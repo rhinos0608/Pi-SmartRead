@@ -3,18 +3,20 @@ import { describe, expect, it } from "vitest";
 import registerExtension from "../../index.js";
 
 describe("index extension wiring", () => {
-	it("registers read_many tool", () => {
-		let registered: { name?: string; execute?: unknown } | undefined;
+  it("registers read_many and intent_read tools", () => {
+    const registered: { name: string; execute: unknown }[] = [];
 
-		const api = {
-			registerTool: (definition: { name: string; execute: unknown }) => {
-				registered = definition;
-			},
-		} as unknown as ExtensionAPI;
+    const api = {
+      registerTool: (definition: { name: string; execute: unknown }) => {
+        registered.push(definition);
+      },
+    } as unknown as ExtensionAPI;
 
-		registerExtension(api);
+    registerExtension(api);
 
-		expect(registered?.name).toBe("read_many");
-		expect(typeof registered?.execute).toBe("function");
-	});
+    const names = registered.map((t) => t.name);
+    expect(names).toContain("read_many");
+    expect(names).toContain("intent_read");
+    expect(registered.every((t) => typeof t.execute === "function")).toBe(true);
+  });
 });
