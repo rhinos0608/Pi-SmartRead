@@ -1,6 +1,7 @@
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import type {
 	ExtensionAPI,
+	ExtensionContext,
 	ReadToolDetails,
 	ReadToolInput,
 	ToolDefinition,
@@ -13,18 +14,33 @@ import {
 	formatSize,
 	truncateHead,
 } from "@mariozechner/pi-coding-agent";
+import {
+	type FileCandidate,
+	type PackingStrategy,
+	type PackingPlan,
+	type TextMetrics,
+	buildPlan,
+	formatContentBlock,
+	measureText,
+	validatePath,
+} from "./utils.js";
+import {
+	buildPartialSection,
+	createPathHash,
+	pickDelimiter,
+} from "./utils.js";
 
 const ReadManySchema = Type.Object({
 	files: Type.Array(
 		Type.Object({
 			path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-			offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
-			limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+			offset: Type.Optional(Type.Number({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
+			limit: Type.Optional(Type.Number({ minimum: 1, description: "Maximum number of lines to read" })),
 		}),
 		{
 			minItems: 1,
-			maxItems: 26,
-			description: "Files to read in the exact order listed (max 26)",
+			maxItems: 5,
+			description: "Files to read in the exact order listed (max 5)",
 		},
 	),
 	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)" })),
@@ -38,40 +54,6 @@ interface ReadManyFileDetail {
 	error?: string;
 	imageCount?: number;
 	truncation?: ReadToolDetails["truncation"];
-}
-
-interface TextMetrics {
-	bytes: number;
-	lines: number;
-}
-
-interface FileCandidate {
-	index: number;
-	path: string;
-	ok: boolean;
-	fullText: string;
-	fullMetrics: TextMetrics;
-	body?: string; // present for successful text/image-summary reads; used for partial rendering
-}
-
-interface PackedSection {
-	index: number;
-	text: string;
-	metrics: TextMetrics;
-}
-
-type PackingStrategy = "request-order" | "smallest-first";
-
-interface PackingPlan {
-	strategy: PackingStrategy;
-	fullIncluded: Set<number>;
-	partialSection?: PackedSection;
-	omittedIndexes: number[];
-	usedBytes: number;
-	usedLines: number;
-	sectionCount: number;
-	fullCount: number;
-	fullSuccessCount: number;
 }
 
 interface ReadManyDetails {
@@ -90,228 +72,6 @@ interface ReadManyDetails {
 	combinedTruncation?: TruncationResult;
 }
 
-const DELIMITER_WORDS = [
-	"PINE",
-	"MANGO",
-	"ORBIT",
-	"RAVEN",
-	"CEDAR",
-	"LOTUS",
-	"EMBER",
-	"NOVA",
-	"DUNE",
-	"KITE",
-	"TIDAL",
-	"QUARTZ",
-	"ACORN",
-	"BLAZE",
-	"FJORD",
-	"GLYPH",
-	"HARBOR",
-	"IVORY",
-	"JUNIPER",
-	"SIERRA",
-	"UMBRA",
-	"VIOLET",
-	"WILLOW",
-	"XENON",
-	"YARROW",
-	"ZEPHYR",
-] as const;
-
-function measureText(text: string): TextMetrics {
-	return {
-		bytes: Buffer.byteLength(text, "utf-8"),
-		lines: text.split("\n").length,
-	};
-}
-
-function createPathHash(path: string): string {
-	// Deterministic tiny hash (no Node crypto dependency)
-	let hash = 5381;
-	for (let i = 0; i < path.length; i++) {
-		hash = ((hash << 5) + hash + path.charCodeAt(i)) >>> 0;
-	}
-	return hash.toString(16).toUpperCase().padStart(6, "0").slice(0, 6);
-}
-
-function buildLineSet(content: string): Set<string> {
-	const lines = content.split("\n");
-	const set = new Set<string>();
-	for (const line of lines) {
-		set.add(line.replace(/\r$/, ""));
-	}
-	return set;
-}
-
-function pickDelimiter(path: string, index: number, content: string): string {
-	const lineSet = buildLineSet(content);
-	const word = DELIMITER_WORDS[index - 1] ?? `FILE${index}`;
-	const hash = createPathHash(path);
-	const base = `${word}_${index}_${hash}`;
-
-	if (!lineSet.has(base)) {
-		return base;
-	}
-
-	for (let attempt = 1; attempt <= 256; attempt++) {
-		const candidate = `${base}_${attempt}`;
-		if (!lineSet.has(candidate)) {
-			return candidate;
-		}
-	}
-
-	// Safety fallback: keep deriving deterministic candidates until one is guaranteed free.
-	const fallbackBase = `${base}_${content.length.toString(36).toUpperCase()}`;
-	if (!lineSet.has(fallbackBase)) {
-		return fallbackBase;
-	}
-
-	let suffix = 1;
-	while (true) {
-		const candidate = `${fallbackBase}_${suffix}`;
-		if (!lineSet.has(candidate)) {
-			return candidate;
-		}
-		suffix += 1;
-	}
-}
-
-function formatContentBlock(path: string, body: string, index: number): string {
-	const delimiter = pickDelimiter(path, index, body);
-	return `@${path}\n<<'${delimiter}'\n${body}\n${delimiter}`;
-}
-
-function canFitSection(
-	state: { usedBytes: number; usedLines: number; sectionCount: number },
-	metrics: TextMetrics,
-): boolean {
-	const sepBytes = state.sectionCount > 0 ? 2 : 0; // "\n\n"
-	const sepLines = state.sectionCount > 0 ? 1 : 0;
-	return (
-		state.usedBytes + sepBytes + metrics.bytes <= DEFAULT_MAX_BYTES &&
-		state.usedLines + sepLines + metrics.lines <= DEFAULT_MAX_LINES
-	);
-}
-
-function addSection(
-	state: { usedBytes: number; usedLines: number; sectionCount: number },
-	metrics: TextMetrics,
-): void {
-	const sepBytes = state.sectionCount > 0 ? 2 : 0;
-	const sepLines = state.sectionCount > 0 ? 1 : 0;
-	state.usedBytes += sepBytes + metrics.bytes;
-	state.usedLines += sepLines + metrics.lines;
-	state.sectionCount += 1;
-}
-
-function buildPartialSection(candidate: FileCandidate, remainingLines: number, remainingBytes: number): string | undefined {
-	if (!candidate.body) {
-		return undefined;
-	}
-
-	// Wrapper adds 3 structural lines around body in `formatContentBlock`.
-	let maxBodyLines = remainingLines - 3;
-	if (maxBodyLines < 1 || remainingBytes < 32) {
-		return undefined;
-	}
-
-	let maxBodyBytes = Math.max(1, remainingBytes - 96); // reserve room for wrapper + delimiter
-
-	for (let attempt = 0; attempt < 16; attempt++) {
-		const trunc = truncateHead(candidate.body, {
-			maxLines: maxBodyLines,
-			maxBytes: maxBodyBytes,
-		});
-
-		if (!trunc.content) {
-			return undefined;
-		}
-
-		const partialText = formatContentBlock(candidate.path, trunc.content, candidate.index + 1);
-		const metrics = measureText(partialText);
-
-		if (metrics.lines <= remainingLines && metrics.bytes <= remainingBytes) {
-			return partialText;
-		}
-
-		if (metrics.lines > remainingLines && maxBodyLines > 1) {
-			maxBodyLines = Math.max(1, maxBodyLines - (metrics.lines - remainingLines));
-		}
-		if (metrics.bytes > remainingBytes && maxBodyBytes > 1) {
-			maxBodyBytes = Math.max(1, maxBodyBytes - (metrics.bytes - remainingBytes) - 8);
-		}
-	}
-
-	return undefined;
-}
-
-function buildPlan(strategy: PackingStrategy, order: number[], candidates: FileCandidate[]): PackingPlan {
-	const state = { usedBytes: 0, usedLines: 0, sectionCount: 0 };
-	const fullIncluded = new Set<number>();
-	let fullSuccessCount = 0;
-
-	for (const index of order) {
-		const candidate = candidates[index];
-		if (canFitSection(state, candidate.fullMetrics)) {
-			addSection(state, candidate.fullMetrics);
-			fullIncluded.add(index);
-			if (candidate.ok) {
-				fullSuccessCount += 1;
-			}
-		} else if (strategy === "request-order") {
-			// Strict request-order behavior: once a full block doesn't fit, stop full-block packing.
-			break;
-		}
-	}
-
-	let partialSection: PackedSection | undefined;
-	for (let index = 0; index < candidates.length; index++) {
-		if (fullIncluded.has(index)) {
-			continue;
-		}
-
-		const sepBytes = state.sectionCount > 0 ? 2 : 0;
-		const sepLines = state.sectionCount > 0 ? 1 : 0;
-		const remainingBytes = DEFAULT_MAX_BYTES - state.usedBytes - sepBytes;
-		const remainingLines = DEFAULT_MAX_LINES - state.usedLines - sepLines;
-
-		if (remainingBytes <= 0 || remainingLines <= 0) {
-			break;
-		}
-
-		const partialText = buildPartialSection(candidates[index], remainingLines, remainingBytes);
-		if (!partialText) {
-			continue;
-		}
-
-		const metrics = measureText(partialText);
-		partialSection = { index, text: partialText, metrics };
-		addSection(state, metrics);
-		break;
-	}
-
-	const omittedIndexes: number[] = [];
-	for (let i = 0; i < candidates.length; i++) {
-		if (fullIncluded.has(i) || partialSection?.index === i) {
-			continue;
-		}
-		omittedIndexes.push(i);
-	}
-
-	return {
-		strategy,
-		fullIncluded,
-		partialSection,
-		omittedIndexes,
-		usedBytes: state.usedBytes,
-		usedLines: state.usedLines,
-		sectionCount: state.sectionCount,
-		fullCount: fullIncluded.size,
-		fullSuccessCount,
-	};
-}
-
 export function createReadManyTool(readToolFactory: typeof createReadTool = createReadTool): ToolDefinition {
 	return {
 		name: "read_many",
@@ -324,7 +84,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 			params: ReadManyInput,
 			signal: AbortSignal | undefined,
 			_onUpdate: unknown,
-			ctx: { cwd: string },
+			ctx: ExtensionContext,
 		) {
 			const readTool = readToolFactory(ctx.cwd);
 			const fileDetails: ReadManyFileDetail[] = [];
@@ -336,6 +96,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 				}
 
 				const request = params.files[i];
+				validatePath(request.path);
 				const input: ReadToolInput = {
 					path: request.path,
 					offset: request.offset,
@@ -434,6 +195,15 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 			});
 			const outputText = outputTruncation.content;
 
+			let partialIncludedPath: string | undefined;
+			if (plan.partialSection !== undefined) {
+				const c = candidates[plan.partialSection.index];
+				if (c === undefined) {
+					throw new Error(`Internal: partialSection.index ${plan.partialSection.index} out of bounds`);
+				}
+				partialIncludedPath = c.path;
+			}
+
 			const details: ReadManyDetails = {
 				processedCount: fileDetails.length,
 				successCount: fileDetails.filter((f) => f.ok).length,
@@ -444,8 +214,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 					switchedForCoverage,
 					fullIncludedCount: plan.fullCount,
 					fullIncludedSuccessCount: plan.fullSuccessCount,
-					partialIncludedPath:
-						plan.partialSection !== undefined ? candidates[plan.partialSection.index]?.path : undefined,
+					partialIncludedPath,
 					omittedPaths: plan.omittedIndexes.map((index) => candidates[index].path),
 				},
 				combinedTruncation: outputTruncation.truncated ? outputTruncation : undefined,

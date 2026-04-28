@@ -8,5 +8,5 @@
     "noEmit": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["index.ts", "read-many.ts", "test/**/*.ts"]
+  "include": ["index.ts", "read-many.ts", "utils.ts", "config.ts", "scoring.ts", "embedding.ts", "resolver.ts", "intent-read.ts", "test/**/*.ts"]
 }
