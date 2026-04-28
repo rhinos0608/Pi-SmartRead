@@ -1,0 +1,224 @@
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { createIntentReadTool } from "../../intent-read.js";
+import type { EmbedRequest, EmbedResult } from "../../embedding.js";
+import { resetConfigCache } from "../../config.js";
+
+// Stub fetchEmbeddings: returns unit vectors for easy scoring
+function makeEmbedder(vectors: number[][]): (req: EmbedRequest) => Promise<EmbedResult> {
+  return async () => ({ vectors });
+}
+
+// Stub readTool: returns text content by path
+function makeReadTool(map: Record<string, string | Error>) {
+  return {
+    execute: async (_id: string, input: { path: string }) => {
+      const val = map[input.path];
+      if (!val) throw new Error(`No stub for: ${input.path}`);
+      if (val instanceof Error) throw val;
+      return { content: [{ type: "text" as const, text: val }] };
+    },
+  };
+}
+
+beforeEach(() => {
+  resetConfigCache();
+  process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
+  process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
+});
+
+afterEach(() => {
+  resetConfigCache();
+  delete process.env.PI_SMARTREAD_EMBEDDING_BASE_URL;
+  delete process.env.PI_SMARTREAD_EMBEDDING_MODEL;
+});
+
+describe("intent_read: input validation", () => {
+  it("throws when both files and directory are provided", async () => {
+    const tool = createIntentReadTool(() => makeReadTool({}) as any, makeEmbedder([]));
+    await expect(
+      tool.execute("id", { query: "auth", files: [{ path: "/a" }], directory: "/tmp" }, undefined, undefined, { cwd: "/" } as any),
+    ).rejects.toThrow(/files.*directory|directory.*files/i);
+  });
+
+  it("throws when neither files nor directory is provided", async () => {
+    const tool = createIntentReadTool(() => makeReadTool({}) as any, makeEmbedder([]));
+    await expect(
+      tool.execute("id", { query: "auth" } as any, undefined, undefined, { cwd: "/" } as any),
+    ).rejects.toThrow(/files.*directory|directory.*files/i);
+  });
+
+  it("throws when query is empty after trimming", async () => {
+    const tool = createIntentReadTool(() => makeReadTool({}) as any, makeEmbedder([]));
+    await expect(
+      tool.execute("id", { query: "   ", files: [{ path: "/a" }] }, undefined, undefined, { cwd: "/" } as any),
+    ).rejects.toThrow(/query/i);
+  });
+});
+
+describe("intent_read: ranking and output", () => {
+  it("returns top-K files by RRF score in relevance order", async () => {
+    // query vector: [1,0,0]
+    // file a vector: [1,0,0] -> high cosine similarity
+    // file b vector: [0,1,0] -> low cosine similarity
+    const queryVec = [1, 0, 0];
+    const fileAVec = [1, 0, 0];
+    const fileBVec = [0, 1, 0];
+
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "authentication logic here", "/b": "database schema" }) as any,
+      makeEmbedder([queryVec, fileAVec, fileBVec]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "authentication", files: [{ path: "/a" }, { path: "/b" }], topK: 2 },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const text = (result.content[0] as any).text as string;
+    const details = result.details as any;
+
+    // /a should rank higher (both keyword and semantic match)
+    const posA = text.indexOf("@/a");
+    const posB = text.indexOf("@/b");
+    expect(posA).toBeGreaterThanOrEqual(0);
+    expect(posB).toBeGreaterThan(posA);
+
+    expect(details.query).toBe("authentication");
+    expect(details.successCount).toBe(2);
+    expect(details.requestedTopK).toBe(2);
+
+    const fileA = details.files.find((f: any) => f.path === "/a");
+    expect(fileA.included).toBe(true);
+    expect(fileA.rrfScore).toBeGreaterThan(0);
+    expect(fileA.inclusion).toBe("full");
+  });
+
+  it("puts errored files after successful files in details.files", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "content", "/b": new Error("missing") }) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }, { path: "/b" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    const errorFile = details.files.find((f: any) => f.path === "/b");
+    const successFile = details.files.find((f: any) => f.path === "/a");
+
+    expect(errorFile.ok).toBe(false);
+    expect(errorFile.inclusion).toBe("error");
+    expect(errorFile.included).toBe(false);
+
+    // Successful file should appear before errored file
+    const successIdx = details.files.indexOf(successFile);
+    const errorIdx = details.files.indexOf(errorFile);
+    expect(successIdx).toBeLessThan(errorIdx);
+  });
+
+  it("marks files outside topK as not_top_k", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth", "/b": "db", "/c": "cache" }) as any,
+      makeEmbedder([[1, 0], [1, 0], [0, 1], [0, 1]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }, { path: "/b" }, { path: "/c" }], topK: 2 },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    const notTopK = details.files.filter((f: any) => f.inclusion === "not_top_k");
+    expect(notTopK).toHaveLength(1);
+  });
+
+  it("stops on first error when stopOnError is true and does not embed", async () => {
+    const embedder = vi.fn(makeEmbedder([]));
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": new Error("bad"), "/b": "ok" }) as any,
+      embedder,
+    );
+
+    await expect(
+      tool.execute(
+        "id",
+        { query: "auth", files: [{ path: "/a" }, { path: "/b" }], stopOnError: true },
+        undefined,
+        undefined,
+        { cwd: "/" } as any,
+      ),
+    ).rejects.toThrow("bad");
+
+    expect(embedder).not.toHaveBeenCalled();
+  });
+
+  it("throws before reading when embedding config is missing", async () => {
+    resetConfigCache();
+    delete process.env.PI_SMARTREAD_EMBEDDING_BASE_URL;
+    delete process.env.PI_SMARTREAD_EMBEDDING_MODEL;
+
+    const readSpy = vi.fn();
+    const tool = createIntentReadTool(() => ({ execute: readSpy }) as any, makeEmbedder([]));
+
+    await expect(
+      tool.execute("id", { query: "auth", files: [{ path: "/a" }] }, undefined, undefined, { cwd: "/" } as any),
+    ).rejects.toThrow(/baseUrl|model/i);
+
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns no content when all files fail to read", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": new Error("gone") }) as any,
+      makeEmbedder([]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const text = (result.content[0] as any).text as string;
+    const details = result.details as any;
+    expect(text).toBe("");
+    expect(details.successCount).toBe(0);
+    expect(details.effectiveTopK).toBe(0);
+  });
+
+  it("includes per-file semanticRank, keywordRank, and rrfScore for successful files", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "authentication middleware" }) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "authentication", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    const fileDetail = details.files[0];
+    expect(typeof fileDetail.semanticRank).toBe("number");
+    expect(typeof fileDetail.keywordRank).toBe("number");
+    expect(typeof fileDetail.rrfScore).toBe("number");
+    expect(typeof fileDetail.semanticScore).toBe("number");
+    expect(typeof fileDetail.keywordScore).toBe("number");
+  });
+});
