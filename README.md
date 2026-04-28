@@ -1,10 +1,12 @@
 # 📚 pi-read-many
 
+> **Tool renamed:** `read_many` → `read_multiple_files`
+
 [![pi coding agent](https://img.shields.io/badge/pi-coding%20agent-6f6bff?logo=terminal&logoColor=white)](https://pi.dev/)
 [![npm version](https://img.shields.io/npm/v/pi-read-many.svg)](https://www.npmjs.com/package/pi-read-many)
 [![license](https://img.shields.io/github/license/Gurpartap/pi-read-many.svg)](LICENSE)
 
-Batch file reads for Pi via a single tool: **`read_many`**.
+Batch file reads for Pi via a single tool: **`read_multiple_files`**.
 
 It helps the model inspect multiple files in one call instead of issuing many separate `read` calls.
 
@@ -34,12 +36,12 @@ After install, use Pi normally. If Pi is already running when you install or upd
 
 ## 📝 Notes
 
-- `read_many` does **not** override built-in `read`.
-- `read_many` summarizes image attachments in combined text output; exact single-file image payload behavior remains in built-in `read`.
+- `read_multiple_files` does **not** override built-in `read`.
+- `read_multiple_files` summarizes image attachments in combined text output; exact single-file image payload behavior remains in built-in `read`.
 
 ---
 
-## ✨ What `read_many` does
+## ✨ What `read_multiple_files` does
 
 - Reads files **sequentially in request order**.
 - Uses Pi's built-in `read` under the hood (same core semantics).
@@ -57,7 +59,7 @@ After install, use Pi normally. If Pi is already running when you install or upd
 - **Error consistency:** errors are framed exactly like normal file blocks.
 - **Image-safe output:** image payloads are summarized in text.
 
-## 🔢 Example `read_many` input
+## 🔢 Example `read_multiple_files` input
 
 ```json
 {
@@ -88,7 +90,7 @@ WORD_INDEX_HASH
 - `INDEX`: 1-based file index in request
 - `HASH`: deterministic short hash of file path
 
-`read_many` allows **up to 26 files**, with a **26-word dictionary** (unique starting letter per word), so each file gets a unique dictionary token.
+`read_multiple_files` allows **up to 26 files**, with a **26-word dictionary** (unique starting letter per word), so each file gets a unique dictionary token.
 
 If a delimiter collides with a content line, the tool auto-suffixes (`_1`, `_2`, …) and keeps trying deterministic fallbacks until it finds a safe delimiter.
 

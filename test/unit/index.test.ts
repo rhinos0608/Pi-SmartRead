@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import registerExtension from "../../index.js";
 
 describe("index extension wiring", () => {
-  it("registers read_many and intent_read tools", () => {
+  it("registers read_multiple_files and intent_read tools", () => {
     const registered: { name: string; execute: unknown }[] = [];
 
     const api = {
@@ -15,7 +15,7 @@ describe("index extension wiring", () => {
     registerExtension(api);
 
     const names = registered.map((t) => t.name);
-    expect(names).toContain("read_many");
+    expect(names).toContain("read_multiple_files");
     expect(names).toContain("intent_read");
     expect(registered.every((t) => typeof t.execute === "function")).toBe(true);
   });

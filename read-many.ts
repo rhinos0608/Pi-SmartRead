@@ -17,17 +17,13 @@ import {
 import {
 	type FileCandidate,
 	type PackingStrategy,
-	type PackingPlan,
-	type TextMetrics,
 	buildPlan,
-	formatContentBlock,
-	measureText,
-	validatePath,
-} from "./utils.js";
-import {
 	buildPartialSection,
 	createPathHash,
+	formatContentBlock,
+	measureText,
 	pickDelimiter,
+	validatePath,
 } from "./utils.js";
 
 const ReadManySchema = Type.Object({
@@ -74,8 +70,8 @@ interface ReadManyDetails {
 
 export function createReadManyTool(readToolFactory: typeof createReadTool = createReadTool): ToolDefinition {
 	return {
-		name: "read_many",
-		label: "read_many",
+		name: "read_multiple_files",
+		label: "read_multiple_files",
 		description: `Read multiple files in one call with per-file offset/limit. Combined output uses per-file heredoc blocks (DICT_N_HASH); image attachments are summarized in text. Under combined output limits (${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}), packing is adaptive: strict request-order by default, switching to smallest-first only when it includes more complete successful files, while rendered section order stays original.`,
 		parameters: ReadManySchema,
 

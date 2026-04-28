@@ -1,6 +1,5 @@
 import { Type, type Static } from "typebox";
 import type {
-  ExtensionAPI,
   ExtensionContext,
   ReadToolInput,
   ToolDefinition,

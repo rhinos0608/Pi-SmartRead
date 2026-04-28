@@ -65,5 +65,6 @@ describe("resolveDirectory", () => {
     const result = resolveDirectory(tmpDir);
     expect(result.paths).toEqual([]);
     expect(result.capped).toBe(false);
+    expect(result.countBeforeCap).toBe(0);
   });
 });

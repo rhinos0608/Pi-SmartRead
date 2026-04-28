@@ -1,7 +1,7 @@
 {
   "name": "pi-read-many",
   "version": "0.1.0",
-  "description": "Batch file reads for Pi via read_many with adaptive packing under output limits",
+  "description": "Batch file reads for Pi via read_multiple_files with adaptive packing under output limits",
   "author": "Gurpartap Singh",
   "license": "MIT",
   "publishConfig": {
@@ -19,7 +19,7 @@
     "pi",
     "pi-extension",
     "pi-package",
-    "read_many",
+    "read_multiple_files",
     "read-many",
     "file-reading",
     "context-packing"
@@ -39,10 +39,10 @@
     "test": "vitest run"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "^0.70.2"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.40"
+    "typebox": "^1.1.24"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
