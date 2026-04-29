@@ -30,6 +30,12 @@
   "files": [
     "index.ts",
     "read-many.ts",
+    "config.ts",
+    "embedding.ts",
+    "intent-read.ts",
+    "resolver.ts",
+    "scoring.ts",
+    "utils.ts",
     "README.md",
     "LICENSE",
     "package.json"

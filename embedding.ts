@@ -11,7 +11,7 @@ export interface EmbedResult {
 }
 
 export async function fetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
-  const url = req.baseUrl.replace(/\/+$/, "") + "/embeddings";
+  const url = req.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") + "/v1/embeddings";
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (req.apiKey) headers["Authorization"] = `Bearer ${req.apiKey}`;
 

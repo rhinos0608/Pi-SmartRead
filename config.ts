@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
 
 export interface ResolvedEmbeddingConfig {
   baseUrl: string;
@@ -13,20 +13,47 @@ interface RawConfig {
   apiKey?: string;
 }
 
-let cache: RawConfig | null = null;
+const CONFIG_FILENAME = "pi-smartread.config.json";
 
-function loadRaw(): RawConfig {
-  if (cache !== null) return cache;
+/**
+ * Walk up from `startDir` toward root to find the first CONFIG_FILENAME.
+ * Returns the full path to the found file, or undefined if none exists.
+ */
+function findConfigFile(startDir: string): string | undefined {
+  let dir = resolve(startDir);
+  // Safety valve: stop at filesystem root
+  const root = dirname(dir); // on Unix this is "/" on the second iteration when dir is "/"
+  let prevDir: string | undefined;
 
-  let fromFile: RawConfig = {};
-  try {
-    const raw = readFileSync(join(process.cwd(), "pi-smartread.config.json"), "utf-8");
-    fromFile = JSON.parse(raw) as RawConfig;
-  } catch {
-    // File absent or unparseable — fall through to env vars
+  for (;;) {
+    const candidate = join(dir, CONFIG_FILENAME);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+    prevDir = dir;
+    dir = dirname(dir);
+    // Stop when we reach the root — dirname("/") returns "/" (unchanged)
+    if (dir === prevDir) break;
   }
 
-  cache = {
+  return undefined;
+}
+
+function loadRaw(cwd?: string): RawConfig {
+  const resolvedCwd = cwd ?? process.cwd();
+
+  let fromFile: RawConfig = {};
+  const configPath = findConfigFile(resolvedCwd);
+  if (configPath) {
+    try {
+      const raw = readFileSync(configPath, "utf-8");
+      fromFile = JSON.parse(raw) as RawConfig;
+    } catch {
+      // File found but unparseable — fall through to env vars
+    }
+  }
+
+  return {
     baseUrl:
       fromFile.baseUrl ??
       process.env.PI_SMARTREAD_EMBEDDING_BASE_URL ??
@@ -37,29 +64,30 @@ function loadRaw(): RawConfig {
       process.env.EMBEDDING_MODEL,
     apiKey: fromFile.apiKey ?? process.env.PI_SMARTREAD_EMBEDDING_API_KEY,
   };
-
-  return cache;
 }
 
-export function validateEmbeddingConfig(): ResolvedEmbeddingConfig {
-  const raw = loadRaw();
+export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig {
+  const raw = loadRaw(cwd);
 
   if (!raw.baseUrl) {
     throw new Error(
       "Embedding baseUrl is required. Set it in pi-smartread.config.json " +
-        "or via the PI_SMARTREAD_EMBEDDING_BASE_URL environment variable.",
+        "(in the current directory or any parent) or via the " +
+        "PI_SMARTREAD_EMBEDDING_BASE_URL environment variable.",
     );
   }
   if (!raw.model) {
     throw new Error(
       "Embedding model is required. Set it in pi-smartread.config.json " +
-        "or via the PI_SMARTREAD_EMBEDDING_MODEL environment variable.",
+        "(in the current directory or any parent) or via the " +
+        "PI_SMARTREAD_EMBEDDING_MODEL environment variable.",
     );
   }
 
   return { baseUrl: raw.baseUrl, model: raw.model, apiKey: raw.apiKey };
 }
 
+/** @deprecated No-op — config is always freshly resolved per invocation. */
 export function resetConfigCache(): void {
-  cache = null;
+  // No-op: cache was removed in favor of per-call resolution
 }

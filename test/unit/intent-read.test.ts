@@ -8,6 +8,16 @@ function makeEmbedder(vectors: number[][]): (req: EmbedRequest) => Promise<Embed
   return async () => ({ vectors });
 }
 
+// Stub fetchEmbeddings: always throws
+function makeFailingEmbedder(errorMsg: string): (req: EmbedRequest) => Promise<EmbedResult> {
+  return async () => { throw new Error(errorMsg); };
+}
+
+// Stub fetchEmbeddings: returns fewer vectors than requested
+function makeWrongCountEmbedder(count: number): (req: EmbedRequest) => Promise<EmbedResult> {
+  return async () => ({ vectors: Array.from({ length: count }, () => [1, 0]) });
+}
+
 // Stub readTool: returns text content by path
 function makeReadTool(map: Record<string, string | Error>) {
   return {
@@ -220,5 +230,143 @@ describe("intent_read: ranking and output", () => {
     expect(typeof fileDetail.rrfScore).toBe("number");
     expect(typeof fileDetail.semanticScore).toBe("number");
     expect(typeof fileDetail.keywordScore).toBe("number");
+  });
+
+  it("includes embeddingStatus=ok and rankingSignals when embeddings succeed", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth" }) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.embeddingStatus).toBe("ok");
+    expect(details.rankingSignals).toEqual({ bm25: true, embeddings: true });
+    expect(details.embeddingError).toBeUndefined();
+  });
+});
+
+describe("intent_read: embedding failure fallback", () => {
+  it("falls back to BM25 when embedding throws", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "authentication logic", "/b": "database schema" }) as any,
+      makeFailingEmbedder("ECONNREFUSED"),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "authentication", files: [{ path: "/a" }, { path: "/b" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    // Tool does not throw — returns BM25-ranked results
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain("@/a");
+    const details = result.details as any;
+    expect(details.embeddingStatus).toBe("failed_fallback_bm25");
+    expect(details.embeddingError).toContain("ECONNREFUSED");
+    expect(details.rankingSignals).toEqual({ bm25: true, embeddings: false });
+    expect(details.successCount).toBe(2);
+  });
+
+  it("no semantic scores when embedding fails", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "authentication" }) as any,
+      makeFailingEmbedder("timeout"),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    const fileDetail = details.files[0];
+    expect(fileDetail.keywordRank).toEqual(expect.any(Number));
+    expect(fileDetail.keywordScore).toEqual(expect.any(Number));
+    expect(fileDetail.rrfScore).toEqual(expect.any(Number));
+    expect(fileDetail.semanticRank).toBeUndefined();
+    expect(fileDetail.semanticScore).toBeUndefined();
+  });
+
+  it("falls back to BM25 when embedding returns wrong vector count", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth", "/b": "db" }) as any,
+      makeWrongCountEmbedder(1),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }, { path: "/b" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.embeddingStatus).toBe("failed_fallback_bm25");
+    expect(details.embeddingError).toContain("Expected 3 vectors, got 1");
+    expect(details.rankingSignals.embeddings).toBe(false);
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain("@/a");
+  });
+
+  it("returns empty content and ok status when no successful files (even with failing embedder)", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": new Error("gone") }) as any,
+      makeFailingEmbedder("down"),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const text = (result.content[0] as any).text as string;
+    expect(text).toBe("");
+    const details = result.details as any;
+    expect(details.successCount).toBe(0);
+    expect(details.embeddingStatus).toBe("ok");
+  });
+
+  it("ranks by keyword relevance when embedding fails", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth auth auth middleware", "/b": "database schema migration" }) as any,
+      makeFailingEmbedder("rate limited"),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }, { path: "/b" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const text = (result.content[0] as any).text as string;
+    const posA = text.indexOf("@/a");
+    const posB = text.indexOf("@/b");
+    expect(posA).toBeGreaterThanOrEqual(0);
+    expect(posB).toBeGreaterThan(posA);
+
+    const details = result.details as any;
+    const fileA = details.files.find((f: any) => f.path === "/a");
+    const fileB = details.files.find((f: any) => f.path === "/b");
+    expect(fileA.keywordScore).toBeGreaterThan(fileB.keywordScore);
   });
 });

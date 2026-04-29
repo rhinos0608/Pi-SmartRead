@@ -30,13 +30,14 @@ const IntentReadSchema = Type.Object({
     ),
   ),
   directory: Type.Optional(Type.String({ description: "Directory to scan (non-recursive, max 20 files)" })),
-  topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: "Max results to return (default 5)" })),
+  topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: "Max results to return (default 20)" })),
   stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first read error (default false)" })),
 });
 
 type IntentReadInput = Static<typeof IntentReadSchema>;
 
 type InclusionStatus = "full" | "partial" | "omitted" | "not_top_k" | "error";
+type EmbeddingStatus = "ok" | "failed_fallback_bm25";
 
 interface IntentReadFileDetail {
   path: string;
@@ -62,6 +63,9 @@ interface IntentReadDetails {
   candidateCountBeforeCap?: number;
   candidateCountAfterCap?: number;
   capped?: boolean;
+  embeddingStatus: EmbeddingStatus;
+  embeddingError?: string;
+  rankingSignals: { bm25: true; embeddings: boolean };
   files: IntentReadFileDetail[];
   packing: {
     strategy: string;
@@ -91,7 +95,11 @@ export function createIntentReadTool(
       ctx: ExtensionContext,
     ) {
       // 1. Validate embedding config first (before any reads)
-      const embeddingConfig = validateEmbeddingConfig();
+      const embeddingConfig = validateEmbeddingConfig(ctx.cwd);
+
+      // Embedding API tracking (updated after embed call; may degrade to fallback)
+      let embeddingStatus: EmbeddingStatus = "ok";
+      let embeddingError: string | undefined;
 
       // 2. Validate input
       const query = params.query.trim();
@@ -107,7 +115,7 @@ export function createIntentReadTool(
         throw new Error("Provide either files or directory");
       }
 
-      const topK = params.topK ?? 5;
+      const topK = params.topK ?? 20;
 
       // 3. Resolve candidates
       interface ResolvedFile { path: string; offset?: number; limit?: number; }
@@ -170,30 +178,55 @@ export function createIntentReadTool(
         const bodies = successfulFiles.map((f) => f.body!);
         const paths = successfulFiles.map((f) => f.path);
 
-        const { vectors } = await fetchEmbeddingsImpl({
-          ...embeddingConfig,
-          inputs: [query, ...bodies],
-        });
-
-        const queryVec = vectors[0];
-        const fileVecs = vectors.slice(1);
-
-        const semanticScores = fileVecs.map((v) => cosineSimilarity(queryVec, v));
+        // Always compute BM25 scores (available for hybrid and fallback paths)
         const keywordScoresArr = bm25Scores(query, bodies);
-        const semanticRanks = computeRanks(semanticScores, paths);
         const keywordRanks = computeRanks(keywordScoresArr, paths);
-        const rrfScores = computeRrfScores(semanticRanks, keywordRanks);
-        const rrfRanks = computeRanks(rrfScores, paths);
+
+        let semanticScores: number[] = [];
+        let semanticRanks: number[] = [];
+        let rrfScores: number[];
+        let rrfRanks: number[];
+
+        // Attempt embedding — fall back to BM25-only on failure
+        try {
+          const { vectors } = await fetchEmbeddingsImpl({
+            ...embeddingConfig,
+            inputs: [query, ...bodies],
+          });
+
+          if (vectors.length === bodies.length + 1) {
+            const queryVec = vectors[0];
+            const fileVecs = vectors.slice(1);
+            semanticScores = fileVecs.map((v) => cosineSimilarity(queryVec, v));
+            semanticRanks = computeRanks(semanticScores, paths);
+            embeddingStatus = "ok";
+          } else {
+            embeddingStatus = "failed_fallback_bm25";
+            embeddingError = `Expected ${bodies.length + 1} vectors, got ${vectors.length}`;
+          }
+        } catch (err) {
+          embeddingStatus = "failed_fallback_bm25";
+          embeddingError = err instanceof Error ? err.message : String(err);
+        }
+
+        if (embeddingStatus === "ok" && semanticRanks.length > 0) {
+          rrfScores = computeRrfScores(semanticRanks, keywordRanks);
+          rrfRanks = computeRanks(rrfScores, paths);
+        } else {
+          // BM25-only fallback: single-rank RRF is monotonic with keyword rank
+          rrfScores = keywordRanks.map((kr) => 1 / (60 + kr));
+          rrfRanks = computeRanks(rrfScores, paths);
+        }
 
         for (let i = 0; i < successfulFiles.length; i++) {
-          fileDetails.set(paths[i], {
-            ...fileDetails.get(paths[i]),
-            semanticRank: semanticRanks[i],
-            semanticScore: semanticScores[i],
-            keywordRank: keywordRanks[i],
-            keywordScore: keywordScoresArr[i],
-            rrfScore: rrfScores[i],
-          });
+          const base = fileDetails.get(paths[i])!;
+          base.keywordRank = keywordRanks[i];
+          base.keywordScore = keywordScoresArr[i];
+          base.rrfScore = rrfScores[i];
+          if (embeddingStatus === "ok") {
+            base.semanticRank = semanticRanks[i];
+            base.semanticScore = semanticScores[i];
+          }
         }
 
         // Sort by RRF rank (ascending rank = descending score)
@@ -294,6 +327,12 @@ export function createIntentReadTool(
           candidateCountAfterCap: dirCap.countAfterCap,
           capped: true,
         }),
+        embeddingStatus,
+        ...(embeddingError && { embeddingError }),
+        rankingSignals: {
+          bm25: true,
+          embeddings: embeddingStatus === "ok",
+        },
         files: allFileDetails,
         packing: {
           strategy: plan.strategy,
