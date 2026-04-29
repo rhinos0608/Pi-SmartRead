@@ -31,6 +31,7 @@
     "index.ts",
     "read-many.ts",
     "config.ts",
+    "chunking.ts",
     "embedding.ts",
     "intent-read.ts",
     "resolver.ts",

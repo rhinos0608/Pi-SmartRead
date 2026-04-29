@@ -8,19 +8,111 @@ import {
 } from "../../scoring.js";
 
 describe("tokenize", () => {
-  it("lowercases and splits on non-alphanumeric non-underscore", () => {
-    expect(tokenize("Hello, World!")).toEqual(["hello", "world"]);
-    expect(tokenize("foo_bar baz")).toEqual(["foo_bar", "baz"]);
-    expect(tokenize("  spaces  ")).toEqual(["spaces"]);
+  describe("full-token behavior (preserve existing tests)", () => {
+    it("lowercases and splits on non-alphanumeric non-underscore", () => {
+      expect(tokenize("Hello, World!")).toContain("hello");
+      expect(tokenize("Hello, World!")).toContain("world");
+      // foo_bar now also produces sub-tokens "foo" and "bar"
+      const result = tokenize("foo_bar baz");
+      expect(result).toContain("foo_bar");
+      expect(result).toContain("foo");
+      expect(result).toContain("bar");
+      expect(result).toContain("baz");
+      expect(tokenize("  spaces  ")).toEqual(["spaces"]);
+    });
+
+    it("discards empty tokens", () => {
+      expect(tokenize(",,,,")).toEqual([]);
+      expect(tokenize("")).toEqual([]);
+    });
+
+    it("keeps underscores inside tokens", () => {
+      expect(tokenize("snake_case")).toEqual(["snake_case", "snake", "case"]);
+    });
   });
 
-  it("discards empty tokens", () => {
-    expect(tokenize(",,,,")).toEqual([]);
-    expect(tokenize("")).toEqual([]);
-  });
+  describe("sub-token generation via camelCase/PascalCase/snake_case splitting", () => {
+    it("splits camelCase into sub-tokens", () => {
+      // processUserData -> ["processuserdata", "process", "user", "data"]
+      const result = tokenize("processUserData");
+      expect(result).toContain("processuserdata");
+      expect(result).toContain("process");
+      expect(result).toContain("user");
+      expect(result).toContain("data");
+    });
 
-  it("keeps underscores inside tokens", () => {
-    expect(tokenize("snake_case")).toEqual(["snake_case"]);
+    it("splits PascalCase into sub-tokens", () => {
+      // MyClassName -> ["myclassname", "my", "class", "name"]
+      const result = tokenize("MyClassName");
+      expect(result).toContain("myclassname");
+      expect(result).toContain("my");
+      expect(result).toContain("class");
+      expect(result).toContain("name");
+    });
+
+    it("splits snake_case via underscore then camelCase", () => {
+      // process_user_data -> ["process_user_data", "process", "user", "data"]
+      const result = tokenize("process_user_data");
+      expect(result).toContain("process_user_data");
+      expect(result).toContain("process");
+      expect(result).toContain("user");
+      expect(result).toContain("data");
+    });
+
+    it("handles mixed camelCase + snake_case", () => {
+      // getUserById -> ["getuserbyid", "get", "user", "by", "id"]
+      const result = tokenize("getUserById");
+      expect(result).toContain("getuserbyid");
+      expect(result).toContain("get");
+      expect(result).toContain("user");
+      expect(result).toContain("by");
+      expect(result).toContain("id");
+    });
+
+    it("handles acronyms (uppercase->lowercase transitions)", () => {
+      // OAuthAPI -> ["oauthapi", "o", "auth", "a", "p", "i"]
+      const result = tokenize("OAuthAPI");
+      expect(result).toContain("oauthapi");
+      expect(result).toContain("o");
+      expect(result).toContain("auth");
+      expect(result).toContain("a");
+      expect(result).toContain("p");
+      expect(result).toContain("i");
+    });
+
+    it("handles numeric suffixes", () => {
+      // userV2 -> ["userv2", "user", "v2"]
+      // file2txt -> ["file2txt", "file", "2", "txt"]
+      const result = tokenize("userV2");
+      expect(result).toContain("userv2");
+      expect(result).toContain("user");
+      // V2 splits at letter->digit boundary
+      expect(result).toContain("v");
+      expect(result).toContain("2");
+
+      const result2 = tokenize("file2txt");
+      expect(result2).toContain("file2txt");
+      expect(result2).toContain("file");
+      expect(result2).toContain("txt");
+    });
+
+    it("deduplicates sub-tokens within a single expansion", () => {
+      // authAuth -> ["authaus", "auth"] (no duplicate "auth")
+      const result = tokenize("authAuth");
+      const authCount = result.filter((t) => t === "auth").length;
+      expect(authCount).toBe(1);
+    });
+
+    it("full token always included first in its expansion", () => {
+      const result = tokenize("processUserData");
+      const idx = result.indexOf("processuserdata");
+      expect(idx).toBeGreaterThanOrEqual(0);
+      // The expansion for "processUserData" starts at idx and includes sub-tokens
+      const after = result.slice(idx);
+      expect(after).toContain("process");
+      expect(after).toContain("user");
+      expect(after).toContain("data");
+    });
   });
 });
 

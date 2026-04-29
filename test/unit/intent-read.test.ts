@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { createIntentReadTool } from "../../intent-read.js";
 import type { EmbedRequest, EmbedResult } from "../../embedding.js";
@@ -68,15 +71,16 @@ describe("intent_read: input validation", () => {
 describe("intent_read: ranking and output", () => {
   it("returns top-K files by RRF score in relevance order", async () => {
     // query vector: [1,0,0]
-    // file a vector: [1,0,0] -> high cosine similarity
-    // file b vector: [0,1,0] -> low cosine similarity
+    // file a chunk vector: [1,0,0] -> high cosine similarity (best chunk)
+    // file b chunk vector: [0,1,0] -> low cosine similarity
+    // With chunking: 2 files × 1 chunk each = 3 vectors (query + 2 chunks)
     const queryVec = [1, 0, 0];
-    const fileAVec = [1, 0, 0];
-    const fileBVec = [0, 1, 0];
+    const fileAChunk = [1, 0, 0];
+    const fileBChunk = [0, 1, 0];
 
     const tool = createIntentReadTool(
       () => makeReadTool({ "/a": "authentication logic here", "/b": "database schema" }) as any,
-      makeEmbedder([queryVec, fileAVec, fileBVec]),
+      makeEmbedder([queryVec, fileAChunk, fileBChunk]),
     );
 
     const result = await tool.execute(
@@ -135,6 +139,7 @@ describe("intent_read: ranking and output", () => {
   });
 
   it("marks files outside topK as not_top_k", async () => {
+    // 3 files × 1 chunk each = 4 vectors (query + 3 chunks)
     const tool = createIntentReadTool(
       () => makeReadTool({ "/a": "auth", "/b": "db", "/c": "cache" }) as any,
       makeEmbedder([[1, 0], [1, 0], [0, 1], [0, 1]]),
@@ -302,6 +307,8 @@ describe("intent_read: embedding failure fallback", () => {
   });
 
   it("falls back to BM25 when embedding returns wrong vector count", async () => {
+    // With chunking: 2 files × 1 chunk = 2 chunks → need query + 2 = 3 vectors
+    // Stub returns only 1 → triggers wrong-count fallback
     const tool = createIntentReadTool(
       () => makeReadTool({ "/a": "auth", "/b": "db" }) as any,
       makeWrongCountEmbedder(1),
@@ -368,5 +375,151 @@ describe("intent_read: embedding failure fallback", () => {
     const fileA = details.files.find((f: any) => f.path === "/a");
     const fileB = details.files.find((f: any) => f.path === "/b");
     expect(fileA.keywordScore).toBeGreaterThan(fileB.keywordScore);
+  });
+});
+
+describe("intent_read: Phase 2 ranking observability", () => {
+  it("includes chunkIndex, chunkScore, and rankedBy for successful files with embeddings", async () => {
+    // 2 files × 1 chunk = 2 chunks → need query + 2 = 3 vectors
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth logic", "/b": "db schema" }) as any,
+      makeEmbedder([[1, 0], [1, 0], [0, 1]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }, { path: "/b" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+
+    const details = result.details as any;
+    const fileA = details.files.find((f: any) => f.path === "/a");
+    const fileB = details.files.find((f: any) => f.path === "/b");
+
+    expect(fileA.chunkIndex).toBe(0);
+    expect(typeof fileA.chunkScore).toBe("number");
+    expect(fileA.rankedBy).toBe("hybrid");
+
+    // fileB got -Infinity semantic score, still hybrid (embeddings succeeded)
+    expect(fileB.rankedBy).toBe("hybrid");
+  });
+
+  it("includes chunkingEnabled and chunkInfo when embeddings succeed", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "test content" }) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "test", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.chunkingEnabled).toBe(true);
+    expect(details.chunkInfo).toBeDefined();
+    expect(details.chunkInfo.totalChunks).toBeGreaterThanOrEqual(0);
+    expect(details.chunkInfo.filesChunked).toBeGreaterThanOrEqual(0);
+    expect(Array.isArray(details.chunkInfo.bestChunkByFile)).toBe(true);
+    if (details.chunkInfo.bestChunkByFile.length > 0) {
+      const best = details.chunkInfo.bestChunkByFile[0];
+      expect(typeof best.path).toBe("string");
+      expect(typeof best.chunkIndex).toBe("number");
+      expect(typeof best.score).toBe("number");
+      expect(typeof best.startChar).toBe("number");
+      expect(typeof best.endChar).toBe("number");
+      expect(typeof best.preview).toBe("string");
+    }
+  });
+
+
+  it("includes rankedBy=bm25 when embeddings fail", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth" }) as any,
+      makeFailingEmbedder("timeout"),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.chunkingEnabled).toBe(false);
+    expect(details.chunkInfo).toBeUndefined();
+    const fileA = details.files.find((f: any) => f.path === "/a");
+    expect(fileA.rankedBy).toBe("bm25");
+  });
+});
+
+describe("intent_read: Phase 4 filename prefilter in directory mode", () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "intent-read-dir-test-"));
+    writeFileSync(join(tmpDir, "auth.ts"), "auth code");
+    writeFileSync(join(tmpDir, "main.ts"), "main code");
+    writeFileSync(join(tmpDir, "db.ts"), "db code");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("presorts directory files by filename match before ranking", async () => {
+    // auth.ts has highest path score for query "auth"
+    // All files have same BM25 potential, but path prefilter moves auth.ts first
+    const tool = createIntentReadTool(
+      () => makeReadTool({
+        [join(tmpDir, "auth.ts")]: "auth code",
+        [join(tmpDir, "main.ts")]: "main code",
+        [join(tmpDir, "db.ts")]: "db code",
+      }) as any,
+      makeEmbedder([[1, 0], [1, 0], [1, 0], [0, 1]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", directory: tmpDir },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    // First file in output should be auth.ts (highest path token overlap)
+    const text = (result.content[0] as any).text as string;
+    const firstFilePos = text.indexOf("@");
+    const authPos = text.indexOf(join(tmpDir, "auth.ts"));
+    // auth.ts path should appear right after the first '@' in the output
+    expect(authPos).toBe(firstFilePos + 1);
+  });
+
+  it("empty query throws validation error in directory mode", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({
+        [join(tmpDir, "auth.ts")]: "auth code",
+        [join(tmpDir, "main.ts")]: "main code",
+      }) as any,
+      makeEmbedder([[1, 0], [1, 0], [1, 0]]),
+    );
+
+    await expect(
+      tool.execute(
+        "id",
+        { query: "   ", directory: tmpDir },
+        undefined,
+        undefined,
+        { cwd: "/" } as any,
+      ),
+    ).rejects.toThrow(/query/i);
   });
 });

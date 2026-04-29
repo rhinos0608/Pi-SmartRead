@@ -7,8 +7,8 @@ import type {
 import { createReadTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@mariozechner/pi-coding-agent";
 import { validateEmbeddingConfig } from "./config.js";
 import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings } from "./embedding.js";
-import { resolveDirectory } from "./resolver.js";
-import { bm25Scores, cosineSimilarity, computeRanks, computeRrfScores } from "./scoring.js";
+import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
+import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
 import {
   type FileCandidate,
   buildPlan,
@@ -16,6 +16,8 @@ import {
   measureText,
   validatePath,
 } from "./utils.js";
+import { chunkText, type ChunkResult } from "./chunking.js";
+import { TOKEN_ESTIMATE_CHARS_PER_TOKEN, MAX_ESTIMATED_TOKENS_PER_INPUT, MAX_ESTIMATED_TOKENS_PER_BATCH } from "./embedding.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -51,6 +53,9 @@ interface IntentReadFileDetail {
   selectedForPacking: boolean;
   included: boolean;
   inclusion: InclusionStatus;
+  chunkIndex?: number;
+  chunkScore?: number;
+  rankedBy: "bm25" | "hybrid";
 }
 
 interface IntentReadDetails {
@@ -66,6 +71,19 @@ interface IntentReadDetails {
   embeddingStatus: EmbeddingStatus;
   embeddingError?: string;
   rankingSignals: { bm25: true; embeddings: boolean };
+  chunkingEnabled: boolean;
+  chunkInfo?: {
+    totalChunks: number;
+    filesChunked: number;
+    bestChunkByFile: {
+      path: string;
+      chunkIndex: number;
+      score: number;
+      startChar: number;
+      endChar: number;
+      preview: string;
+    }[];
+  };
   files: IntentReadFileDetail[];
   packing: {
     strategy: string;
@@ -132,6 +150,10 @@ export function createIntentReadTool(
           };
         }
         resolvedFiles = resolution.paths.map((p) => ({ path: p }));
+        // Phase 4: reorder by filename/path token overlap within capped results
+        const pathStrings = resolvedFiles.map((r) => r.path);
+        const reordered = presortPathsByQuery(pathStrings, query);
+        resolvedFiles = reordered.map((p) => ({ path: p }));
       } else {
         resolvedFiles = params.files!;
       }
@@ -169,51 +191,113 @@ export function createIntentReadTool(
       // 5. Embed + score (skip if no successful files)
       const fileDetails = new Map<string, Partial<IntentReadFileDetail>>();
       for (const f of fileResults) {
-        fileDetails.set(f.path, { path: f.path, ok: f.ok, error: f.error });
+        fileDetails.set(f.path, { path: f.path, ok: f.ok, error: f.error, rankedBy: "bm25" });
       }
 
       let rankedSuccessOrder: string[] = []; // paths in RRF rank order (rank 1 first)
 
+      // Track chunking observability (may stay at defaults if no files to process)
+      let totalChunks = 0;
+      let filesChunked = 0;
+      const bestChunkByFile: {
+        path: string;
+        chunkIndex: number;
+        score: number;
+        startChar: number;
+        endChar: number;
+        preview: string;
+      }[] = [];
+
       if (successfulFiles.length > 0) {
+        // Chunk each successful file's body
+        const chunkSizeChars = embeddingConfig.chunkSizeChars;
+        const chunkOverlapChars = embeddingConfig.chunkOverlapChars;
+        const maxChunksPerFile = embeddingConfig.maxChunksPerFile;
+
+        // Map file index -> its chunks
+        const fileChunks: ChunkResult[][] = [];
+        for (const f of successfulFiles) {
+          fileChunks.push(
+            chunkText(f.body!, {
+              chunkSizeChars,
+              chunkOverlapChars,
+              maxChunksPerFile,
+            }),
+          );
+        }
+
+        // Collect all chunk texts plus the query
+        const allChunkTexts = fileChunks.flatMap((chunks) => chunks.map((c) => c.text));
+
         const bodies = successfulFiles.map((f) => f.body!);
         const paths = successfulFiles.map((f) => f.path);
 
-        // Always compute BM25 scores (available for hybrid and fallback paths)
+        // Always compute BM25 scores on whole-file bodies
         const keywordScoresArr = bm25Scores(query, bodies);
         const keywordRanks = computeRanks(keywordScoresArr, paths);
 
         let semanticScores: number[] = [];
         let semanticRanks: number[] = [];
-        let rrfScores: number[];
-        let rrfRanks: number[];
 
         // Attempt embedding — fall back to BM25-only on failure
         try {
           const { vectors } = await fetchEmbeddingsImpl({
             ...embeddingConfig,
-            inputs: [query, ...bodies],
+            inputs: [query, ...allChunkTexts],
           });
 
-          if (vectors.length === bodies.length + 1) {
+          if (vectors.length === allChunkTexts.length + 1) {
             const queryVec = vectors[0];
-            const fileVecs = vectors.slice(1);
-            semanticScores = fileVecs.map((v) => cosineSimilarity(queryVec, v));
+            const chunkVecs = vectors.slice(1);
+
+            // Map chunk vectors back to parent files, taking max similarity
+            let chunkIdx = 0;
+            for (let fi = 0; fi < fileChunks.length; fi++) {
+              const numChunks = fileChunks[fi].length;
+              totalChunks += numChunks;
+              if (numChunks > 0) {
+                filesChunked++;
+                const myChunkVecs = chunkVecs.slice(chunkIdx, chunkIdx + numChunks);
+                const { maxScore, bestChunkIndex } = maxChunkSimilarity(queryVec, myChunkVecs);
+                semanticScores.push(maxScore);
+                const path = successfulFiles[fi].path;
+                const fileDetail = fileDetails.get(path)!;
+                fileDetail.chunkIndex = bestChunkIndex;
+                fileDetail.chunkScore = maxScore;
+                const bestChunk = fileChunks[fi][bestChunkIndex];
+                bestChunkByFile.push({
+                  path,
+                  chunkIndex: bestChunkIndex,
+                  score: maxScore,
+                  startChar: bestChunk.startChar,
+                  endChar: bestChunk.endChar,
+                  preview: bestChunk.text.substring(0, 120),
+                });
+              } else {
+                semanticScores.push(-Infinity);
+              }
+              chunkIdx += numChunks;
+            }
+
             semanticRanks = computeRanks(semanticScores, paths);
             embeddingStatus = "ok";
           } else {
             embeddingStatus = "failed_fallback_bm25";
-            embeddingError = `Expected ${bodies.length + 1} vectors, got ${vectors.length}`;
+            embeddingError = `Expected ${allChunkTexts.length + 1} vectors, got ${vectors.length}`;
           }
         } catch (err) {
           embeddingStatus = "failed_fallback_bm25";
           embeddingError = err instanceof Error ? err.message : String(err);
         }
 
+        let rrfScores: number[];
+        let rrfRanks: number[];
+
         if (embeddingStatus === "ok" && semanticRanks.length > 0) {
           rrfScores = computeRrfScores(semanticRanks, keywordRanks);
           rrfRanks = computeRanks(rrfScores, paths);
         } else {
-          // BM25-only fallback: single-rank RRF is monotonic with keyword rank
+          // BM25-only fallback
           rrfScores = keywordRanks.map((kr) => 1 / (60 + kr));
           rrfRanks = computeRanks(rrfScores, paths);
         }
@@ -226,10 +310,13 @@ export function createIntentReadTool(
           if (embeddingStatus === "ok") {
             base.semanticRank = semanticRanks[i];
             base.semanticScore = semanticScores[i];
+            base.rankedBy = "hybrid";
+          } else {
+            base.rankedBy = "bm25" as "bm25";
           }
         }
 
-        // Sort by RRF rank (ascending rank = descending score)
+        // Sort by RRF rank
         rankedSuccessOrder = [...paths].sort((a, b) => {
           const ri = paths.indexOf(a);
           const rj = paths.indexOf(b);
@@ -333,6 +420,14 @@ export function createIntentReadTool(
           bm25: true,
           embeddings: embeddingStatus === "ok",
         },
+        chunkingEnabled: embeddingStatus === "ok",
+        ...(embeddingStatus === "ok" && filesChunked > 0 && {
+          chunkInfo: {
+            totalChunks,
+            filesChunked,
+            bestChunkByFile,
+          },
+        }),
         files: allFileDetails,
         packing: {
           strategy: plan.strategy,

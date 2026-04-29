@@ -11,6 +11,9 @@ describe("config: validateEmbeddingConfig", () => {
     delete process.env.PI_SMARTREAD_EMBEDDING_API_KEY;
     delete process.env.EMBEDDING_BASE_URL;
     delete process.env.EMBEDDING_MODEL;
+    delete process.env.PI_SMARTREAD_CHUNK_SIZE;
+    delete process.env.PI_SMARTREAD_CHUNK_OVERLAP;
+    delete process.env.PI_SMARTREAD_MAX_CHUNKS;
   });
 
   it("throws when baseUrl is missing", () => {
@@ -66,5 +69,38 @@ describe("config: validateEmbeddingConfig", () => {
       expect(msg).toContain("pi-smartread.config.json");
       expect(msg).toContain("PI_SMARTREAD_EMBEDDING_BASE_URL");
     }
+  });
+
+  it("throws when chunkSizeChars is not positive", () => {
+    process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
+    process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
+    process.env.PI_SMARTREAD_CHUNK_SIZE = "0";
+    expect(() => validateEmbeddingConfig(SAFE_CWD)).toThrow(/chunkSizeChars/);
+  });
+
+  it("throws when chunkOverlapChars is negative", () => {
+    process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
+    process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
+    process.env.PI_SMARTREAD_CHUNK_OVERLAP = "-1";
+    expect(() => validateEmbeddingConfig(SAFE_CWD)).toThrow(/chunkOverlapChars/);
+  });
+
+  it("throws when maxChunksPerFile is not positive", () => {
+    process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
+    process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
+    process.env.PI_SMARTREAD_MAX_CHUNKS = "-5";
+    expect(() => validateEmbeddingConfig(SAFE_CWD)).toThrow(/maxChunksPerFile/);
+  });
+
+  it("allows valid chunk config values", () => {
+    process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
+    process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
+    process.env.PI_SMARTREAD_CHUNK_SIZE = "1024";
+    process.env.PI_SMARTREAD_CHUNK_OVERLAP = "128";
+    process.env.PI_SMARTREAD_MAX_CHUNKS = "8";
+    const cfg = validateEmbeddingConfig(SAFE_CWD);
+    expect(cfg.chunkSizeChars).toBe(1024);
+    expect(cfg.chunkOverlapChars).toBe(128);
+    expect(cfg.maxChunksPerFile).toBe(8);
   });
 });

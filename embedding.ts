@@ -10,7 +10,29 @@ export interface EmbedResult {
   vectors: number[][];
 }
 
+// Token estimation constants
+export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
+export const MAX_ESTIMATED_TOKENS_PER_INPUT = 2048;
+export const MAX_ESTIMATED_TOKENS_PER_BATCH = 32768;
+
 export async function fetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
+  // Token validation before sending
+  let totalTokens = 0;
+  for (let i = 0; i < req.inputs.length; i++) {
+    const estimatedTokens = Math.ceil(req.inputs[i].length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+    totalTokens += estimatedTokens;
+    if (estimatedTokens > MAX_ESTIMATED_TOKENS_PER_INPUT) {
+      throw new Error(
+        `Input at index ${i} exceeds token limit: estimated ${estimatedTokens} tokens, max ${MAX_ESTIMATED_TOKENS_PER_INPUT}`,
+      );
+    }
+  }
+  if (totalTokens > MAX_ESTIMATED_TOKENS_PER_BATCH) {
+    throw new Error(
+      `Batch exceeds token limit: estimated ${totalTokens} tokens, max ${MAX_ESTIMATED_TOKENS_PER_BATCH}`,
+    );
+  }
+
   const url = req.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") + "/v1/embeddings";
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (req.apiKey) headers["Authorization"] = `Bearer ${req.apiKey}`;

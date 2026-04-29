@@ -5,12 +5,18 @@ export interface ResolvedEmbeddingConfig {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  chunkSizeChars?: number;
+  chunkOverlapChars?: number;
+  maxChunksPerFile?: number;
 }
 
 interface RawConfig {
   baseUrl?: string;
   model?: string;
   apiKey?: string;
+  chunkSizeChars?: number;
+  chunkOverlapChars?: number;
+  maxChunksPerFile?: number;
 }
 
 const CONFIG_FILENAME = "pi-smartread.config.json";
@@ -63,6 +69,15 @@ function loadRaw(cwd?: string): RawConfig {
       process.env.PI_SMARTREAD_EMBEDDING_MODEL ??
       process.env.EMBEDDING_MODEL,
     apiKey: fromFile.apiKey ?? process.env.PI_SMARTREAD_EMBEDDING_API_KEY,
+    chunkSizeChars:
+      fromFile.chunkSizeChars ??
+      (process.env.PI_SMARTREAD_CHUNK_SIZE ? parseInt(process.env.PI_SMARTREAD_CHUNK_SIZE, 10) : undefined),
+    chunkOverlapChars:
+      fromFile.chunkOverlapChars ??
+      (process.env.PI_SMARTREAD_CHUNK_OVERLAP ? parseInt(process.env.PI_SMARTREAD_CHUNK_OVERLAP, 10) : undefined),
+    maxChunksPerFile:
+      fromFile.maxChunksPerFile ??
+      (process.env.PI_SMARTREAD_MAX_CHUNKS ? parseInt(process.env.PI_SMARTREAD_MAX_CHUNKS, 10) : undefined),
   };
 }
 
@@ -84,7 +99,30 @@ export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig {
     );
   }
 
-  return { baseUrl: raw.baseUrl, model: raw.model, apiKey: raw.apiKey };
+  if (raw.chunkSizeChars !== undefined && (!Number.isFinite(raw.chunkSizeChars) || raw.chunkSizeChars <= 0)) {
+    throw new Error(
+      "chunkSizeChars must be a positive integer. Got: " + String(raw.chunkSizeChars),
+    );
+  }
+  if (raw.chunkOverlapChars !== undefined && (!Number.isFinite(raw.chunkOverlapChars) || raw.chunkOverlapChars < 0)) {
+    throw new Error(
+      "chunkOverlapChars must be a non-negative integer. Got: " + String(raw.chunkOverlapChars),
+    );
+  }
+  if (raw.maxChunksPerFile !== undefined && (!Number.isFinite(raw.maxChunksPerFile) || raw.maxChunksPerFile <= 0)) {
+    throw new Error(
+      "maxChunksPerFile must be a positive integer. Got: " + String(raw.maxChunksPerFile),
+    );
+  }
+
+  return {
+    baseUrl: raw.baseUrl,
+    model: raw.model,
+    apiKey: raw.apiKey,
+    chunkSizeChars: raw.chunkSizeChars,
+    chunkOverlapChars: raw.chunkOverlapChars,
+    maxChunksPerFile: raw.maxChunksPerFile,
+  };
 }
 
 /** @deprecated No-op — config is always freshly resolved per invocation. */
