@@ -4,6 +4,7 @@
   "description": "Batch file reads for Pi via read_multiple_files with adaptive packing under output limits",
   "author": "Gurpartap Singh",
   "license": "MIT",
+  "type": "module",
   "publishConfig": {
     "access": "public"
   },
@@ -49,7 +50,9 @@
     "@mariozechner/pi-coding-agent": "^0.70.2"
   },
   "dependencies": {
-    "typebox": "^1.1.24"
+    "tree-sitter-wasms": "^0.1.13",
+    "typebox": "^1.1.24",
+    "web-tree-sitter": "^0.26.8"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",

@@ -2,3 +2,5 @@ node_modules/
 .pi/
 *.log
 .DS_Store
+.pi-smartread.tags.cache/
+*.wasm

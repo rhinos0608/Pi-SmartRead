@@ -208,3 +208,106 @@
 
 ## Verdict
 **All spec requirements satisfied. Implementation is complete, tested, and clean. Ready for merge/PR.**
+
+## Phase 1: repo-map integration (tree-sitter tags, pagerank, cache, file-discovery, tree-context)
+
+## Review
+- **Correct:**
+  - `languages.ts` provides a clean, exhaustive map of 40+ file extensions to tree-sitter language names, with correct WASM filename aliases (`c_sharp` → `c-sharp`, etc.) and query-name aliases for `.scm` discovery.
+  - `file-discovery.ts` filters by supported extensions, safely ignores common build/vendor directories, handles permission errors gracefully, supports max-file caps, and offers a focused `findFilesMatching` helper.
+  - `cache.ts` implements mtime-based invalidation with both in-memory and optional on-disk persistence. Failures during JSON parse or disk writes are caught and fall back gracefully.
+  - `pagerank.ts` correctly implements personalized PageRank: damping factor (default 0.85), dangling-node redistribution via the personalization vector, convergence check (`tol = 1e-6`), and zero-node guard.
+  - `tags.ts` architecture matches Aider repomap patterns: async parser init, per-language WASM loading, query caching, flat capture processing, deduplication, and batch concurrency limiting.
+  - `Tag` interface in `cache.ts` (`relFname`, `fname`, `line`, `name`, `kind: "def" | "ref"`) matches `tags.ts` usage exactly.
+  - All internal imports use `.js` extensions for ESM compatibility (`./languages.js`, `./cache.js`).
+  - No `any` types observed; strict-null annotations are present (`number | null`, `Tag[] | null`, etc.).
+  - Edge cases handled: unsupported language, missing WASM, missing query file, unreadable source file, null parse tree, empty captures.
+
+- **Fixed:**
+  - `tags.ts` ESM imports: `web-tree-sitter` v0.26.x is a CJS default-export module. Named value imports (`Language`, `Query`) fail at runtime in pure ESM Node. Replaced with `import Parser from "web-tree-sitter"` and used `Parser.Language.load()` / `new Parser.Query()` at runtime, keeping `import type { Language, Query, Tree }` for type safety.
+  - `tags.ts` concurrency race: `initParser()` used a boolean flag (`parserInitialized`) before an async `Parser.init()`, allowing duplicate concurrent initializations. Replaced with a shared `initPromise` guard.
+  - `tags.ts` memory safety: parser and tree `.delete()` calls were only in the success path. Wrapped tag extraction in `try/finally` so `tree?.delete()` and `parser.delete()` run even if `query.captures()` or the loop throws.
+  - `cache.ts` filename collisions: the `replace(/[^a-zA-Z0-9._-]/g, "_")` sanitization is lossy (e.g., `foo:bar.ts` and `foo_bar.ts` collide). Replaced with SHA-256 hashing for guaranteed unique, fixed-length cache filenames.
+  - `tree-context.ts` bounds-check bug: `renderTreeContext` called `addParentContext(lines, loi, ...)` before validating `loi`. Passing `linesOfInterest` containing `0` or negative numbers caused an array out-of-bounds crash (`lines[-1]`). Added `if (loi < 1 || loi > lines.length) continue;` guard.
+
+- **Note:**
+  - `tree-context.ts` defines `TreeContextOptions` (`color?`, `margin?`) but `renderTreeContext` ignores the parameter entirely (prefixed `_options`). Either implement margin/color or remove from public API to avoid confusion.
+  - `tree-context.ts` `getIndent` uses raw character count for tabs; mixed tab/space indentation will produce incorrect parent-context hierarchies. Consider documenting or normalizing tabs to spaces.
+  - `cache.ts` in-memory `Map` has no eviction policy; for repos with >100k files this could grow without bound.
+  - `tsconfig.json` `include` array currently omits the 6 new repo-map source files. Add them (`languages.ts`, `cache.ts`, `pagerank.ts`, `tree-context.ts`, `file-discovery.ts`, `tags.ts`) before wire-up so `tsc --noEmit` covers them.
+  - `web-tree-sitter` v0.26.x `Parser.init()` is assumed idempotent; the `initPromise` pattern prevents duplicate concurrent calls but does not retry on failure (acceptable behavior).
+
+## Review: Re-review all finished repo-map phases (1-3) with fixes
+
+### Correct
+- **Phase 1 bugs verified fixed:**
+  1. `tags.ts` CJS/ESM import: uses `createRequire(import.meta.url)` to resolve `tree-sitter-wasms/package.json` inside an ESM module. Named value imports (`Parser`, `Language`, `Query`) from `web-tree-sitter` v0.26.8 are valid because the package is `"type": "module"` and exports them explicitly.
+  2. `tags.ts` race condition: `initPromise` is a shared `Promise<void> | null` guard. All concurrent callers await the same initialization promise; no duplicate `Parser.init()` calls.
+  3. `tags.ts` memory leak: `parser.parse()` returns a `Tree`; both `tree?.delete()` and `parser.delete()` are called inside a `finally` block, guaranteeing cleanup on success, error, or early return.
+  4. `cache.ts` SHA-256 filename collision: `getFilePath` uses `createHash("sha256").update(fname).digest("hex")` for cache filenames, eliminating any possible collision from path-sanitization edge cases.
+  5. `tree-context.ts` bounds checking: `renderTreeContext` validates every `loi` with `if (loi < 1 || loi > lines.length) continue;` before passing it to `addParentContext`, preventing `lines[-1]` crashes.
+- **Phase 2 orchestrator (`repomap.ts`):**
+  - PageRank graph construction is correct: nodes = all files (relative paths), edges = `refFile → defFile` for shared identifiers across files. Missing-node edges are safely skipped inside `pagerank.ts`.
+  - Personalized PageRank matches Aider patterns: focus files get weight `100`, connected neighbors get `+10`, priority identifiers boost rank `×10`, priority files boost `×5`, focus files boost `×20`.
+  - Token-budget binary search is correctly implemented in `buildMap`: `left/right` converges on the largest `mid` slice of already-sorted tags whose rendered output fits within `maxTokens`.
+  - Focus files are intentionally excluded from the rendered map (`if (focusRelFiles.has(relFname)) continue`), matching Aider's behavior (focus files are already in the conversation context).
+  - `Tag` type is shared between `cache.ts` and `tags.ts`; no boundary mismatches.
+  - `repomap.ts` correctly handles absolute vs. relative paths: all internal file lists use absolute paths; tags store `relFname`; PageRank and rendering operate on `relFname`.
+- **Phase 3 tool wrappers (`repomap-tool.ts`):**
+  - Two tools exposed: `repo_map` and `search_symbols`.
+  - Schema definitions use `Type.Object` from `typebox`, matching existing `read-many.ts` and `intent-read.ts` patterns.
+  - `execute` signature matches existing tools (`toolCallId`, `params`, `signal`, `_onUpdate`, `ctx`).
+  - Result shapes return `{ content: [{ type: "text", text: ... }], details: ... }`, matching the content/detail pattern used by `read_many` and `intent_read`.
+  - `search_symbols` formats output with relative file paths, line numbers, `[def]`/`[ref]` labels, and optional tree context.
+- **`index.ts` registration:**
+  - Correctly imports `registerRepoTools` from `./repomap-tool.js` (`.js` extension).
+  - Calls `registerRepoTools(pi)` inside the default export alongside existing tools.
+  - No duplicated registrations; `read-many.ts` default export is left for backward compatibility.
+- **ESM imports:**
+  - All cross-module imports use `.js` extensions (`./cache.js`, `./languages.js`, `./tags.js`, `./pagerank.js`, `./tree-context.js`, `./file-discovery.js`, `./repomap.js`, `./repomap-tool.js`).
+- **Type safety:**
+  - No explicit `any` types remain in the new code.
+  - Strict TypeScript (`strict: true`) is enabled in `tsconfig.json`.
+  - `tsconfig.json` `include` array already lists all new repo-map sources (`languages.ts`, `cache.ts`, `pagerank.ts`, `tree-context.ts`, `file-discovery.ts`, `tags.ts`, `repomap.ts`, `repomap-tool.ts`).
+
+### Fixed
+- **`repomap-tool.ts` stale singleton bug:** the original `getRepoMap(cwd)` helper used a single `repoMapInstance` variable. If the tool was invoked with a different `directory` / `ctx.cwd`, it would return the cached `RepoMap` for the old directory. Replaced with `const repoMapInstances = new Map<string, RepoMap>()` so each working directory gets its own cached instance, consistent with the tool's schema which allows varying `directory` per call.
+- **`repomap.ts` redundant filtering:** `findSrcFiles(this.root).filter(isSupportedFile)` appeared twice (`getRepoMap` and `searchIdentifiers`). `findSrcFiles` already applies `isSupportedFile` internally, so the `.filter` was redundant. Removed both occurrences and removed the unused `isSupportedFile` import.
+
+### Note
+- `tree-context.ts` still accepts `TreeContextOptions` (color, margin) but ignores them. This is harmless but could be removed or implemented later.
+- `searchIdentifiers` in `repomap.ts` processes files sequentially rather than using `getTagsBatch` (which has controlled concurrency). This is correct but slower on very large repos; consider switching to `getTagsBatch` in a future optimization.
+- `cache.ts` in-memory map has no eviction policy. For monorepos with hundreds of thousands of files this could grow unbounded. Acceptable for current target repos.
+## Final Review: repo-map optimizations, hook system, and tests
+
+### Correct
+- **ESM imports:** All new files use `.js` extensions (`./hook.js`, `./repomap.js`, `./file-discovery.js`); `index.ts` correctly wraps before registering.
+- **Hook state model:** Keyed by normalized git root (or absolute path fallback); stores `mapShown`, `explicitlyCalled`, `inFlight`. Handles skip-map meta, already-shown, concurrency guard, and generation correctly. The concurrency guard is safe because JS is single-threaded: the first caller sets `inFlight` synchronously before yielding, so concurrent callers arriving in the same tick will see it and await the shared promise.
+- **Hook failure recovery:** Generation errors fall through to the original tool with `_repoMapHook.failed` in `details`, signalling the failure without breaking the read flow.
+- **Response contract:** `intercepted: true` in `details` plus explicit `[REPO MAP — TOOL INTERCEPTED]` header makes it unambiguous.
+- **Cross-tool state sharing:** `read_many` and `intent_read` share the same `sessionStates` map because both are keyed by the same `computeRepoKey(cwd)`. Verified by test.
+- **Gitignore parsing:** Cascading upward via `loadGitignoreRules` works. Negation re-applies in order. Anchored (`/`) and dir-only (`/`) patterns are detected and compiled into anchored regexes. Unanchored patterns without a slash match at any depth (`(?:^|/)…$`). `**/` expands to `(?:.+/)?`. `gitignoreGlobToRegex` escapes regex metacharacters except `*` and `?`.
+- **TS path alias resolution:** `parseTsconfigPaths` correctly extracts `@/* → ./src/*` style aliases from `compilerOptions.paths`. `resolveViaAlias` strips the prefix, appends the suffix, and resolves against `absRoot`. Multiple aliases and `jsconfig.json` fallback are supported.
+- **Compact mode:** `renderTagsCompact` produces single-line summaries: `file.ts (refs: N) — sym1, sym2 (+3 more)`. Symbols are deduplicated and capped at 8. Works correctly with the token-budget binary search (subset slicing is independent of rendering format).
+- **Tests:**
+  - `import-based.test.ts` (13 tests) covers: empty repo, in-degree ranking, CJS require, Python imports, bare package filtering, `excludeUnranked`, focus-files boost, token budget, `importEdges` counting, triple-slash references, self-import filtering, TS alias resolution, and compact output assertions.
+  - `hook.test.ts` (11 tests) covers: first-read intercept, second-read passthrough, `skipRepoMapHook`, explicit-call suppression, cross-repo isolation, explicit-call scope, concurrent readers, empty-repo fallthrough, `intent_read` intercept, cwd normalization via git root, and cross-tool state sharing.
+
+### Fixed
+1. **`tsconfig.json` missing `hook.ts`** — Added to `include` array so it is covered by `tsc --noEmit`.
+2. **`repomap.ts` tree-sitter path ignored `compact` option** — Line ~514 hardcoded `compact: false` for the tree-sitter success path, so users who requested `compact: true` while tree-sitter succeeded still got full code context. Changed to `options.compact ?? false`.
+3. **`repomap.ts` dead `existsSync` in `resolveViaAlias`** — Checked `existsSync(resolved)` and returned the same `resolved` path in both branches. Simplified to a single `return`.
+4. **`file-discovery.ts` dead/misleading dot-dir gitignore check** — The code checked `isGitignored(relPath, true, rules)` for dot-dirs inside `IGNORE_DIRS` but then executed an unconditional second `continue`, making the check dead. Simplified both `findSrcFiles` and `findFilesMatching` to: `if (IGNORE_DIRS.has(entry) || entry.startsWith(".")) continue;`.
+5. **`file-discovery.ts` hardcoded Unix root `/` in `loadGitignoreRules`** — Replaced `dir === "/" ? null : join(dir, "..")` with `resolve(dir, "..")` and `parent !== dir`, which works correctly on both Unix and Windows.
+6. **`file-discovery.ts` cross-platform path separator bug** — `relative()` can produce backslashes on Windows, but gitignore regexes match forward slashes. Added `relPath.replace(/\\/g, "/")` normalization inside `isGitignored` before regex testing.
+7. **`file-discovery.ts` unused `sep` import** — Removed from the `node:path` import list.
+8. **`hook.ts` dead `registerHookedTools` used `require()` in ESM** — This function was exported but never called by `index.ts` (which uses `wrapReadManyTool`/`wrapIntentReadTool` instead). It would have thrown `ReferenceError: require is not defined` in pure ESM. Removed entirely.
+9. **`hook.ts` unused imports** — Removed `type Static` and `ExtensionAPI` which became unused after removing `registerHookedTools`.
+10. **`repomap.ts` unused `existsSync` import** — Removed after cleaning up `resolveViaAlias`.
+
+### Note
+- No missing tests were identified as strictly necessary, though explicit gitignore edge-case tests (negation, anchored vs. unanchored patterns on Windows) could be added as a future enhancement.
+- The hook's `generateCompactMap` double-catches (tree-sitter + explicit import-based fallback) is defensive but slightly redundant because `autoFallback: true` inside `getRepoMap` already handles tree-sitter failure internally. This is harmless redundancy.
+- `file-discovery.ts` `IGNORE_DIRS` still unconditionally skips all dot-directories. This is intentional and safe, but means a `.gitignore` negation like `!.hidden/` cannot override it. Acceptable for security/performance.
+
+- The `initPromise` pattern in `tags.ts` does not retry if `Parser.init()` throws (the rejected promise is cached). Given that WASM files are bundled, this is an acceptable failure mode.
