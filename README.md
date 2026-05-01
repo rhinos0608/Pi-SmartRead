@@ -1,18 +1,33 @@
-# 📚 pi-read-many
+# 📚 Pi-SmartRead (`pi-read-many`)
 
-> **Tool renamed:** `read_many` → `read_multiple_files`
+Pi extension package for **multi-file reading, intent-based retrieval, repository mapping, and symbol search**.
 
-[![pi coding agent](https://img.shields.io/badge/pi-coding%20agent-6f6bff?logo=terminal&logoColor=white)](https://pi.dev/)
-[![npm version](https://img.shields.io/npm/v/pi-read-many.svg)](https://www.npmjs.com/package/pi-read-many)
-[![license](https://img.shields.io/github/license/Gurpartap/pi-read-many.svg)](LICENSE)
-
-Batch file reads for Pi via a single tool: **`read_multiple_files`**.
-
-It helps the model inspect multiple files in one call instead of issuing many separate `read` calls.
+> npm package name: `pi-read-many`
+> project/repo name: `Pi-SmartRead`
 
 ---
 
-## 🚀 Install
+## What it adds to Pi
+
+This package ships five code-navigation tools and behaviors:
+
+| Tool / behavior | What it does |
+|---|---|
+| `read` | Wraps Pi's built-in `read` and may intercept the first repo read to show a compact repo map |
+| `read_multiple_files` | Reads up to 20 files in one call with adaptive output packing |
+| `intent_read` | Ranks candidate files for a query using BM25 + embeddings with RRF fusion |
+| `repo_map` | Builds a PageRank-ranked repository map from native tree-sitter tags |
+| `search_symbols` | Finds symbol definitions and references with context |
+
+This package is useful when an agent needs to:
+- inspect several files at once
+- find the most relevant files for a task
+- understand repo structure before reading deeply
+- locate functions, classes, and references quickly
+
+---
+
+## Install
 
 ### Preferred (npm)
 
@@ -26,7 +41,7 @@ pi install npm:pi-read-many
 pi install git:https://github.com/Gurpartap/pi-read-many
 ```
 
-After install, use Pi normally. If Pi is already running when you install or update, run:
+If Pi is already running when you install or update the package, run:
 
 ```text
 /reload
@@ -34,33 +49,38 @@ After install, use Pi normally. If Pi is already running when you install or upd
 
 ---
 
-## 📝 Notes
+## First-read repo map hook
 
-- `read_multiple_files` does **not** override built-in `read`.
-- `read_multiple_files` summarizes image attachments in combined text output; exact single-file image payload behavior remains in built-in `read`.
+On the **first** `read`, `read_multiple_files`, or `intent_read` call in a repository, Pi-SmartRead may intercept the request and return a **compact repo map** instead of the requested file contents.
+
+This gives the agent orientation before deeper reads.
+
+After that first intercept:
+- future reads pass through normally
+- an explicit `repo_map` call also suppresses later first-read interception for that repo
+
+If you see an intercept response, simply re-issue the original read.
 
 ---
 
-## ✨ What `read_multiple_files` does
+## `read_multiple_files`
 
-- Reads files **sequentially in request order**.
-- Uses Pi's built-in `read` under the hood (same core semantics).
-- Returns one combined text response using per-file heredoc blocks.
-- Continues on per-file errors by default (`stopOnError: false`).
-- Applies combined output budgeting with block-safe packing.
-- Exposes packing decisions in `details.packing`.
-- **Limit:** up to **5 files** per call.
+Read multiple known files in one call.
 
-### Additional behavior
+### Key behavior
 
-- **Adaptive packing:** starts with strict request-order full-block packing.
-- **Strategy switch:** uses smallest-first **only if** it increases complete successful-file coverage.
-- **Stable output order:** rendered sections still follow original request order.
-- **Partial inclusion:** includes at most one partial section when needed.
-- **Error consistency:** errors are framed exactly like normal file blocks.
-- **Image-safe output:** image payloads are summarized in text.
+- reads files in request order
+- supports per-file `offset` and `limit`
+- continues on errors by default
+- uses adaptive packing under Pi output limits
+- returns stable per-file heredoc blocks
+- supports up to **20 files** per call
 
-## 🔢 Example `read_multiple_files` input
+### Packing behavior
+
+Pi-SmartRead starts with strict request-order packing, then switches to smallest-first **only** when that includes more complete successful files. Output order still follows the original request order.
+
+### Example
 
 ```json
 {
@@ -72,60 +92,54 @@ After install, use Pi normally. If Pi is already running when you install or upd
 }
 ```
 
+### Returned details
+
+`details.packing` includes:
+- `strategy`
+- `switchedForCoverage`
+- `fullIncludedCount`
+- `fullIncludedSuccessCount`
+- `partialIncludedPath`
+- `omittedPaths`
+
 ---
 
-## 🔍 `intent_read` — Intent-Based File Reader
+## `intent_read`
 
-A second tool ships alongside `read_multiple_files`. It accepts a **query string** and up to **20 file candidates**, reads all of them, ranks them by relevance to the query, and returns the top-K results with file contents and per-file relevance metadata.
-
-**Limit:** up to **20 files** per call.
+Find the most relevant files for a query when you do **not** already know which files matter.
 
 ### When to use it
 
-Use `intent_read` when the model needs to find the right files for a task but doesn't know which ones to open — for example, searching for a bug across many source files, gathering all files related to a feature, or answering a high-level question from a codebase.
+Use `intent_read` for tasks like:
+- “find the auth middleware”
+- “which files implement repo mapping?”
+- “what code is relevant to this bug?”
 
-Use `read_multiple_files` when the files are already known and should all be included.
+Use `read_multiple_files` when you already know the exact files to open.
 
 ### How it works
 
-1. **Read** all candidate files sequentially.
-2. **Chunk** each file's content (configurable chunk size and overlap).
-3. **Score** each file's chunks against the query using hybrid ranking.
-4. **Select** the top-scoring chunk per file as that file's relevance score.
-5. **Fuse** per-file scores via Reciprocal Rank Fusion (RRF) across ranking approaches.
-6. **Return** top-K results with their full content and per-file metadata.
+1. resolves candidates from explicit files or a non-recursive directory scan
+2. augments candidates with direct in-workspace relative import neighbours when there is room
+3. reads candidate files
+4. chunks file content with overlap
+5. builds compressed embedding text with structural headers
+6. ranks files using **BM25 + semantic similarity**
+7. fuses ranks with **Reciprocal Rank Fusion (RRF)**
+8. filters low-signal candidates
+9. returns the top-K files with scores and metadata
 
-### Ranking: Hybrid BM25 + Semantic RRF
+### Current implemented retrieval features
 
-`intent_read` uses two independent ranking passes per file:
+- **BM25 keyword ranking**
+- **embedding cosine similarity** against an OpenAI-compatible endpoint
+- **RRF fusion** (`k = 60`)
+- **direct import-neighbour augmentation**
+- **compressed embedding snippets** (imports stripped, whitespace collapsed, head/tail preserved)
+- **in-memory LRU cache** for repeated embedding batches
+- **BM25-only degradation** when the embedding request fails after configuration has been validated
 
-| Ranker | Method | Description |
-|---|---|---|
-| **BM25** | Classic keyword | Fast sparse retrieval over raw chunk text |
-| **Semantic** | Embedding cosine | Dense similarity via an OpenAI-compatible embedding endpoint |
-
-Per-file scores are fused via **Reciprocal Rank Fusion (RRF)**:
-
-```
-RRF_score(d) = Σ  1 / (k + rank(d))
-```
-
-Where `k = 60` and ranks come from BM25 and semantic rankers independently. Each file's best-scoring chunk is used for both rankers.
-
-If no embedding endpoint is configured, `intent_read` falls back to **BM25-only ranking**.
-
-### Output fields
-
-Each result in `results` includes:
-
-| Field | Type | Description |
-|---|---|---|
-| `path` | `string` | Resolved file path |
-| `content` | `string` | Full text content of the file |
-| `score` | `number` | RRF fusion score (higher = more relevant) |
-| `ranks` | `object` | Raw per-ranker scores (`bm25`, `semantic`) and ranks (`bm25_rank`, `semantic_rank`) |
-
-### 🔢 Example `intent_read` input
+### Example
 
 ```json
 {
@@ -139,11 +153,112 @@ Each result in `results` includes:
 }
 ```
 
+### Output shape
+
+`intent_read` returns:
+- a single combined text payload in `content[0].text`, using framed heredoc blocks for included files
+- ranking and diagnostic metadata in `details`
+
+The per-file ranking data lives in `details.files`. Each file entry may include:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | `string` | resolved file path |
+| `ok` | `boolean` | whether reading succeeded |
+| `keywordRank` / `keywordScore` | `number` | BM25 ranking data |
+| `semanticRank` / `semanticScore` | `number` | embedding ranking data when semantic ranking succeeded |
+| `rrfScore` | `number` | fused RRF score |
+| `chunkIndex` / `chunkScore` | `number` | best chunk selected for the file |
+| `rankedBy` | `"bm25" | "hybrid"` | ranking mode used for that file |
+| `selectedForPacking` | `boolean` | whether the file made the top-K set |
+| `included` | `boolean` | whether the file made it into the final output budget |
+| `inclusion` | `string` | inclusion reason such as `full`, `partial`, `omitted`, `not_top_k`, `below_threshold`, or `error` |
+
+Additional diagnostics may appear under `details`, including:
+- `embeddingStatus`
+- `embeddingCache`
+- `filteredBelowThresholdPaths`
+- `graphAugmentation`
+- `chunkInfo`
+- `packing`
+
 ---
 
-## 📦 Output format
+## `repo_map`
 
-Each included file is returned in this framed block format:
+Generate a repository map using **native tree-sitter AST extraction** by default, with an **import-based fallback** when needed.
+
+### What it does
+
+- scans supported source files
+- extracts definitions and references
+- ranks files using PageRank
+- personalizes ranking toward files and identifiers
+- renders a token-budgeted map for agent orientation
+
+### Example
+
+```json
+{
+  "directory": ".",
+  "mapTokens": 4096,
+  "focusFiles": ["repomap.ts"],
+  "priorityIdentifiers": ["RepoMap"],
+  "compact": false
+}
+```
+
+### Notable options
+
+| Option | Meaning |
+|---|---|
+| `mapTokens` | token budget for the rendered map |
+| `focusFiles` | files to personalize PageRank toward |
+| `priorityIdentifiers` | identifiers to boost |
+| `forceRefresh` | ignore cache and re-parse |
+| `useImportBased` | force import-only ranking |
+| `autoFallback` | fall back automatically if AST parsing fails |
+| `compact` | emit a terse single-line-per-file view |
+
+---
+
+## `search_symbols`
+
+Search for symbol definitions and references across the repository.
+
+### What it does
+
+- uses native tree-sitter tags when available
+- falls back to text-based symbol search when AST tags are unavailable
+- supports definition-only or reference-only filtering
+- returns surrounding code context for each match
+
+### Example
+
+```json
+{
+  "query": "getRepoMap",
+  "directory": ".",
+  "maxResults": 10,
+  "includeDefinitions": true,
+  "includeReferences": false
+}
+```
+
+### Typical output
+
+```text
+Found 2 symbol(s) matching "getRepoMap":
+
+  repomap-tool.ts:95  [def]  getRepoMap
+  repomap.ts:598  [def]  getRepoMap
+```
+
+---
+
+## Output format
+
+`read_multiple_files` and `intent_read` return framed file blocks like:
 
 ```bash
 @path/to/file
@@ -152,38 +267,22 @@ Each included file is returned in this framed block format:
 WORD_INDEX_HASH
 ```
 
-### Delimiter rules (`WORD_INDEX_HASH`)
+Delimiter parts:
+- `WORD`: readable dictionary word
+- `INDEX`: 1-based file index
+- `HASH`: deterministic short hash of the path
 
-- `WORD`: fixed readable dictionary word from a **26-word dictionary** (one unique starting letter per word)
-- `INDEX`: 1-based file index in the request
-- `HASH`: deterministic short hash of the file path
-
-> **Note:** The 26-word dictionary is purely a **formatting convenience** — it produces readable, distinct delimiters per file. It is not a file count limit. Limits are enforced by the tool's schema (5 for `read_multiple_files`, 20 for `intent_read`).
-
-If a delimiter collides with a content line, the tool auto-suffixes (`_1`, `_2`, …) and keeps trying deterministic fallbacks until it finds a safe delimiter.
+If a delimiter collides with file content, Pi-SmartRead automatically retries with a safe suffix.
 
 ---
 
-## 🧾 `details.packing` fields
+## Configuration
 
-| Field | Meaning |
-|---|---|
-| `strategy` | Chosen packing strategy (`request-order` or `smallest-first`) |
-| `switchedForCoverage` | Whether strategy switched to improve successful full-file coverage |
-| `fullIncludedCount` | Number of fully included blocks |
-| `fullIncludedSuccessCount` | Number of fully included successful blocks |
-| `partialIncludedPath` | Path of partially included block (if any) |
-| `omittedPaths` | Paths omitted due to budget limits |
+### Embedding backend
 
----
+`intent_read` semantic ranking uses an **OpenAI-compatible embeddings API**.
 
-## ⚙️ Configuration
-
-### Embedding backend (for `intent_read` semantic ranking)
-
-`intent_read` sends file contents to an **OpenAI-compatible embedding endpoint** for semantic scoring. The model may be open-source (e.g. Nomic, Ollama), self-hosted, or a cloud provider.
-
-Configure it via **`pi-smartread.config.json`** in the current working directory or any parent directory, or via **environment variables**:
+Configure it with `pi-smartread.config.json` in the current directory or any parent directory:
 
 ```json
 {
@@ -193,29 +292,47 @@ Configure it via **`pi-smartread.config.json`** in the current working directory
 }
 ```
 
-| Config key | Env var | Required | Description |
-|---|---|---|---|
-| `baseUrl` | `PI_SMARTREAD_EMBEDDING_BASE_URL` | ✅ Yes | OpenAI-compatible `/embeddings` endpoint base URL |
-| `model` | `PI_SMARTREAD_EMBEDDING_MODEL` | ✅ Yes | Embedding model name |
-| `apiKey` | `PI_SMARTREAD_EMBEDDING_API_KEY` | No | Bearer token sent as `Authorization: Bearer <apiKey>` |
+### Config fields
 
-> If `baseUrl` or `model` is missing, `intent_read` falls back to **BM25-only ranking** at call time — the extension will still load and register successfully.
+| Config key | Primary env var | Compatibility env var | Required | Description |
+|---|---|---|---|---|
+| `baseUrl` | `PI_SMARTREAD_EMBEDDING_BASE_URL` | `EMBEDDING_BASE_URL` | Yes | OpenAI-compatible base URL |
+| `model` | `PI_SMARTREAD_EMBEDDING_MODEL` | `EMBEDDING_MODEL` | Yes | embedding model name |
+| `apiKey` | `PI_SMARTREAD_EMBEDDING_API_KEY` | — | No | bearer token |
+| `chunkSizeChars` | `PI_SMARTREAD_CHUNK_SIZE` | — | No | target chunk size |
+| `chunkOverlapChars` | `PI_SMARTREAD_CHUNK_OVERLAP` | — | No | chunk overlap |
+| `maxChunksPerFile` | `PI_SMARTREAD_MAX_CHUNKS` | — | No | max chunks per file |
 
-### Chunking (for `intent_read` embedding/scoring)
+### Chunking defaults
 
-Each file is split into overlapping text chunks before embedding and BM25 scoring.
+| Setting | Default |
+|---|---|
+| `chunkSizeChars` | `4096` |
+| `chunkOverlapChars` | `512` |
+| `maxChunksPerFile` | `12` |
 
-| Env var | Default | Description |
-|---|---|---|
-| `PI_SMARTREAD_CHUNK_SIZE` | `4096` | Target characters per chunk |
-| `PI_SMARTREAD_CHUNK_OVERLAP` | `512` | Character overlap between consecutive chunks |
-| `PI_SMARTREAD_MAX_CHUNKS_PER_FILE` | `12` | Maximum chunks extracted per file (prevents runaway processing of very large files) |
+### Behavior when config is missing
 
-These values can also be set in `pi-smartread.config.json` using the keys `chunkSizeChars`, `chunkOverlapChars`, and `maxChunksPerFile`.
+If `baseUrl` or `model` is missing:
+- the extension still loads
+- `intent_read` throws before reading files
+- BM25-only fallback applies only after configuration is valid and the embedding request itself fails
 
 ---
 
-## 🛠️ Development
+## Native tree-sitter notes
+
+Pi-SmartRead now uses **native tree-sitter bindings**, not WASM, for repo mapping and symbol search.
+
+Current implementation details:
+- native parsers: `tree-sitter`, `tree-sitter-javascript`, `tree-sitter-typescript`
+- query files from the bundled `queries/` directory
+- chunked callback parsing for large files, which avoids the native binding failure seen on TypeScript files larger than roughly 32KB
+- text fallback in `search_symbols` when AST tags are unavailable
+
+---
+
+## Development
 
 ```bash
 npm install
@@ -223,16 +340,49 @@ npm run typecheck
 npm test
 ```
 
-Tests are unit-level and do not launch Pi directly.
-
-For local one-off development loading:
+For local one-off loading during development:
 
 ```bash
-pi -e ./read-many.ts
+pi -e ./index.ts
+```
+
+If Pi is already running, use:
+
+```text
+/reload
+```
+
+Useful focused checks:
+
+```bash
+npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts test/unit/repomap-tool.test.ts test/unit/index.test.ts
 ```
 
 ---
 
-## 📄 License
+## Troubleshooting
+
+### I got a repo map instead of my read result
+That is expected on the first read-like call in a repository. Re-issue the read.
+
+### `intent_read` is not using semantic ranking
+Check `pi-smartread.config.json` or the `PI_SMARTREAD_EMBEDDING_*` environment variables.
+
+### `search_symbols` returns no results after an update
+Reload Pi with `/reload` so the running extension host picks up the current build.
+
+### I only want a quick structure overview
+Call `repo_map` with `compact: true`.
+
+---
+
+## Related docs
+
+- `docs/research-deep-dive.md` — design research, implemented retrieval patterns, and roadmap
+- `progress.md` — implementation snapshot
+
+---
+
+## License
 
 MIT © 2026 Gurpartap Singh

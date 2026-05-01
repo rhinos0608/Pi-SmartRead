@@ -48,7 +48,7 @@ describe("pagerank", () => {
     }
 
     const start = performance.now();
-    const result = pagerank(nodes, edges, undefined, 0.85, 100, 1e-6);
+    const result = pagerank(nodes, edges, undefined, { alpha: 0.85, maxIter: 100, tol: 1e-6 });
     const elapsed = performance.now() - start;
 
     expect(result.size).toBe(50);

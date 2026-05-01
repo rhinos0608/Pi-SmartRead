@@ -2,9 +2,12 @@ import type { ExtensionAPI, ToolDefinition } from "@mariozechner/pi-coding-agent
 import { createIntentReadTool } from "./intent-read.js";
 import { createReadManyTool } from "./read-many.js";
 import registerRepoTools from "./repomap-tool.js";
-import { wrapReadManyTool, wrapIntentReadTool } from "./hook.js";
+import { wrapBuiltinReadTool, wrapReadManyTool, wrapIntentReadTool } from "./hook.js";
 
 export default function (pi: ExtensionAPI) {
+  // Override the built-in read tool with repo-map first-read interception
+  pi.registerTool(wrapBuiltinReadTool());
+
   // Wrap with repo-map hook interceptor
   const readManyDef = createReadManyTool() as unknown as ToolDefinition;
   const intentReadDef = createIntentReadTool() as unknown as ToolDefinition;

@@ -12,6 +12,9 @@ import type {
   ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import { RepoMap, type RepoMapOptions, type SearchResult } from "./repomap.js";
+import { createSymbolResolverTool } from "./symbol-resolver.js";
+import { findCallers } from "./callgraph.js";
+import { findSrcFiles } from "./file-discovery.js";
 import { markRepoMapExplicitlyCalled } from "./hook.js";
 
 // ── Tool: repo_map ────────────────────────────────────────────────
@@ -43,6 +46,18 @@ const RepoMapSchema = Type.Object({
         "Identifier names to boost in ranking (e.g., function/class names)",
     }),
   ),
+  mentionedIdents: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Identifiers mentioned in user query — used for file-path matching and personalization",
+    }),
+  ),
+  mentionedFnames: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "File paths mentioned in user query — used for personalization",
+    }),
+  ),
   excludeUnranked: Type.Optional(
     Type.Boolean({
       description:
@@ -64,7 +79,7 @@ const RepoMapSchema = Type.Object({
   autoFallback: Type.Optional(
     Type.Boolean({
       description:
-        "Auto-fallback to import-based mapping when tree-sitter WASM fails (default: true). Set false to surface WASM errors.",
+        "Auto-fallback to import-based mapping when tree-sitter parsing fails (default: true). Set false to surface parser errors.",
     }),
   ),
   compact: Type.Optional(
@@ -111,6 +126,8 @@ function createRepoTool(): ToolDefinition {
         mapTokens: params.mapTokens,
         focusFiles: params.focusFiles ?? [],
         priorityIdentifiers: params.priorityIdentifiers ?? [],
+        mentionedIdents: params.mentionedIdents ?? [],
+        mentionedFnames: params.mentionedFnames ?? [],
         excludeUnranked: params.excludeUnranked ?? false,
         forceRefresh: params.forceRefresh ?? false,
         useImportBased: params.useImportBased ?? false,
@@ -177,10 +194,21 @@ const SearchSymbolsSchema = Type.Object({
 type SearchSymbolsInput = Static<typeof SearchSymbolsSchema>;
 
 function createSearchSymbolsTool(): ToolDefinition {
+  const repoMapInstances = new Map<string, RepoMap>();
+
+  function getRepoMap(cwd: string): RepoMap {
+    let instance = repoMapInstances.get(cwd);
+    if (!instance) {
+      instance = new RepoMap(cwd);
+      repoMapInstances.set(cwd, instance);
+    }
+    return instance;
+  }
+
   return {
     name: "search_symbols",
     label: "search_symbols",
-    description: `Search for symbols (functions, classes, variables) by name across the repository using tree-sitter AST analysis. Returns matching definitions and references with surrounding code context. Use this to find where symbols are defined and where they're used.`,
+    description: `Search for symbols (functions, classes, variables) by name across the repository using tree-sitter AST analysis, with text fallback when tree-sitter is unavailable. Returns matching definitions and references with surrounding code context. Use this to find where symbols are defined and where they're used.`,
     parameters: SearchSymbolsSchema,
 
     async execute(
@@ -191,10 +219,11 @@ function createSearchSymbolsTool(): ToolDefinition {
       ctx: ExtensionContext,
     ) {
       const cwd = params.directory ? params.directory : ctx.cwd;
-      const rm = new RepoMap(cwd);
+      const rm = getRepoMap(cwd);
 
       if (signal?.aborted) throw new Error("Operation aborted");
 
+      const startTime = Date.now();
       const results: SearchResult[] = await rm.searchIdentifiers(
         params.query,
         {
@@ -202,17 +231,26 @@ function createSearchSymbolsTool(): ToolDefinition {
           includeDefinitions: params.includeDefinitions ?? true,
           includeReferences: params.includeReferences ?? true,
         },
+        signal,
       );
 
       if (results.length === 0) {
+        // Provide diagnostic info so the user can understand why nothing matched
+        const allFiles = findSrcFiles(cwd);
         return {
           content: [
             {
               type: "text" as const,
-              text: `[No symbols found matching "${params.query}"]`,
+              text: `[No symbols found matching "${params.query}". Searched ${allFiles.length} source file(s) in ${cwd}.]`,
             },
           ],
-          details: { total: 0 },
+          details: {
+            total: 0,
+            query: params.query,
+            directory: cwd,
+            filesScanned: allFiles.length,
+            timeMs: Date.now() - startTime,
+          },
         };
       }
 
@@ -239,12 +277,93 @@ function createSearchSymbolsTool(): ToolDefinition {
   } as unknown as ToolDefinition;
 }
 
+// ── Tool: find_callers ───────────────────────────────────────────
+
+const FindCallersSchema = Type.Object({
+  function: Type.String({ 
+    description: "Function name to find callers for (e.g., 'getConfig', 'createUser')",
+    minLength: 1,
+  }),
+  directory: Type.Optional(
+    Type.String({
+      description: "Root directory to search (default: extension working directory)",
+    }),
+  ),
+  maxResults: Type.Optional(
+    Type.Number({ 
+      description: "Maximum caller results (default: 50)",
+      minimum: 1,
+      maximum: 500,
+    }),
+  ),
+});
+
+type FindCallersInput = Static<typeof FindCallersSchema>;
+
+function createFindCallersTool(): ToolDefinition {
+  return {
+    name: "find_callers",
+    label: "find_callers",
+    description: "Find all functions that call a given function across the repository. Uses tree-sitter AST analysis to build a call graph and identify call sites. Supports TypeScript, JavaScript, and TSX.",
+    parameters: FindCallersSchema,
+
+    async execute(
+      toolCallId: string,
+      params: FindCallersInput,
+      signal: AbortSignal | undefined,
+      _onUpdate: unknown,
+      ctx: ExtensionContext,
+    ) {
+      const cwd = params.directory ?? ctx.cwd;
+      const allFiles = findSrcFiles(cwd);
+
+      if (signal?.aborted) throw new Error("Operation aborted");
+
+      const callers = await findCallers(allFiles, params.function);
+
+      if (callers.length === 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `[No callers found for "${params.function}". The function may be uncalled, externally defined, or in an unsupported language.]`,
+          }],
+          details: { function: params.function, callers: [], total: 0 },
+        };
+      }
+
+      const max = params.maxResults ?? 50;
+      const shown = callers.slice(0, max);
+
+      const lines: string[] = [
+        `Found ${callers.length} caller(s) for "${params.function}":`,
+        "",
+      ];
+
+      for (const c of shown) {
+        lines.push(`  ${c.callerFunction} in ${c.file}`);
+      }
+
+      if (callers.length > max) {
+        lines.push("");
+        lines.push(`  ... and ${callers.length - max} more`);
+      }
+
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+        details: { function: params.function, callers: shown, total: callers.length },
+      };
+    },
+  } as unknown as ToolDefinition;
+}
+
 // ── Registration ──────────────────────────────────────────────────
 
 /**
- * Register both repo-map tools with the Pi extension API.
+ * Register all repo-map and symbol tools with the Pi extension API.
  */
 export default function registerRepoTools(pi: ExtensionAPI): void {
   pi.registerTool(createRepoTool());
   pi.registerTool(createSearchSymbolsTool());
+  pi.registerTool(createSymbolResolverTool());
+  pi.registerTool(createFindCallersTool());
 }

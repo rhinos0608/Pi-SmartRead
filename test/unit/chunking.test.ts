@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkText } from "../../chunking.js";
+import { chunkText, compressSnippet } from "../../chunking.js";
 
 describe("chunkText", () => {
   it("returns empty array for empty string", () => {
@@ -111,5 +111,149 @@ describe("chunkText", () => {
     expect(result[0].text).toBe("a");
     expect(result[0].startChar).toBe(0);
     expect(result[0].endChar).toBe(1);
+  });
+
+  it("adds context headers and compressed embedding text when filePath is provided", () => {
+    const text = "import fs from 'node:fs';\n\nexport function readConfig() {\n  return true;\n}\n";
+    const result = chunkText(text, { filePath: "src/config.ts", compressForEmbedding: true });
+
+    expect(result).toHaveLength(1);
+    expect(result[0].contextHeader).toBe("File: src/config.ts > Function: readConfig");
+    expect(result[0].embeddingText).toContain("File: src/config.ts > Function: readConfig");
+    expect(result[0].embeddingText).not.toContain("import fs");
+  });
+});
+
+describe("compressSnippet", () => {
+  it("strips import lines, collapses blank lines, and truncates long snippets", () => {
+    const snippet = [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "",
+      "",
+      "export function loadConfig() {",
+      "  return '" + "x".repeat(80) + "';",
+      "}",
+    ].join("\n");
+
+    const compressed = compressSnippet(snippet, { maxChars: 80 });
+
+    expect(compressed).not.toContain("import fs");
+    expect(compressed).not.toContain("import path");
+    expect(compressed).not.toContain("\n\n\n");
+    expect(compressed.length).toBeLessThanOrEqual(100);
+    expect(compressed).toContain("truncated");
+  });
+
+  it("preserves both the start and end when truncating long snippets", () => {
+    const compressed = compressSnippet(`start-${"x".repeat(200)}-importantTail`, { maxChars: 80 });
+
+    expect(compressed).toContain("start-");
+    expect(compressed).toContain("importantTail");
+    expect(compressed).toContain("truncated");
+  });
+});
+
+describe("symbol-boundary chunking", () => {
+  it("chunks at function boundaries", () => {
+    const code = `
+function foo() {
+  return 1;
+}
+
+function bar() {
+  return 2;
+}
+
+function baz() {
+  return 3;
+}
+`;
+    const chunks = chunkText(code, { useSymbolBoundaries: true, chunkSizeChars: 30 });
+
+    // Should get individual function chunks (chunkSizeChars is small enough)
+    expect(chunks.length).toBeGreaterThanOrEqual(1);
+    expect(chunks.some((c) => c.text.includes("function foo"))).toBe(true);
+    expect(chunks.some((c) => c.symbolBoundary?.name === "foo")).toBe(true);
+    expect(chunks.some((c) => c.symbolBoundary?.name === "bar")).toBe(true);
+    expect(chunks.some((c) => c.symbolBoundary?.name === "baz")).toBe(true);
+  });
+
+  it("chunks at class boundaries", () => {
+    const code = `
+class UserService {
+  createUser() { return {}; }
+}
+
+class OrderService {
+  createOrder() { return {}; }
+}
+`;
+    const chunks = chunkText(code, { useSymbolBoundaries: true, chunkSizeChars: 40 });
+
+    // Each class should produce a chunk
+    expect(chunks.length).toBeGreaterThanOrEqual(1);
+    expect(chunks.some((c) => c.symbolBoundary?.name === "UserService")).toBe(true);
+    expect(chunks.some((c) => c.symbolBoundary?.name === "OrderService")).toBe(true);
+  });
+
+  it("falls back to character-based when no symbols found", () => {
+    const text = "Just some plain text.".repeat(200);
+    const chunks = chunkText(text, { useSymbolBoundaries: true, maxChunksPerFile: 5 });
+
+    expect(chunks.length).toBeGreaterThan(0);
+    // No symbol boundaries since no function/class declarations
+    expect(chunks.every((c) => c.symbolBoundary === undefined)).toBe(true);
+  });
+
+  it("includes line range in chunk metadata", () => {
+    const code = "\n// preamble\n\nfunction myFunc() {\n  return 42;\n}\n\n// epilogue";
+    const chunks = chunkText(code, { useSymbolBoundaries: true, chunkSizeChars: 500 });
+
+    const funcChunk = chunks.find((c) => c.symbolBoundary?.name === "myFunc");
+    expect(funcChunk).toBeDefined();
+    expect(funcChunk!.symbolBoundary!.startLine).toBeGreaterThan(0);
+    expect(funcChunk!.symbolBoundary!.endLine).toBeGreaterThan(funcChunk!.symbolBoundary!.startLine);
+  });
+
+  it("sub-splits very large symbols", () => {
+    // Create a function larger than 2x chunkSizeChars
+    const largeBody = "  console.log('line ' + i);\n".repeat(800);
+    const code = `function bigFunction() {\n${largeBody}}\n`;
+    const chunks = chunkText(code, {
+      useSymbolBoundaries: true,
+      chunkSizeChars: 200,
+      maxChunksPerFile: 10,
+    });
+
+    // Should sub-split into multiple chunks from the same symbol
+    expect(chunks.length).toBeGreaterThan(1);
+    const bigFuncChunks = chunks.filter(
+      (c) => c.symbolBoundary?.name === "bigFunction",
+    );
+    expect(bigFuncChunks.length).toBeGreaterThan(1);
+  });
+
+  it("merges small adjacent chunks", () => {
+    const code = `
+const x = 1;
+
+const y = 2;
+
+const z = 3;
+`;
+    const chunks = chunkText(code, {
+      useSymbolBoundaries: true,
+      chunkSizeChars: 2000,
+      minChunkChars: 10,
+    });
+
+    // Small variable declarations should be merged together
+    expect(chunks.length).toBeLessThanOrEqual(1);
+  });
+
+  it("handles empty input", () => {
+    expect(chunkText("", { useSymbolBoundaries: true })).toEqual([]);
+    expect(chunkText("   ", { useSymbolBoundaries: true })).toEqual([]);
   });
 });

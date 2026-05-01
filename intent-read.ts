@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import type {
   ExtensionContext,
@@ -7,6 +9,7 @@ import type {
 import { createReadTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@mariozechner/pi-coding-agent";
 import { validateEmbeddingConfig } from "./config.js";
 import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings } from "./embedding.js";
+import { PersistentEmbeddingCache } from "./persistent-embedding-cache.js";
 import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
 import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
 import {
@@ -17,7 +20,6 @@ import {
   validatePath,
 } from "./utils.js";
 import { chunkText, type ChunkResult } from "./chunking.js";
-import { TOKEN_ESTIMATE_CHARS_PER_TOKEN, MAX_ESTIMATED_TOKENS_PER_INPUT, MAX_ESTIMATED_TOKENS_PER_BATCH } from "./embedding.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -38,8 +40,140 @@ const IntentReadSchema = Type.Object({
 
 type IntentReadInput = Static<typeof IntentReadSchema>;
 
-type InclusionStatus = "full" | "partial" | "omitted" | "not_top_k" | "error";
+type InclusionStatus = "full" | "partial" | "omitted" | "not_top_k" | "below_threshold" | "error";
 type EmbeddingStatus = "ok" | "failed_fallback_bm25";
+
+const INTENT_READ_CACHE_SIZE = 64;
+const MIN_RELEVANCE_SCORE = 0.05;
+const MAX_INTENT_READ_FILES = 20;
+const IMPORT_SPECIFIER_RE = /^\s*(?:import\s+(?:[^"']+?\s+from\s+)?|import\s*\(|(?:const|let|var)\s+[^=]+?=\s*require\(|export\s+[^"']+?\s+from\s+)["']([^"']+)["']/gm;
+const RESOLUTION_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json"];
+
+class LruCache<T> {
+  private values = new Map<string, T>();
+
+  constructor(readonly maxSize: number) {}
+
+  get(key: string): T | undefined {
+    const value = this.values.get(key);
+    if (value === undefined) return undefined;
+    this.values.delete(key);
+    this.values.set(key, value);
+    return value;
+  }
+
+  set(key: string, value: T): void {
+    if (this.values.has(key)) {
+      this.values.delete(key);
+    }
+    this.values.set(key, value);
+    while (this.values.size > this.maxSize) {
+      const oldest = this.values.keys().next().value;
+      if (oldest === undefined) break;
+      this.values.delete(oldest);
+    }
+  }
+
+  get size(): number {
+    return this.values.size;
+  }
+}
+
+function createEmbeddingCacheKey(config: EmbedRequest, query: string, inputs: string[]): string {
+  return JSON.stringify({
+    cwdSafeBaseUrl: config.baseUrl.replace(/\/+$/, ""),
+    model: config.model,
+    query,
+    inputs: [...inputs].sort(),
+  });
+}
+
+function isRelevantCandidate(keywordScore: number, semanticScore: number | undefined, embeddingStatus: EmbeddingStatus): boolean {
+  // Keep exact lexical matches even when embeddings disagree. Code search must not
+  // drop identifier/API-name hits solely because semantic similarity is low.
+  if (keywordScore > 0) return true;
+  if (embeddingStatus !== "ok" || semanticScore === undefined) return false;
+  return semanticScore >= MIN_RELEVANCE_SCORE;
+}
+
+function normalizeCandidatePath(cwd: string, path: string): string {
+  return isAbsolute(path) ? path : resolve(cwd, path);
+}
+
+function isPathInside(root: string, path: string): boolean {
+  const resolvedRoot = resolve(root);
+  const resolvedPath = resolve(path);
+  const lexicalRel = relative(resolvedRoot, resolvedPath);
+  if (lexicalRel === "" || (!lexicalRel.startsWith("..") && !isAbsolute(lexicalRel))) {
+    return true;
+  }
+
+  try {
+    const realRoot = realpathSync(resolvedRoot);
+    const realRel = relative(realRoot, resolvedPath);
+    return realRel === "" || (!realRel.startsWith("..") && !isAbsolute(realRel));
+  } catch {
+    return false;
+  }
+}
+
+function resolveImportSpecifier(cwd: string, importerPath: string, specifier: string): string | undefined {
+  if (!specifier.startsWith(".")) return undefined;
+
+  const basePath = resolve(dirname(importerPath), specifier);
+  if (!isPathInside(cwd, basePath)) return undefined;
+  for (const ext of RESOLUTION_EXTENSIONS) {
+    const candidate = `${basePath}${ext}`;
+    if (isReadableWorkspaceFile(cwd, candidate)) return candidate;
+  }
+
+  for (const ext of RESOLUTION_EXTENSIONS.slice(1)) {
+    const candidate = join(basePath, `index${ext}`);
+    if (isReadableWorkspaceFile(cwd, candidate)) return candidate;
+  }
+
+  return undefined;
+}
+
+function isReadableWorkspaceFile(cwd: string, path: string): boolean {
+  try {
+    if (!existsSync(path) || !isPathInside(cwd, path)) return false;
+    const realPath = realpathSync(path);
+    return isPathInside(cwd, realPath) && statSync(realPath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function findDirectImportNeighbours(cwd: string, paths: string[], maxCount: number): string[] {
+  if (maxCount <= 0) return [];
+
+  const basePaths = new Set(paths.map((path) => normalizeCandidatePath(cwd, path)));
+  const neighbours: string[] = [];
+  const seen = new Set<string>(basePaths);
+
+  for (const path of paths) {
+    const importerPath = normalizeCandidatePath(cwd, path);
+    if (!isPathInside(cwd, importerPath)) continue;
+
+    let text: string;
+    try {
+      text = readFileSync(importerPath, "utf-8");
+    } catch {
+      continue;
+    }
+
+    for (const match of text.matchAll(IMPORT_SPECIFIER_RE)) {
+      const resolved = resolveImportSpecifier(cwd, importerPath, match[1]);
+      if (!resolved || seen.has(resolved)) continue;
+      seen.add(resolved);
+      neighbours.push(resolved);
+      if (neighbours.length >= maxCount) return neighbours;
+    }
+  }
+
+  return neighbours;
+}
 
 interface IntentReadFileDetail {
   path: string;
@@ -72,6 +206,9 @@ interface IntentReadDetails {
   embeddingError?: string;
   rankingSignals: { bm25: true; embeddings: boolean };
   chunkingEnabled: boolean;
+  embeddingCache: { hit: boolean; size: number; maxSize: number; persistent?: boolean; diskEntries?: number };
+  filteredBelowThresholdPaths: string[];
+  graphAugmentation: { addedPaths: string[]; candidateCountBefore: number; candidateCountAfter: number };
   chunkInfo?: {
     totalChunks: number;
     filesChunked: number;
@@ -99,6 +236,10 @@ export function createIntentReadTool(
   readToolFactory: typeof createReadTool = createReadTool,
   fetchEmbeddingsImpl: (req: EmbedRequest) => Promise<EmbedResult> = defaultFetchEmbeddings,
 ): ToolDefinition {
+  const embeddingLruCache = new LruCache<EmbedResult>(INTENT_READ_CACHE_SIZE);
+  // Persistent cache is lazy-initialized per cwd (disk path depends on cwd)
+  const persistentCaches = new Map<string, PersistentEmbeddingCache>();
+
   return {
     name: "intent_read",
     label: "intent_read",
@@ -118,6 +259,7 @@ export function createIntentReadTool(
       // Embedding API tracking (updated after embed call; may degrade to fallback)
       let embeddingStatus: EmbeddingStatus = "ok";
       let embeddingError: string | undefined;
+      let embeddingCacheHit = false;
 
       // 2. Validate input
       const query = params.query.trim();
@@ -141,7 +283,7 @@ export function createIntentReadTool(
       let dirCap: { countBeforeCap: number; countAfterCap: number; capped: boolean } | undefined;
 
       if (hasDirectory) {
-        const resolution = resolveDirectory(params.directory!);
+        const resolution = resolveDirectory(normalizeCandidatePath(ctx.cwd, params.directory!));
         if (resolution.capped) {
           dirCap = {
             countBeforeCap: resolution.countBeforeCap,
@@ -157,6 +299,19 @@ export function createIntentReadTool(
       } else {
         resolvedFiles = params.files!;
       }
+
+      const candidateCountBeforeGraph = resolvedFiles.length;
+      const remainingGraphSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+      const graphNeighbourPaths = findDirectImportNeighbours(ctx.cwd, resolvedFiles.map((file) => file.path), remainingGraphSlots);
+      if (graphNeighbourPaths.length > 0) {
+        const existingPaths = new Set(resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)));
+        for (const graphPath of graphNeighbourPaths) {
+          if (existingPaths.has(graphPath) || resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
+          existingPaths.add(graphPath);
+          resolvedFiles.push({ path: graphPath });
+        }
+      }
+      const addedGraphPaths = resolvedFiles.slice(candidateCountBeforeGraph).map((file) => file.path);
 
       // 4. Read files
       const readTool = readToolFactory(ctx.cwd);
@@ -195,6 +350,7 @@ export function createIntentReadTool(
       }
 
       let rankedSuccessOrder: string[] = []; // paths in RRF rank order (rank 1 first)
+      let filteredBelowThresholdPaths: string[] = [];
 
       // Track chunking observability (may stay at defaults if no files to process)
       let totalChunks = 0;
@@ -222,12 +378,15 @@ export function createIntentReadTool(
               chunkSizeChars,
               chunkOverlapChars,
               maxChunksPerFile,
+              filePath: f.path,
+              compressForEmbedding: true,
+              useSymbolBoundaries: true,
             }),
           );
         }
 
         // Collect all chunk texts plus the query
-        const allChunkTexts = fileChunks.flatMap((chunks) => chunks.map((c) => c.text));
+        const allChunkTexts = fileChunks.flatMap((chunks) => chunks.map((c) => c.embeddingText ?? c.text));
 
         const bodies = successfulFiles.map((f) => f.body!);
         const paths = successfulFiles.map((f) => f.path);
@@ -241,10 +400,47 @@ export function createIntentReadTool(
 
         // Attempt embedding — fall back to BM25-only on failure
         try {
-          const { vectors } = await fetchEmbeddingsImpl({
+          const embeddingRequest = {
             ...embeddingConfig,
             inputs: [query, ...allChunkTexts],
-          });
+          };
+          const embeddingCacheKey = createEmbeddingCacheKey(embeddingRequest, query, allChunkTexts);
+
+          // Check persistent cache first, then memory LRU
+          const persistentCache = persistentCaches.get(ctx.cwd) ?? new PersistentEmbeddingCache(ctx.cwd);
+          persistentCaches.set(ctx.cwd, persistentCache);
+
+          const persistentKey = PersistentEmbeddingCache.computeKey(embeddingRequest, query, allChunkTexts);
+          let embeddingResult: EmbedResult | null = null;
+
+          // Check memory LRU
+          const cachedMemResult = embeddingLruCache.get(embeddingCacheKey);
+          if (cachedMemResult) {
+            embeddingCacheHit = true;
+            embeddingResult = cachedMemResult;
+          }
+
+          // Check persistent disk cache
+          if (!embeddingResult) {
+            const persistentResult = persistentCache.get(persistentKey);
+            if (persistentResult) {
+              embeddingCacheHit = true;
+              embeddingResult = persistentResult;
+              // Promote to memory
+              embeddingLruCache.set(embeddingCacheKey, persistentResult);
+            }
+          }
+
+          // Call API if no cache hit
+          if (!embeddingResult) {
+            embeddingResult = await fetchEmbeddingsImpl(embeddingRequest);
+          }
+
+          const { vectors } = embeddingResult;
+          if (!cachedMemResult) {
+            embeddingLruCache.set(embeddingCacheKey, { vectors });
+            persistentCache.set(persistentKey, { vectors });
+          }
 
           if (vectors.length === allChunkTexts.length + 1) {
             const queryVec = vectors[0];
@@ -271,7 +467,7 @@ export function createIntentReadTool(
                   score: maxScore,
                   startChar: bestChunk.startChar,
                   endChar: bestChunk.endChar,
-                  preview: bestChunk.text.substring(0, 120),
+                  preview: (bestChunk.embeddingText ?? bestChunk.text).substring(0, 120),
                 });
               } else {
                 semanticScores.push(-Infinity);
@@ -316,15 +512,23 @@ export function createIntentReadTool(
           }
         }
 
+        const relevantPaths = new Set<string>();
+        for (let i = 0; i < successfulFiles.length; i++) {
+          if (isRelevantCandidate(keywordScoresArr[i], semanticScores[i], embeddingStatus)) {
+            relevantPaths.add(paths[i]);
+          }
+        }
+        filteredBelowThresholdPaths = paths.filter((path) => !relevantPaths.has(path));
+
+        const ranksByPath = new Map(paths.map((path, i) => [path, rrfRanks[i]]));
+
         // Sort by RRF rank
-        rankedSuccessOrder = [...paths].sort((a, b) => {
-          const ri = paths.indexOf(a);
-          const rj = paths.indexOf(b);
-          return rrfRanks[ri] - rrfRanks[rj];
-        });
+        rankedSuccessOrder = [...paths]
+          .filter((path) => relevantPaths.has(path))
+          .sort((a, b) => (ranksByPath.get(a) ?? Infinity) - (ranksByPath.get(b) ?? Infinity));
       }
 
-      const effectiveTopK = Math.min(topK, successfulFiles.length);
+      const effectiveTopK = Math.min(topK, rankedSuccessOrder.length);
       const topKPaths = new Set(rankedSuccessOrder.slice(0, effectiveTopK));
 
       // Mark each file's selection status
@@ -333,6 +537,9 @@ export function createIntentReadTool(
         detail.selectedForPacking = f.ok && topKPaths.has(f.path);
         if (!f.ok) {
           detail.inclusion = "error";
+          detail.included = false;
+        } else if (filteredBelowThresholdPaths.includes(f.path)) {
+          detail.inclusion = "below_threshold";
           detail.included = false;
         } else if (!topKPaths.has(f.path)) {
           detail.inclusion = "not_top_k";
@@ -394,6 +601,7 @@ export function createIntentReadTool(
       // 7. Build details.files: successful files in RRF order, then errored files in input order
       const allFileDetails: IntentReadFileDetail[] = [
         ...rankedSuccessOrder.map((path: string) => fileDetails.get(path) as IntentReadFileDetail),
+        ...filteredBelowThresholdPaths.map((path: string) => fileDetails.get(path) as IntentReadFileDetail),
         ...erroredFiles.map((f: FileReadResult) => fileDetails.get(f.path) as IntentReadFileDetail),
       ];
 
@@ -421,6 +629,19 @@ export function createIntentReadTool(
           embeddings: embeddingStatus === "ok",
         },
         chunkingEnabled: embeddingStatus === "ok",
+        embeddingCache: {
+          hit: embeddingCacheHit,
+          size: embeddingLruCache.size,
+          maxSize: embeddingLruCache.maxSize,
+          persistent: persistentCaches.get(ctx.cwd)?.hasPersistence ?? false,
+          diskEntries: persistentCaches.get(ctx.cwd)?.diskEntries ?? 0,
+        },
+        filteredBelowThresholdPaths,
+        graphAugmentation: {
+          addedPaths: addedGraphPaths,
+          candidateCountBefore: candidateCountBeforeGraph,
+          candidateCountAfter: resolvedFiles.length,
+        },
         ...(embeddingStatus === "ok" && filesChunked > 0 && {
           chunkInfo: {
             totalChunks,

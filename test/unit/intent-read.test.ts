@@ -96,9 +96,8 @@ describe("intent_read: ranking and output", () => {
 
     // /a should rank higher (both keyword and semantic match)
     const posA = text.indexOf("@/a");
-    const posB = text.indexOf("@/b");
     expect(posA).toBeGreaterThanOrEqual(0);
-    expect(posB).toBeGreaterThan(posA);
+    expect(text).not.toContain("@/b");
 
     expect(details.query).toBe("authentication");
     expect(details.successCount).toBe(2);
@@ -142,7 +141,7 @@ describe("intent_read: ranking and output", () => {
     // 3 files × 1 chunk each = 4 vectors (query + 3 chunks)
     const tool = createIntentReadTool(
       () => makeReadTool({ "/a": "auth", "/b": "db", "/c": "cache" }) as any,
-      makeEmbedder([[1, 0], [1, 0], [0, 1], [0, 1]]),
+      makeEmbedder([[1, 0], [1, 0], [1, 0], [1, 0]]),
     );
 
     const result = await tool.execute(
@@ -256,6 +255,60 @@ describe("intent_read: ranking and output", () => {
     expect(details.rankingSignals).toEqual({ bm25: true, embeddings: true });
     expect(details.embeddingError).toBeUndefined();
   });
+
+  it("reuses cached embedding results for repeated queries over unchanged content", async () => {
+    const embedder = vi.fn(makeEmbedder([[1, 0], [1, 0]]));
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "authentication middleware" }) as any,
+      embedder,
+    );
+
+    const params = { query: "authentication", files: [{ path: "/a" }] };
+    await tool.execute("id:1", params, undefined, undefined, { cwd: "/" } as any);
+    const result = await tool.execute("id:2", params, undefined, undefined, { cwd: "/" } as any);
+
+    expect(embedder).toHaveBeenCalledTimes(1);
+    expect((result.details as any).embeddingCache).toMatchObject({ hit: true, size: 1, maxSize: 64 });
+  });
+
+  it("filters unrelated hybrid candidates below the minimum relevance threshold", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "authentication middleware", "/b": "database schema" }) as any,
+      makeEmbedder([[1, 0], [1, 0], [0, 1]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "authentication", files: [{ path: "/a" }, { path: "/b" }], topK: 2 },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.effectiveTopK).toBe(1);
+    expect(details.filteredBelowThresholdPaths).toEqual(["/b"]);
+    expect(details.files.find((f: any) => f.path === "/b").inclusion).toBe("below_threshold");
+  });
+
+  it("keeps exact keyword matches even when semantic similarity is below threshold", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "authentication middleware", "/b": "authentication database schema" }) as any,
+      makeEmbedder([[1, 0], [1, 0], [0, 1]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "authentication", files: [{ path: "/a" }, { path: "/b" }], topK: 2 },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.filteredBelowThresholdPaths).toEqual([]);
+    expect(details.files.find((f: any) => f.path === "/b").inclusion).toBe("full");
+  });
 });
 
 describe("intent_read: embedding failure fallback", () => {
@@ -353,7 +406,7 @@ describe("intent_read: embedding failure fallback", () => {
 
   it("ranks by keyword relevance when embedding fails", async () => {
     const tool = createIntentReadTool(
-      () => makeReadTool({ "/a": "auth auth auth middleware", "/b": "database schema migration" }) as any,
+      () => makeReadTool({ "/a": "auth middleware", "/b": "auth database schema migration" }) as any,
       makeFailingEmbedder("rate limited"),
     );
 
@@ -375,6 +428,172 @@ describe("intent_read: embedding failure fallback", () => {
     const fileA = details.files.find((f: any) => f.path === "/a");
     const fileB = details.files.find((f: any) => f.path === "/b");
     expect(fileA.keywordScore).toBeGreaterThan(fileB.keywordScore);
+  });
+});
+
+describe("intent_read: graph-neighbour augmentation", () => {
+  it("adds direct relative import neighbours when file mode leaves candidate slots", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-graph-"));
+    try {
+      const fileA = join(root, "a.ts");
+      const fileB = join(root, "b.ts");
+      writeFileSync(fileA, "import { helper } from './b';\nexport const auth = helper();\n");
+      writeFileSync(fileB, "export function helper() { return 'authentication helper'; }\n");
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: "authentication entry", [fileB]: "authentication helper" }) as any,
+        makeEmbedder([[1, 0], [1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "authentication", files: [{ path: fileA }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.graphAugmentation.addedPaths).toEqual([fileB]);
+      expect(details.files.map((f: any) => f.path)).toContain(fileB);
+      expect((result.content[0] as any).text).toContain(`@${fileB}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("caps graph neighbours at the remaining 20-file budget", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-graph-cap-"));
+    try {
+      const files: string[] = [];
+      const readMap: Record<string, string> = {};
+      for (let i = 0; i < 22; i++) {
+        const path = join(root, `${i}.ts`);
+        files.push(path);
+        readMap[path] = `authentication ${i}`;
+      }
+      writeFileSync(files[0], "import './19';\nimport './20';\nimport './21';\nexport const zero = true;\n");
+      for (let i = 1; i < 22; i++) writeFileSync(files[i], `export const value${i} = true;\n`);
+
+      const tool = createIntentReadTool(
+        () => makeReadTool(readMap) as any,
+        async (req: EmbedRequest) => ({ vectors: Array.from({ length: req.inputs.length }, () => [1, 0]) }),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "authentication", files: files.slice(0, 18).map((path) => ({ path })), topK: 20 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.processedCount).toBe(20);
+      expect(details.graphAugmentation.addedPaths).toEqual([files[19], files[20]]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not add graph neighbours outside the workspace", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "intent-read-graph-escape-"));
+    const root = join(parent, "repo");
+    try {
+      mkdirSync(root);
+      const fileA = join(root, "a.ts");
+      const outside = join(parent, "outside.ts");
+      writeFileSync(fileA, "import '../outside';\nexport const auth = true;\n");
+      writeFileSync(outside, "export const secret = true;\n");
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: "authentication entry", [outside]: "secret" }) as any,
+        makeEmbedder([[1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "authentication", files: [{ path: fileA }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.graphAugmentation.addedPaths).toEqual([]);
+      expect(details.files.map((f: any) => f.path)).not.toContain(outside);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("does not add graph neighbours through symlinks that point outside the workspace", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "intent-read-graph-symlink-"));
+    const root = join(parent, "repo");
+    try {
+      mkdirSync(root);
+      const fileA = join(root, "a.ts");
+      const outside = join(parent, "outside.ts");
+      const link = join(root, "linked.ts");
+      writeFileSync(fileA, "import './linked';\nexport const auth = true;\n");
+      writeFileSync(outside, "export const secret = true;\n");
+      symlinkSync(outside, link);
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: "authentication entry", [link]: "secret" }) as any,
+        makeEmbedder([[1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "authentication", files: [{ path: fileA }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.graphAugmentation.addedPaths).toEqual([]);
+      expect(details.files.map((f: any) => f.path)).not.toContain(link);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("does not add graph neighbours through symlinked directories that point outside the workspace", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "intent-read-graph-symlink-dir-"));
+    const root = join(parent, "repo");
+    const outsideDir = join(parent, "outside-dir");
+    try {
+      mkdirSync(root);
+      mkdirSync(outsideDir);
+      const fileA = join(root, "a.ts");
+      const outside = join(outsideDir, "helper.ts");
+      const linkDir = join(root, "linked-dir");
+      const linkedFile = join(linkDir, "helper.ts");
+      writeFileSync(fileA, "import './linked-dir/helper';\nexport const auth = true;\n");
+      writeFileSync(outside, "export const secret = true;\n");
+      symlinkSync(outsideDir, linkDir, "dir");
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: "authentication entry", [linkedFile]: "secret" }) as any,
+        makeEmbedder([[1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "authentication", files: [{ path: fileA }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.graphAugmentation.addedPaths).toEqual([]);
+      expect(details.files.map((f: any) => f.path)).not.toContain(linkedFile);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 });
 

@@ -13,6 +13,6 @@
     "scoring.ts", "chunking.ts", "embedding.ts", "resolver.ts",
     "intent-read.ts", "languages.ts", "cache.ts", "pagerank.ts",
     "tree-context.ts", "file-discovery.ts", "tags.ts", "repomap.ts",
-    "repomap-tool.ts", "hook.ts", "test/**/*.ts"
+    "repomap-tool.ts", "hook.ts", "special.ts", "test/**/*.ts"
   ]
 }

@@ -11,10 +11,11 @@
  *   - Typed intercept response: caller cannot confuse with normal output
  *   - Explicit repo_map calls mark state, suppressing later hooks in that repo
  */
-import { Type, type TSchema } from "typebox";
-import type {
-  ExtensionContext,
-  ToolDefinition,
+import type { TSchema } from "typebox";
+import {
+  createReadToolDefinition,
+  type ExtensionContext,
+  type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -262,27 +263,29 @@ async function interceptFirstRead(
 
 /**
  * Augment a tool's parameter schema with the `_meta` hook-control field.
- * This adds a reserved metadata parameter that does not affect the
- * tool's actual behavior — it only controls the repo-map hook.
+ *
+ * Injects `_meta` as a flat property on the schema rather than using
+ * TypeBox Intersect (which produces {allOf: [...]} that the framework
+ * cannot flatten), so the model sees the full parameter shape.
  */
 function augmentSchema(originalSchema: TSchema): TSchema {
-  // Use Intersect to merge the original schema with _meta
-  // This preserves all original validations
-  return Type.Intersect([
-    originalSchema,
-    Type.Object({
-      _meta: Type.Optional(
-        Type.Object({
-          skipRepoMapHook: Type.Optional(
-            Type.Boolean({
-              description:
-                "Hook-control: skip the repo-map orientation hook for this call",
-            }),
-          ),
-        }),
-      ),
-    }),
-  ]) as unknown as TSchema;
+  const schema = JSON.parse(JSON.stringify(originalSchema)) as Record<
+    string,
+    unknown
+  >;
+  const properties = (schema.properties as Record<string, unknown>) ?? {};
+  properties._meta = {
+    type: "object" as const,
+    properties: {
+      skipRepoMapHook: {
+        type: "boolean" as const,
+        description:
+          "Hook-control: skip the repo-map orientation hook for this call",
+      },
+    },
+  };
+  schema.properties = properties;
+  return schema as unknown as TSchema;
 }
 
 // ── Tool wrapping ─────────────────────────────────────────────────
@@ -344,4 +347,79 @@ export function wrapReadManyTool(toolDef: ToolDefinition): ToolDefinition {
 
 export function wrapIntentReadTool(toolDef: ToolDefinition): ToolDefinition {
   return wrapReadTool(toolDef);
+}
+
+// ── Built-in read override ────────────────────────────────────────
+
+/**
+ * Factory for a `read` tool that overrides the built-in read when
+ * registered via `pi.registerTool()`.
+ *
+ * The returned ToolDefinition:
+ *   - Preserves the built-in read's name, label, description,
+ *     promptSnippet, promptGuidelines, renderCall, and renderResult
+ *   - Augments the parameter schema with a `_meta` hook-control field
+ *   - On first read per repo/session: returns a compact repo map
+ *     instructing the agent to re-issue the read
+ *   - On subsequent reads: dynamically delegates to
+ *     `createReadToolDefinition(ctx.cwd)` so the correct working
+ *     directory is used at execution time (not at registration time)
+ */
+export function wrapBuiltinReadTool(): ToolDefinition {
+  // Create a base definition to inherit renderCall/renderResult and
+  // metadata properties.  The captured cwd (".") is never used for
+  // file resolution — we override execute to create a fresh
+  // definition with the actual ctx.cwd at call time.
+  const baseDef = createReadToolDefinition(".");
+  const toolName = baseDef.name;
+
+  // Build the original execute delegate that creates a fresh
+  // definition with the runtime cwd on every call.
+  const createDelegatedExecute = (
+    ctx: ExtensionContext,
+  ): ((
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    onUpdate: unknown,
+    _ctx: ExtensionContext,
+  ) => Promise<unknown>) => {
+    const freshDef = createReadToolDefinition(ctx.cwd);
+    return freshDef.execute.bind(freshDef) as (
+      toolCallId: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+      _ctx: ExtensionContext,
+    ) => Promise<unknown>;
+  };
+
+  return {
+    name: baseDef.name,
+    label: baseDef.label,
+    description: baseDef.description,
+    promptSnippet: baseDef.promptSnippet,
+    promptGuidelines: baseDef.promptGuidelines,
+    parameters: augmentSchema(baseDef.parameters as TSchema),
+    renderCall: baseDef.renderCall,
+    renderResult: baseDef.renderResult,
+
+    async execute(
+      toolCallId: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+      ctx: ExtensionContext,
+    ) {
+      return interceptFirstRead(
+        params,
+        toolName,
+        createDelegatedExecute(ctx),
+        toolCallId,
+        signal,
+        onUpdate,
+        ctx,
+      );
+    },
+  } as unknown as ToolDefinition;
 }
