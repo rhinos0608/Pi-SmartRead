@@ -1,7 +1,7 @@
 {
   "name": "pi-read-many",
   "version": "0.1.0",
-  "description": "Batch file reads for Pi via read_multiple_files with adaptive packing under output limits",
+  "description": "Code intelligence extension for Pi — multi-file reading, intent-based retrieval, repo mapping, symbol search, cross-file resolution, and call graph analysis",
   "author": "Gurpartap Singh",
   "license": "MIT",
   "type": "module",
@@ -10,12 +10,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Gurpartap/pi-read-many.git"
+    "url": "git+https://github.com/rhinos0608/Pi-SmartRead.git"
   },
   "bugs": {
-    "url": "https://github.com/Gurpartap/pi-read-many/issues"
+    "url": "https://github.com/rhinos0608/Pi-SmartRead/issues"
   },
-  "homepage": "https://github.com/Gurpartap/pi-read-many",
+  "homepage": "https://github.com/rhinos0608/Pi-SmartRead",
   "keywords": [
     "pi",
     "pi-extension",
@@ -23,7 +23,16 @@
     "read_multiple_files",
     "read-many",
     "file-reading",
-    "context-packing"
+    "context-packing",
+    "repo-map",
+    "symbol-search",
+    "call-graph",
+    "intent-read",
+    "tree-sitter",
+    "bm25",
+    "embeddings",
+    "code-intelligence",
+    "page-rank"
   ],
   "engines": {
     "node": ">=20"
@@ -48,6 +57,10 @@
     "tree-context.ts",
     "hook.ts",
     "special.ts",
+    "callgraph.ts",
+    "symbol-resolver.ts",
+    "persistent-embedding-cache.ts",
+    "tree-context.ts",
     "queries/",
     "README.md",
     "LICENSE",
@@ -64,7 +77,7 @@
     "tree-sitter": "^0.21.1",
     "tree-sitter-javascript": "^0.23.1",
     "tree-sitter-typescript": "^0.23.2",
-    "typebox": "^1.1.24"
+    "@sinclair/typebox": "^0.34.13"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",

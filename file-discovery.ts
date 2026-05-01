@@ -161,7 +161,8 @@ function parseGitignoreLine(line: string): GitignoreRule | null {
 
 /**
  * Load .gitignore rules from a directory, cascading upward.
- * Returns rules from all .gitignore files found on the path to root.
+ * Parent rules are loaded first (prepended) so child rules take precedence
+ * (last-match-wins semantics). Stops at the repository root (.git directory).
  */
 function loadGitignoreRules(
   dir: string,
@@ -170,9 +171,21 @@ function loadGitignoreRules(
   const cached = gitignoreCache.get(dir);
   if (cached !== undefined) return cached;
 
-  const rules: GitignoreRule[] = [];
+  // Collect parent rules first (bottom-up: grandparent → parent → current)
+  let parentRules: GitignoreRule[] = [];
+  const parent = resolve(dir, "..");
+  if (parent !== dir) {
+    // Stop at repository root
+    if (existsSync(join(parent, ".git"))) {
+      parentRules = [];
+    } else {
+      parentRules = loadGitignoreRules(parent, gitignoreCache);
+    }
+  }
 
-  // Collect .gitignore files from this directory upward
+  const rules: GitignoreRule[] = [...parentRules];
+
+  // Collect .gitignore rules from this directory
   const gitignorePath = join(dir, ".gitignore");
   if (existsSync(gitignorePath)) {
     try {
@@ -184,13 +197,6 @@ function loadGitignoreRules(
     } catch {
       // Can't read .gitignore — skip
     }
-  }
-
-  // Cascade upward
-  const parent = resolve(dir, "..");
-  if (parent !== dir) {
-    const parentRules = loadGitignoreRules(parent, gitignoreCache);
-    rules.push(...parentRules);
   }
 
   gitignoreCache.set(dir, rules);
@@ -279,6 +285,7 @@ export function findFilesMatching(
   const results: string[] = [];
   const supportedExts = getSupportedExtensions();
   const gitignoreCache = new Map<string, GitignoreRule[]>();
+  const resolvedRoot = resolve(rootDir);
 
   function walk(dir: string): void {
     if (results.length >= maxFiles) return;
@@ -291,7 +298,6 @@ export function findFilesMatching(
     }
 
     const gitignoreRules = loadGitignoreRules(dir, gitignoreCache);
-    const relDir = relative(rootDir, dir) || ".";
 
     for (const entry of entries) {
       if (results.length >= maxFiles) return;
@@ -304,7 +310,7 @@ export function findFilesMatching(
         continue;
       }
 
-      const relPath = relative(rootDir, fullPath);
+      const relPath = relative(resolvedRoot, fullPath);
       const isDir = stat.isDirectory();
 
       if (isDir) {
@@ -331,6 +337,6 @@ export function findFilesMatching(
     }
   }
 
-  walk(rootDir);
+  walk(resolvedRoot);
   return results;
 }

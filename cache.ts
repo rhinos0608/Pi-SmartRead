@@ -167,12 +167,18 @@ export class TagsCache {
         const filePath = this.getFilePath(fname);
         if (existsSync(filePath)) {
           const raw = readFileSync(filePath, "utf-8");
-          const entry: CacheEntry = JSON.parse(raw);
-          if (entry.mtime === mtime) {
+          const entry = JSON.parse(raw) as CacheEntry;
+          if (
+            entry &&
+            typeof entry.mtime === "number" &&
+            entry.mtime === mtime &&
+            Array.isArray(entry.tags)
+          ) {
             // Promote to memory cache
             this.memoryCache.set(fname, entry);
             return entry.tags;
           }
+          // Malformed entry — treat as miss
         }
       } catch {
         // Corrupted cache entry — treat as miss, will re-parse
@@ -265,19 +271,23 @@ export class TagsCache {
   warm(fnames: string[]): void {
     if (!this.useFilePersistence) return;
 
-    const seen = new Set<string>();
     try {
-      const entries = readdirSync(this.cacheDir);
-      for (const entry of entries) {
-        if (!entry.endsWith(".json") || entry === VERSION_FILENAME) continue;
-        const filePath = join(this.cacheDir, entry);
+      for (const fname of fnames) {
+        const mtime = this.getMtime(fname);
+        if (mtime === null) continue;
+
+        const filePath = this.getFilePath(fname);
         try {
           const raw = readFileSync(filePath, "utf-8");
-          const cacheEntry: CacheEntry = JSON.parse(raw);
-          // The fname is not stored in the cache entry itself,
-          // so we just prime by checking against known files
-          // This is a best-effort warm — real lookup uses get()
-          seen.add(filePath);
+          const entry = JSON.parse(raw) as CacheEntry;
+          if (
+            entry &&
+            typeof entry.mtime === "number" &&
+            entry.mtime === mtime &&
+            Array.isArray(entry.tags)
+          ) {
+            this.memoryCache.set(fname, entry);
+          }
         } catch {
           // skip corrupted entries during warm
         }
@@ -340,14 +350,13 @@ export class TagsCache {
    * Invalidate a file's cached tags and all its dependents.
    * Returns the set of invalidated files for caller awareness.
    */
-  invalidateFile(fname: string): Set<string> {
-    const invalidated = new Set<string>();
+  invalidateFile(fname: string, invalidated = new Set<string>()): Set<string> {
+    // Guard against cycles
+    if (invalidated.has(fname)) return invalidated;
+    invalidated.add(fname);
 
     // Remove from memory cache
-    if (this.memoryCache.has(fname)) {
-      this.memoryCache.delete(fname);
-      invalidated.add(fname);
-    }
+    this.memoryCache.delete(fname);
 
     // Remove from disk
     if (this.useFilePersistence) {
@@ -366,10 +375,7 @@ export class TagsCache {
       const deps = this.dependents.get(fname);
       if (deps) {
         for (const dependent of deps) {
-          if (!invalidated.has(dependent)) {
-            this.invalidateFile(dependent);
-            invalidated.add(dependent);
-          }
+          this.invalidateFile(dependent, invalidated);
         }
         this.dependents.delete(fname);
       }

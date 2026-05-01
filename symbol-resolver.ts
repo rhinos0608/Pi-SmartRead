@@ -12,7 +12,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
-import { Type, type Static } from "typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionContext,
   ToolDefinition,
@@ -326,9 +326,19 @@ export function createSymbolResolverTool(): ToolDefinition {
       let contextFile: string | undefined;
       let contextLine: number | undefined;
       if (params.context) {
-        const parts = params.context.split(":");
-        contextFile = parts[0]!;
-        contextLine = parts[1] ? parseInt(parts[1], 10) : undefined;
+        const lastColon = params.context.lastIndexOf(":");
+        if (lastColon !== -1 && lastColon < params.context.length - 1) {
+          const trailing = params.context.slice(lastColon + 1);
+          const parsed = parseInt(trailing, 10);
+          if (!isNaN(parsed)) {
+            contextFile = params.context.slice(0, lastColon);
+            contextLine = parsed;
+          } else {
+            contextFile = params.context;
+          }
+        } else {
+          contextFile = params.context;
+        }
       }
 
       if (signal?.aborted) throw new Error("Operation aborted");

@@ -25,7 +25,7 @@ export interface ChunkOptions {
   compressForEmbedding?: boolean;
   /** Use tree-sitter symbol boundaries (functions, classes, methods) instead of character-based splitting */
   useSymbolBoundaries?: boolean;
-  /** Language hint for symbol-boundary chunking (e.g., 'typescript', 'javascript') */
+  /** @deprecated Reserved for future language-specific chunking rules. Currently unused. */
   languageHint?: string;
 }
 
@@ -117,6 +117,14 @@ function extractSymbolBoundaries(text: string): SymbolSpan[] {
 /**
  * Find the matching closing brace for an opening brace, respecting nesting.
  * Returns the byte offset after the closing brace, or null if unmatched.
+ *
+ * Known limitations:
+ * - The escape check (`prev !== "\\"`) does not correctly handle double-escaped
+ *   backslashes (e.g., `"\\\\"` before a quote) because it only inspects the
+ *   immediately preceding character.
+ * - Template literal `${...}` interpolations are not fully supported — expressions
+ *   containing strings or braces can confuse the state machine.
+ * A full parser (e.g., tree-sitter) would be needed to handle these scenarios.
  */
 function findMatchingBrace(text: string, startPos: number): number | null {
   // Find the first { after startPos
@@ -198,7 +206,8 @@ function getStructuralContext(text: string): string | undefined {
   if (functionMatch) return `Function: ${functionMatch[1]}`;
   if (classMatch) return `Class: ${classMatch[1]}`;
   if (methodMatch) {
-    const methodName = methodMatch[0].trim().replace(/\($/, "");
+    const raw = methodMatch[0].trim().replace(/\($/, "");
+    const methodName = raw.split(/\s+/).pop()!;
     if (!NON_METHOD_KEYWORDS.has(methodName)) return `Method: ${methodName}`;
   }
   return undefined;

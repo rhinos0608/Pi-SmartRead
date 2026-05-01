@@ -305,6 +305,9 @@ export function countTokens(
   const sampleText = sampledLines.join("\n");
   const sampleTokens = tokenCountFn(sampleText);
 
+  // Guard against empty sample
+  if (sampleText.length === 0) return estimateTokens(text);
+
   // Extrapolate
   return Math.round((sampleTokens / sampleText.length) * text.length);
 }
@@ -504,7 +507,7 @@ function extractImports(fname: string, code: string): string[] {
     for (const match of code.matchAll(importRe)) {
       const parts = match[0].split(/\s*,\s*/);
       for (const part of parts) {
-        const p = part.replace(/^import\s+/, "").replace(/\./g, "/");
+        const p = part.trim().replace(/^import\s+/, "").replace(/\./g, "/");
         if (p && !p.startsWith("__") && !seen.has(p)) { seen.add(p); imports.push(p); }
       }
     }
@@ -617,7 +620,7 @@ export class RepoMap {
         }
       }
 
-      if (refresh === "auto" && this.mapProcessingTime > 1.0) {
+      if (refresh === "auto" && this.mapProcessingTime > 1000) {
         const cached = this.mapCache.get(cacheKey);
         if (cached && !forceRefresh) {
           return cached;

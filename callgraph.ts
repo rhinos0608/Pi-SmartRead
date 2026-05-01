@@ -60,6 +60,8 @@ export interface CallEdge {
   callee: string;
   /** True if callee was resolved to a definition somewhere */
   resolved: boolean;
+  /** Source line of the call site (0 if unavailable) */
+  callerLine?: number;
 }
 
 export interface FunctionInfo {
@@ -172,6 +174,7 @@ function extractCallEdges(tree: Parser.Tree, file: string): CallEdge[] {
             caller: `${file}:${caller}`,
             callee,
             resolved: false,
+            callerLine: node.startPosition.row + 1,
           });
         }
       }
@@ -259,7 +262,8 @@ export async function buildCallGraph(
     if (calleeKey) {
       const calleeFn = allFunctions.get(calleeKey);
       if (calleeFn) {
-        calleeFn.calledBy.push(edge.caller.split(":").slice(1).join(":"));
+        const callerIdx = edge.caller.lastIndexOf(":");
+        calleeFn.calledBy.push(edge.caller.slice(callerIdx + 1));
         edge.resolved = true;
       }
     }

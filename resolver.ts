@@ -11,16 +11,24 @@ export interface DirectoryResolution {
 export function resolveDirectory(directory: string, cap = 20): DirectoryResolution {
   const resolved = resolve(directory);
 
-  const all = (
-    new fdir()
-      .withFullPaths()
-      .crawlWithOptions(resolved, { maxDepth: 0, excludeSymlinks: true })
-      .sync() as string[]
-  ).sort((a, b) => a.localeCompare(b));
+  // Validate cap
+  const safeCap = Number.isInteger(cap) && cap > 0 ? cap : 1;
+
+  let all: string[];
+  try {
+    all = (
+      new fdir()
+        .withFullPaths()
+        .crawlWithOptions(resolved, { maxDepth: 0, excludeSymlinks: true })
+        .sync() as string[]
+    ).sort((a, b) => a.localeCompare(b));
+  } catch {
+    return { paths: [], capped: false, countBeforeCap: 0 };
+  }
 
   return {
-    paths: all.slice(0, cap),
-    capped: all.length > cap,
+    paths: all.slice(0, safeCap),
+    capped: all.length > safeCap,
     countBeforeCap: all.length,
   };
 }

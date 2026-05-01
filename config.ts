@@ -99,17 +99,17 @@ export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig {
     );
   }
 
-  if (raw.chunkSizeChars !== undefined && (!Number.isFinite(raw.chunkSizeChars) || raw.chunkSizeChars <= 0)) {
+  if (raw.chunkSizeChars !== undefined && (!Number.isInteger(raw.chunkSizeChars) || raw.chunkSizeChars <= 0)) {
     throw new Error(
       "chunkSizeChars must be a positive integer. Got: " + String(raw.chunkSizeChars),
     );
   }
-  if (raw.chunkOverlapChars !== undefined && (!Number.isFinite(raw.chunkOverlapChars) || raw.chunkOverlapChars < 0)) {
+  if (raw.chunkOverlapChars !== undefined && (!Number.isInteger(raw.chunkOverlapChars) || raw.chunkOverlapChars < 0)) {
     throw new Error(
       "chunkOverlapChars must be a non-negative integer. Got: " + String(raw.chunkOverlapChars),
     );
   }
-  if (raw.maxChunksPerFile !== undefined && (!Number.isFinite(raw.maxChunksPerFile) || raw.maxChunksPerFile <= 0)) {
+  if (raw.maxChunksPerFile !== undefined && (!Number.isInteger(raw.maxChunksPerFile) || raw.maxChunksPerFile <= 0)) {
     throw new Error(
       "maxChunksPerFile must be a positive integer. Got: " + String(raw.maxChunksPerFile),
     );

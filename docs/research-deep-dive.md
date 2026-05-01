@@ -12,14 +12,17 @@ Pi-SmartRead occupies a niche at the intersection of **code-aware hybrid retriev
 
 ## Current Implementation Snapshot (2026-05-01)
 
-The codebase now ships and verifies these capabilities directly:
+Pi-SmartRead is now an independent fork at `rhinos0608/Pi-SmartRead`, detached from the upstream `Gurpartap/pi-read-many`. It ships 7 code-intelligence tools:
 
 - `read_multiple_files` with adaptive packing under Pi output limits
-- `intent_read` with BM25 + embedding similarity, RRF fusion, LRU embedding-result caching, direct import-neighbour augmentation, and compressed embedding snippets
-- `repo_map` with tree-sitter-first ranking and import-based fallback
+- `intent_read` with BM25 + embedding similarity, RRF fusion, persistent disk-backed embedding cache, LRU in-memory layer, direct import-neighbour augmentation, and compressed embedding snippets
+- `repo_map` with tree-sitter-first ranking (41 languages), PageRank personalization, and import-based fallback
 - `search_symbols` with native tree-sitter symbol extraction plus text fallback
-- native `tree-sitter` parsers for JavaScript and TypeScript, replacing the earlier WASM-based path
-- chunked callback parsing in `tags.ts`, which avoids the native binding failure on large TypeScript files
+- `resolve_symbol` with cross-file resolution, context-aware disambiguation, and best-guess definition selection
+- `find_callers` with call graph extraction from tree-sitter ASTs (TypeScript, JavaScript, TSX)
+- First-read hook that intercepts the initial read-like call per repo to return a compact repo map
+- Native `tree-sitter` parsers for JavaScript and TypeScript (not WASM)
+- Chunked callback parsing in `tags.ts`, which avoids the native binding failure on large TypeScript files
 
 Treat the rest of this document as research, implementation rationale, and roadmap context around that shipped baseline.
 
@@ -291,26 +294,28 @@ Pi-SmartRead currently exists as a Pi extension. All three comparable tools (Arb
 
 ## Part 5: Prioritized Adoption Roadmap
 
-### Immediate (High ROI, Low Risk)
-1. **RRF fusion in `scoring.ts`** — already present via RRF(k=60).
-2. **Context-header chunking in `chunking.ts`** — initial integration adds file/function/class headers and compressed embedding text; full tree-sitter AST-unit chunking remains a future enhancement.
-3. **LRU query cache in `intent_read`** — implemented for repeated unchanged embedding batches.
-
-### Short-Term (Medium ROI, Medium Effort)
-4. **Graph-neighbour augmentation** — initial direct relative import-neighbour expansion implemented before ranking; richer incoming/call graph expansion remains future work.
-5. **Context compression** — implemented for embedding snippets: strip imports, collapse whitespace, preserve head/tail.
-6. **Minimum score threshold** — implemented for no-keyword, low-semantic candidates while preserving exact lexical matches.
+### Completed
+1. ~~**RRF fusion in `scoring.ts`**~~ — shipped via RRF(k=60).
+2. ~~**Context-header chunking in `chunking.ts`**~~ — initial integration with file/function/class headers and compressed embedding text.
+3. ~~**LRU query cache in `intent_read`**~~ — shipped (64-entry in-memory).
+4. ~~**Graph-neighbour augmentation**~~ — initial direct relative import-neighbour expansion shipped.
+5. ~~**Context compression**~~ — shipped for embedding snippets.
+6. ~~**Minimum score threshold**~~ — shipped for low-signal candidates.
+7. ~~**Persistent embedding cache**~~ — shipped (disk-backed, survives restarts).
+8. ~~**Call graph analysis**~~ — shipped via `find_callers`.
+9. ~~**Cross-file symbol resolution**~~ — shipped via `resolve_symbol`.
+10. ~~**41-language support**~~ — shipped for repo_map.
 
 ### Medium-Term (High ROI, Higher Effort)
-7. **Cross-encoder re-ranking** — add lightweight re-ranker on top-20 results. Needs model loading.
-8. **HyDE query expansion** — generate hypothetical code/docs for better embedding. Needs LLM call.
-9. **MCP server exposure** — wrap tools for Cursor/Claude Code. New module.
+- **Cross-encoder re-ranking** — add lightweight re-ranker on top-20 results. Needs model loading.
+- **HyDE query expansion** — generate hypothetical code/docs for better embedding. Needs LLM call.
+- **MCP server exposure** — wrap tools for Cursor/Claude Code. New module.
 
 ### Long-Term (Architectural)
-10. **Model registry** — multiple embedding model options with hash fallback
-11. **Incremental indexing** — watch mode for real-time updates
-12. **Portable export** — single-file project maps
-13. **Community detection** — group code into logical clusters
+- **Model registry** — multiple embedding model options with hash fallback
+- **Incremental indexing** — watch mode for real-time updates
+- **Portable export** — single-file project maps
+- **Community detection** — group code into logical clusters
 
 ---
 
@@ -331,7 +336,8 @@ Pi-SmartRead currently exists as a Pi extension. All three comparable tools (Arb
 
 ## Part 7: Gaps & Unknowns
 
-1. **Retrieval quality still lacks formal benchmarks** — the source is now directly inspectable, but there are still no Recall@k, MRR, or NDCG measurements to quantify retrieval quality over time.
+1. **Retrieval quality still lacks formal benchmarks** — no Recall@k, MRR, or NDCG measurements to quantify retrieval quality over time.
 2. **Embedding model in use is deployment-specific** — the OpenAI-compatible endpoint could proxy to very different embedding models depending on the environment.
 3. **AST chunking is still partial** — context-header chunking and snippet compression are implemented, but full AST-unit chunking remains future work.
-4. **Test corpus needed** — a standard set of 5-10 open-source repos of varying sizes would make retrieval regressions easier to catch and compare.
+4. **Call graph is TypeScript/JavaScript/TSX only** — `find_callers` does not yet support Python, Go, Rust, or other languages with tree-sitter parsers.
+5. **Test corpus needed** — a standard set of 5-10 open-source repos of varying sizes would make retrieval regressions easier to catch and compare.

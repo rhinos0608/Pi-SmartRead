@@ -1,11 +1,13 @@
 /**
  * Pi tool wrappers for the repo-map system.
  *
- * Exposes two tools:
+ * Exposes four tools:
  * - `repo_map` — generate a PageRank-ranked map of the repo
  * - `search_symbols` — search for symbols by name across the repo
+ * - `find_callers` — find all callers of a given function
+ * - `resolve_symbol` — resolve a symbol to its definition and references
  */
-import { Type, type Static } from "typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -315,9 +317,10 @@ function createFindCallersTool(): ToolDefinition {
       ctx: ExtensionContext,
     ) {
       const cwd = params.directory ?? ctx.cwd;
-      const allFiles = findSrcFiles(cwd);
 
       if (signal?.aborted) throw new Error("Operation aborted");
+
+      const allFiles = findSrcFiles(cwd);
 
       const callers = await findCallers(allFiles, params.function);
 

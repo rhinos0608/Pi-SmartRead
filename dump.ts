@@ -11,11 +11,11 @@
  * Usage:
  *   import { dump } from "./dump.js";
  *   dump({ foo, bar });
- *   // → "foo: 42, bar: ['a', 'b']"
+ *   // → "foo=42, bar=['a','b']"
  *
  * For verbose-mode debugging, pass a label:
  *   dump({ foo }, "getRankedTags");
- *   // → "[getRankedTags] foo: 42"
+ *   // → "[getRankedTags] foo=42"
  */
 import { inspect } from "node:util";
 

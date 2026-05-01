@@ -79,7 +79,8 @@ function getOrCreateState(key: string): RepoSessionState {
  */
 export function markRepoMapExplicitlyCalled(cwd: string): void {
   const key = computeRepoKey(cwd);
-  const state = getOrCreateState(key);
+  const state = sessionStates.get(key);
+  if (!state) return;
   state.explicitlyCalled = true;
 }
 
@@ -229,7 +230,7 @@ async function interceptFirstRead(
       toolName,
       key,
       result.map,
-      { totalFiles: 0, totalTags: 0, rankMethod: "cached" },
+      result.stats as Record<string, unknown>,
     );
   }
 
