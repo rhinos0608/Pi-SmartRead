@@ -95,7 +95,7 @@ export function bm25Scores(query: string, documents: string[]): number[] {
   if (N === 0) return [];
 
   const tokenizedDocs = documents.map(tokenize);
-  const avgDocLen = tokenizedDocs.reduce((sum, d) => sum + d.length, 0) / N;
+  const avgDocLen = Math.max(1, tokenizedDocs.reduce((sum, d) => sum + d.length, 0) / N);
 
   const queryTokens = [...new Set(tokenize(query))];
 

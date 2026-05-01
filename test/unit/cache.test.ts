@@ -2,7 +2,7 @@
  * Tests for TagsCache.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TagsCache, type Tag } from "../../cache.js";
@@ -66,6 +66,8 @@ describe("TagsCache", () => {
 
     // Modify the file (new content = new mtime)
     writeFileSync(testFile, "v2");
+    const nextMtime = new Date(Date.now() + 2000);
+    utimesSync(testFile, nextMtime, nextMtime);
 
     const retrieved = cache.get(testFile);
     expect(retrieved).toBeNull();

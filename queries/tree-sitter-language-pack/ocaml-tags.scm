@@ -18,7 +18,7 @@
   (#strip! @doc "^\\(\\*\\*?\\s*|\\s\\*\\)$")
 )
 
-(module_type_path (module_type_name) @name.reference.implementation) @reference.implementation
+(module_type_path (module_type_name) @name.reference.interface) @reference.interface
 
 ; Functions
 ;----------

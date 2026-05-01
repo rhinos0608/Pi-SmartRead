@@ -232,12 +232,13 @@ export async function buildCallGraph(
     // Register functions from caller edges
     for (const edge of edges) {
       if (!allFunctions.has(edge.caller)) {
-        const [callerFile, ...nameParts] = edge.caller.split(":");
-        const name = nameParts.join(":");
+        const callerIdx = edge.caller.lastIndexOf(":");
+        const callerFile = edge.caller.slice(0, callerIdx);
+        const name = edge.caller.slice(callerIdx + 1);
         allFunctions.set(edge.caller, {
           name,
-          file: callerFile!,
-          line: 0,
+          file: callerFile,
+          line: edge.callerLine ?? 0,
           calls: [],
           calledBy: [],
         });
@@ -293,6 +294,7 @@ export async function buildCallGraph(
 export async function findCallers(
   files: string[],
   targetFunction: string,
+  signal?: AbortSignal,
 ): Promise<{ file: string; callerFunction: string }[]> {
   await initParser();
 
@@ -300,6 +302,7 @@ export async function findCallers(
   const seen = new Set<string>();
 
   for (const file of files) {
+    if (signal?.aborted) return [];
     const lang = filenameToLang(file);
     if (!lang) continue;
 
@@ -318,6 +321,7 @@ export async function findCallers(
     const tree = parseCode(parser, code);
 
     function walk(node: Parser.SyntaxNode) {
+      if (signal?.aborted) return;
       if (node.type === "call_expression") {
         const callee = getCallTargetName(node);
         if (callee === targetFunction) {

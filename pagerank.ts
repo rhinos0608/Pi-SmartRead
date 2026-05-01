@@ -249,7 +249,7 @@ export function buildWeightedEdges(
         useMul *= 50;
       }
       const numRefs = Math.sqrt(rawCount);
-      const finalWeight = Math.round(useMul * numRefs);
+      const finalWeight = Math.max(1, Math.round(useMul * numRefs));
 
       for (const definer of definers) {
         if (referencer === definer) continue;

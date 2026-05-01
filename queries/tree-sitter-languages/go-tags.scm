@@ -28,3 +28,4 @@
   name: (type_identifier) @name.definition.type) @definition.type
 
 (type_identifier) @name.reference.type @reference.type
+  (#not-has-parent? @reference.type type_spec)

@@ -11,7 +11,7 @@
  *   - Typed intercept response: caller cannot confuse with normal output
  *   - Explicit repo_map calls mark state, suppressing later hooks in that repo
  */
-import type { TSchema } from "typebox";
+import type { TSchema } from "@sinclair/typebox";
 import {
   createReadToolDefinition,
   type ExtensionContext,
@@ -75,12 +75,12 @@ function getOrCreateState(key: string): RepoSessionState {
  * Called by repo_map tool after successful generation.
  * This suppresses the hook for subsequent reads in the same repo.
  *
- * Does NOT mark if the key is not tracked (no state = no reads pending).
+ * Creates repo state if needed so an explicit repo_map call can
+ * suppress the first read even before any read has occurred.
  */
 export function markRepoMapExplicitlyCalled(cwd: string): void {
   const key = computeRepoKey(cwd);
-  const state = sessionStates.get(key);
-  if (!state) return;
+  const state = getOrCreateState(key);
   state.explicitlyCalled = true;
 }
 
@@ -230,7 +230,7 @@ async function interceptFirstRead(
       toolName,
       key,
       result.map,
-      result.stats as Record<string, unknown>,
+      result.stats ?? { totalFiles: 0, totalTags: 0, rankMethod: "cached" },
     );
   }
 
@@ -401,7 +401,7 @@ export function wrapBuiltinReadTool(): ToolDefinition {
     description: baseDef.description,
     promptSnippet: baseDef.promptSnippet,
     promptGuidelines: baseDef.promptGuidelines,
-    parameters: augmentSchema(baseDef.parameters as TSchema),
+    parameters: augmentSchema(baseDef.parameters as unknown as TSchema),
     renderCall: baseDef.renderCall,
     renderResult: baseDef.renderResult,
 

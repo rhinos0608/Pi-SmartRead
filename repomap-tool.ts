@@ -320,9 +320,9 @@ function createFindCallersTool(): ToolDefinition {
 
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      const allFiles = findSrcFiles(cwd);
+      const allFiles = findSrcFiles(cwd, 10_000, signal);
 
-      const callers = await findCallers(allFiles, params.function);
+      const callers = await findCallers(allFiles, params.function, signal);
 
       if (callers.length === 0) {
         return {

@@ -81,7 +81,7 @@ describe("tokenize", () => {
     });
 
     it("handles numeric suffixes", () => {
-      // userV2 -> ["userv2", "user", "v2"]
+      // userV2 -> ["userv2", "user", "v", "2"]
       // file2txt -> ["file2txt", "file", "2", "txt"]
       const result = tokenize("userV2");
       expect(result).toContain("userv2");
@@ -97,7 +97,7 @@ describe("tokenize", () => {
     });
 
     it("deduplicates sub-tokens within a single expansion", () => {
-      // authAuth -> ["authaus", "auth"] (no duplicate "auth")
+      // authAuth -> ["authauth", "auth"] (no duplicate "auth")
       const result = tokenize("authAuth");
       const authCount = result.filter((t) => t === "auth").length;
       expect(authCount).toBe(1);

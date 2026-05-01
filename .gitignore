@@ -4,3 +4,4 @@ node_modules/
 .DS_Store
 .pi-smartread.tags.cache/
 *.wasm
+.pi-smartread.tags.cache/*

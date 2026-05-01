@@ -222,7 +222,10 @@ No new runtime dependencies required:
 
 - Directory-expanded candidates are sorted lexicographically by resolved path before capping.
 - Ranking ties are broken by original candidate order, then path.
+  - For directory expansion, original candidate order means the lexicographically sorted order described above.
+  - For explicit `files` input, original candidate order means the exact order of entries in the provided array.
 - RRF ties are broken by original candidate order, then path.
+  - Implementations must preserve that order when comparing candidates for tie-breaking.
 - Errored files are appended after successful files in deterministic input order.
 
 This ensures repeated calls over the same inputs produce stable results.

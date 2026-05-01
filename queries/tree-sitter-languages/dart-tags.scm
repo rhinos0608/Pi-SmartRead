@@ -2,7 +2,8 @@
   name: (identifier) @name.definition.class) @definition.class
 
 (method_signature
-  (function_signature)) @definition.method
+  (function_signature
+    name: (identifier) @name.definition.method)) @definition.method
 
 (type_alias
   (type_identifier) @name.definition.type) @definition.type
@@ -15,9 +16,6 @@
   (setter_signature
     name: (identifier) @name.definition.method)) @definition.method
 
-(method_signature
-  (function_signature
-  name: (identifier) @name.definition.method)) @definition.method
 
 (method_signature
   (factory_constructor_signature
@@ -30,7 +28,6 @@
 (method_signature
   (operator_signature)) @definition.method
 
-(method_signature) @definition.method
 
 (mixin_declaration
   (mixin)
@@ -50,12 +47,15 @@
 
 (initialized_variable_definition
   name: (identifier)
-  value: (identifier) @name.reference.class
+  value: (identifier) @name.reference.class) @reference.class
+
+(initialized_variable_definition
+  name: (identifier)
   value: (selector
-	"!"?
-	(argument_part
-	  (arguments
-	    (argument)*))?)?) @reference.class
+    "!"?
+    (argument_part
+      (arguments
+        (argument)*))?)?) @reference.class
 
 (assignment_expression
   left: (assignable_expression
@@ -77,15 +77,17 @@
     (conditional_assignable_selector
       "?." (identifier) @name.reference.call)?
     (unconditional_assignable_selector
-      "."? (identifier) @name.reference.call)?
+      "." (identifier) @name.reference.call)?
     (argument_part
       (arguments
-        (argument)*))?)*
-	(cascade_section
-	  (cascade_selector
-		(identifier)) @name.reference.call
-	  (argument_part
-		(arguments
-		  (argument)*))?)?) @reference.call
+        (argument)*))?) @reference.call)
+
+((identifier) @name
+ (cascade_section
+   (cascade_selector
+     (identifier)) @name.reference.call
+   (argument_part
+     (arguments
+       (argument)*))?) @reference.call)
 
 

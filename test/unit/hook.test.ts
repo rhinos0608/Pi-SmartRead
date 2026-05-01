@@ -307,11 +307,9 @@ describe("hook — repo-map interceptor", () => {
       makeMockContext(tmpDir),
     ) as { content: { text: string }[]; details: Record<string, unknown> };
 
-    // If no files found, should pass through
+    // Should have passthrough since hook checks result.map === "" and therefore falls through
     // We just verify the hook is in the flow — with no files, compact map returns empty
     const text = result.content?.[0]?.text ?? "";
-    // Should NOT have the passthrough since hook intercepts even with empty map
-    // Actually, the hook checks result.map === "" and falls through
     expect(text).toBe("ORIGINAL_READ");
     expect(calls).toBe(1);
   });

@@ -6,3 +6,4 @@
 
 ;; Match function calls
 (list (symbol) @name.reference.function) @reference.function
+  (#not-match? @name.reference.function "^(defun|defsubst|defmacro|defvar|defconst|defcustom|let|let\*|let\*\*|letf|letrec|letrec\*|lambda|if|when|unless|progn|quote|function|setq|setf|apply|eval|cond|case|catch|throw|save-excursion|save-current-buffer|with-temp-buffer|with-current-buffer|pcase|pcase-let|pcase-let\*|while|dolist|dotimes)$")

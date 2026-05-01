@@ -18,7 +18,7 @@
   (#strip! @doc "^\\(\\*+\\s*|\\s*\\*+\\)$")
 )
 
-(module_type_path (module_type_name) @name) @reference.implementation
+(module_type_path (module_type_name) @name) @reference.interface
 
 
 ; Classes
@@ -92,7 +92,7 @@
 (
   (comment)? @doc .
   (value_specification
-    (value_name) @name.definition.function
+    (value_name) @name
   ) @definition.function
   (#strip! @doc "^\\(\\*+\\s*|\\s*\\*+\\)$")
 )

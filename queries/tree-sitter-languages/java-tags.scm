@@ -6,7 +6,7 @@
 
 (method_invocation
   name: (identifier) @name.reference.call
-  arguments: (argument_list) @reference.call)
+  arguments: (argument_list)) @reference.call
 
 (interface_declaration
   name: (identifier) @name.definition.interface) @definition.interface

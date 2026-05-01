@@ -6,7 +6,7 @@
 
 **Architecture:** Extract shared helpers from `read-many.ts` into `utils.ts`, then build `config.ts` (config loading), `scoring.ts` (BM25 + cosine + RRF), `embedding.ts` (OpenAI-compatible HTTP client), and `resolver.ts` (directory expansion), all wired together in `intent-read.ts`. Both tools are registered via `index.ts`.
 
-**Tech Stack:** TypeScript (NodeNext ESM), Vitest, typebox, fdir, Node built-in `fetch`
+**Tech Stack:** TypeScript (NodeNext ESM), Vitest, @sinclair/typebox, fdir, Node built-in `fetch`
 
 ---
 
@@ -367,7 +367,7 @@ export function buildPlan(
 Replace the inlined type/function definitions in `read-many.ts` with imports. The file should begin with:
 
 ```typescript
-import { Type, type Static } from "typebox";
+import { Type, type Static } from "@sinclair/typebox"
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -435,11 +435,6 @@ export const __test = {
     "index.ts",
     "read-many.ts",
     "utils.ts",
-    "config.ts",
-    "scoring.ts",
-    "embedding.ts",
-    "resolver.ts",
-    "intent-read.ts",
     "test/**/*.ts"
   ]
 }
@@ -1483,7 +1478,7 @@ Expected: `Error: Cannot find module '../../intent-read.js'`
 - [ ] **Step 3: Create intent-read.ts**
 
 ```typescript
-import { Type, type Static } from "typebox";
+import { Type, type Static } from "@sinclair/typebox"
 import type {
   ExtensionAPI,
   ExtensionContext,

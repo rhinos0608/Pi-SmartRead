@@ -53,7 +53,7 @@
 ;;           - we already exclude func-1, but param1 is still recognized
 ;;             as a function call - exclude it too
 ;;           - the same for labels
-;;           - the same macrolet
+;;           - the same for macrolet
 ;;       - what else?
 ;;         (that's a non-goal to completely support all macros
 ;;          and special operators, but every one we support
@@ -105,7 +105,7 @@
 ;;   overview in the form of defpackage, to the definition
 ;;   where user can read parameters, docstring, etc.
 ;;   - The @name must not include the colon, or sharpsign colon, quotes,
-;;     just symbol-a, symbol-b, symbol-c, sybmol-d
+;;     just symbol-a, symbol-b, symbol-c, symbol-d
 ;;   - Downcase the names specified as string literals?
 ;;     ("SYMBOL-D" -> symbol-d)
 ;;   - We don't know if the exported symbol is a function, variable,

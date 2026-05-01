@@ -52,12 +52,15 @@
 
 (initialized_variable_definition
   name: (identifier)
-  value: (identifier) @name.reference.class 
+  value: (identifier) @name.reference.class) @reference.class
+
+(initialized_variable_definition
+  name: (identifier)
   value: (selector
-	"!"?
-	(argument_part 
-	  (arguments
-	    (argument)*))?)?) @reference.class
+    "!"?
+    (argument_part
+      (arguments
+        (argument)*))?)?) @reference.class
 
 (assignment_expression
   left: (assignable_expression 

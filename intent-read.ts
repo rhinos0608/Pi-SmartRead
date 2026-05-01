@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { Type, type Static } from "typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionContext,
   ReadToolInput,

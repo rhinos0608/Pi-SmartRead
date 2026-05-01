@@ -25,8 +25,6 @@ export interface ChunkOptions {
   compressForEmbedding?: boolean;
   /** Use tree-sitter symbol boundaries (functions, classes, methods) instead of character-based splitting */
   useSymbolBoundaries?: boolean;
-  /** @deprecated Reserved for future language-specific chunking rules. Currently unused. */
-  languageHint?: string;
 }
 
 export interface CompressSnippetOptions {

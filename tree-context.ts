@@ -37,10 +37,35 @@ interface TreeContextCacheEntry {
   indentLevels: number[];
   /** Cached parent context for each line number */
   contextLines: Map<number, number[]>;
+  lastAccessedAt: number;
 }
+
+/** Maximum number of cached files kept in memory */
+const MAX_TREE_CONTEXT_CACHE = 500;
 
 /** Module-level tree context cache */
 const treeContextCache = new Map<string, TreeContextCacheEntry>();
+
+function touchTreeContextCache(fname: string, entry: TreeContextCacheEntry): void {
+  entry.lastAccessedAt = Date.now();
+  treeContextCache.delete(fname);
+  treeContextCache.set(fname, entry);
+}
+
+function evictOldestIfNeeded(): void {
+  while (treeContextCache.size > MAX_TREE_CONTEXT_CACHE) {
+    let oldestKey: string | undefined;
+    let oldestSeen = Number.POSITIVE_INFINITY;
+    for (const [key, entry] of treeContextCache) {
+      if (entry.lastAccessedAt < oldestSeen) {
+        oldestSeen = entry.lastAccessedAt;
+        oldestKey = key;
+      }
+    }
+    if (!oldestKey) break;
+    treeContextCache.delete(oldestKey);
+  }
+}
 
 /**
  * Get file mtime for cache invalidation.
@@ -156,24 +181,16 @@ export function renderTreeContext(
     if (cached && cached.mtime === mtime) {
       indentLevels = cached.indentLevels;
       cacheEntry = cached;
+      touchTreeContextCache(fname, cached);
     } else {
       indentLevels = buildIndentLevels(lines);
-      cacheEntry = { mtime, indentLevels, contextLines: new Map() };
+      cacheEntry = { mtime, indentLevels, contextLines: new Map(), lastAccessedAt: Date.now() };
       treeContextCache.set(fname, cacheEntry);
+      evictOldestIfNeeded();
     }
   } else {
     indentLevels = buildIndentLevels(lines);
     cacheEntry = undefined;
-  }
-
-  // Check for top-of-file header if requested
-  if (showTopOfFile && headerMax > 0) {
-    const minLoi = Math.min(...linesOfInterest);
-    if (minLoi > headerMax + 3) {
-      for (let i = 1; i <= Math.min(headerMax, lines.length); i++) {
-        visibleLines.add(i);
-      }
-    }
   }
 
   for (const loi of loiSet) {

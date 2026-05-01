@@ -62,6 +62,7 @@ describe("config: validateEmbeddingConfig", () => {
   });
 
   it("error message points to both config file and env var names", () => {
+    expect.assertions(2);
     try {
       validateEmbeddingConfig(SAFE_CWD);
     } catch (err) {

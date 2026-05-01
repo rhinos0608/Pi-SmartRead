@@ -16,8 +16,6 @@
 (abstract_type_declaration
   name: (type_identifier) @name.definition.class) @definition.class
 
-(constant_assignment
-  left: (identifier) @name.definition.class) @definition.class
 
 (function_definition
   name: (identifier) @name.definition.function) @definition.function

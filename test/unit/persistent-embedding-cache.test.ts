@@ -107,11 +107,10 @@ describe("PersistentEmbeddingCache", () => {
     expect(cache.diskEntries).toBe(0);
   });
 
-  it("handles concurrent reads without corruption", () => {
+  it("handles many sequential reads/writes without corruption", () => {
     const cache = new PersistentEmbeddingCache(tmpDir, 100);
-    const result = makeResult();
 
-    // Write many entries concurrently
+    // Write many entries sequentially
     for (let i = 0; i < 50; i++) {
       cache.set(
         PersistentEmbeddingCache.computeKey(makeReq(), `q${i}`, [`data${i}`]),

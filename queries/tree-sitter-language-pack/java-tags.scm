@@ -5,8 +5,8 @@
   name: (identifier) @name.definition.method) @definition.method
 
 (method_invocation
-  name: (identifier) @name.reference.method
-  arguments: (argument_list) @reference.call)
+  name: (identifier) @name.reference.call
+  arguments: (argument_list)) @reference.call
 
 (interface_declaration
   name: (identifier) @name.definition.interface) @definition.interface

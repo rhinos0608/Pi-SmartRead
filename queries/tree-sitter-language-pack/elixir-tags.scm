@@ -48,7 +48,16 @@
 ; * pipe into function call
 (binary_operator
   operator: "|>"
-  right: (identifier) @name.reference.call) @reference.call
+  right: [
+    (identifier) @name.reference.call
+    (call_expression
+      function: (identifier) @name.reference.call)
+    (call_expression
+      function: (dot
+        right: (identifier) @name.reference.call))
+    (scoped_expression
+      (identifier) @name.reference.call)
+  ]) @reference.call
 
 ; * modules
 (alias) @name.reference.module @reference.module

@@ -22,8 +22,9 @@
 
 ; function definitions
 
-(function_item
+((function_item
     name: (identifier) @name.definition.function) @definition.function
+  (#not-has-parent? @definition.function declaration_list))
 
 ; trait definitions
 (trait_item

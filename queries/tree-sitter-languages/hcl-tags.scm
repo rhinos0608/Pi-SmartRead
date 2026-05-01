@@ -10,6 +10,13 @@
   (body) @definition.resource
 ) (#eq? @block_type "resource")
 
+(block
+  (identifier) @block_type
+  (string_lit (template_literal) @data_source_type)
+  (string_lit (template_literal) @name.definition.data)
+  (body) @definition.data
+) (#eq? @block_type "data")
+
 (block 
   (identifier) @block_type
   (string_lit (template_literal) @name.definition.module)

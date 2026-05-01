@@ -303,10 +303,11 @@ export function countTokens(
     sampledLines.push(lines[i]);
   }
   const sampleText = sampledLines.join("\n");
-  const sampleTokens = tokenCountFn(sampleText);
 
   // Guard against empty sample
   if (sampleText.length === 0) return estimateTokens(text);
+
+  const sampleTokens = tokenCountFn(sampleText);
 
   // Extrapolate
   return Math.round((sampleTokens / sampleText.length) * text.length);

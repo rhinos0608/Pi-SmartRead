@@ -6,7 +6,7 @@
  * These files are prepended to ranked output so they always appear
  * in the repo map regardless of PageRank score.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join, normalize, relative, resolve } from "node:path";
 
 const ROOT_IMPORTANT_FILES = [
@@ -212,9 +212,13 @@ const ROOT_IMPORTANT_FILES = [
   "docker-entrypoint.sh",
 ] as const;
 
+function normalizeToPosix(filePath: string): string {
+  return normalize(filePath).replace(/\\+/g, "/");
+}
+
 /** Normalize once for fast lookup */
 const NORMALIZED_IMPORTANT = new Set(
-  ROOT_IMPORTANT_FILES.map((p) => normalize(p)),
+  ROOT_IMPORTANT_FILES.map((p) => normalizeToPosix(p)),
 );
 
 /**
@@ -222,7 +226,7 @@ const NORMALIZED_IMPORTANT = new Set(
  * Also detects GitHub Actions workflow files.
  */
 export function isImportantFile(filePath: string): boolean {
-  const normalized = normalize(filePath).replace(/\\/g, "/");
+  const normalized = normalizeToPosix(filePath);
   const dirName = normalized.includes("/")
     ? normalized.slice(0, normalized.lastIndexOf("/"))
     : ".";
@@ -232,9 +236,9 @@ export function isImportantFile(filePath: string): boolean {
 
   // GitHub Actions workflow files
   if (
-    (dirName === normalize(".github/workflows") ||
+    (dirName === ".github/workflows" ||
       dirName.endsWith("/.github/workflows")) &&
-    fileName.endsWith(".yml")
+    (fileName.endsWith(".yml") || fileName.endsWith(".yaml"))
   ) {
     return true;
   }
@@ -258,19 +262,36 @@ export function discoverImportantFiles(
   root: string,
   allFiles?: string[],
 ): string[] {
+  const resolvedRoot = resolve(root);
+
   if (allFiles) {
     // Fast path: filter from known files
-    const relFiles = allFiles.map((f) => relative(resolve(root), f));
-    return filterImportantFiles(relFiles).map((f) => join(resolve(root), f));
+    const relFiles = allFiles.map((f) => relative(resolvedRoot, f));
+    return filterImportantFiles(relFiles).map((f) => join(resolvedRoot, f));
   }
 
-  // Slow path: check each known important file
+  // Slow path: check each known important file plus workflows
   const found: string[] = [];
   for (const relPath of ROOT_IMPORTANT_FILES) {
-    const absPath = join(resolve(root), relPath);
+    const absPath = join(resolvedRoot, relPath);
     if (existsSync(absPath)) {
       found.push(absPath);
     }
   }
+
+  const workflowsDir = join(resolvedRoot, ".github", "workflows");
+  if (existsSync(workflowsDir)) {
+    try {
+      for (const entry of readdirSync(workflowsDir)) {
+        const absPath = join(workflowsDir, entry);
+        if (isImportantFile(absPath)) {
+          found.push(absPath);
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
   return found;
 }

@@ -42,5 +42,8 @@
 ) @reference.send
 
 (namespace_declaration
- name: (identifier) @name.definition.module
+ name: [
+   (identifier) @name.definition.module
+   (qualified_name) @name.definition.module
+ ]
 ) @definition.module

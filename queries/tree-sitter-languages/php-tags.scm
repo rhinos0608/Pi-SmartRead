@@ -16,7 +16,7 @@
 (function_call_expression
   function: [
     (qualified_name (name) @name.reference.call)
-    (variable_name (name)) @name.reference.call
+    (variable_name (name) @name.reference.call)
   ]) @reference.call
 
 (scoped_call_expression

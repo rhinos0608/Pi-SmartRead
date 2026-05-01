@@ -4,7 +4,7 @@
   (method_definition
     name: (property_identifier) @name.definition.method) @definition.method
   (#not-eq? @name.definition.method "constructor")
-  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
   (#select-adjacent! @doc @definition.method)
 )
 
@@ -17,7 +17,7 @@
     (class_declaration
       name: (_) @name.definition.class)
   ] @definition.class
-  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
   (#select-adjacent! @doc @definition.class)
 )
 
@@ -34,7 +34,7 @@
     (generator_function_declaration
       name: (identifier) @name.definition.function)
   ] @definition.function
-  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
   (#select-adjacent! @doc @definition.function)
 )
 
@@ -45,7 +45,7 @@
     (variable_declarator
       name: (identifier) @name.definition.function
       value: [(arrow_function) (function_expression)]) @definition.function)
-  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
   (#select-adjacent! @doc @definition.function)
 )
 
@@ -56,7 +56,7 @@
     (variable_declarator
       name: (identifier) @name.definition.function
       value: [(arrow_function) (function_expression)]) @definition.function)
-  (#strip! @doc "^[\\s\\*/]+|^[\\s\\*/]$")
+  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
   (#select-adjacent! @doc @definition.function)
 )
 
@@ -82,7 +82,7 @@
 (call_expression
   function: (member_expression
     property: (property_identifier) @name.reference.call)
-  arguments: (_) @reference.call)
+  arguments: (_)) @reference.call
 
 (new_expression
   constructor: (_) @name.reference.class) @reference.class

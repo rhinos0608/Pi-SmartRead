@@ -1,6 +1,6 @@
 # Deep Research: Code-Aware Retrieval, Repo Mapping & Agent Integration
 
-> **Date:** 2026-04-30
+> **Date:** 2026-05-01
 > **Scope:** Cross-referencing Pi-SmartRead against the ecosystem of code intelligence tools
 > **Sources:** GitHub (live API), Reddit (r/LocalLLaMA), Hacker News, Academic (arXiv), Code-level analysis
 
@@ -193,7 +193,7 @@ While overkill for Pi-SmartRead's scope, the pattern of using **Leiden community
 
 ## Part 2: Academic & Industry Patterns
 
-### Hybrid Retrieval (Spare + Dense Fusion)
+### Hybrid Retrieval (Sparse + Dense Fusion)
 
 The consensus across papers (Blended RAG, Sparse Meets Dense, Adaptive Chunking, late chunking vs. contextual retrieval) is:
 

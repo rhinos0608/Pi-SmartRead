@@ -31,7 +31,7 @@ describe("RepoMap — import-based fallback", () => {
   it("ranks files by import in-degree", async () => {
     // 3 files: utils.ts ← main.ts, helper.ts ← main.ts
     // utils.ts has in-degree 2 (imported by main.ts and helper.ts)
-    // helper.ts has in-degree 0
+    // helper.ts has in-degree 1 (imported by main.ts)
     // main.ts has in-degree 0
     writeFileSync(
       join(tmpDir, "utils.ts"),
@@ -131,6 +131,10 @@ describe("RepoMap — import-based fallback", () => {
       "export function helper() { return 1; }\n",
     );
     writeFileSync(
+      join(tmpDir, "main.ts"),
+      "import { helper } from './utils';\nconsole.log(helper());\n",
+    );
+    writeFileSync(
       join(tmpDir, "orphan.ts"),
       "// no imports in or out\n",
     );
@@ -141,8 +145,9 @@ describe("RepoMap — import-based fallback", () => {
       excludeUnranked: true,
     });
 
-    // orpan.ts has in-degree 0 and should be excluded
+    // orphan.ts has in-degree 0 and should be excluded
     const relFiles = result.rankedTags.map((rt) => rt.tag.relFname);
+    expect(relFiles).toContain("utils.ts");
     expect(relFiles).not.toContain("orphan.ts");
   });
 

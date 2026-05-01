@@ -10,7 +10,7 @@
 
 ; Tag name selector definitions: tagName { ... }
 (rule_set
-  selectors: (tag_name) @name.definition.type) @definition.type
+  selectors: (tag_name) @name.reference.type) @reference.type
 
 ; @keyframes animation definitions
 (keyframes_statement

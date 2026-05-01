@@ -226,13 +226,17 @@ function isGitignored(
 
 // ── Public API ────────────────────────────────────────────────────
 
-export function findSrcFiles(rootDir: string, maxFiles = 10_000): string[] {
+export function findSrcFiles(
+  rootDir: string,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): string[] {
   const results: string[] = [];
   const gitignoreCache = new Map<string, GitignoreRule[]>();
   const resolvedRoot = resolve(rootDir);
 
   function walk(dir: string): void {
-    if (results.length >= maxFiles) return;
+    if (signal?.aborted || results.length >= maxFiles) return;
 
     let entries: string[];
     try {
@@ -245,7 +249,7 @@ export function findSrcFiles(rootDir: string, maxFiles = 10_000): string[] {
     const gitignoreRules = loadGitignoreRules(dir, gitignoreCache);
 
     for (const entry of entries) {
-      if (results.length >= maxFiles) return;
+      if (signal?.aborted || results.length >= maxFiles) return;
 
       const fullPath = join(dir, entry);
       let stat: ReturnType<typeof statSync>;

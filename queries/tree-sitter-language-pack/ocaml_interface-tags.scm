@@ -92,7 +92,7 @@
 (
   (comment)? @doc .
   (value_specification
-    (value_name) @name.definition.function
+    (value_name) @name
   ) @definition.function
   (#strip! @doc "^\\(\\*+\\s*|\\s*\\*+\\)$")
 )
