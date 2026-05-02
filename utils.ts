@@ -83,49 +83,60 @@ export function createPathHash(path: string): string {
 	return hash.toString(16).toUpperCase().padStart(6, "0").slice(0, 6);
 }
 
-export function buildLineSet(content: string): Set<string> {
-	const lines = content.split("\n");
-	const set = new Set<string>();
-	for (const line of lines) {
-		set.add(line.replace(/\r$/, ""));
+export class LruCache<T> {
+	private values = new Map<string, T>();
+
+	constructor(readonly maxSize: number) {}
+
+	get(key: string): T | undefined {
+		const value = this.values.get(key);
+		if (value === undefined) return undefined;
+		this.values.delete(key);
+		this.values.set(key, value);
+		return value;
 	}
-	return set;
+
+	set(key: string, value: T): void {
+		if (this.values.has(key)) {
+			this.values.delete(key);
+		}
+		this.values.set(key, value);
+		while (this.values.size > this.maxSize) {
+			const oldest = this.values.keys().next().value;
+			if (oldest === undefined) break;
+			this.values.delete(oldest);
+		}
+	}
+
+	get size(): number {
+		return this.values.size;
+	}
+
+	clear(): void {
+		this.values.clear();
+	}
 }
 
 export function pickDelimiter(path: string, index: number, content: string): string {
-	const lineSet = buildLineSet(content);
 	const word = DELIMITER_WORDS[index - 1] ?? `FILE${index}`;
 	const hash = createPathHash(path);
 	const base = `${word}_${index}_${hash}`;
 
-	if (!lineSet.has(base)) {
+	if (!content.includes(base)) {
 		return base;
 	}
 
-	for (let attempt = 1; attempt <= 256; attempt++) {
+	for (let attempt = 1; attempt <= 32; attempt++) {
 		const candidate = `${base}_${attempt}`;
-		if (!lineSet.has(candidate)) {
+		if (!content.includes(candidate)) {
 			return candidate;
 		}
 	}
 
-	// Safety fallback: keep deriving deterministic candidates until one is guaranteed free.
-	const fallbackBase = `${base}_${content.length.toString(36).toUpperCase()}`;
-	if (!lineSet.has(fallbackBase)) {
-		return fallbackBase;
-	}
-
-	for (let suffix = 1; suffix <= 10_000; suffix++) {
-		const candidate = `${fallbackBase}_${suffix}`;
-		if (!lineSet.has(candidate)) {
-			return candidate;
-		}
-	}
-
-	throw new Error(
-		`pickDelimiter: could not find a unique delimiter for "${path}" after exhaustive search. ` +
-		"File content contains an unusual density of delimiter-like strings.",
-	);
+	// Safety fallback: if 32 deterministic attempts fail, jump to a high-entropy random string
+	// to prevent worst-case exhaustive loops.
+	const randomSuffix = Math.random().toString(36).slice(2, 10).toUpperCase();
+	return `${base}_${randomSuffix}`;
 }
 
 export function validatePath(path: string): void {

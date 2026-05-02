@@ -6,6 +6,7 @@ import { TagsCache } from "./cache.js";
 import type { Tag } from "./cache.js";
 import { resolveSymbol } from "./symbol-resolver.js";
 import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
+import { LruCache } from "./utils.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -101,12 +102,12 @@ export class ContextGraph {
    * Pre-built symbol index: symbol name → tags across all files.
    * Built lazily by buildContextGraph(). Cleared on forceRefresh.
    */
-  private symbolIndex: Map<string, Tag[]> | null = null;
+  private symbolIndex: LruCache<Tag[]> | null = null;
   /**
    * Pre-built reverse index: file path → tags for that file.
    * Speeds up getSymbolNeighbours without rescanning.
    */
-  private fileIndex: Map<string, Tag[]> | null = null;
+  private fileIndex: LruCache<Tag[]> | null = null;
   /**
    * Pre-built call graph. Built lazily if includeCalls is true.
    */
@@ -124,15 +125,16 @@ export class ContextGraph {
    */
   async buildContextGraph(options: ContextGraphOptions = {}): Promise<void> {
     await initParser();
+    await this.tagsCache.init();
 
     if (options.forceRefresh) {
       this.symbolIndex = null;
       this.fileIndex = null;
       this.callGraph = null;
-      this.tagsCache.clearDiskCache();
+      await this.tagsCache.clearDiskCache();
     }
 
-    const allFiles = findSrcFiles(this.root);
+    const allFiles = await findSrcFiles(this.root);
     
     if (options.includeCalls && this.callGraph === null && allFiles.length > 0) {
       this.callGraph = await buildCallGraph(allFiles);
@@ -141,8 +143,8 @@ export class ContextGraph {
     if (this.symbolIndex !== null) return; // already built
 
     if (allFiles.length === 0) {
-      this.symbolIndex = new Map();
-      this.fileIndex = new Map();
+      this.symbolIndex = new LruCache(1);
+      this.fileIndex = new LruCache(1);
       return;
     }
 
@@ -158,9 +160,9 @@ export class ContextGraph {
       20,
     );
 
-    // Build symbol → tags index
-    const index = new Map<string, Tag[]>();
-    const fileIdx = new Map<string, Tag[]>();
+    // Build symbol → tags index with memory caps
+    const index = new LruCache<Tag[]>(50_000);
+    const fileIdx = new LruCache<Tag[]>(10_000);
     for (const tag of allTags) {
       // Symbol index
       let list = index.get(tag.name);
@@ -186,14 +188,14 @@ export class ContextGraph {
   /**
    * Returns the pre-built symbol index, or null if not yet built.
    */
-  private getSymbolIndex(): Map<string, Tag[]> | null {
+  private getSymbolIndex(): LruCache<Tag[]> | null {
     return this.symbolIndex;
   }
 
   /**
    * Returns the pre-built file tag index, or null if not yet built.
    */
-  private getFileIndex(): Map<string, Tag[]> | null {
+  private getFileIndex(): LruCache<Tag[]> | null {
     return this.fileIndex;
   }
 
@@ -302,7 +304,7 @@ export class ContextGraph {
       }
     } catch {
       // Fall back to raw tag-based lookup
-      const allFiles = findSrcFiles(this.root);
+      const allFiles = await findSrcFiles(this.root);
       const fileObjects = allFiles.map(f => ({ fname: f, relFname: relative(this.root, f) }));
       const tags = await getTagsBatch(fileObjects, this.tagsCache, options.forceRefresh ?? false);
 
@@ -448,7 +450,7 @@ export class ContextGraph {
     const uniqueRefNames = new Set(references.map(tag => tag.name));
 
     if (uniqueRefNames.size > 0) {
-      const allFiles = findSrcFiles(this.root);
+      const allFiles = await findSrcFiles(this.root);
       const fileObjects = allFiles.map(f => ({ fname: f, relFname: relative(this.root, f) }));
       const allTags = await getTagsBatch(fileObjects, this.tagsCache, options.forceRefresh ?? false);
 

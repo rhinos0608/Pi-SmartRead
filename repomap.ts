@@ -26,7 +26,7 @@
  * - Error recovery (RecursionError, parse failures, file-not-found)
  */
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { promises as fs } from "node:fs";
 import type { Tag } from "./cache.js";
 import { TagsCache } from "./cache.js";
 import { findSrcFiles } from "./file-discovery.js";
@@ -179,7 +179,7 @@ function sortSearchResults(results: SearchResult[]): SearchResult[] {
   });
 }
 
-function searchIdentifiersByText(
+async function searchIdentifiersByText(
   root: string,
   files: string[],
   query: string,
@@ -189,7 +189,7 @@ function searchIdentifiersByText(
     includeReferences: boolean;
   },
   signal?: AbortSignal,
-): SearchResult[] {
+): Promise<SearchResult[]> {
   const queryLower = query.toLowerCase();
   const results: SearchResult[] = [];
 
@@ -198,7 +198,7 @@ function searchIdentifiersByText(
 
     let code: string;
     try {
-      code = readFileSync(fname, "utf-8");
+      code = await fs.readFile(fname, "utf-8");
     } catch {
       continue;
     }
@@ -214,7 +214,7 @@ function searchIdentifiersByText(
       if (match.kind === "ref" && !options.includeReferences) continue;
 
       const lineNumber = i + 1;
-      const context = renderTreeContext(code, [lineNumber], {
+      const context = await renderTreeContext(code, [lineNumber], {
         lineNumbers: true,
         loiPad: 2,
       }, fname);
@@ -331,7 +331,7 @@ export interface TsAliasMap {
  * Parse tsconfig.json (or jsconfig.json) to extract compilerOptions.paths.
  * Returns a map of alias prefixes to directory targets.
  */
-export function parseTsconfigPaths(root: string): TsAliasMap | null {
+export async function parseTsconfigPaths(root: string): Promise<TsAliasMap | null> {
   const prefixes = new Map<string, string>();
 
   const configNames = ["tsconfig.json", "jsconfig.json"];
@@ -339,7 +339,7 @@ export function parseTsconfigPaths(root: string): TsAliasMap | null {
     const configPath = path.join(root, name);
     let raw: string;
     try {
-      raw = readFileSync(configPath, "utf-8");
+      raw = await fs.readFile(configPath, "utf-8");
     } catch {
       continue;
     }
@@ -516,11 +516,11 @@ function extractImports(fname: string, code: string): string[] {
   return imports;
 }
 
-function buildImportGraph(
+async function buildImportGraph(
   allFiles: string[],
   root: string,
   aliases?: TsAliasMap,
-): { inDegrees: Map<string, number>; edges: ImportEdge[] } {
+): Promise<{ inDegrees: Map<string, number>; edges: ImportEdge[] }> {
   const knownRelFiles = new Set(allFiles);
   const inDegrees = new Map<string, number>();
   const edges: ImportEdge[] = [];
@@ -535,7 +535,11 @@ function buildImportGraph(
 
     const absFname = path.resolve(root, relFname);
     let code: string;
-    try { code = readFileSync(absFname, "utf-8"); } catch { continue; }
+    try {
+      code = await fs.readFile(absFname, "utf-8");
+    } catch {
+      continue;
+    }
 
     const importPaths = extractImports(absFname, code);
 
@@ -602,6 +606,7 @@ export class RepoMap {
     options: Partial<RepoMapOptions> = {},
   ): Promise<RepoMapResult> {
     const startTime = Date.now();
+    await this.cache.init();
     const refresh = options.refresh ?? "auto";
     const forceRefresh = options.forceRefresh ?? false;
 
@@ -614,7 +619,7 @@ export class RepoMap {
       }
 
       if (refresh === "files") {
-        const filesSame = this.areFilesSame(options);
+        const filesSame = await this.areFilesSame(options);
         if (filesSame && this.mapCache.has(cacheKey)) {
           return this.mapCache.get(cacheKey)!;
         }
@@ -708,7 +713,7 @@ export class RepoMap {
     const progress = options.progress;
 
     // Discover files
-    const allSrcFiles = findSrcFiles(this.root);
+    const allSrcFiles = await findSrcFiles(this.root);
     const fileSet = new Set([...focusFiles, ...additionalFiles, ...allSrcFiles]);
     const allFiles = Array.from(fileSet);
 
@@ -806,12 +811,12 @@ export class RepoMap {
         rankedTags = rankedTags.filter((rt) => rt.rank > 0);
       }
 
-      const { map, tokenCount } = this.buildMap(
+      const { map, tokenCount } = await this.buildMap(
         rankedTags, focusFiles, allFiles, maxTokens, compact,
       );
 
       // Prepend special files
-      const finalMap = this.prependSpecialFiles(map, allFiles);
+      const finalMap = await this.prependSpecialFiles(map, allFiles);
 
       const stats: RepoMapStats = {
         totalFiles: allFiles.length,
@@ -831,8 +836,8 @@ export class RepoMap {
     // ── Import-based fallback path ──
     progress?.("Building import graph...");
     const allRelFiles = allFiles.map((f) => path.relative(this.root, f));
-    const tsAliases = parseTsconfigPaths(this.root) ?? undefined;
-    const { inDegrees, edges } = buildImportGraph(allRelFiles, this.root, tsAliases);
+    const tsAliases = await parseTsconfigPaths(this.root) ?? undefined;
+    const { inDegrees, edges } = await buildImportGraph(allRelFiles, this.root, tsAliases);
     importEdges = edges.length;
 
     rankedTags = this.getImportRankedTags(
@@ -846,11 +851,11 @@ export class RepoMap {
       rankedTags = rankedTags.filter((rt) => rt.rank > 0);
     }
 
-    const { map, tokenCount } = this.buildMap(
+    const { map, tokenCount } = await this.buildMap(
       rankedTags, focusFiles, allFiles, maxTokens, compact,
     );
 
-    const finalMap = this.prependSpecialFiles(map, allFiles);
+    const finalMap = await this.prependSpecialFiles(map, allFiles);
 
     const stats: RepoMapStats = {
       totalFiles: allFiles.length,
@@ -871,24 +876,26 @@ export class RepoMap {
    * Prepends special/important config files (Dockerfile, package.json, etc.)
    * to the repo map output. Matches Aider's filter_important_files behavior.
    */
-  private prependSpecialFiles(map: string, allFiles: string[]): string {
+  private async prependSpecialFiles(map: string, allFiles: string[]): Promise<string> {
     const absRoot = this.root;
     const allRelFiles = allFiles.map((f) => path.relative(absRoot, f));
     const specialFiles = allRelFiles.filter((f) => isImportantFile(f));
 
     if (specialFiles.length === 0) return map;
 
-    const lines = specialFiles.map((f) => {
-      let code = "";
-      try {
-        code = readFileSync(path.resolve(absRoot, f), "utf-8");
-        // Show just the first 3 lines
-        const firstLines = code.split("\n").slice(0, 3).join("\n");
-        return `${f}:\n${firstLines}`;
-      } catch {
-        return `${f}:\n[unreadable]`;
-      }
-    });
+    const lines = await Promise.all(
+      specialFiles.map(async (f) => {
+        let code = "";
+        try {
+          code = await fs.readFile(path.resolve(absRoot, f), "utf-8");
+          // Show just the first 3 lines
+          const firstLines = code.split("\n").slice(0, 3).join("\n");
+          return `${f}:\n${firstLines}`;
+        } catch {
+          return `${f}:\n[unreadable]`;
+        }
+      }),
+    );
 
     const specialSection = lines.join("\n\n") + "\n\n";
 
@@ -917,14 +924,14 @@ export class RepoMap {
   /**
    * Check if the file set is the same as last time (for "files" refresh mode).
    */
-  private areFilesSame(options: Partial<RepoMapOptions>): boolean {
+  private async areFilesSame(options: Partial<RepoMapOptions>): Promise<boolean> {
     if (!this.lastFileSet) return false;
 
     const focusFiles = (options.focusFiles ?? []).map((f) => path.resolve(this.root, f));
     const additionalFiles = (options.additionalFiles ?? []).map((f) => path.resolve(this.root, f));
 
     // Quick check: discover files and compare
-    const allSrcFiles = findSrcFiles(this.root);
+    const allSrcFiles = await findSrcFiles(this.root);
     const fileSet = new Set([...focusFiles, ...additionalFiles, ...allSrcFiles]);
     const relFiles = new Set(Array.from(fileSet).map((f) => path.relative(this.root, f)));
 
@@ -1005,7 +1012,7 @@ export class RepoMap {
     const includeReferences = options.includeReferences ?? true;
     const queryLower = query.toLowerCase();
 
-    const allSrcFiles = findSrcFiles(this.root);
+    const allSrcFiles = await findSrcFiles(this.root);
 
     if (signal?.aborted) {
       return [];
@@ -1082,7 +1089,7 @@ export class RepoMap {
 
     if (useTextFallback) {
       progress?.(`Searching ${allSrcFiles.length} files with text fallback...`);
-      return searchIdentifiersByText(
+      return await searchIdentifiersByText(
         this.root,
         allSrcFiles,
         query,
@@ -1118,8 +1125,8 @@ export class RepoMap {
 
       let context = "";
       try {
-        const code = readFileSync(tag.fname, "utf-8");
-        context = renderTreeContext(code, [tag.line], {
+        const code = await fs.readFile(tag.fname, "utf-8");
+        context = await renderTreeContext(code, [tag.line], {
           lineNumbers: true,
           loiPad: 2,
         }, tag.fname);
@@ -1310,13 +1317,13 @@ export class RepoMap {
 
   // ── Token-budgeted map rendering ────────────────────────────────
 
-  private buildMap(
+  private async buildMap(
     rankedTags: RankedTag[],
     focusFiles: string[],
     _allFiles: string[],
     maxTokens: number,
     compact: boolean,
-  ): { map: string; tokenCount: number } {
+  ): Promise<{ map: string; tokenCount: number }> {
     const focusRelFiles = new Set(focusFiles.map((f) => path.relative(this.root, f)));
 
     let left = 0;
@@ -1327,7 +1334,7 @@ export class RepoMap {
     while (left <= right) {
       const mid = Math.floor((left + right) / 2);
       const subset = rankedTags.slice(0, mid);
-      const output = this.renderTags(subset, focusRelFiles, compact);
+      const output = await this.renderTags(subset, focusRelFiles, compact);
       const tokens = countTokens(output);
 
       if (tokens <= maxTokens) {
@@ -1342,11 +1349,11 @@ export class RepoMap {
     return { map: bestOutput, tokenCount: bestTokens };
   }
 
-  private renderTags(
+  private async renderTags(
     tags: RankedTag[],
     focusRelFiles: Set<string>,
     compact: boolean,
-  ): string {
+  ): Promise<string> {
     const byFile = new Map<string, RankedTag[]>();
     for (const rt of tags) {
       const existing = byFile.get(rt.tag.relFname) ?? [];
@@ -1372,12 +1379,12 @@ export class RepoMap {
 
       let code: string;
       try {
-        code = readFileSync(path.resolve(this.root, relFname), "utf-8");
+        code = await fs.readFile(path.resolve(this.root, relFname), "utf-8");
       } catch {
         continue;
       }
 
-      const rendered = renderTreeContext(code, lois, {
+      const rendered = await renderTreeContext(code, lois, {
         maxLineWidth: 100,
       }, path.resolve(this.root, relFname));
       if (!rendered) continue;

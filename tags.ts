@@ -51,7 +51,7 @@ export async function initParser(): Promise<void> {
   return initPromise;
 }
 
-function loadLanguage(lang: SupportedLanguage): Grammar | null {
+export function loadLanguage(lang: SupportedLanguage): Grammar | null {
   const cached = languageCache.get(lang);
   if (cached) return cached;
 
@@ -286,7 +286,7 @@ export async function getTags(
   forceRefresh: boolean,
 ): Promise<Tag[]> {
   if (cache && !forceRefresh) {
-    const cached = cache.get(fname);
+    const cached = await cache.get(fname);
     if (cached) return cached;
   }
 
@@ -294,7 +294,7 @@ export async function getTags(
   const { tags, parseTimeMs } = result;
 
   if (cache) {
-    cache.set(fname, tags);
+    await cache.set(fname, tags);
     cache.recordParseTime(fname, parseTimeMs);
   }
 

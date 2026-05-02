@@ -10,17 +10,19 @@
  * tree-sitter tag extraction, matching the approach in `getRankedTags`.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionContext,
   ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import { getTagsBatch, initParser } from "./tags.js";
+import Parser, { Query } from "tree-sitter";
+import { getTagsBatch, initParser, loadLanguage } from "./tags.js";
 import { TagsCache } from "./cache.js";
 import { renderTreeContext } from "./tree-context.js";
 import { findSrcFiles } from "./file-discovery.js";
+import { filenameToLang } from "./languages.js";
 
 export interface SymbolResolution {
   symbol: string;
@@ -85,20 +87,62 @@ type SymbolResolutionInput = Static<typeof SymbolResolutionSchema>;
 
 // ── Import specifier extraction ───────────────────────────────────
 
-// Matches: default imports, named imports, namespace imports, side-effect imports, require()
-const IMPORT_RE = /^\s*(?:import\s+(?:type\s+)?(?:\*\s+as\s+\w+\s+from\s+|\{[^}]*\}\s+from\s+|\w+(?:\s*,\s*\{[^}]*\})?\s+from\s+)?["']([^"']+)["']|import\s*\(["']([^"']+)["']\)|(?:const|let|var)\s+[^=]+?=\s*require\(["']([^"']+)["']\))/gm;
 const RESOLUTION_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", "/index.ts", "/index.tsx", "/index.js"];
 
+// Queries for JS/TS import extraction
+const JS_TS_IMPORT_QUERY = `
+(import_statement source: (string) @spec)
+(export_statement source: (string) @spec)
+(call_expression
+  function: [(identifier) @req (#eq? @req "require") (import)]
+  arguments: (arguments (string) @spec))
+`;
+
+const importQueryCache = new Map<string, Query>();
+
 /**
- * Extract all raw import specifiers from a file.
+ * Extract all raw import specifiers from a file using AST parsing where possible.
  */
-function extractImportSpecifiers(code: string): string[] {
-  const specs: string[] = [];
-  for (const match of code.matchAll(IMPORT_RE)) {
-    const spec = match[1] || match[2] || match[3];
-    if (spec && spec.startsWith(".")) specs.push(spec);
+function extractImportSpecifiers(fname: string, code: string): string[] {
+  const lang = filenameToLang(fname);
+  if (!lang) return [];
+
+  const grammar = loadLanguage(lang);
+  if (!grammar || (lang !== "typescript" && lang !== "tsx" && lang !== "javascript")) {
+    // For other languages, we could add more queries, but for now we only target JS/TS
+    // as per RESOLUTION_EXTENSIONS.
+    return [];
   }
-  return specs;
+
+  try {
+    const parser = new Parser();
+    parser.setLanguage(grammar);
+    const tree = parser.parse(code);
+
+    let query = importQueryCache.get(lang);
+    if (!query) {
+      query = new Query(grammar, JS_TS_IMPORT_QUERY);
+      importQueryCache.set(lang, query);
+    }
+
+    const matches = query.matches(tree.rootNode);
+    const specs: string[] = [];
+    for (const match of matches) {
+      for (const capture of match.captures) {
+        if (capture.name === "spec") {
+          // Remove quotes from string literal
+          const text = capture.node.text;
+          const spec = text.slice(1, -1);
+          if (spec && spec.startsWith(".")) {
+            specs.push(spec);
+          }
+        }
+      }
+    }
+    return [...new Set(specs)]; // dedupe
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -158,7 +202,7 @@ export async function resolveSymbol(
   maxResults: number,
 ): Promise<SymbolResolution> {
   const startTime = Date.now();
-  const allSrcFiles = findSrcFiles(root);
+  const allSrcFiles = await findSrcFiles(root);
 
   if (allSrcFiles.length === 0) {
     return {
@@ -175,6 +219,7 @@ export async function resolveSymbol(
   // ── Extract tags ──
   await initParser();
   const cache = new TagsCache(root);
+  await cache.init();
 
   const allTags = await getTagsBatch(
     allSrcFiles.map((f) => ({ fname: f, relFname: relative(root, f) })),
@@ -190,20 +235,20 @@ export async function resolveSymbol(
   const references = new Map<string, { file: string; line: number }[]>();
   const importMap = new Map<string, Set<string>>();
 
-  for (const f of allSrcFiles) {
+  await Promise.all(allSrcFiles.map(async (f) => {
     const relFname = relative(root, f);
     importMap.set(relFname, new Set());
 
     // Extract imports in parallel with tag processing
     try {
-      const code = readFileSync(f, "utf-8");
-      const importSpecs = extractImportSpecifiers(code);
+      const code = await fs.readFile(f, "utf-8");
+      const importSpecs = extractImportSpecifiers(f, code);
       for (const spec of importSpecs) {
         const resolved = canResolveImport(root, dirname(f), spec);
         if (resolved) importMap.get(relFname)!.add(resolved);
       }
     } catch { /* ignore */ }
-  }
+  }));
 
   for (const tag of allTags) {
     if (tag.kind === "def") {
@@ -266,8 +311,8 @@ export async function resolveSymbol(
       .map(async (d) => {
         let context: string | undefined;
         try {
-          const code = readFileSync(resolve(root, d.file), "utf-8");
-          context = renderTreeContext(code, [d.line], { lineNumbers: true, loiPad: 2 }, resolve(root, d.file));
+          const code = await fs.readFile(resolve(root, d.file), "utf-8");
+          context = await renderTreeContext(code, [d.line], { lineNumbers: true, loiPad: 2 }, resolve(root, d.file));
         } catch { /* omit */ }
         return { ...d, context };
       }),
@@ -277,8 +322,8 @@ export async function resolveSymbol(
     refs.slice(0, maxResults).map(async (r) => {
       let context: string | undefined;
       try {
-        const code = readFileSync(resolve(root, r.file), "utf-8");
-        context = renderTreeContext(code, [r.line], { lineNumbers: true, loiPad: 2 }, resolve(root, r.file));
+        const code = await fs.readFile(resolve(root, r.file), "utf-8");
+        context = await renderTreeContext(code, [r.line], { lineNumbers: true, loiPad: 2 }, resolve(root, r.file));
       } catch { /* omit */ }
       return { ...r, context };
     }),

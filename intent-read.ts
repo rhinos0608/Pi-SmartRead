@@ -22,6 +22,7 @@ import {
   formatContentBlock,
   measureText,
   validatePath,
+  LruCache,
 } from "./utils.js";
 import { probeQuery, type ProbeResult } from "./query-probe.js";
 import { rerank, type RerankerInput } from "./rerank.js";
@@ -52,36 +53,6 @@ type EmbeddingStatus = "ok" | "failed_fallback_bm25";
 const INTENT_READ_CACHE_SIZE = 64;
 const MIN_RELEVANCE_SCORE = 0.05;
 const MAX_INTENT_READ_FILES = 20;
-
-class LruCache<T> {
-  private values = new Map<string, T>();
-
-  constructor(readonly maxSize: number) {}
-
-  get(key: string): T | undefined {
-    const value = this.values.get(key);
-    if (value === undefined) return undefined;
-    this.values.delete(key);
-    this.values.set(key, value);
-    return value;
-  }
-
-  set(key: string, value: T): void {
-    if (this.values.has(key)) {
-      this.values.delete(key);
-    }
-    this.values.set(key, value);
-    while (this.values.size > this.maxSize) {
-      const oldest = this.values.keys().next().value;
-      if (oldest === undefined) break;
-      this.values.delete(oldest);
-    }
-  }
-
-  get size(): number {
-    return this.values.size;
-  }
-}
 
 const contextGraphCache = new LruCache<ContextGraph>(10);
 

@@ -10,14 +10,7 @@
  *  - Corruption recovery: re-parses on JSON parse failure, tracks corruption count
  *  - Disk cache clearing on version mismatch
  */
-import {
-  existsSync,
-  statSync,
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  rmSync,
-} from "node:fs";
+import { promises as fs, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -77,7 +70,8 @@ export class TagsCache {
     this.trackDependencies = options.trackDependencies ?? false;
 
     if (!options.noDiskCache) {
-      this.initFilePersistence();
+      // We can't await in constructor, so we provide an init method
+      // or handle it lazily. Here we use an async init.
     }
   }
 
@@ -85,11 +79,11 @@ export class TagsCache {
    * Initialize disk persistence.
    * Checks CACHE_VERSION and clears if mismatch.
    */
-  private initFilePersistence(): void {
+  async init(): Promise<void> {
     try {
       if (!existsSync(this.cacheDir)) {
-        mkdirSync(this.cacheDir, { recursive: true });
-        this.writeVersionFile();
+        await fs.mkdir(this.cacheDir, { recursive: true });
+        await this.writeVersionFile();
         this.useFilePersistence = true;
         return;
       }
@@ -98,32 +92,32 @@ export class TagsCache {
       const versionFile = join(this.cacheDir, VERSION_FILENAME);
       if (existsSync(versionFile)) {
         try {
-          const raw = readFileSync(versionFile, "utf-8");
+          const raw = await fs.readFile(versionFile, "utf-8");
           const ver = JSON.parse(raw);
           if (ver.version !== CACHE_VERSION) {
             // Version mismatch — wipe and recreate
-            this.clearDiskCache();
+            await this.clearDiskCache();
           }
         } catch {
           // Corrupted version file — wipe
-          this.clearDiskCache();
+          await this.clearDiskCache();
         }
       } else {
         // No version file (old format) — wipe and recreate
-        this.clearDiskCache();
+        await this.clearDiskCache();
       }
 
-      this.writeVersionFile();
+      await this.writeVersionFile();
       this.useFilePersistence = true;
     } catch {
       this.useFilePersistence = false;
     }
   }
 
-  private writeVersionFile(): void {
+  private async writeVersionFile(): Promise<void> {
     try {
       const versionFile = join(this.cacheDir, VERSION_FILENAME);
-      writeFileSync(
+      await fs.writeFile(
         versionFile,
         JSON.stringify({ version: CACHE_VERSION }),
         "utf-8",
@@ -138,9 +132,10 @@ export class TagsCache {
     return join(this.cacheDir, `${hash}.json`);
   }
 
-  private getMtime(fname: string): number | null {
+  private async getMtime(fname: string): Promise<number | null> {
     try {
-      return statSync(fname).mtimeMs;
+      const stat = await fs.stat(fname);
+      return stat.mtimeMs;
     } catch {
       return null;
     }
@@ -150,8 +145,8 @@ export class TagsCache {
    * Get tags for a file from cache.
    * Returns null on cache miss, mtime mismatch, or corrupted entry.
    */
-  get(fname: string): Tag[] | null {
-    const mtime = this.getMtime(fname);
+  async get(fname: string): Promise<Tag[] | null> {
+    const mtime = await this.getMtime(fname);
     if (mtime === null) return null;
 
     // Check memory cache first
@@ -165,7 +160,7 @@ export class TagsCache {
       try {
         const filePath = this.getFilePath(fname);
         if (existsSync(filePath)) {
-          const raw = readFileSync(filePath, "utf-8");
+          const raw = await fs.readFile(filePath, "utf-8");
           const entry = JSON.parse(raw) as CacheEntry;
           if (
             entry &&
@@ -186,8 +181,8 @@ export class TagsCache {
           console.error(
             `[TagsCache] ${this.corruptionCount} corrupted entries — clearing disk cache`,
           );
-          this.clearDiskCache();
-          this.writeVersionFile();
+          await this.clearDiskCache();
+          await this.writeVersionFile();
         }
       }
     }
@@ -199,8 +194,8 @@ export class TagsCache {
    * Store tags for a file in cache.
    * Failure to write to disk is non-fatal — memory cache is sufficient fallback.
    */
-  set(fname: string, tags: Tag[]): void {
-    const mtime = this.getMtime(fname);
+  async set(fname: string, tags: Tag[]): Promise<void> {
+    const mtime = await this.getMtime(fname);
     if (mtime === null) return;
 
     const entry: CacheEntry = { mtime, tags };
@@ -209,7 +204,7 @@ export class TagsCache {
     if (this.useFilePersistence) {
       try {
         const filePath = this.getFilePath(fname);
-        writeFileSync(filePath, JSON.stringify(entry), "utf-8");
+        await fs.writeFile(filePath, JSON.stringify(entry), "utf-8");
       } catch {
         // Write failed — memory cache is sufficient fallback
       }
@@ -224,12 +219,12 @@ export class TagsCache {
   /**
    * Wipe disk cache directory entirely and re-create it empty.
    */
-  clearDiskCache(): void {
+  async clearDiskCache(): Promise<void> {
     try {
       if (existsSync(this.cacheDir)) {
-        rmSync(this.cacheDir, { recursive: true, force: true });
+        await fs.rm(this.cacheDir, { recursive: true, force: true });
       }
-      mkdirSync(this.cacheDir, { recursive: true });
+      await fs.mkdir(this.cacheDir, { recursive: true });
       this.memoryCache.clear();
       this.corruptionCount = 0;
     } catch {
@@ -240,11 +235,11 @@ export class TagsCache {
   /**
    * Recover from corruption: resets corruption count and optionally clears disk cache.
    */
-  recover(clearDisk = false): void {
+  async recover(clearDisk = false): Promise<void> {
     this.corruptionCount = 0;
     if (clearDisk && this.useFilePersistence) {
-      this.clearDiskCache();
-      this.writeVersionFile();
+      await this.clearDiskCache();
+      await this.writeVersionFile();
     }
   }
 
@@ -267,17 +262,17 @@ export class TagsCache {
    * Warm the cache by pre-loading entries from disk for known files.
    * Useful during initial scan to detect cache hits without checking each file.
    */
-  warm(fnames: string[]): void {
+  async warm(fnames: string[]): Promise<void> {
     if (!this.useFilePersistence) return;
 
     try {
       for (const fname of fnames) {
-        const mtime = this.getMtime(fname);
+        const mtime = await this.getMtime(fname);
         if (mtime === null) continue;
 
         const filePath = this.getFilePath(fname);
         try {
-          const raw = readFileSync(filePath, "utf-8");
+          const raw = await fs.readFile(filePath, "utf-8");
           const entry = JSON.parse(raw) as CacheEntry;
           if (
             entry &&
@@ -349,7 +344,7 @@ export class TagsCache {
    * Invalidate a file's cached tags and all its dependents.
    * Returns the set of invalidated files for caller awareness.
    */
-  invalidateFile(fname: string, invalidated = new Set<string>()): Set<string> {
+  async invalidateFile(fname: string, invalidated = new Set<string>()): Promise<Set<string>> {
     // Guard against cycles
     if (invalidated.has(fname)) return invalidated;
     invalidated.add(fname);
@@ -362,7 +357,7 @@ export class TagsCache {
       try {
         const filePath = this.getFilePath(fname);
         if (existsSync(filePath)) {
-          rmSync(filePath);
+          await fs.rm(filePath);
         }
       } catch {
         // Non-fatal
@@ -374,7 +369,7 @@ export class TagsCache {
       const deps = this.dependents.get(fname);
       if (deps) {
         for (const dependent of deps) {
-          this.invalidateFile(dependent, invalidated);
+          await this.invalidateFile(dependent, invalidated);
         }
         this.dependents.delete(fname);
       }

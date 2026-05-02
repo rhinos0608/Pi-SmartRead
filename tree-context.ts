@@ -12,7 +12,7 @@
  * - Line truncation at 100 chars to avoid minified code bloat
  */
 
-import { statSync } from "node:fs";
+import { promises as fs } from "node:fs";
 
 export interface TreeContextOptions {
   /** Show line numbers in output (default: false) */
@@ -70,9 +70,10 @@ function evictOldestIfNeeded(): void {
 /**
  * Get file mtime for cache invalidation.
  */
-function getMtime(fname: string): number {
+async function getMtime(fname: string): Promise<number> {
   try {
-    return statSync(fname).mtimeMs;
+    const stat = await fs.stat(fname);
+    return stat.mtimeMs;
   } catch {
     return Date.now();
   }
@@ -151,12 +152,12 @@ function getParentContext(
  * @param options - Rendering options
  * @returns Rendered string with context lines
  */
-export function renderTreeContext(
+export async function renderTreeContext(
   code: string,
   linesOfInterest: number[],
   options: TreeContextOptions = {},
   fname?: string,
-): string {
+): Promise<string> {
   const {
     lineNumbers = false,
     loiPad = 0,
@@ -176,7 +177,7 @@ export function renderTreeContext(
   let cacheEntry: TreeContextCacheEntry | undefined;
 
   if (fname) {
-    const mtime = getMtime(fname);
+    const mtime = await getMtime(fname);
     const cached = treeContextCache.get(fname);
     if (cached && cached.mtime === mtime) {
       indentLevels = cached.indentLevels;

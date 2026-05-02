@@ -238,7 +238,7 @@ function createSearchSymbolsTool(): ToolDefinition {
 
       if (results.length === 0) {
         // Provide diagnostic info so the user can understand why nothing matched
-        const allFiles = findSrcFiles(cwd);
+        const allFiles = await findSrcFiles(cwd);
         return {
           content: [
             {
@@ -320,7 +320,7 @@ function createFindCallersTool(): ToolDefinition {
 
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      const allFiles = findSrcFiles(cwd, 10_000, signal);
+      const allFiles = await findSrcFiles(cwd, 10_000, signal);
 
       const callers = await findCallers(allFiles, params.function, signal);
 

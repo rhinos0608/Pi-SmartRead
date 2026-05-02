@@ -3,7 +3,7 @@
  * filtering by supported extensions for tree-sitter analysis,
  * and respecting .gitignore patterns.
  */
-import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
+import { promises as fs, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { isSupportedFile, getSupportedExtensions } from "./languages.js";
 
@@ -164,10 +164,10 @@ function parseGitignoreLine(line: string): GitignoreRule | null {
  * Parent rules are loaded first (prepended) so child rules take precedence
  * (last-match-wins semantics). Stops at the repository root (.git directory).
  */
-function loadGitignoreRules(
+async function loadGitignoreRules(
   dir: string,
   gitignoreCache: Map<string, GitignoreRule[]>,
-): GitignoreRule[] {
+): Promise<GitignoreRule[]> {
   const cached = gitignoreCache.get(dir);
   if (cached !== undefined) return cached;
 
@@ -179,7 +179,7 @@ function loadGitignoreRules(
     if (existsSync(join(parent, ".git"))) {
       parentRules = [];
     } else {
-      parentRules = loadGitignoreRules(parent, gitignoreCache);
+      parentRules = await loadGitignoreRules(parent, gitignoreCache);
     }
   }
 
@@ -187,16 +187,17 @@ function loadGitignoreRules(
 
   // Collect .gitignore rules from this directory
   const gitignorePath = join(dir, ".gitignore");
-  if (existsSync(gitignorePath)) {
-    try {
-      const content = readFileSync(gitignorePath, "utf-8");
+  try {
+    const stat = await fs.stat(gitignorePath);
+    if (stat.isFile()) {
+      const content = await fs.readFile(gitignorePath, "utf-8");
       for (const line of content.split("\n")) {
         const rule = parseGitignoreLine(line);
         if (rule) rules.push(rule);
       }
-    } catch {
-      // Can't read .gitignore — skip
     }
+  } catch {
+    // Can't read .gitignore or doesn't exist — skip
   }
 
   gitignoreCache.set(dir, rules);
@@ -226,121 +227,117 @@ function isGitignored(
 
 // ── Public API ────────────────────────────────────────────────────
 
-export function findSrcFiles(
+export async function findSrcFiles(
   rootDir: string,
   maxFiles = 10_000,
   signal?: AbortSignal,
-): string[] {
+): Promise<string[]> {
   const results: string[] = [];
   const gitignoreCache = new Map<string, GitignoreRule[]>();
   const resolvedRoot = resolve(rootDir);
 
-  function walk(dir: string): void {
+  async function walk(dir: string): Promise<void> {
     if (signal?.aborted || results.length >= maxFiles) return;
 
-    let entries: string[];
+    let dirHandle: Awaited<ReturnType<typeof fs.opendir>>;
     try {
-      entries = readdirSync(dir);
+      dirHandle = await fs.opendir(dir);
     } catch {
       return;
     }
 
     // Load .gitignore rules for this directory
-    const gitignoreRules = loadGitignoreRules(dir, gitignoreCache);
+    const gitignoreRules = await loadGitignoreRules(dir, gitignoreCache);
 
-    for (const entry of entries) {
-      if (signal?.aborted || results.length >= maxFiles) return;
+    try {
+      for await (const entry of dirHandle) {
+        if (signal?.aborted || results.length >= maxFiles) return;
 
-      const fullPath = join(dir, entry);
-      let stat: ReturnType<typeof statSync>;
-      try {
-        stat = statSync(fullPath);
-      } catch {
-        continue;
+        const fullPath = join(dir, entry.name);
+        const relPath = relative(resolvedRoot, fullPath);
+        const isDir = entry.isDirectory();
+
+        if (isDir) {
+          if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+          if (gitignoreRules.length > 0 && isGitignored(relPath, true, gitignoreRules)) continue;
+          await walk(fullPath);
+        } else if (entry.isFile() && isSupportedFile(fullPath)) {
+          // Check gitignore
+          if (gitignoreRules.length > 0 && isGitignored(relPath, false, gitignoreRules)) continue;
+          results.push(fullPath);
+        }
       }
-
-      const relPath = relative(resolvedRoot, fullPath);
-      const isDir = stat.isDirectory();
-
-      if (isDir) {
-        if (IGNORE_DIRS.has(entry) || entry.startsWith(".")) continue;
-        if (gitignoreRules.length > 0 && isGitignored(relPath, true, gitignoreRules)) continue;
-        walk(fullPath);
-      } else if (stat.isFile() && isSupportedFile(fullPath)) {
-        // Check gitignore
-        if (gitignoreRules.length > 0 && isGitignored(relPath, false, gitignoreRules)) continue;
-        results.push(fullPath);
-      }
+    } catch {
+      // Ignore errors during iteration
+    } finally {
+      // dirHandle is closed automatically by for-await loop
     }
   }
 
-  walk(resolvedRoot);
+  await walk(resolvedRoot);
   return results;
 }
 
 /**
  * Find only source files with names matching identifiers (used for focused scans).
  */
-export function findFilesMatching(
+export async function findFilesMatching(
   rootDir: string,
   identifiers: Set<string>,
   maxFiles = 500,
-): string[] {
+): Promise<string[]> {
   const results: string[] = [];
   const supportedExts = getSupportedExtensions();
   const gitignoreCache = new Map<string, GitignoreRule[]>();
   const resolvedRoot = resolve(rootDir);
 
-  function walk(dir: string): void {
+  async function walk(dir: string): Promise<void> {
     if (results.length >= maxFiles) return;
 
-    let entries: string[];
+    let dirHandle: Awaited<ReturnType<typeof fs.opendir>>;
     try {
-      entries = readdirSync(dir);
+      dirHandle = await fs.opendir(dir);
     } catch {
       return;
     }
 
-    const gitignoreRules = loadGitignoreRules(dir, gitignoreCache);
+    const gitignoreRules = await loadGitignoreRules(dir, gitignoreCache);
 
-    for (const entry of entries) {
-      if (results.length >= maxFiles) return;
+    try {
+      for await (const entry of dirHandle) {
+        if (results.length >= maxFiles) return;
 
-      const fullPath = join(dir, entry);
-      let stat: ReturnType<typeof statSync>;
-      try {
-        stat = statSync(fullPath);
-      } catch {
-        continue;
-      }
+        const fullPath = join(dir, entry.name);
+        const relPath = relative(resolvedRoot, fullPath);
+        const isDir = entry.isDirectory();
 
-      const relPath = relative(resolvedRoot, fullPath);
-      const isDir = stat.isDirectory();
+        if (isDir) {
+          if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+          if (gitignoreRules.length > 0 && isGitignored(relPath, true, gitignoreRules)) continue;
+          await walk(fullPath);
+        } else if (entry.isFile()) {
+          if (gitignoreRules.length > 0 && isGitignored(relPath, false, gitignoreRules)) continue;
 
-      if (isDir) {
-        if (IGNORE_DIRS.has(entry) || entry.startsWith(".")) continue;
-        if (gitignoreRules.length > 0 && isGitignored(relPath, true, gitignoreRules)) continue;
-        walk(fullPath);
-      } else if (stat.isFile()) {
-        if (gitignoreRules.length > 0 && isGitignored(relPath, false, gitignoreRules)) continue;
+          const extIdx = entry.name.lastIndexOf(".");
+          if (extIdx === -1) continue;
+          const ext = entry.name.slice(extIdx);
+          if (!supportedExts.includes(ext)) continue;
 
-        const extIdx = entry.lastIndexOf(".");
-        if (extIdx === -1) continue;
-        const ext = entry.slice(extIdx);
-        if (!supportedExts.includes(ext)) continue;
-
-        // Check if any path component matches an identifier
-        const basename = entry.slice(0, extIdx);
-        for (const ident of identifiers) {
-          if (basename.includes(ident) || fullPath.includes(ident)) {
-            results.push(fullPath);
-            break;
+          // Check if any path component matches an identifier
+          const basename = entry.name.slice(0, extIdx);
+          for (const ident of identifiers) {
+            if (basename.includes(ident) || fullPath.includes(ident)) {
+              results.push(fullPath);
+              break;
+            }
           }
         }
       }
+    } catch {
+      // Ignore errors during iteration
     }
   }
 
-  walk(resolvedRoot);
+  await walk(resolvedRoot);
   return results;
 }

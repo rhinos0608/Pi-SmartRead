@@ -11,7 +11,7 @@
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
     "downlevelIteration": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["node"]
   },
   "include": [
     "index.ts", "read-many.ts", "utils.ts", "config.ts",

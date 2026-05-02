@@ -387,3 +387,4 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 ## License
 
 MIT © 2026 Gurpartap Singh
+MIT © 2026 Rhine Sharar
