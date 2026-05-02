@@ -134,7 +134,4 @@ export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig {
   };
 }
 
-/** @deprecated No-op — config is always freshly resolved per invocation. */
-export function resetConfigCache(): void {
-  // No-op: cache was removed in favor of per-call resolution
-}
+

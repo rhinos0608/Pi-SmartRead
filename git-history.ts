@@ -99,6 +99,8 @@ export async function getCoCommittedFiles(
   }
 }
 
+const recentFilesCache = new Map<string, { timestamp: number; files: Set<string> }>();
+
 /**
  * Determines if a file has been modified within a certain time window (e.g., '7.days.ago').
  * Useful for boosting recently active files in retrieval.
@@ -107,17 +109,28 @@ export async function isRecentlyModified(cwd: string, targetPath: string, since 
   const gitRoot = await findGitRoot(cwd);
   if (!gitRoot) return false;
 
+  const cacheKey = `${gitRoot}:${since}`;
+  const now = Date.now();
+  let cacheEntry = recentFilesCache.get(cacheKey);
+
+  if (!cacheEntry || now - cacheEntry.timestamp > 5 * 60 * 1000) {
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["log", `--since=${since}`, "--name-only", "--pretty=format:"],
+        { cwd: gitRoot, encoding: "utf-8" }
+      );
+      const files = new Set(stdout.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0));
+      cacheEntry = { timestamp: now, files };
+      recentFilesCache.set(cacheKey, cacheEntry);
+    } catch {
+      cacheEntry = { timestamp: now, files: new Set() };
+      recentFilesCache.set(cacheKey, cacheEntry);
+    }
+  }
+
   const fullPath = isAbsolute(targetPath) ? targetPath : resolve(cwd, targetPath);
   const relTarget = relative(gitRoot, fullPath);
 
-  try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["log", "-1", `--since=${since}`, "--format=%H", "--", relTarget],
-      { cwd: gitRoot, encoding: "utf-8" }
-    );
-    return stdout.trim().length > 0;
-  } catch {
-    return false;
-  }
+  return cacheEntry.files.has(relTarget);
 }

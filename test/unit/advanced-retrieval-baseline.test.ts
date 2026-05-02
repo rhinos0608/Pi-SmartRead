@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { createIntentReadTool } from "../../intent-read.js";
 import { SCENARIOS, createRetrievalFixture, cleanupFixture, RetrievalFixture } from "../helpers/retrieval-fixtures.js";
 import type { EmbedRequest, EmbedResult } from "../../embedding.js";
-import { resetConfigCache } from "../../config.js";
+
 
 // Stub fetchEmbeddings: returns unit vectors based on keywords to simulate perfect semantic match
 async function mockFetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
@@ -25,7 +25,6 @@ describe("Advanced Retrieval Baseline (Phase 0)", () => {
   let fixture: RetrievalFixture;
 
   beforeEach(() => {
-    resetConfigCache();
     process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
     process.env.PI_SMARTREAD_EMBEDDING_MODEL = "mock-embed";
   });

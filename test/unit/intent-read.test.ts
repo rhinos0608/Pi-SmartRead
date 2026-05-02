@@ -34,13 +34,11 @@ function makeReadTool(map: Record<string, string | Error>) {
 }
 
 beforeEach(() => {
-  resetConfigCache();
   process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
   process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
 });
 
 afterEach(() => {
-  resetConfigCache();
   delete process.env.PI_SMARTREAD_EMBEDDING_BASE_URL;
   delete process.env.PI_SMARTREAD_EMBEDDING_MODEL;
 });
@@ -178,7 +176,6 @@ describe("intent_read: ranking and output", () => {
   });
 
   it("throws before reading when embedding config is missing", async () => {
-    resetConfigCache();
     delete process.env.PI_SMARTREAD_EMBEDDING_BASE_URL;
     delete process.env.PI_SMARTREAD_EMBEDDING_MODEL;
 

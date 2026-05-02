@@ -53,6 +53,8 @@ const INTENT_READ_CACHE_SIZE = 64;
 const MIN_RELEVANCE_SCORE = 0.05;
 const MAX_INTENT_READ_FILES = 20;
 
+const contextGraphCache = new Map<string, ContextGraph>();
+
 class LruCache<T> {
   private values = new Map<string, T>();
 
@@ -249,7 +251,12 @@ export function createIntentReadTool(
       // This pre-builds the symbol → tags index so probing and symbol-neighbour
       // expansion use the fast O(1) lookup path instead of full-repo rescans.
       // Skip for directories that don't look like real projects (e.g. "/" in tests).
-      const sharedGraph = new ContextGraph(ctx.cwd);
+      let sharedGraph = contextGraphCache.get(ctx.cwd);
+      if (!sharedGraph) {
+        sharedGraph = new ContextGraph(ctx.cwd);
+        contextGraphCache.set(ctx.cwd, sharedGraph);
+      }
+      
       const hasProjectMarker =
         existsSync(join(ctx.cwd, ".git")) ||
         existsSync(join(ctx.cwd, "package.json")) ||
@@ -257,7 +264,8 @@ export function createIntentReadTool(
         existsSync(join(ctx.cwd, "pyproject.toml")) ||
         existsSync(join(ctx.cwd, "Cargo.toml")) ||
         existsSync(join(ctx.cwd, "go.mod"));
-      if (hasProjectMarker) {
+      
+      if (hasProjectMarker && embeddingConfig.probeEnabled === true) {
         await sharedGraph.buildContextGraph({ forceRefresh: false, includeSymbols: true });
       }
 
@@ -331,7 +339,7 @@ export function createIntentReadTool(
 
       // 2b: Symbol neighbours (uses pre-built symbol index from shared graph)
       const symbolSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      if (symbolSlots > 0) {
+      if (symbolSlots > 0 && embeddingConfig.probeEnabled === true) {
         const seedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
         for (const seedFile of seedFiles) {
           if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
