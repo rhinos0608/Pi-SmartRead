@@ -472,8 +472,8 @@ describe("intent_read: graph-neighbour augmentation", () => {
         files.push(path);
         readMap[path] = `authentication ${i}`;
       }
-      writeFileSync(files[0], "import './19';\nimport './20';\nimport './21';\nexport const zero = true;\n");
-      for (let i = 1; i < 22; i++) writeFileSync(files[i], `export const value${i} = true;\n`);
+      writeFileSync(files[0]!, "import './19';\nimport './20';\nimport './21';\nexport const zero = true;\n");
+      for (let i = 1; i < 22; i++) writeFileSync(files[i]!, `export const value${i} = true;\n`);
 
       const tool = createIntentReadTool(
         () => makeReadTool(readMap) as any,
@@ -713,7 +713,7 @@ describe("intent_read: Phase 4 filename prefilter in directory mode", () => {
       { cwd: "/" } as any,
     );
 
-    const details = result.details as any;
+    
     // First file in output should be auth.ts (highest path token overlap)
     const text = (result.content[0] as any).text as string;
     const firstFilePos = text.indexOf("@");

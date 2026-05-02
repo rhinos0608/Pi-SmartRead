@@ -285,8 +285,8 @@ describe("hook — repo-map interceptor", () => {
     ]) as { details: Record<string, unknown> }[];
 
     // Both should return intercept responses
-    expect(r1.details?.intercepted).toBe(true);
-    expect(r2.details?.intercepted).toBe(true);
+    expect(r1!.details?.intercepted).toBe(true);
+    expect(r2!.details?.intercepted).toBe(true);
     expect(calls).toBe(0); // Underlying tool never called
   });
 

@@ -11,18 +11,16 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { basename, dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionContext,
   ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import { getTagsBatch, initParser } from "./tags.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { filenameToLang } from "./languages.js";
 import { TagsCache } from "./cache.js";
-import type { Tag } from "./cache.js";
 import { renderTreeContext } from "./tree-context.js";
+import { findSrcFiles } from "./file-discovery.js";
 
 export interface SymbolResolution {
   symbol: string;
@@ -152,7 +150,7 @@ function scoreDefinitionRelevance(
 
 // ── Main resolution function ──────────────────────────────────────
 
-async function resolveSymbol(
+export async function resolveSymbol(
   root: string,
   symbol: string,
   contextFile: string | undefined,
@@ -313,7 +311,7 @@ export function createSymbolResolverTool(): ToolDefinition {
     parameters: SymbolResolutionSchema,
 
     async execute(
-      toolCallId: string,
+      _toolCallId: string,
       params: SymbolResolutionInput,
       signal: AbortSignal | undefined,
       _onUpdate: unknown,

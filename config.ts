@@ -8,6 +8,10 @@ export interface ResolvedEmbeddingConfig {
   chunkSizeChars?: number;
   chunkOverlapChars?: number;
   maxChunksPerFile?: number;
+  /** Enable symbol-based query probing (Phase 3, off by default). */
+  probeEnabled?: boolean;
+  /** Enable structural reranker after RRF (Phase 5, off by default). */
+  rerankEnabled?: boolean;
 }
 
 interface RawConfig {
@@ -17,6 +21,8 @@ interface RawConfig {
   chunkSizeChars?: number;
   chunkOverlapChars?: number;
   maxChunksPerFile?: number;
+  probeEnabled?: boolean;
+  rerankEnabled?: boolean;
 }
 
 const CONFIG_FILENAME = "pi-smartread.config.json";
@@ -28,7 +34,6 @@ const CONFIG_FILENAME = "pi-smartread.config.json";
 function findConfigFile(startDir: string): string | undefined {
   let dir = resolve(startDir);
   // Safety valve: stop at filesystem root
-  const root = dirname(dir); // on Unix this is "/" on the second iteration when dir is "/"
   let prevDir: string | undefined;
 
   for (;;) {
@@ -78,6 +83,8 @@ function loadRaw(cwd?: string): RawConfig {
     maxChunksPerFile:
       fromFile.maxChunksPerFile ??
       (process.env.PI_SMARTREAD_MAX_CHUNKS ? parseInt(process.env.PI_SMARTREAD_MAX_CHUNKS, 10) : undefined),
+    probeEnabled: fromFile.probeEnabled ?? false,
+    rerankEnabled: fromFile.rerankEnabled ?? false,
   };
 }
 
@@ -122,6 +129,8 @@ export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig {
     chunkSizeChars: raw.chunkSizeChars,
     chunkOverlapChars: raw.chunkOverlapChars,
     maxChunksPerFile: raw.maxChunksPerFile,
+    probeEnabled: raw.probeEnabled ?? false,
+    rerankEnabled: raw.rerankEnabled ?? false,
   };
 }
 

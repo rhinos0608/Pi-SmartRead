@@ -4,7 +4,7 @@
 
 (function_declarator declarator: (identifier) @name.definition.function) @definition.function
 
-(function_declarator declarator: (field_identifier) @name.definition.function) @definition.method
+(function_declarator declarator: (field_identifier) @name.definition.method) @definition.method
 
 (function_declarator declarator: (qualified_identifier scope: (type_identifier) @scope name: (identifier) @name.definition.method)) @definition.method
 

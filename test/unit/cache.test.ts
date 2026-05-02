@@ -2,7 +2,7 @@
  * Tests for TagsCache.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TagsCache, type Tag } from "../../cache.js";

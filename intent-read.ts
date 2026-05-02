@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionContext,
@@ -13,12 +13,18 @@ import { PersistentEmbeddingCache } from "./persistent-embedding-cache.js";
 import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
 import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
 import {
+  findDirectImportNeighbours,
+  ContextGraph,
+} from "./context-graph.js";
+import {
   type FileCandidate,
   buildPlan,
   formatContentBlock,
   measureText,
   validatePath,
 } from "./utils.js";
+import { probeQuery, type ProbeResult } from "./query-probe.js";
+import { rerank, type RerankerInput } from "./rerank.js";
 import { chunkText, type ChunkResult } from "./chunking.js";
 
 const IntentReadSchema = Type.Object({
@@ -46,8 +52,6 @@ type EmbeddingStatus = "ok" | "failed_fallback_bm25";
 const INTENT_READ_CACHE_SIZE = 64;
 const MIN_RELEVANCE_SCORE = 0.05;
 const MAX_INTENT_READ_FILES = 20;
-const IMPORT_SPECIFIER_RE = /^\s*(?:import\s+(?:[^"']+?\s+from\s+)?|import\s*\(|(?:const|let|var)\s+[^=]+?=\s*require\(|export\s+[^"']+?\s+from\s+)["']([^"']+)["']/gm;
-const RESOLUTION_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json"];
 
 class LruCache<T> {
   private values = new Map<string, T>();
@@ -100,81 +104,6 @@ function normalizeCandidatePath(cwd: string, path: string): string {
   return isAbsolute(path) ? path : resolve(cwd, path);
 }
 
-function isPathInside(root: string, path: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedPath = resolve(path);
-  const lexicalRel = relative(resolvedRoot, resolvedPath);
-  if (lexicalRel === "" || (!lexicalRel.startsWith("..") && !isAbsolute(lexicalRel))) {
-    return true;
-  }
-
-  try {
-    const realRoot = realpathSync(resolvedRoot);
-    const realRel = relative(realRoot, resolvedPath);
-    return realRel === "" || (!realRel.startsWith("..") && !isAbsolute(realRel));
-  } catch {
-    return false;
-  }
-}
-
-function resolveImportSpecifier(cwd: string, importerPath: string, specifier: string): string | undefined {
-  if (!specifier.startsWith(".")) return undefined;
-
-  const basePath = resolve(dirname(importerPath), specifier);
-  if (!isPathInside(cwd, basePath)) return undefined;
-  for (const ext of RESOLUTION_EXTENSIONS) {
-    const candidate = `${basePath}${ext}`;
-    if (isReadableWorkspaceFile(cwd, candidate)) return candidate;
-  }
-
-  for (const ext of RESOLUTION_EXTENSIONS.slice(1)) {
-    const candidate = join(basePath, `index${ext}`);
-    if (isReadableWorkspaceFile(cwd, candidate)) return candidate;
-  }
-
-  return undefined;
-}
-
-function isReadableWorkspaceFile(cwd: string, path: string): boolean {
-  try {
-    if (!existsSync(path) || !isPathInside(cwd, path)) return false;
-    const realPath = realpathSync(path);
-    return isPathInside(cwd, realPath) && statSync(realPath).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function findDirectImportNeighbours(cwd: string, paths: string[], maxCount: number): string[] {
-  if (maxCount <= 0) return [];
-
-  const basePaths = new Set(paths.map((path) => normalizeCandidatePath(cwd, path)));
-  const neighbours: string[] = [];
-  const seen = new Set<string>(basePaths);
-
-  for (const path of paths) {
-    const importerPath = normalizeCandidatePath(cwd, path);
-    if (!isPathInside(cwd, importerPath)) continue;
-
-    let text: string;
-    try {
-      text = readFileSync(importerPath, "utf-8");
-    } catch {
-      continue;
-    }
-
-    for (const match of text.matchAll(IMPORT_SPECIFIER_RE)) {
-      const resolved = resolveImportSpecifier(cwd, importerPath, match[1]);
-      if (!resolved || seen.has(resolved)) continue;
-      seen.add(resolved);
-      neighbours.push(resolved);
-      if (neighbours.length >= maxCount) return neighbours;
-    }
-  }
-
-  return neighbours;
-}
-
 interface IntentReadFileDetail {
   path: string;
   ok: boolean;
@@ -190,6 +119,10 @@ interface IntentReadFileDetail {
   chunkIndex?: number;
   chunkScore?: number;
   rankedBy: "bm25" | "hybrid";
+  /** Graph distance from seed files (0 = seed, 1 = import, 2 = symbol neighbour). */
+  graphDistance?: number;
+  /** Confidence from query probing (1.0 = direct symbol match). */
+  probeConfidence?: number;
 }
 
 interface IntentReadDetails {
@@ -208,7 +141,7 @@ interface IntentReadDetails {
   chunkingEnabled: boolean;
   embeddingCache: { hit: boolean; size: number; maxSize: number; persistent?: boolean; diskEntries?: number };
   filteredBelowThresholdPaths: string[];
-  graphAugmentation: { addedPaths: string[]; candidateCountBefore: number; candidateCountAfter: number };
+  graphAugmentation: { addedPaths: string[]; candidateCountBefore: number; candidateCountAfter: number; edgesUsed?: Array<{ from: string; to: string; type: string; confidence: number }> };
   chunkInfo?: {
     totalChunks: number;
     filesChunked: number;
@@ -220,6 +153,13 @@ interface IntentReadDetails {
       endChar: number;
       preview: string;
     }[];
+  };
+  probing?: ProbeResult;
+  reranking?: {
+    status: "off" | "ok" | "failed_fallback";
+    changedOrder: boolean;
+    candidateCount: number;
+    strategy: string;
   };
   files: IntentReadFileDetail[];
   packing: {
@@ -261,6 +201,9 @@ export function createIntentReadTool(
       let embeddingError: string | undefined;
       let embeddingCacheHit = false;
 
+      // Phase 5: reranking metadata (populated after RRF, gated behind config)
+      let rerankingResult: { status: "off" | "ok" | "failed_fallback"; changedOrder: boolean; candidateCount: number; strategy: string } | undefined;
+
       // 2. Validate input
       const query = params.query.trim();
       if (!query) throw new Error("query must not be empty or whitespace-only");
@@ -301,14 +244,109 @@ export function createIntentReadTool(
       }
 
       const candidateCountBeforeGraph = resolvedFiles.length;
-      const remainingGraphSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      const graphNeighbourPaths = findDirectImportNeighbours(ctx.cwd, resolvedFiles.map((file) => file.path), remainingGraphSlots);
-      if (graphNeighbourPaths.length > 0) {
-        const existingPaths = new Set(resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)));
-        for (const graphPath of graphNeighbourPaths) {
-          if (existingPaths.has(graphPath) || resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
-          existingPaths.add(graphPath);
-          resolvedFiles.push({ path: graphPath });
+
+      // Build shared ContextGraph with symbol index for all graph-aware phases.
+      // This pre-builds the symbol → tags index so probing and symbol-neighbour
+      // expansion use the fast O(1) lookup path instead of full-repo rescans.
+      // Skip for directories that don't look like real projects (e.g. "/" in tests).
+      const sharedGraph = new ContextGraph(ctx.cwd);
+      const hasProjectMarker =
+        existsSync(join(ctx.cwd, ".git")) ||
+        existsSync(join(ctx.cwd, "package.json")) ||
+        existsSync(join(ctx.cwd, "tsconfig.json")) ||
+        existsSync(join(ctx.cwd, "pyproject.toml")) ||
+        existsSync(join(ctx.cwd, "Cargo.toml")) ||
+        existsSync(join(ctx.cwd, "go.mod"));
+      if (hasProjectMarker) {
+        await sharedGraph.buildContextGraph({ forceRefresh: false, includeSymbols: true });
+      }
+
+      // Tracking sets for structural signals (populated during expansion)
+      const probeAddedSet = new Set<string>();
+      const graphDistanceMap = new Map<string, number>();
+
+      // Phase 3: Probe phase — extract symbols from query, find definition files.
+      // Gated behind config (probeEnabled: true, default off) because probe uses
+      // tree-sitter which is expensive and not needed for simple file-scoped queries.
+      let probing: ProbeResult | undefined;
+      const probeAddedPaths: string[] = [];
+      if (embeddingConfig.probeEnabled === true) {
+        const probeSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+        if (probeSlots > 0) {
+          try {
+            probing = await probeQuery(query, {
+              maxProbeAdded: Math.min(4, probeSlots),
+              graph: sharedGraph,
+            });
+            if (probing.status === "ok" && probing.addedPaths.length > 0) {
+              const probeExisting = new Set(resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)));
+              for (const probePath of probing.addedPaths) {
+                if (probeExisting.has(probePath) || resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
+                probeExisting.add(probePath);
+                resolvedFiles.push({ path: probePath });
+                probeAddedPaths.push(probePath);
+                probeAddedSet.add(normalizeCandidatePath(ctx.cwd, probePath));
+              }
+            }
+          } catch (err) {
+            probing = {
+              status: "failed",
+              strategy: "symbols",
+              inferredSymbols: [],
+              addedPaths: [],
+              warnings: [err instanceof Error ? err.message : String(err)],
+            };
+          }
+        }
+      }
+
+      // Phase 2: Graph neighbour expansion (imports + symbols)
+      const graphEdges: Array<{ from: string; to: string; type: string; confidence: number }> = [];
+      const existingPaths = new Set(resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)));
+
+      // 2a: Import neighbours (fast, regex-based batch scan)
+      const importSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+      const importNeighbourPaths = findDirectImportNeighbours(ctx.cwd, resolvedFiles.map((file) => file.path), importSlots);
+      for (const graphPath of importNeighbourPaths) {
+        if (existingPaths.has(graphPath) || resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
+        existingPaths.add(graphPath);
+        resolvedFiles.push({ path: graphPath });
+        
+        // Find which seed file imported this path (fallback to cwd if not found)
+        const seedFile = resolvedFiles.find(f => {
+          try {
+            const neighbours = findDirectImportNeighbours(ctx.cwd, [f.path], MAX_INTENT_READ_FILES);
+            return neighbours.includes(graphPath);
+          } catch { return false; }
+        });
+        
+        graphEdges.push({ 
+          from: seedFile ? seedFile.path : ctx.cwd, 
+          to: graphPath, 
+          type: "imports", 
+          confidence: 1.0 
+        });
+        graphDistanceMap.set(normalizeCandidatePath(ctx.cwd, graphPath), 1);
+      }
+
+      // 2b: Symbol neighbours (uses pre-built symbol index from shared graph)
+      const symbolSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+      if (symbolSlots > 0) {
+        const seedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
+        for (const seedFile of seedFiles) {
+          if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+          try {
+            const neighbours = await sharedGraph.getFileNeighbours(seedFile.path, { includeSymbols: true });
+            for (const n of neighbours) {
+              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+              const normalized = normalizeCandidatePath(ctx.cwd, n.path);
+              if (existingPaths.has(normalized)) continue;
+              existingPaths.add(normalized);
+              resolvedFiles.push({ path: n.path });
+              graphEdges.push({ from: seedFile.path, to: n.path, type: n.provenance.type, confidence: n.provenance.confidence });
+              graphDistanceMap.set(normalized, 2);
+            }
+          } catch { /* skip individual failures */ }
         }
       }
       const addedGraphPaths = resolvedFiles.slice(candidateCountBeforeGraph).map((file) => file.path);
@@ -321,7 +359,7 @@ export function createIntentReadTool(
       for (let i = 0; i < resolvedFiles.length; i++) {
         if (signal?.aborted) throw new Error("Operation aborted");
 
-        const req = resolvedFiles[i];
+        const req = resolvedFiles[i]!;
         try {
           validatePath(req.path);
           const input: ReadToolInput = { path: req.path, offset: req.offset, limit: req.limit };
@@ -395,7 +433,7 @@ export function createIntentReadTool(
         const keywordScoresArr = bm25Scores(query, bodies);
         const keywordRanks = computeRanks(keywordScoresArr, paths);
 
-        let semanticScores: number[] = [];
+        const semanticScores: number[] = [];
         let semanticRanks: number[] = [];
 
         // Attempt embedding — fall back to BM25-only on failure
@@ -443,24 +481,24 @@ export function createIntentReadTool(
           }
 
           if (vectors.length === allChunkTexts.length + 1) {
-            const queryVec = vectors[0];
+            const queryVec = vectors[0]!;
             const chunkVecs = vectors.slice(1);
 
             // Map chunk vectors back to parent files, taking max similarity
             let chunkIdx = 0;
             for (let fi = 0; fi < fileChunks.length; fi++) {
-              const numChunks = fileChunks[fi].length;
+              const numChunks = fileChunks[fi]!.length;
               totalChunks += numChunks;
               if (numChunks > 0) {
                 filesChunked++;
                 const myChunkVecs = chunkVecs.slice(chunkIdx, chunkIdx + numChunks);
-                const { maxScore, bestChunkIndex } = maxChunkSimilarity(queryVec, myChunkVecs);
+                const { maxScore, bestChunkIndex } = maxChunkSimilarity(queryVec, myChunkVecs!);
                 semanticScores.push(maxScore);
-                const path = successfulFiles[fi].path;
+                const path = successfulFiles[fi]!.path;
                 const fileDetail = fileDetails.get(path)!;
                 fileDetail.chunkIndex = bestChunkIndex;
                 fileDetail.chunkScore = maxScore;
-                const bestChunk = fileChunks[fi][bestChunkIndex];
+                const bestChunk = fileChunks[fi]![bestChunkIndex]!;
                 bestChunkByFile.push({
                   path,
                   chunkIndex: bestChunkIndex,
@@ -499,23 +537,35 @@ export function createIntentReadTool(
         }
 
         for (let i = 0; i < successfulFiles.length; i++) {
-          const base = fileDetails.get(paths[i])!;
-          base.keywordRank = keywordRanks[i];
+          const base = fileDetails.get(paths[i]!)!;
+          base.keywordRank = keywordRanks[i]!;
           base.keywordScore = keywordScoresArr[i];
           base.rrfScore = rrfScores[i];
           if (embeddingStatus === "ok") {
-            base.semanticRank = semanticRanks[i];
-            base.semanticScore = semanticScores[i];
+            base.semanticRank = semanticRanks[i]!;
+            base.semanticScore = semanticScores[i]!;
             base.rankedBy = "hybrid";
           } else {
             base.rankedBy = "bm25" as "bm25";
           }
         }
 
+        // Apply structural signals to file details for reranking and observability
+        for (const path of paths) {
+          const detail = fileDetails.get(path)!;
+          const normalized = normalizeCandidatePath(ctx.cwd, path);
+          if (probeAddedSet.has(normalized)) {
+            detail.probeConfidence = 1.0;
+            detail.graphDistance = 0;
+          } else if (graphDistanceMap.has(normalized)) {
+            detail.graphDistance = graphDistanceMap.get(normalized);
+          }
+        }
+
         const relevantPaths = new Set<string>();
         for (let i = 0; i < successfulFiles.length; i++) {
-          if (isRelevantCandidate(keywordScoresArr[i], semanticScores[i], embeddingStatus)) {
-            relevantPaths.add(paths[i]);
+          if (isRelevantCandidate(keywordScoresArr[i]!, semanticScores[i]!, embeddingStatus)) {
+            relevantPaths.add(paths[i]!);
           }
         }
         filteredBelowThresholdPaths = paths.filter((path) => !relevantPaths.has(path));
@@ -526,6 +576,33 @@ export function createIntentReadTool(
         rankedSuccessOrder = [...paths]
           .filter((path) => relevantPaths.has(path))
           .sort((a, b) => (ranksByPath.get(a) ?? Infinity) - (ranksByPath.get(b) ?? Infinity));
+
+        // Phase 5: optional structural reranker (off by default, gated behind config)
+        if (embeddingConfig.rerankEnabled === true && rankedSuccessOrder.length > 0) {
+          const rerankInputs: RerankerInput[] = rankedSuccessOrder.map((path) => {
+            const detail = fileDetails.get(path)!;
+            return {
+              path,
+              rrfScore: detail.rrfScore ?? 0,
+              keywordScore: detail.keywordScore ?? 0,
+              semanticScore: detail.semanticScore,
+              graphDistance: detail.graphDistance,
+              probeConfidence: detail.probeConfidence,
+            };
+          });
+          const rerankResults = rerank(rerankInputs);
+          const changedCount = rerankResults.filter((r) => r.changed).length;
+          if (changedCount > 0) {
+            const reordered = [...rerankResults].sort((a, b) => a.newRank - b.newRank);
+            rankedSuccessOrder = reordered.map((r) => r.path);
+          }
+          rerankingResult = {
+            status: "ok",
+            changedOrder: changedCount > 0,
+            candidateCount: rerankResults.length,
+            strategy: "structural",
+          };
+        }
       }
 
       const effectiveTopK = Math.min(topK, rankedSuccessOrder.length);
@@ -566,7 +643,7 @@ export function createIntentReadTool(
 
       const requestOrder = packCandidates.map((_, i) => i);
       const smallestFirstOrder = [...requestOrder].sort((a, b) => {
-        const d = packCandidates[a].fullMetrics.bytes - packCandidates[b].fullMetrics.bytes;
+        const d = packCandidates[a]!.fullMetrics.bytes - packCandidates[b]!.fullMetrics.bytes;
         return d !== 0 ? d : a - b;
       });
 
@@ -578,9 +655,9 @@ export function createIntentReadTool(
       // Build output sections in RRF rank order
       const sections: string[] = [];
       for (let i = 0; i < packCandidates.length; i++) {
-        const path = packCandidates[i].path;
+        const path = packCandidates[i]!.path;
         if (plan.fullIncluded.has(i)) {
-          sections.push(packCandidates[i].fullText);
+          sections.push(packCandidates[i]!.fullText);
           const d = fileDetails.get(path)!;
           d.inclusion = "full";
           d.included = true;
@@ -641,7 +718,10 @@ export function createIntentReadTool(
           addedPaths: addedGraphPaths,
           candidateCountBefore: candidateCountBeforeGraph,
           candidateCountAfter: resolvedFiles.length,
+          ...(graphEdges.length > 0 && { edgesUsed: graphEdges }),
         },
+        ...(probing && { probing }),
+        ...(rerankingResult && { reranking: rerankingResult }),
         ...(embeddingStatus === "ok" && filesChunked > 0 && {
           chunkInfo: {
             totalChunks,
@@ -656,7 +736,7 @@ export function createIntentReadTool(
           fullIncludedCount: plan.fullCount,
           fullIncludedSuccessCount: plan.fullSuccessCount,
           partialIncludedPath,
-          omittedPaths: plan.omittedIndexes.map((i: number) => packCandidates[i].path),
+          omittedPaths: plan.omittedIndexes.map((i: number) => packCandidates[i]!.path),
         },
       };
 

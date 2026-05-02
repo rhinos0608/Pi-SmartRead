@@ -50,13 +50,8 @@
   operator: "|>"
   right: [
     (identifier) @name.reference.call
-    (call_expression
-      function: (identifier) @name.reference.call)
-    (call_expression
-      function: (dot
-        right: (identifier) @name.reference.call))
-    (scoped_expression
-      (identifier) @name.reference.call)
+    (call target: (identifier) @name.reference.call)
+    (call target: (dot right: (identifier) @name.reference.call))
   ]) @reference.call
 
 ; * modules

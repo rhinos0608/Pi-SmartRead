@@ -21,7 +21,7 @@ describe("fetchEmbeddings", () => {
     await fetchEmbeddings({ baseUrl: BASE_URL, model: MODEL, inputs: ["query", "file body"] });
 
     expect(fetch).toHaveBeenCalledOnce();
-    const [url, opts] = vi.mocked(fetch).mock.calls[0];
+    const [url, opts] = vi.mocked(fetch).mock.calls[0]!;
     expect(url).toBe(`${BASE_URL}/embeddings`);
     expect(opts?.method).toBe("POST");
     const body = JSON.parse(opts?.body as string);
@@ -32,21 +32,21 @@ describe("fetchEmbeddings", () => {
   it("normalizes trailing slash in baseUrl", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(makeOkResponse([[0.1], [0.2]]));
     await fetchEmbeddings({ baseUrl: `${BASE_URL}/`, model: MODEL, inputs: ["a", "b"] });
-    const [url] = vi.mocked(fetch).mock.calls[0];
+    const [url] = vi.mocked(fetch).mock.calls[0]!;
     expect(url).toBe(`${BASE_URL}/embeddings`);
   });
 
   it("includes Authorization header when apiKey is provided", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(makeOkResponse([[0.1], [0.2]]));
     await fetchEmbeddings({ baseUrl: BASE_URL, model: MODEL, inputs: ["a", "b"], apiKey: "sk-test" });
-    const [, opts] = vi.mocked(fetch).mock.calls[0];
+    const [, opts] = vi.mocked(fetch).mock.calls[0]!;
     expect((opts?.headers as Record<string, string>)["Authorization"]).toBe("Bearer sk-test");
   });
 
   it("omits Authorization header when apiKey is absent", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(makeOkResponse([[0.1], [0.2]]));
     await fetchEmbeddings({ baseUrl: BASE_URL, model: MODEL, inputs: ["a", "b"] });
-    const [, opts] = vi.mocked(fetch).mock.calls[0];
+    const [, opts] = vi.mocked(fetch).mock.calls[0]!;
     expect((opts?.headers as Record<string, string>)["Authorization"]).toBeUndefined();
   });
 

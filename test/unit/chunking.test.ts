@@ -14,12 +14,12 @@ describe("chunkText", () => {
     const short = "hello world";
     const result = chunkText(short);
     expect(result).toHaveLength(1);
-    expect(result[0].text).toBe(short);
-    expect(result[0].chunkIndex).toBe(0);
-    expect(result[0].startChar).toBe(0);
-    expect(result[0].endChar).toBe(short.length);
-    expect(result[0].wasHardSplit).toBe(false);
-    expect(result[0].estimatedTokens).toBe(Math.ceil(short.length / 4));
+    expect(result[0]!!.text).toBe(short);
+    expect(result[0]!!.chunkIndex).toBe(0);
+    expect(result[0]!!.startChar).toBe(0);
+    expect(result[0]!!.endChar).toBe(short.length);
+    expect(result[0]!!.wasHardSplit).toBe(false);
+    expect(result[0]!!.estimatedTokens).toBe(Math.ceil(short.length / 4));
   });
 
   it("splits on double newlines when available", () => {
@@ -28,22 +28,22 @@ describe("chunkText", () => {
     const result = chunkText(text, { chunkSizeChars: 30 });
     expect(result.length).toBeGreaterThan(1);
     // First chunk should end after the double newline
-    expect(result[0].text).toContain("aaa\n\naaa");
-    expect(result[0].wasHardSplit).toBe(false);
+    expect(result[0]!!.text).toContain("aaa\n\naaa");
+    expect(result[0]!!.wasHardSplit).toBe(false);
   });
 
   it("splits on single newline when double newline not available", () => {
     const text = "aaa\naaaa\naaaa\naaaa\naaaa\naaaa\naaaa\naaaa\naaaa\naaaa\naaaa";
     const result = chunkText(text, { chunkSizeChars: 30 });
     expect(result.length).toBeGreaterThan(1);
-    expect(result[0].wasHardSplit).toBe(false);
+    expect(result[0]!!.wasHardSplit).toBe(false);
   });
 
   it("does hard split when no natural boundary near target position", () => {
     // A very long continuous string with no newlines
     const text = "a".repeat(500) + "b".repeat(500) + "c".repeat(500);
     const result = chunkText(text, { chunkSizeChars: 500 });
-    expect(result[0].wasHardSplit).toBe(true);
+    expect(result[0]!!.wasHardSplit).toBe(true);
   });
 
   it("respects maxChunksPerFile", () => {
@@ -59,14 +59,14 @@ describe("chunkText", () => {
     const result = chunkText(text, { chunkSizeChars: 10, chunkOverlapChars: 6, minChunkChars: 1 });
     expect(result.length).toBeGreaterThan(1);
     // Second chunk should start before the first chunk's end (overlap)
-    const gap = result[0].endChar - result[1].startChar;
+    const gap = result[0]!!.endChar - result[1]!!.startChar;
     expect(gap).toBeGreaterThan(0);
   });
 
   it("estimates tokens correctly", () => {
     const text = "1234567890123456"; // 16 chars
     const result = chunkText(text);
-    expect(result[0].estimatedTokens).toBe(4); // 16/4 = 4
+    expect(result[0]!!.estimatedTokens).toBe(4); // 16/4 = 4
   });
 
   it("ensures chunk text content matches reported start/end positions", () => {
@@ -83,7 +83,7 @@ describe("chunkText", () => {
     const text = "x".repeat(200) + "\n\n" + "y".repeat(10);
     const result = chunkText(text, { chunkSizeChars: 100, minChunkChars: 50 });
     // The tiny remainder at the end should be skipped (unless it's the only chunk)
-    const lastChunk = result[result.length - 1];
+    const lastChunk = result[result.length - 1]!;
     if (result.length > 1) {
       expect(lastChunk.text.length).toBeGreaterThanOrEqual(50);
     }
@@ -92,7 +92,7 @@ describe("chunkText", () => {
   it("always includes the final chunk even if it's small", () => {
     const text = "x".repeat(1000) + "y".repeat(5);
     const result = chunkText(text, { chunkSizeChars: 500, chunkOverlapChars: 400, maxChunksPerFile: 20, minChunkChars: 200 });
-    const lastChunk = result[result.length - 1];
+    const lastChunk = result[result.length - 1]!;
     expect(lastChunk.text).toContain("y".repeat(5));
   });
 
@@ -100,7 +100,7 @@ describe("chunkText", () => {
     const text = "line\n".repeat(50);
     const result = chunkText(text, { chunkSizeChars: 50 });
     for (let i = 0; i < result.length; i++) {
-      expect(result[i].chunkIndex).toBe(i);
+      expect(result[i]!.chunkIndex).toBe(i);
     }
   });
 
@@ -108,9 +108,9 @@ describe("chunkText", () => {
     const text = "a";
     const result = chunkText(text);
     expect(result).toHaveLength(1);
-    expect(result[0].text).toBe("a");
-    expect(result[0].startChar).toBe(0);
-    expect(result[0].endChar).toBe(1);
+    expect(result[0]!!.text).toBe("a");
+    expect(result[0]!!.startChar).toBe(0);
+    expect(result[0]!!.endChar).toBe(1);
   });
 
   it("adds context headers and compressed embedding text when filePath is provided", () => {
@@ -118,9 +118,9 @@ describe("chunkText", () => {
     const result = chunkText(text, { filePath: "src/config.ts", compressForEmbedding: true });
 
     expect(result).toHaveLength(1);
-    expect(result[0].contextHeader).toBe("File: src/config.ts > Function: readConfig");
-    expect(result[0].embeddingText).toContain("File: src/config.ts > Function: readConfig");
-    expect(result[0].embeddingText).not.toContain("import fs");
+    expect(result[0]!!.contextHeader).toBe("File: src/config.ts > Function: readConfig");
+    expect(result[0]!!.embeddingText).toContain("File: src/config.ts > Function: readConfig");
+    expect(result[0]!!.embeddingText).not.toContain("import fs");
   });
 });
 

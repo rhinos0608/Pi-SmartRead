@@ -24,8 +24,8 @@ describe("RepoMap — import-based fallback", () => {
     const rm = new RepoMap(tmpDir);
     const result = await rm.getRepoMap({ useImportBased: true });
     expect(result.map).toBe("");
-    expect(result.stats.totalFiles).toBe(0);
-    expect(result.stats.rankMethod).toBe("import-based");
+    expect(result.stats!.totalFiles).toBe(0);
+    expect(result.stats!.rankMethod).toBe("import-based");
   });
 
   it("ranks files by import in-degree", async () => {
@@ -50,22 +50,22 @@ describe("RepoMap — import-based fallback", () => {
     const result = await rm.getRepoMap({ useImportBased: true });
 
     // Should have found 3 files
-    expect(result.stats.totalFiles).toBe(3);
-    expect(result.stats.rankMethod).toBe("import-based");
-    expect(result.stats.importEdges).toBeGreaterThanOrEqual(2);
+    expect(result.stats!.totalFiles).toBe(3);
+    expect(result.stats!.rankMethod).toBe("import-based");
+    expect(result.stats!.importEdges).toBeGreaterThanOrEqual(2);
 
     // rankedTags should be sorted by in-degree descending
     // utils.ts has in-degree 2 (imported by main.ts and helper.ts) → rank 1
     // helper.ts has in-degree 1 (imported by main.ts) → rank 0.5
     // main.ts has in-degree 0 → rank 0
     expect(result.rankedTags.length).toBe(3);
-    expect(result.rankedTags[0].tag.relFname).toBe("utils.ts");
-    expect(result.rankedTags[0].rank).toBeGreaterThan(
-      result.rankedTags[1].rank,
+    expect(result.rankedTags[0]!.tag.relFname).toBe("utils.ts");
+    expect(result.rankedTags[0]!.rank).toBeGreaterThan(
+      result.rankedTags[1]!.rank,
     );
-    expect(result.rankedTags[1].tag.relFname).toBe("helper.ts");
-    expect(result.rankedTags[1].rank).toBeGreaterThan(
-      result.rankedTags[2].rank,
+    expect(result.rankedTags[1]!.tag.relFname).toBe("helper.ts");
+    expect(result.rankedTags[1]!.rank).toBeGreaterThan(
+      result.rankedTags[2]!.rank,
     );
   });
 
@@ -82,9 +82,9 @@ describe("RepoMap — import-based fallback", () => {
     const rm = new RepoMap(tmpDir);
     const result = await rm.getRepoMap({ useImportBased: true });
 
-    expect(result.stats.totalFiles).toBe(2);
+    expect(result.stats!.totalFiles).toBe(2);
     // config.js should have in-degree 1
-    expect(result.rankedTags[0].tag.relFname).toBe("config.js");
+    expect(result.rankedTags[0]!.tag.relFname).toBe("config.js");
   });
 
   it("handles Python imports", async () => {
@@ -100,9 +100,9 @@ describe("RepoMap — import-based fallback", () => {
     const rm = new RepoMap(tmpDir);
     const result = await rm.getRepoMap({ useImportBased: true });
 
-    expect(result.stats.totalFiles).toBe(2);
+    expect(result.stats!.totalFiles).toBe(2);
     // utils.py should rank higher (imported by main.py)
-    expect(result.rankedTags[0].tag.relFname).toBe("utils.py");
+    expect(result.rankedTags[0]!.tag.relFname).toBe("utils.py");
   });
 
   it("ignores bare package imports (node_modules)", async () => {
@@ -121,8 +121,8 @@ describe("RepoMap — import-based fallback", () => {
 
     // main.ts imports express (bare) and ./utils (resolved)
     // Bare imports should be ignored — they don't affect in-degree
-    expect(result.stats.totalFiles).toBe(2);
-    expect(result.rankedTags[0].tag.relFname).toBe("utils.ts");
+    expect(result.stats!.totalFiles).toBe(2);
+    expect(result.rankedTags[0]!.tag.relFname).toBe("utils.ts");
   });
 
   it("respects excludeUnranked option", async () => {
@@ -230,7 +230,7 @@ describe("RepoMap — import-based fallback", () => {
 
     // Edges: b.ts → a.ts, c.ts → b.ts = 2 edges
     // But c.ts also transitively... no, only direct imports
-    expect(result.stats.importEdges).toBe(2);
+    expect(result.stats!.importEdges).toBe(2);
   });
 
   it("handles TypeScript triple-slash reference directives", async () => {
@@ -247,7 +247,7 @@ describe("RepoMap — import-based fallback", () => {
     const result = await rm.getRepoMap({ useImportBased: true });
 
     // types.d.ts should be imported by app.ts
-    expect(result.stats.totalFiles).toBe(2);
+    expect(result.stats!.totalFiles).toBe(2);
     const typeRank = result.rankedTags.find(
       (rt) => rt.tag.relFname === "types.d.ts",
     );
@@ -265,8 +265,8 @@ describe("RepoMap — import-based fallback", () => {
     const result = await rm.getRepoMap({ useImportBased: true });
 
     // Self-import edge should not count — in-degree of self.ts should be 0
-    expect(result.stats.importEdges).toBe(0);
-    expect(result.rankedTags[0].rank).toBe(0);
+    expect(result.stats!.importEdges).toBe(0);
+    expect(result.rankedTags[0]!.rank).toBe(0);
   });
 
   it("resolves tsconfig path aliases (e.g. @/utils → ./src/utils)", async () => {
@@ -294,7 +294,7 @@ describe("RepoMap — import-based fallback", () => {
     const result = await rm.getRepoMap({ useImportBased: true });
 
     // core.ts should have in-degree 1 (imported by main.ts via @ alias)
-    expect(result.stats.totalFiles).toBe(2); // src/core.ts, main.ts
+    expect(result.stats!.totalFiles).toBe(2); // src/core.ts, main.ts
     const coreEntry = result.rankedTags.find(
       (rt) => rt.tag.relFname === "src/core.ts",
     );

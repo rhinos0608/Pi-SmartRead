@@ -84,7 +84,7 @@ function getMtime(fname: string): number {
 function buildIndentLevels(lines: string[]): number[] {
   return lines.map((line) => {
     const match = line.match(/^(\s*)/);
-    return match ? match[1].length : 0;
+    return match ? match[1]!.length : 0;
   });
 }
 
@@ -105,13 +105,13 @@ function computeParentContext(
   let currentIndent = targetIndent;
 
   for (let i = lineNum - 1; i >= 1; i--) {
-    const line = lines[i - 1];
+    const line = lines[i - 1]!;
     if (line.trim() === "") continue;
 
-    const indent = indentLevels[i - 1];
+    const indent = indentLevels[i - 1]!;
     if (indent < currentIndent) {
       parents.unshift(i);
-      currentIndent = indent;
+      currentIndent = indent!;
       if (indent === 0) break;
     }
   }
@@ -227,11 +227,11 @@ export function renderTreeContext(
     if (lineNum < 1 || lineNum > lines.length) continue;
 
     if (lastLine !== -1 && lineNum > lastLine + 1) {
-      const indent = getIndent(lines[lineNum - 1]);
+      const indent = getIndent(lines[lineNum - 1]!);
       output.push(`${" ".repeat(indent)}⋮...`);
     }
 
-    let line = lines[lineNum - 1];
+    let line = lines[lineNum - 1]!;
 
     // Truncate long lines
     if (maxLineWidth > 0 && line.length > maxLineWidth) {
@@ -259,5 +259,5 @@ export function renderTreeContext(
 
 function getIndent(line: string): number {
   const match = line.match(/^(\s*)/);
-  return match ? match[1].length : 0;
+  return match ? match[1]!.length : 0;
 }

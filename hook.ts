@@ -158,7 +158,7 @@ function buildFailurePassthrough(
 
 async function generateCompactMap(
   cwd: string,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
 ): Promise<{ map: string; stats: Record<string, unknown> } | null> {
   try {
     const rm = new RepoMap(cwd);

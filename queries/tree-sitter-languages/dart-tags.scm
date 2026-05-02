@@ -85,7 +85,7 @@
 ((identifier) @name
  (cascade_section
    (cascade_selector
-     (identifier)) @name.reference.call
+     (identifier) @name.reference.call)
    (argument_part
      (arguments
        (argument)*))?) @reference.call)

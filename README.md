@@ -296,6 +296,8 @@ Create `pi-smartread.config.json` in the current directory or any parent:
 | `chunkSizeChars` | `PI_SMARTREAD_CHUNK_SIZE` | — | No | Target chunk size (default: 4096) |
 | `chunkOverlapChars` | `PI_SMARTREAD_CHUNK_OVERLAP` | — | No | Chunk overlap (default: 512) |
 | `maxChunksPerFile` | `PI_SMARTREAD_MAX_CHUNKS` | — | No | Max chunks per file (default: 12) |
+| `probeEnabled` | — | — | No | Enable symbol-based query probing for intent_read (default: false, experimental) |
+| `rerankEnabled` | — | — | No | Enable structural reranking after RRF for intent_read (default: false, experimental) |
 
 ### Caching
 

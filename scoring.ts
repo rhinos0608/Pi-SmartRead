@@ -139,7 +139,7 @@ export function maxChunkSimilarity(queryVec: number[], chunkVecs: number[][]): C
   let maxScore = -Infinity;
   let bestChunkIndex = 0;
   for (let i = 0; i < chunkVecs.length; i++) {
-    const score = cosineSimilarity(queryVec, chunkVecs[i]);
+    const score = cosineSimilarity(queryVec, chunkVecs[i]!);
     if (score > maxScore) {
       maxScore = score;
       bestChunkIndex = i;
@@ -151,9 +151,9 @@ export function maxChunkSimilarity(queryVec: number[], chunkVecs: number[][]): C
 export function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+    dot += a[i]! * b[i]!;
+    normA += a[i]! * a[i]!;
+    normB += b[i]! * b[i]!;
   }
   if (normA === 0 || normB === 0) return -Infinity;
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
@@ -165,7 +165,7 @@ export function computeRanks(scores: number[], paths: string[]): number[] {
     const d = b.score - a.score;
     if (d > 0 || d < 0) return d;
     if (a.i !== b.i) return a.i - b.i;
-    return a.path.localeCompare(b.path);
+    return a.path!.localeCompare(b.path!);
   });
   const ranks = new Array<number>(scores.length);
   order.forEach((item, rank) => { ranks[item.i] = rank + 1; });
@@ -173,6 +173,9 @@ export function computeRanks(scores: number[], paths: string[]): number[] {
 }
 
 export function computeRrfScores(semanticRanks: number[], keywordRanks: number[]): number[] {
+  if (semanticRanks.length !== keywordRanks.length) {
+    throw new Error(`Length mismatch: semanticRanks (${semanticRanks.length}) and keywordRanks (${keywordRanks.length}) must be equal.`);
+  }
   const k = 60;
-  return semanticRanks.map((sr, i) => 1 / (k + sr) + 1 / (k + keywordRanks[i]));
+  return semanticRanks.map((sr, i) => 1 / (k + sr) + 1 / (k + keywordRanks[i]!));
 }

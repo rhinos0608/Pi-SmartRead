@@ -79,8 +79,6 @@ function extractSymbolBoundaries(text: string): SymbolSpan[] {
     let match: RegExpExecArray | null;
     while ((match = re.exec(text)) !== null) {
       const name = match[nameGroup]!;
-      const startByte = match.index + (match[0].indexOf(name) === 0 ? 0 : match[0].indexOf(name));
-      // Find the extent: from the declaration start to the matching closing brace
       const declStart = match.index;
       const endByte = findMatchingBrace(text, declStart) ?? Math.min(declStart + 2000, text.length);
 
@@ -239,10 +237,6 @@ export function chunkText(
   text: string,
   options?: ChunkOptions,
 ): ChunkResult[] {
-  const chunkSizeChars = options?.chunkSizeChars ?? DEFAULT_CHUNK_SIZE_CHARS;
-  const chunkOverlapChars = options?.chunkOverlapChars ?? DEFAULT_CHUNK_OVERLAP_CHARS;
-  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
-  const minChunkChars = options?.minChunkChars ?? DEFAULT_MIN_CHUNK_CHARS;
   const useSymbolBoundaries = options?.useSymbolBoundaries ?? false;
 
   if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
@@ -359,8 +353,8 @@ function chunkBySymbolBoundaries(
 
   // Recompute indices and enrich
   for (let i = 0; i < results.length; i++) {
-    results[i].chunkIndex = i;
-    enrichChunk(results[i], options ?? {});
+    results[i]!.chunkIndex = i;
+    enrichChunk(results[i]!, options ?? {});
   }
 
   return results;
@@ -385,7 +379,7 @@ function chunkByCharacterSize(
 
   while (offset < text.length && results.length < maxChunksPerFile) {
     const remaining = text.length - offset;
-    let targetEnd = offset + chunkSizeChars;
+    const targetEnd = offset + chunkSizeChars;
 
     if (remaining <= chunkSizeChars) {
       const chunk = text.slice(offset);
@@ -400,7 +394,7 @@ function chunkByCharacterSize(
       break;
     }
 
-    let splitPos = targetEnd;
+    let splitPos: number | undefined = targetEnd;
     let wasHardSplit = true;
 
     let bestPos = -1;
@@ -427,7 +421,7 @@ function chunkByCharacterSize(
       } else {
         bestPos = -1;
         for (let i = targetEnd - 1; i >= offset + 1; i--) {
-          if (/\s/.test(text[i])) {
+          if (/\s/.test(text[i]!)) {
             bestPos = i + 1;
             break;
           }
@@ -439,7 +433,7 @@ function chunkByCharacterSize(
       }
     }
 
-    const chunk = text.slice(offset, splitPos);
+    const chunk = text.slice(offset, splitPos!);
     const endChar = splitPos;
 
     if (chunk.length >= minChunkChars || results.length === 0) {
@@ -459,8 +453,8 @@ function chunkByCharacterSize(
   }
 
   for (let i = 0; i < results.length; i++) {
-    results[i].chunkIndex = i;
-    enrichChunk(results[i], options ?? {});
+    results[i]!.chunkIndex = i;
+    enrichChunk(results[i]!, options ?? {});
   }
 
   return results;

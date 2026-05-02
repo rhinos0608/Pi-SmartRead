@@ -31,10 +31,10 @@ import type { Tag } from "./cache.js";
 import { TagsCache } from "./cache.js";
 import { findSrcFiles } from "./file-discovery.js";
 import { getTagsBatch, initParser, getTagsRaw } from "./tags.js";
-import { pagerank, buildWeightedEdges, type GraphEdge } from "./pagerank.js";
+import { pagerank, buildWeightedEdges } from "./pagerank.js";
 import { renderTreeContext } from "./tree-context.js";
-import { filenameToLang, isSupportedFile } from "./languages.js";
-import { discoverImportantFiles, isImportantFile } from "./special.js";
+import { isImportantFile } from "./special.js";
+import { filenameToLang } from "./languages.js";
 
 // ── Options & Types ───────────────────────────────────────────────
 
@@ -161,7 +161,7 @@ function getFallbackMatch(line: string, queryLower: string): { kind: "def" | "re
   const identRe = /\b([A-Za-z_$][\w$]*)\b/g;
   let match: RegExpExecArray | null;
   while ((match = identRe.exec(line)) !== null) {
-    const name = match[1];
+    const name = match[1]!;
     if (name.toLowerCase().includes(queryLower)) {
       return { kind: "ref", name };
     }
@@ -243,7 +243,6 @@ const DEFAULT_MAP_TOKENS = 4096;
 const CHARS_PER_TOKEN = 4;
 
 /** Supported import-extraction languages */
-type ImportExtractLang = "javascript" | "typescript" | "tsx" | "python";
 
 // ── Token counting ────────────────────────────────────────────────
 
@@ -300,7 +299,7 @@ export function countTokens(
   const step = Math.max(1, Math.floor(numLines / 100));
   const sampledLines: string[] = [];
   for (let i = 0; i < numLines; i += step) {
-    sampledLines.push(lines[i]);
+    sampledLines.push(lines[i]!);
   }
   const sampleText = sampledLines.join("\n");
 
@@ -353,7 +352,7 @@ export function parseTsconfigPaths(root: string): TsAliasMap | null {
       for (const [alias, targets] of Object.entries(paths)) {
         const aliasMatch = alias.match(/^([^/*]+)\/(?:\*|\*\*)$/);
         if (!aliasMatch) continue;
-        const prefix = aliasMatch[1];
+        const prefix = aliasMatch[1]!;
 
         const targetArr = Array.isArray(targets) ? targets : [targets];
         for (const t of targetArr) {
@@ -464,7 +463,7 @@ function extractImports(fname: string, code: string): string[] {
     // Go grouped: import ( "fmt" ; "fmt" "os" )
     const goImportBlock = /import\s*\(([^)]*)\)/g;
     for (const match of code.matchAll(goImportBlock)) {
-      const block = match[1];
+      const block = match[1]!;
       const quoted = block.match(/"([^"]+)"/g);
       if (quoted) {
         for (const q of quoted) {
@@ -477,7 +476,7 @@ function extractImports(fname: string, code: string): string[] {
     // Rust: use crate::module; use std::collections::HashMap;
     const rustUse = /^use\s+([a-zA-Z_][a-zA-Z0-9_:*]*);/gm;
     for (const match of code.matchAll(rustUse)) {
-      let p = match[1];
+      let p = match[1]!;
       p = p.replace(/^(crate|self|super)::/, "");
       p = p.replace(/::\*$/, "");
       const parts = p.split("::");
@@ -501,7 +500,7 @@ function extractImports(fname: string, code: string): string[] {
   } else if (lang === "python") {
     const fromRe = /^from\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s+import/mg;
     for (const match of code.matchAll(fromRe)) {
-      const p = match[1].replace(/\./g, "/");
+      const p = match[1]!.replace(/\./g, "/");
       if (p && p !== "__future__" && !seen.has(p)) { seen.add(p); imports.push(p); }
     }
     const importRe = /^import\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*/mg;
@@ -720,7 +719,7 @@ export class RepoMap {
 
     // Decide ranking method
     let rankMethod: "tree-sitter" | "import-based" = "tree-sitter";
-    let allTags: Tag[] = [];
+    const allTags: Tag[] = [];
     let importEdges = 0;
 
     if (useImportBased) {
@@ -1314,7 +1313,7 @@ export class RepoMap {
   private buildMap(
     rankedTags: RankedTag[],
     focusFiles: string[],
-    allFiles: string[],
+    _allFiles: string[],
     maxTokens: number,
     compact: boolean,
   ): { map: string; tokenCount: number } {

@@ -20,10 +20,6 @@ import { filenameToLang } from "./languages.js";
 
 // Re-use grammar loading from tags module
 import { createRequire } from "node:module";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 const TypeScriptGrammar = require("tree-sitter-typescript");
 const JavaScriptGrammar = require("tree-sitter-javascript");

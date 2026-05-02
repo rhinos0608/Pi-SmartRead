@@ -145,7 +145,7 @@ function backfillRefTags(
   const identRe = /\b([a-zA-Z_][a-zA-Z0-9_]{1,})\b/g;
   let match: RegExpExecArray | null;
   while ((match = identRe.exec(code)) !== null) {
-    const name = match[1];
+    const name = match[1]!;
 
     // Only include identifiers that appeared as definitions
     if (!defNames.has(name)) continue;
@@ -162,7 +162,7 @@ function backfillRefTags(
       relFname,
       fname,
       line,
-      name,
+      name: name!,
       kind: "ref",
     });
   }
@@ -214,7 +214,6 @@ export async function getTagsRaw(
     const captures = query.captures(tree.rootNode);
 
     let sawDef = false;
-    let sawRef = false;
     const defNames = new Set<string>();
 
     for (const capture of captures) {
@@ -243,8 +242,6 @@ export async function getTagsRaw(
       if (kind === "def") {
         sawDef = true;
         defNames.add(name);
-      } else {
-        sawRef = true;
       }
     }
 

@@ -19,7 +19,7 @@ export async function fetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
   // Token validation before sending
   let totalTokens = 0;
   for (let i = 0; i < req.inputs.length; i++) {
-    const estimatedTokens = Math.ceil(req.inputs[i].length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+    const estimatedTokens = Math.ceil((req.inputs[i] ?? "").length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
     totalTokens += estimatedTokens;
     if (estimatedTokens > MAX_ESTIMATED_TOKENS_PER_INPUT) {
       throw new Error(

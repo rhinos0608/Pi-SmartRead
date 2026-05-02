@@ -61,6 +61,7 @@
     (argument_part
       (arguments
         (argument)*))?)?) @reference.class
+(identifier) @name.reference.class
 
 (assignment_expression
   left: (assignable_expression 

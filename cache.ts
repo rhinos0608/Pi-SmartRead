@@ -17,7 +17,6 @@ import {
   writeFileSync,
   mkdirSync,
   rmSync,
-  readdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";

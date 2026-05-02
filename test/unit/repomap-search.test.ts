@@ -75,11 +75,11 @@ describe("RepoMap.searchIdentifiers fallback", () => {
     expect(mocks.initParser).toHaveBeenCalled();
     expect(mocks.getTagsBatch).toHaveBeenCalled();
     expect(results).toHaveLength(3);
-    expect(results[0].kind).toBe("def");
+    expect(results[0]!.kind).toBe("def");
     expect(results.filter((result) => result.kind === "ref")).toHaveLength(2);
-    expect(results[0].context).toContain("calculateTotal");
-    expect(results[1].context).toContain("calculateTotal");
-    expect(results[2].context).toContain("calculateTotal");
+    expect(results[0]!.context).toContain("calculateTotal");
+    expect(results[1]!.context).toContain("calculateTotal");
+    expect(results[2]!.context).toContain("calculateTotal");
   });
 
   it("respects includeDefinitions and includeReferences in fallback mode", async () => {
@@ -93,8 +93,8 @@ describe("RepoMap.searchIdentifiers fallback", () => {
 
     expect(results).toHaveLength(2);
     expect(results.every((result) => result.kind === "ref")).toBe(true);
-    expect(results[0].file).toBe("b.ts");
-    expect(results[1].file).toBe("d.ts");
+    expect(results[0]!.file).toBe("b.ts");
+    expect(results[1]!.file).toBe("d.ts");
   });
 
   it("extracts the actual symbol name for substring matches", async () => {
@@ -107,7 +107,7 @@ describe("RepoMap.searchIdentifiers fallback", () => {
     );
 
     expect(results.some((result) => result.name === "markRepoMapExplicitlyCalled")).toBe(true);
-    expect(results[0].kind).toBe("def");
+    expect(results[0]!.kind).toBe("def");
   });
 
   it("limits maxResults after sorting across all files", async () => {
@@ -120,8 +120,8 @@ describe("RepoMap.searchIdentifiers fallback", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0].kind).toBe("def");
-    expect(results[1].kind).toBe("ref");
+    expect(results[0]!.kind).toBe("def");
+    expect(results[1]!.kind).toBe("ref");
   });
 
   it("returns only definitions when includeReferences is false", async () => {
@@ -134,7 +134,7 @@ describe("RepoMap.searchIdentifiers fallback", () => {
     );
 
     expect(results.every((r) => r.kind === "def")).toBe(true);
-    expect(results[0].file).toBe("a.ts");
+    expect(results[0]!.file).toBe("a.ts");
   });
 
   it("does not fabricate references for plain text matches", async () => {

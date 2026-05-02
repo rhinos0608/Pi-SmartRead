@@ -13,7 +13,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import { RepoMap, type RepoMapOptions, type SearchResult } from "./repomap.js";
+import { RepoMap, type SearchResult } from "./repomap.js";
 import { createSymbolResolverTool } from "./symbol-resolver.js";
 import { findCallers } from "./callgraph.js";
 import { findSrcFiles } from "./file-discovery.js";
@@ -113,7 +113,7 @@ function createRepoTool(): ToolDefinition {
     parameters: RepoMapSchema,
 
     async execute(
-      toolCallId: string,
+      _toolCallId: string,
       params: RepoMapInput,
       signal: AbortSignal | undefined,
       _onUpdate: unknown,
@@ -214,7 +214,7 @@ function createSearchSymbolsTool(): ToolDefinition {
     parameters: SearchSymbolsSchema,
 
     async execute(
-      toolCallId: string,
+      _toolCallId: string,
       params: SearchSymbolsInput,
       signal: AbortSignal | undefined,
       _onUpdate: unknown,
@@ -310,7 +310,7 @@ function createFindCallersTool(): ToolDefinition {
     parameters: FindCallersSchema,
 
     async execute(
-      toolCallId: string,
+      _toolCallId: string,
       params: FindCallersInput,
       signal: AbortSignal | undefined,
       _onUpdate: unknown,

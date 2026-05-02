@@ -37,7 +37,7 @@ describe("pagerank", () => {
 
     // a.ts should have the highest rank due to personalization
     const ranks = Array.from(result.entries()).sort((a, b) => b[1] - a[1]);
-    expect(ranks[0][0]).toBe("a.ts");
+    expect(ranks[0]![0]).toBe("a.ts");
   });
 
   it("converges within max iterations", () => {

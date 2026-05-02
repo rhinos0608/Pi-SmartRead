@@ -104,7 +104,7 @@ export function pagerank(
 
   const nodeIndex = new Map<string, number>();
   for (let i = 0; i < n; i++) {
-    nodeIndex.set(nodeList[i], i);
+    nodeIndex.set(nodeList[i]!, i);
   }
 
   const outDegree = new Float64Array(n);
@@ -121,8 +121,8 @@ export function pagerank(
     if (fromIdx === undefined || toIdx === undefined) continue;
 
     const weight = edge.weight ?? 1.0;
-    adjList[fromIdx].push({ to: toIdx, weight });
-    outDegree[fromIdx] += weight;
+    adjList[fromIdx]!.push({ to: toIdx, weight });
+    outDegree[fromIdx]! += weight;
   }
 
   let ranks = new Float64Array(n).fill(1 / n);
@@ -134,12 +134,12 @@ export function pagerank(
     for (const [node, val] of personalization) {
       const idx = nodeIndex.get(node);
       if (idx !== undefined) {
-        personVec[idx] = val;
+        personVec[idx]! = val;
         total += val;
       }
     }
     if (total > 0) {
-      for (let i = 0; i < n; i++) personVec[i] /= total;
+      for (let i = 0; i < n; i++) personVec[i]! /= total;
     } else {
       personVec.fill(1 / n);
     }
@@ -159,27 +159,27 @@ export function pagerank(
     // Sum of ranks of dangling nodes (no outgoing edges)
     let danglingSum = 0;
     for (let i = 0; i < n; i++) {
-      if (outDegree[i] === 0) danglingSum += ranks[i];
+      if (outDegree[i]! === 0) danglingSum += ranks[i]!;
     }
 
     // Teleport contribution (uses danglingVec for dangling redistribution)
     for (let i = 0; i < n; i++) {
-      newRanks[i] = (1 - alpha) * personVec[i] + alpha * danglingSum * danglingVec[i];
+      newRanks[i]! = (1 - alpha) * personVec[i]! + alpha * danglingSum * danglingVec[i]!;
     }
 
     // Edge contributions
     for (let i = 0; i < n; i++) {
-      if (outDegree[i] === 0) continue;
-      const contribution = (alpha * ranks[i]) / (outDegree[i] || 1);
-      for (const { to, weight } of adjList[i]) {
-        newRanks[to] += contribution * weight;
+      if (outDegree[i]! === 0) continue;
+      const contribution = (alpha * ranks[i]!) / (outDegree[i]! || 1);
+      for (const { to, weight } of adjList[i]!) {
+        newRanks[to]! += contribution * weight;
       }
     }
 
     // Check convergence
     let diff = 0;
     for (let i = 0; i < n; i++) {
-      diff += Math.abs(newRanks[i] - ranks[i]);
+      diff += Math.abs(newRanks[i]! - ranks[i]!);
     }
 
     ranks = newRanks;
@@ -188,7 +188,7 @@ export function pagerank(
 
   const result = new Map<string, number>();
   for (let i = 0; i < n; i++) {
-    result.set(nodeList[i], ranks[i]);
+    result.set(nodeList[i]!, ranks[i]!);
   }
   return result;
 }

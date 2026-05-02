@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach as _afterEach, beforeEach, describe, expect, it } from "vitest";
 import { validateEmbeddingConfig } from "../../config.js";
 
 /** A cwd that has no pi-smartread.config.json in any ancestor directory. */

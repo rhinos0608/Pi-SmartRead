@@ -51,7 +51,7 @@ describe("utils: formatContentBlock", () => {
     const lines = block.split("\n");
     expect(lines[0]).toBe("@/tmp/file.txt");
     expect(lines[1]).toMatch(/^<<'ORBIT_3_[0-9A-F]{6}(?:_.*)?'$/);
-    const delimiter = lines[1].slice(3, -1);
+    const delimiter = lines[1]!.slice(3, -1);
     expect(lines.at(-1)).toBe(delimiter);
   });
 });

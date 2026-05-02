@@ -120,14 +120,14 @@ describe("bm25Scores", () => {
   it("gives higher score to document containing query terms", () => {
     const docs = ["authentication middleware logic", "database schema migration"];
     const scores = bm25Scores("authentication", docs);
-    expect(scores[0]).toBeGreaterThan(scores[1]);
+    expect(scores[0]!).toBeGreaterThan(scores[1]!);
   });
 
   it("returns zero score when query terms not in any document", () => {
     const docs = ["foo bar", "baz qux"];
     const scores = bm25Scores("zzz", docs);
-    expect(scores[0]).toBe(0);
-    expect(scores[1]).toBe(0);
+    expect(scores[0]!).toBe(0);
+    expect(scores[1]!).toBe(0);
   });
 
   it("does not multiply repeated query terms", () => {
@@ -141,8 +141,8 @@ describe("bm25Scores", () => {
     const docs = ["a b c", "d e f", "a b c"];
     const scores = bm25Scores("a", docs);
     expect(scores).toHaveLength(3);
-    expect(scores[0]).toBe(scores[2]);
-    expect(scores[1]).toBe(0);
+    expect(scores[0]!).toBe(scores[2]);
+    expect(scores[1]!).toBe(0);
   });
 });
 
@@ -185,11 +185,11 @@ describe("computeRrfScores", () => {
     const scores = computeRrfScores([1, 2], [2, 1]);
     // File 0: 1/(60+1) + 1/(60+2) = 1/61 + 1/62
     // File 1: 1/(60+2) + 1/(60+1) = 1/62 + 1/61
-    expect(scores[0]).toBeCloseTo(scores[1]);
+    expect(scores[0]!).toBeCloseTo(scores[1]!);
   });
 
   it("produces higher scores for lower combined ranks", () => {
     const scores = computeRrfScores([1, 3], [1, 3]);
-    expect(scores[0]).toBeGreaterThan(scores[1]);
+    expect(scores[0]!).toBeGreaterThan(scores[1]!);
   });
 });

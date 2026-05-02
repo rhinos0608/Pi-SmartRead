@@ -53,7 +53,7 @@ export interface PackedSection {
 	metrics: TextMetrics;
 }
 
-export type PackingStrategy = "request-order" | "smallest-first";
+export type PackingStrategy = "request-order" | "smallest-first" | "relevance-first";
 
 export interface PackingPlan {
 	strategy: PackingStrategy;
@@ -214,7 +214,7 @@ export function buildPlan(strategy: PackingStrategy, order: number[], candidates
 	let fullSuccessCount = 0;
 
 	for (const index of order) {
-		const candidate = candidates[index];
+		const candidate = candidates[index]!;
 		if (canFitSection(state, candidate.fullMetrics)) {
 			addSection(state, candidate.fullMetrics);
 			fullIncluded.add(index);
@@ -242,7 +242,7 @@ export function buildPlan(strategy: PackingStrategy, order: number[], candidates
 			break;
 		}
 
-		const partialText = buildPartialSection(candidates[index], remainingLines, remainingBytes);
+		const partialText = buildPartialSection(candidates[index]!, remainingLines, remainingBytes);
 		if (!partialText) {
 			continue;
 		}
