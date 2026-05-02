@@ -579,17 +579,27 @@ export function createIntentReadTool(
 
         // Phase 5: optional structural reranker (off by default, gated behind config)
         if (embeddingConfig.rerankEnabled === true && rankedSuccessOrder.length > 0) {
-          const rerankInputs: RerankerInput[] = rankedSuccessOrder.map((path) => {
-            const detail = fileDetails.get(path)!;
-            return {
-              path,
-              rrfScore: detail.rrfScore ?? 0,
-              keywordScore: detail.keywordScore ?? 0,
-              semanticScore: detail.semanticScore,
-              graphDistance: detail.graphDistance,
-              probeConfidence: detail.probeConfidence,
-            };
-          });
+          const { isRecentlyModified } = await import("./git-history.js");
+          
+          const rerankInputs: RerankerInput[] = await Promise.all(
+            rankedSuccessOrder.map(async (path) => {
+              const detail = fileDetails.get(path)!;
+              let temporalScore = 0;
+              try {
+                if (await isRecentlyModified(ctx.cwd, path)) temporalScore = 1.0;
+              } catch { /* ignore git errors */ }
+              
+              return {
+                path,
+                rrfScore: detail.rrfScore ?? 0,
+                keywordScore: detail.keywordScore ?? 0,
+                semanticScore: detail.semanticScore,
+                graphDistance: detail.graphDistance,
+                probeConfidence: detail.probeConfidence,
+                temporalScore,
+              };
+            })
+          );
           const rerankResults = rerank(rerankInputs);
           const changedCount = rerankResults.filter((r) => r.changed).length;
           if (changedCount > 0) {

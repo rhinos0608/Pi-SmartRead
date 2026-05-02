@@ -5,6 +5,7 @@ import { getTagsBatch, initParser } from "./tags.js";
 import { TagsCache } from "./cache.js";
 import type { Tag } from "./cache.js";
 import { resolveSymbol } from "./symbol-resolver.js";
+import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -106,6 +107,10 @@ export class ContextGraph {
    * Speeds up getSymbolNeighbours without rescanning.
    */
   private fileIndex: Map<string, Tag[]> | null = null;
+  /**
+   * Pre-built call graph. Built lazily if includeCalls is true.
+   */
+  private callGraph: CallGraphResult | null = null;
 
   constructor(private root: string) {
     this.tagsCache = new TagsCache(root);
@@ -123,12 +128,18 @@ export class ContextGraph {
     if (options.forceRefresh) {
       this.symbolIndex = null;
       this.fileIndex = null;
+      this.callGraph = null;
       this.tagsCache.clearDiskCache();
+    }
+
+    const allFiles = findSrcFiles(this.root);
+    
+    if (options.includeCalls && this.callGraph === null && allFiles.length > 0) {
+      this.callGraph = await buildCallGraph(allFiles);
     }
 
     if (this.symbolIndex !== null) return; // already built
 
-    const allFiles = findSrcFiles(this.root);
     if (allFiles.length === 0) {
       this.symbolIndex = new Map();
       this.fileIndex = new Map();
@@ -208,6 +219,18 @@ export class ContextGraph {
     if (options.includeSymbols) {
       const symbolNeighbours = await this.getSymbolNeighbours(path, options);
       for (const n of symbolNeighbours) {
+        if (!seen.has(resolve(n.path))) {
+          seen.add(resolve(n.path));
+          neighbours.push(n);
+          this.recordProvenance(n.provenance);
+        }
+      }
+    }
+
+    // 3. Call-based neighbours
+    if (options.includeCalls && this.callGraph) {
+      const callNeighbours = this.getCallNeighbours(path);
+      for (const n of callNeighbours) {
         if (!seen.has(resolve(n.path))) {
           seen.add(resolve(n.path));
           neighbours.push(n);
@@ -328,6 +351,56 @@ export class ContextGraph {
       const resolved = resolveImportSpecifier(this.root, fullPath, match[1]!);
       if (resolved && isReadableWorkspaceFile(this.root, resolved)) {
         neighbours.push(resolved);
+      }
+    }
+
+    return neighbours;
+  }
+
+  private getCallNeighbours(path: string): GraphNeighbour[] {
+    const neighbours: GraphNeighbour[] = [];
+    if (!this.callGraph) return neighbours;
+
+    const resolvedPath = resolve(path);
+    const relPath = relative(this.root, resolvedPath);
+
+    // Find functions defined in this file
+    const functionsInFile = this.callGraph.functions.filter(f => f.file === relPath);
+
+    for (const func of functionsInFile) {
+      // Functions this file calls
+      for (const calleeStr of func.calls) {
+        // calleeStr is typically file:func or func
+        const parts = calleeStr.split(":");
+        if (parts.length === 2) {
+          const calleeFile = parts[0];
+          if (calleeFile && calleeFile !== relPath) {
+            const calleePath = resolve(this.root, calleeFile);
+            if (isReadableWorkspaceFile(this.root, calleePath)) {
+              neighbours.push({
+                path: calleePath,
+                provenance: { from: path, to: calleePath, type: "calls", confidence: 0.8 },
+              });
+            }
+          }
+        }
+      }
+
+      // Functions that call this file
+      for (const callerStr of func.calledBy) {
+        const parts = callerStr.split(":");
+        if (parts.length === 2) {
+          const callerFile = parts[0];
+          if (callerFile && callerFile !== relPath) {
+            const callerPath = resolve(this.root, callerFile);
+            if (isReadableWorkspaceFile(this.root, callerPath)) {
+              neighbours.push({
+                path: callerPath,
+                provenance: { from: path, to: callerPath, type: "called_by", confidence: 0.8 },
+              });
+            }
+          }
+        }
       }
     }
 

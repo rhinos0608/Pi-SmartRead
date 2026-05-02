@@ -20,6 +20,8 @@ import {
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { RepoMap } from "./repomap.js";
+import { ContextGraph } from "./context-graph.js";
+import { getCoCommittedFiles, isRecentlyModified } from "./git-history.js";
 
 // ── State types ───────────────────────────────────────────────────
 
@@ -350,6 +352,89 @@ export function wrapIntentReadTool(toolDef: ToolDefinition): ToolDefinition {
   return wrapReadTool(toolDef);
 }
 
+// ── Contextual Read Interceptor ───────────────────────────────────
+
+async function interceptContextualRead(
+  params: Record<string, unknown>,
+  originalExecute: (
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    onUpdate: unknown,
+    ctx: ExtensionContext,
+  ) => Promise<unknown>,
+  toolCallId: string,
+  signal: AbortSignal | undefined,
+  onUpdate: unknown,
+  ctx: ExtensionContext,
+): Promise<unknown> {
+  // Execute the original read to get the file contents
+  const result = await originalExecute(toolCallId, params, signal, onUpdate, ctx) as HookResponse;
+
+  if (!result || !Array.isArray(result.content)) {
+    return result; // Unexpected format, return as is
+  }
+
+  const filePath = params.path as string;
+  if (!filePath) {
+    return result; // No path specified, shouldn't happen for read tool but just in case
+  }
+
+  const cwd = path.resolve(params.directory as string ?? ctx.cwd);
+  const fullPath = path.resolve(cwd, filePath);
+
+  if (!existsSync(fullPath)) {
+    return result; // Original read likely failed too
+  }
+
+  const contextLines: string[] = [];
+  contextLines.push("---");
+  contextLines.push(`🔍 Context Map for ${filePath}:`);
+
+  try {
+    // 1. Structural Context (Imports, Calls, Definitions)
+    const graph = new ContextGraph(cwd);
+    // Don't force refresh every read to keep it fast, but do include symbols and calls
+    await graph.buildContextGraph({ forceRefresh: false, includeSymbols: true, includeCalls: true });
+    
+    const neighbours = await graph.getFileNeighbours(fullPath, { includeSymbols: true, includeCalls: true });
+    
+    const importedBy = neighbours.filter(n => n.provenance.type === "imported_by").map(n => path.relative(cwd, n.path));
+    const imports = neighbours.filter(n => n.provenance.type === "imports").map(n => path.relative(cwd, n.path));
+    const calls = neighbours.filter(n => n.provenance.type === "calls").map(n => path.relative(cwd, n.path));
+    const calledBy = neighbours.filter(n => n.provenance.type === "called_by").map(n => path.relative(cwd, n.path));
+
+    if (importedBy.length > 0) contextLines.push(`• Imported by: ${importedBy.slice(0, 5).join(", ")}${importedBy.length > 5 ? "..." : ""}`);
+    if (imports.length > 0) contextLines.push(`• Imports: ${imports.slice(0, 5).join(", ")}${imports.length > 5 ? "..." : ""}`);
+    if (calledBy.length > 0) contextLines.push(`• Called by functions in: ${calledBy.slice(0, 5).join(", ")}${calledBy.length > 5 ? "..." : ""}`);
+    if (calls.length > 0) contextLines.push(`• Calls functions in: ${calls.slice(0, 5).join(", ")}${calls.length > 5 ? "..." : ""}`);
+
+    // 2. Temporal Context (Git History)
+    const coCommits = await getCoCommittedFiles(cwd, fullPath);
+    if (coCommits.length > 0) {
+      const coCommitStrings = coCommits.map(c => `${path.relative(cwd, c.path)} (${Math.round(c.correlation * 100)}%)`);
+      contextLines.push(`• Historically co-modified with: ${coCommitStrings.join(", ")}`);
+    }
+    
+    if (await isRecentlyModified(cwd, fullPath)) {
+      contextLines.push(`• Note: This file was recently modified.`);
+    }
+
+  } catch (err) {
+    contextLines.push(`• Warning: Context generation failed (${(err as Error).message})`);
+  }
+
+  // Only append if we actually found meaningful context beyond the header
+  if (contextLines.length > 2) {
+    const textContent = result.content.find(c => c.type === "text");
+    if (textContent) {
+      textContent.text += "\n\n" + contextLines.join("\n");
+    }
+  }
+
+  return result;
+}
+
 // ── Built-in read override ────────────────────────────────────────
 
 /**
@@ -412,10 +497,22 @@ export function wrapBuiltinReadTool(): ToolDefinition {
       onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
+      // First wrap the base execute in our contextual read interceptor
+      const contextualExecute = async (
+        tId: string,
+        p: Record<string, unknown>,
+        sig: AbortSignal | undefined,
+        onUp: unknown,
+        context: ExtensionContext
+      ) => {
+        return interceptContextualRead(p, createDelegatedExecute(context), tId, sig, onUp, context);
+      };
+
+      // Then wrap that in the first-read interceptor
       return interceptFirstRead(
         params,
         toolName,
-        createDelegatedExecute(ctx),
+        contextualExecute,
         toolCallId,
         signal,
         onUpdate,

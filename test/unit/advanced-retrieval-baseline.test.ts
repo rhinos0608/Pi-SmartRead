@@ -1,5 +1,4 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import path from "path";
 import { createIntentReadTool } from "../../intent-read.js";
 import { SCENARIOS, createRetrievalFixture, cleanupFixture, RetrievalFixture } from "../helpers/retrieval-fixtures.js";
 import type { EmbedRequest, EmbedResult } from "../../embedding.js";

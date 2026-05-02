@@ -18,6 +18,7 @@ export interface RerankerInput {
   pageRank?: number;
   pathProximity?: number;
   probeConfidence?: number;
+  temporalScore?: number; // Git co-commit correlation
 }
 
 export interface RerankerResult {
@@ -77,6 +78,10 @@ function computeStructuralScore(input: RerankerInput): number {
   }
   if (input.probeConfidence !== undefined && input.probeConfidence > 0) {
     score += input.probeConfidence;
+    signals++;
+  }
+  if (input.temporalScore !== undefined && input.temporalScore > 0) {
+    score += input.temporalScore; // 0.0 to 1.0 correlation
     signals++;
   }
 
@@ -151,12 +156,6 @@ export function rerank(
       rerankScore: c.rrfScore,
       originalRank: slice.length + i,
       newRank: slice.length + i,
-      changed: false,
-      signals: { rrfWeight, structuralWeight, proximityWeight },
-    })),
-  ];
-}
-length + i,
       changed: false,
       signals: { rrfWeight, structuralWeight, proximityWeight },
     })),
