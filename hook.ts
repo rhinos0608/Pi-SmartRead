@@ -21,7 +21,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { RepoMap } from "./repomap.js";
 import { ContextGraph } from "./context-graph.js";
-import { getCoCommittedFiles, isRecentlyModified } from "./git-history.js";
+import { isRecentlyModified } from "./git-history.js";
 
 // ── State types ───────────────────────────────────────────────────
 
@@ -410,12 +410,6 @@ async function interceptContextualRead(
     if (calls.length > 0) contextLines.push(`• Calls functions in: ${calls.slice(0, 5).join(", ")}${calls.length > 5 ? "..." : ""}`);
 
     // 2. Temporal Context (Git History)
-    const coCommits = await getCoCommittedFiles(cwd, fullPath);
-    if (coCommits.length > 0) {
-      const coCommitStrings = coCommits.map(c => `${path.relative(cwd, c.path)} (${Math.round(c.correlation * 100)}%)`);
-      contextLines.push(`• Historically co-modified with: ${coCommitStrings.join(", ")}`);
-    }
-    
     if (await isRecentlyModified(cwd, fullPath)) {
       contextLines.push(`• Note: This file was recently modified.`);
     }

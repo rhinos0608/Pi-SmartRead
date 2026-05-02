@@ -53,8 +53,6 @@ const INTENT_READ_CACHE_SIZE = 64;
 const MIN_RELEVANCE_SCORE = 0.05;
 const MAX_INTENT_READ_FILES = 20;
 
-const contextGraphCache = new Map<string, ContextGraph>();
-
 class LruCache<T> {
   private values = new Map<string, T>();
 
@@ -84,6 +82,8 @@ class LruCache<T> {
     return this.values.size;
   }
 }
+
+const contextGraphCache = new LruCache<ContextGraph>(10);
 
 function createEmbeddingCacheKey(config: EmbedRequest, query: string, inputs: string[]): string {
   return JSON.stringify({
@@ -314,6 +314,17 @@ export function createIntentReadTool(
 
       // 2a: Import neighbours (fast, regex-based batch scan)
       const importSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+      
+      // Pre-compute import neighbours for initial seed files to avoid O(n^2) rescans
+      const seedFileToImports = new Map<string, string[]>();
+      for (const file of resolvedFiles) {
+        try {
+          seedFileToImports.set(file.path, findDirectImportNeighbours(ctx.cwd, [file.path], MAX_INTENT_READ_FILES));
+        } catch {
+          seedFileToImports.set(file.path, []);
+        }
+      }
+
       const importNeighbourPaths = findDirectImportNeighbours(ctx.cwd, resolvedFiles.map((file) => file.path), importSlots);
       for (const graphPath of importNeighbourPaths) {
         if (existingPaths.has(graphPath) || resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
@@ -322,10 +333,8 @@ export function createIntentReadTool(
         
         // Find which seed file imported this path (fallback to cwd if not found)
         const seedFile = resolvedFiles.find(f => {
-          try {
-            const neighbours = findDirectImportNeighbours(ctx.cwd, [f.path], MAX_INTENT_READ_FILES);
-            return neighbours.includes(graphPath);
-          } catch { return false; }
+          const neighbours = seedFileToImports.get(f.path);
+          return neighbours ? neighbours.includes(graphPath) : false;
         });
         
         graphEdges.push({ 

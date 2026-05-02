@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { createIntentReadTool } from "../../intent-read.js";
 import type { EmbedRequest, EmbedResult } from "../../embedding.js";
-import { resetConfigCache } from "../../config.js";
 
 // Stub fetchEmbeddings: returns unit vectors for easy scoring
 function makeEmbedder(vectors: number[][]): (req: EmbedRequest) => Promise<EmbedResult> {
