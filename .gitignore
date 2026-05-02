@@ -3,5 +3,6 @@ node_modules/
 *.log
 .DS_Store
 .pi-smartread.tags.cache/
+.pi-smartread.embeddings.cache/
 *.wasm
 .pi-smartread.tags.cache/*
