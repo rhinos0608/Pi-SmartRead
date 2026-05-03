@@ -60,7 +60,16 @@ interface SymbolSpan {
  *
  * More accurate than character-based chunking, lighter than full tree-sitter parse.
  */
-function extractSymbolBoundaries(text: string): SymbolSpan[] {
+/**
+ * Extract symbol boundaries from source text using lightweight regex + brace matching.
+ *
+ * This is a pure-text approach (no tree-sitter dependency) that works for
+ * TypeScript, JavaScript, and similar C-family languages.
+ *
+ * Exported for use by ast-chunker.ts as fallback when web-tree-sitter WASM is unavailable.
+ * Prefer ast-chunker.ts::extractSymbolBoundaries for AST-accurate results.
+ */
+export function extractSymbolBoundaries(text: string): SymbolSpan[] {
   const spans: SymbolSpan[] = [];
 
   // Match major declarations with their starting positions
@@ -121,8 +130,10 @@ function extractSymbolBoundaries(text: string): SymbolSpan[] {
  * - Template literal `${...}` interpolations are not fully supported — expressions
  *   containing strings or braces can confuse the state machine.
  * A full parser (e.g., tree-sitter) would be needed to handle these scenarios.
+ *
+ * Exported for use by ast-chunker.ts as fallback when web-tree-sitter is unavailable.
  */
-function findMatchingBrace(text: string, startPos: number): number | null {
+export function findMatchingBrace(text: string, startPos: number): number | null {
   // Find the first { after startPos
   const openIdx = text.indexOf("{", startPos);
   if (openIdx === -1) return null;
@@ -358,6 +369,92 @@ function chunkBySymbolBoundaries(
   }
 
   return results;
+}
+
+// ── AST-aware chunking (async, uses web-tree-sitter) ────────────
+
+/**
+ * Result of AST-aware chunking with diagnostics for observability.
+ */
+export interface AstChunkResult {
+  chunks: ChunkResult[];
+  diagnostics: {
+    usedAst: boolean;
+    wasmAvailable: boolean;
+    parseTimeMs: number;
+    symbolCount: number;
+    grammarExtension: string;
+    wasmFile: string | null;
+  };
+}
+
+/**
+ * Chunk text using AST-accurate symbol boundaries via web-tree-sitter.
+ *
+ * This is an async alternative to chunkText() that uses the same WASM
+ * infrastructure as smart-edit's ast-resolver for precise AST boundary
+ * detection. Falls back to regex-based symbol chunking when web-tree-sitter
+ * is unavailable or the language isn't supported.
+ *
+ * Integration note: shares @vscode/tree-sitter-wasm with smart-edit extension.
+ * WASM grammars are cached in-process, so loading is lazy per-grammar.
+ *
+ * @param text - Source code text
+ * @param options - Chunking options (must include filePath for language detection)
+ * @returns AstChunkResult with chunks and detailed diagnostics
+ */
+export async function chunkTextAst(
+  text: string,
+  options?: ChunkOptions,
+): Promise<AstChunkResult> {
+  if (!text || text.length === 0 || /^\s*$/.test(text)) {
+    return { chunks: [], diagnostics: {
+      usedAst: false, wasmAvailable: false, parseTimeMs: 0,
+      symbolCount: 0, grammarExtension: "", wasmFile: null,
+    }};
+  }
+
+  // Only use AST chunking when useSymbolBoundaries is set
+  if (!options?.useSymbolBoundaries) {
+    return {
+      chunks: chunkText(text, options),
+      diagnostics: {
+        usedAst: false, wasmAvailable: false, parseTimeMs: 0,
+        symbolCount: 0, grammarExtension: "", wasmFile: null,
+      },
+    };
+  }
+
+  const filePath = options?.filePath ?? "";
+  const startTime = Date.now();
+
+  try {
+    const { chunkByAstBoundaries } = await import("./ast-chunker.js");
+    const { chunks, diagnostics } = await chunkByAstBoundaries(text, filePath, options);
+
+    return {
+      chunks,
+      diagnostics: {
+        usedAst: !diagnostics.usedFallback,
+        wasmAvailable: diagnostics.wasmAvailable,
+        parseTimeMs: diagnostics.parseTimeMs,
+        symbolCount: diagnostics.symbolCount,
+        grammarExtension: diagnostics.grammarExtension,
+        wasmFile: diagnostics.wasmFile ?? null,
+      },
+    };
+  } catch {
+    // Async AST chunking failed — fall back to sync symbol-boundary chunking
+    const chunks = chunkBySymbolBoundaries(text, options);
+    return {
+      chunks,
+      diagnostics: {
+        usedAst: false, wasmAvailable: false,
+        parseTimeMs: Date.now() - startTime,
+        symbolCount: 0, grammarExtension: "", wasmFile: null,
+      },
+    };
+  }
 }
 
 /**

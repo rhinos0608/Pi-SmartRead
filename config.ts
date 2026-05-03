@@ -12,6 +12,57 @@ export interface ResolvedEmbeddingConfig {
   probeEnabled?: boolean;
   /** Enable structural reranker after RRF (Phase 5, off by default). */
   rerankEnabled?: boolean;
+  /** Enable HyDE query expansion (off by default). */
+  hydeEnabled?: boolean;
+  /** External reranker API configuration (Phase 6, off by default). */
+  externalReranker?: ExternalRerankerConfig;
+}
+
+export interface ExternalRerankerConfig {
+  /** Base URL of the reranker API (e.g., "https://api.cohere.com/v1"). */
+  baseUrl: string;
+  /** API key for authentication. */
+  apiKey?: string;
+  /** Model name to use (e.g., "rerank-english-v3.0"). */
+  model?: string;
+  /** Request timeout in milliseconds (default: 10000). */
+  timeoutMs?: number;
+  /** Maximum number of documents to send per request (default: 20). */
+  maxDocuments?: number;
+}
+
+export interface SearchEnrichModeConfig {
+  /** When this mode's enrichment is enabled, also append callers (default: true). */
+  callers?: boolean;
+  /** When this mode's enrichment is enabled, also show resolution info (default: true). */
+  resolution?: boolean;
+  /** When this mode's enrichment is enabled, tag results with symbol metadata (default: true). */
+  symbols?: boolean;
+}
+
+export interface SearchConfig {
+  enrich?: {
+    /** Default enrichment for all modes (applied first, then per-mode override). */
+    default?: SearchEnrichModeConfig;
+    /** Enrichment behaviour for mode="resolve". */
+    resolve?: SearchEnrichModeConfig;
+    /** Enrichment behaviour for mode="symbols". */
+    symbols?: SearchEnrichModeConfig;
+    /** Enrichment behaviour for mode="code". */
+    code?: SearchEnrichModeConfig;
+  };
+}
+
+export function loadSearchConfig(cwd?: string): SearchConfig {
+  const resolvedCwd = cwd ?? process.cwd();
+  const configPath = findConfigFile(resolvedCwd);
+  if (!configPath) return {};
+  try {
+    const raw = JSON.parse(readFileSync(configPath, "utf-8")) as { search?: SearchConfig };
+    return raw.search ?? {};
+  } catch {
+    return {};
+  }
 }
 
 interface RawConfig {
@@ -23,6 +74,9 @@ interface RawConfig {
   maxChunksPerFile?: number;
   probeEnabled?: boolean;
   rerankEnabled?: boolean;
+  hydeEnabled?: boolean;
+  externalReranker?: ExternalRerankerConfig;
+  search?: SearchConfig;
 }
 
 const CONFIG_FILENAME = "pi-smartread.config.json";
@@ -131,6 +185,8 @@ export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig {
     maxChunksPerFile: raw.maxChunksPerFile,
     probeEnabled: raw.probeEnabled ?? false,
     rerankEnabled: raw.rerankEnabled ?? false,
+    hydeEnabled: raw.hydeEnabled ?? false,
+    externalReranker: raw.externalReranker,
   };
 }
 

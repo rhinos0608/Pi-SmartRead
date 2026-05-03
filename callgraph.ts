@@ -8,7 +8,7 @@
  * "what does initApp call?"
  *
  * Works by post-processing tree-sitter parsed CSTs for
- * TypeScript/JavaScript/Python — extracting call_expression
+ * TypeScript/JavaScript/Python/Go/Rust — extracting call_expression
  * nodes and mapping them to the enclosing function definition.
  */
 
@@ -23,6 +23,9 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const TypeScriptGrammar = require("tree-sitter-typescript");
 const JavaScriptGrammar = require("tree-sitter-javascript");
+const PythonGrammar = require("tree-sitter-python");
+const GoGrammar = require("tree-sitter-go");
+const RustGrammar = require("tree-sitter-rust");
 
 type Grammar = Parameters<Parser["setLanguage"]>[0];
 const languageCache = new Map<string, Grammar>();
@@ -36,6 +39,9 @@ function loadGrammar(lang: SupportedLanguage): Grammar | null {
   if (lang === "typescript") language = TypeScriptGrammar.typescript as Grammar;
   else if (lang === "tsx") language = TypeScriptGrammar.tsx as Grammar;
   else if (lang === "javascript") language = JavaScriptGrammar as Grammar;
+  else if (lang === "python") language = PythonGrammar as Grammar;
+  else if (lang === "go") language = GoGrammar as Grammar;
+  else if (lang === "rust") language = RustGrammar as Grammar;
 
   if (!language) return null;
 
@@ -82,21 +88,22 @@ export interface CallGraphResult {
 
 /**
  * Find the enclosing function name for a node by walking up the tree.
+ *
+ * Supports TypeScript/JavaScript, Python, Go, and Rust AST node types.
  */
 function findEnclosingFunction(node: Parser.SyntaxNode): string | null {
   let current: Parser.SyntaxNode | null = node;
   while (current) {
+    // TypeScript/JavaScript: function_declaration, method_definition, etc.
     if (
       current.type === "function_declaration" ||
       current.type === "method_definition" ||
       current.type === "arrow_function" ||
       current.type === "function_expression"
     ) {
-      // Find the name
       const nameNode = current.childForFieldName("name");
       if (nameNode) return nameNode.text;
 
-      // For methods, get the name from the property
       for (let i = 0; i < current.namedChildCount; i++) {
         const child = current.namedChild(i);
         if (child?.type === "property_identifier") {
@@ -104,7 +111,6 @@ function findEnclosingFunction(node: Parser.SyntaxNode): string | null {
         }
       }
 
-      // Variable assignment: const foo = () => {}
       const parent = current.parent;
       if (parent?.type === "variable_declarator") {
         const nameChild = parent.childForFieldName("name");
@@ -114,12 +120,40 @@ function findEnclosingFunction(node: Parser.SyntaxNode): string | null {
       return "(anonymous)";
     }
 
+    // Python: function_definition (def keyword, indentation-scoped)
+    if (current.type === "function_definition") {
+      const nameNode = current.childForFieldName("name");
+      if (nameNode) return nameNode.text;
+      return "(anonymous)";
+    }
+
+    // Go: function_declaration and method_declaration
+    if (
+      current.type === "function_declaration" ||
+      current.type === "method_declaration"
+    ) {
+      const nameNode = current.childForFieldName("name");
+      if (nameNode) return nameNode.text;
+      return "(anonymous)";
+    }
+
+    // Rust: function_item (fn keyword)
+    if (current.type === "function_item") {
+      const nameNode = current.childForFieldName("name");
+      if (nameNode) return nameNode.text;
+      return "(anonymous)";
+    }
+
+    // Stop at top-level containers
     if (
       current.type === "class_declaration" ||
+      current.type === "class_definition" ||
+      current.type === "impl_item" ||
       current.type === "program" ||
-      current.type === "module"
+      current.type === "module" ||
+      current.type === "source_file"
     ) {
-      return null; // top level, no enclosing function
+      return null;
     }
 
     current = current.parent;
@@ -130,16 +164,20 @@ function findEnclosingFunction(node: Parser.SyntaxNode): string | null {
 /**
  * Check if a call expression node's function name is a simple identifier
  * (not a property access or complex expression).
+ *
+ * Supports TS/JS member_expression, Python attribute, Go selector_expression,
+ * and Rust scoped_identifier / field_expression.
  */
 function getCallTargetName(callNode: Parser.SyntaxNode): string | null {
   const fnNode = callNode.childForFieldName("function");
   if (!fnNode) return null;
 
+  // Simple identifier: foo()
   if (fnNode.type === "identifier") {
     return fnNode.text;
   }
 
-  // member_expression: obj.method()
+  // TS/JS member_expression: obj.method()
   if (fnNode.type === "member_expression") {
     const property = fnNode.childForFieldName("property");
     if (property?.type === "property_identifier") {
@@ -147,22 +185,80 @@ function getCallTargetName(callNode: Parser.SyntaxNode): string | null {
     }
   }
 
+  // Python attribute: obj.method() or self.repo.find()
+  // The attribute node has an "attribute" field for the method name
+  if (fnNode.type === "attribute") {
+    const attrNode = fnNode.childForFieldName("attribute");
+    if (attrNode) return attrNode.text;
+    // Fallback: last child is typically the attribute name
+    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
+    if (lastChild) return lastChild.text;
+  }
+
+  // Go selector_expression: pkg.Func() or obj.Method()
+  if (fnNode.type === "selector_expression") {
+    const field = fnNode.childForFieldName("field");
+    if (field) return field.text;
+    // Fallback: last child is the selected field
+    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
+    if (lastChild) return lastChild.text;
+  }
+
+  // Rust scoped_identifier: Module::func() or Type::method()
+  if (fnNode.type === "scoped_identifier") {
+    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
+    if (lastChild) return lastChild.text;
+  }
+
+  // Rust field_expression: obj.method()
+  if (fnNode.type === "field_expression") {
+    const field = fnNode.childForFieldName("field");
+    if (field) return field.text;
+    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
+    if (lastChild) return lastChild.text;
+  }
+
   return null;
 }
 
 /**
  * Walk a parsed tree and extract call edges.
+ *
+ * Handles call_expression (TS/JS/Python/Go/Rust) and
+ * macro_invocation (Rust: println!, vec!, etc.).
  */
 function extractCallEdges(tree: Parser.Tree, file: string): CallEdge[] {
   const edges: CallEdge[] = [];
   const seen = new Set<string>();
 
   function walk(node: Parser.SyntaxNode) {
-    if (node.type === "call_expression") {
+    // Standard call expressions (all supported languages)
+    // Python uses "call" instead of "call_expression"
+    if (node.type === "call_expression" || node.type === "call") {
       const caller = findEnclosingFunction(node);
       const callee = getCallTargetName(node);
 
       if (caller && callee) {
+        const key = `${file}:${caller}→${callee}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          edges.push({
+            caller: `${file}:${caller}`,
+            callee,
+            resolved: false,
+            callerLine: node.startPosition.row + 1,
+          });
+        }
+      }
+    }
+
+    // Rust macro invocations: println!("..."), vec![...], format!(...)
+    // Treat macro name as a call target for completeness.
+    if (node.type === "macro_invocation") {
+      const caller = findEnclosingFunction(node);
+      const macroNameNode = node.childForFieldName("macro");
+      if (caller && macroNameNode) {
+        const callee = macroNameNode.text;
         const key = `${file}:${caller}→${callee}`;
         if (!seen.has(key)) {
           seen.add(key);
@@ -318,7 +414,8 @@ export async function findCallers(
 
     function walk(node: Parser.SyntaxNode) {
       if (signal?.aborted) return;
-      if (node.type === "call_expression") {
+      // Python uses "call" instead of "call_expression"
+      if (node.type === "call_expression" || node.type === "call") {
         const callee = getCallTargetName(node);
         if (callee === targetFunction) {
           const caller = findEnclosingFunction(node);

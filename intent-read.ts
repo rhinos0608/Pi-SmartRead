@@ -26,7 +26,8 @@ import {
 } from "./utils.js";
 import { probeQuery, type ProbeResult } from "./query-probe.js";
 import { rerank, type RerankerInput } from "./rerank.js";
-import { chunkText, type ChunkResult } from "./chunking.js";
+import { chunkTextAst, type ChunkResult } from "./chunking.js";
+import { applyHyde, type HydeResult } from "./hyde.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -112,6 +113,8 @@ interface IntentReadDetails {
   embeddingError?: string;
   rankingSignals: { bm25: true; embeddings: boolean };
   chunkingEnabled: boolean;
+  /** AST-aware chunking detection (uses web-tree-sitter WASM from smart-edit integration) */
+  astChunking?: { usedAst: boolean; wasmAvailable: boolean; parseTimeMs: number; symbolCount: number };
   embeddingCache: { hit: boolean; size: number; maxSize: number; persistent?: boolean; diskEntries?: number };
   filteredBelowThresholdPaths: string[];
   graphAugmentation: { addedPaths: string[]; candidateCountBefore: number; candidateCountAfter: number; edgesUsed?: Array<{ from: string; to: string; type: string; confidence: number }> };
@@ -128,6 +131,7 @@ interface IntentReadDetails {
     }[];
   };
   probing?: ProbeResult;
+  hyde?: HydeResult;
   reranking?: {
     status: "off" | "ok" | "failed_fallback";
     changedOrder: boolean;
@@ -150,8 +154,9 @@ export function createIntentReadTool(
   fetchEmbeddingsImpl: (req: EmbedRequest) => Promise<EmbedResult> = defaultFetchEmbeddings,
 ): ToolDefinition {
   const embeddingLruCache = new LruCache<EmbedResult>(INTENT_READ_CACHE_SIZE);
-  // Persistent cache is lazy-initialized per cwd (disk path depends on cwd)
-  const persistentCaches = new Map<string, PersistentEmbeddingCache>();
+  // Persistent cache is lazy-initialized per cwd (disk path depends on cwd).
+  // Use LRU to prevent unbounded memory growth across repos.
+  const persistentCaches = new LruCache<PersistentEmbeddingCache>(10);
 
   return {
     name: "intent_read",
@@ -237,7 +242,7 @@ export function createIntentReadTool(
         existsSync(join(ctx.cwd, "go.mod"));
       
       if (hasProjectMarker && embeddingConfig.probeEnabled === true) {
-        await sharedGraph.buildContextGraph({ forceRefresh: false, includeSymbols: true });
+        await sharedGraph.buildContextGraph({ forceRefresh: false, includeSymbols: true, includeCalls: true });
       }
 
       // Tracking sets for structural signals (populated during expansion)
@@ -337,6 +342,26 @@ export function createIntentReadTool(
           } catch { /* skip individual failures */ }
         }
       }
+      // 2c: Call graph neighbours (caller/callee expansion for high-confidence function symbols)
+      const callSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+      if (callSlots > 0 && embeddingConfig.probeEnabled === true) {
+        const callSeedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
+        for (const seedFile of callSeedFiles) {
+          if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+          try {
+            const neighbours = await sharedGraph.getFileNeighbours(seedFile.path, { includeCalls: true });
+            for (const n of neighbours) {
+              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+              const normalized = normalizeCandidatePath(ctx.cwd, n.path);
+              if (existingPaths.has(normalized)) continue;
+              existingPaths.add(normalized);
+              resolvedFiles.push({ path: n.path });
+              graphEdges.push({ from: seedFile.path, to: n.path, type: n.provenance.type, confidence: n.provenance.confidence });
+              graphDistanceMap.set(normalized, 2);
+            }
+          } catch { /* skip individual failures */ }
+        }
+      }
       const addedGraphPaths = resolvedFiles.slice(candidateCountBeforeGraph).map((file) => file.path);
 
       // 4. Read files
@@ -390,25 +415,40 @@ export function createIntentReadTool(
         preview: string;
       }[] = [];
 
+      // AST chunking tracking (populated inside the if-block)
+      let astChunkingUsed = false;
+      let astChunkingStats = { usedAst: false, wasmAvailable: false, parseTimeMs: 0, symbolCount: 0 };
+
+      // HyDE tracking (populated inside the if-block)
+      let hydeResult: HydeResult = { document: query, applied: false, pattern: "none", identifiers: [] };
+
       if (successfulFiles.length > 0) {
         // Chunk each successful file's body
         const chunkSizeChars = embeddingConfig.chunkSizeChars;
         const chunkOverlapChars = embeddingConfig.chunkOverlapChars;
         const maxChunksPerFile = embeddingConfig.maxChunksPerFile;
 
-        // Map file index -> its chunks
+        // Map file index -> its chunks (using AST-aware chunking when available)
         const fileChunks: ChunkResult[][] = [];
         for (const f of successfulFiles) {
-          fileChunks.push(
-            chunkText(f.body!, {
-              chunkSizeChars,
-              chunkOverlapChars,
-              maxChunksPerFile,
-              filePath: f.path,
-              compressForEmbedding: true,
-              useSymbolBoundaries: true,
-            }),
-          );
+          const result = await chunkTextAst(f.body!, {
+            chunkSizeChars,
+            chunkOverlapChars,
+            maxChunksPerFile,
+            filePath: f.path,
+            compressForEmbedding: true,
+            useSymbolBoundaries: true,
+          });
+          fileChunks.push(result.chunks);
+          if (result.diagnostics.usedAst) {
+            astChunkingUsed = true;
+            astChunkingStats = {
+              usedAst: true,
+              wasmAvailable: result.diagnostics.wasmAvailable,
+              parseTimeMs: Math.max(astChunkingStats.parseTimeMs, result.diagnostics.parseTimeMs),
+              symbolCount: Math.max(astChunkingStats.symbolCount, result.diagnostics.symbolCount),
+            };
+          }
         }
 
         // Collect all chunk texts plus the query
@@ -424,11 +464,20 @@ export function createIntentReadTool(
         const semanticScores: number[] = [];
         let semanticRanks: number[] = [];
 
+        // HyDE (Hypothetical Document Embeddings): optionally replace the
+        // raw query with a generated hypothetical code document for embedding.
+        // This improves semantic matching for abstract/natural-language queries.
+        hydeResult = applyHyde({
+          enabled: embeddingConfig.hydeEnabled === true,
+          query,
+        });
+        const embeddingQuery = hydeResult.applied ? hydeResult.document : query;
+
         // Attempt embedding — fall back to BM25-only on failure
         try {
           const embeddingRequest = {
             ...embeddingConfig,
-            inputs: [query, ...allChunkTexts],
+            inputs: [embeddingQuery, ...allChunkTexts],
           };
           const embeddingCacheKey = createEmbeddingCacheKey(embeddingRequest, query, allChunkTexts);
 
@@ -645,10 +694,34 @@ export function createIntentReadTool(
         return d !== 0 ? d : a - b;
       });
 
+      // Relevance-first hybrid: guarantee #1 ranked file is included first,
+      // then fill remaining space with smallest-first for maximum coverage.
+      // Prevents smallest-first from displacing the highest-confidence result.
+      const relevanceFirstOrder = packCandidates.length > 0
+        ? [0, ...smallestFirstOrder.filter((i) => i !== 0)]
+        : [];
+
       const requestPlan = buildPlan("request-order", requestOrder, packCandidates);
       const smallestPlan = buildPlan("smallest-first", smallestFirstOrder, packCandidates);
-      const switchedForCoverage = smallestPlan.fullSuccessCount > requestPlan.fullSuccessCount;
-      const plan = switchedForCoverage ? smallestPlan : requestPlan;
+      const relevancePlan = buildPlan("relevance-first", relevanceFirstOrder, packCandidates);
+
+      // Pick the plan that includes the most successful files.
+      // Tie-break: prefer plans that include the #1 ranked file (index 0).
+      const candidates_plans = [
+        { plan: requestPlan, name: "request-order" },
+        { plan: smallestPlan, name: "smallest-first" },
+        { plan: relevancePlan, name: "relevance-first" },
+      ];
+      const best = candidates_plans.sort((a, b) => {
+        const d = b.plan.fullSuccessCount - a.plan.fullSuccessCount;
+        if (d !== 0) return d;
+        // Tie-break: prefer including the top-ranked file
+        const aHasTop = a.plan.fullIncluded.has(0) ? 1 : 0;
+        const bHasTop = b.plan.fullIncluded.has(0) ? 1 : 0;
+        return bHasTop - aHasTop;
+      })[0]!;
+      const switchedForCoverage = best.name !== "request-order";
+      const plan = best.plan;
 
       // Build output sections in RRF rank order
       const sections: string[] = [];
@@ -704,6 +777,7 @@ export function createIntentReadTool(
           embeddings: embeddingStatus === "ok",
         },
         chunkingEnabled: embeddingStatus === "ok",
+        astChunking: astChunkingUsed ? astChunkingStats : undefined,
         embeddingCache: {
           hit: embeddingCacheHit,
           size: embeddingLruCache.size,
@@ -719,6 +793,7 @@ export function createIntentReadTool(
           ...(graphEdges.length > 0 && { edgesUsed: graphEdges }),
         },
         ...(probing && { probing }),
+        ...(hydeResult.applied && { hyde: hydeResult }),
         ...(rerankingResult && { reranking: rerankingResult }),
         ...(embeddingStatus === "ok" && filesChunked > 0 && {
           chunkInfo: {

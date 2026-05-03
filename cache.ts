@@ -33,11 +33,12 @@ export interface TagsCacheOptions {
 
 interface CacheEntry {
   mtime: number;
+  queryMtime: number | null;
   tags: Tag[];
 }
 
 /** Current cache format version. Bump when Tag structure or serialization changes. */
-export const CACHE_VERSION = 2;
+export const CACHE_VERSION = 3;
 
 const VERSION_FILENAME = "version.json";
 
@@ -48,6 +49,8 @@ export class TagsCache {
   private corruptionCount: number;
   private maxCorruptionThreshold: number;
   private trackDependencies: boolean;
+  /** Max entries in memory cache before eviction begins. */
+  private readonly maxMemoryEntries: number;
 
   /** File → set of files that import from this file (reverse dependency graph) */
   dependents: Map<string, Set<string>> = new Map();
@@ -68,6 +71,7 @@ export class TagsCache {
     this.corruptionCount = 0;
     this.maxCorruptionThreshold = options.maxCorruptionThreshold ?? 5;
     this.trackDependencies = options.trackDependencies ?? false;
+    this.maxMemoryEntries = 10_000; // Hard cap: prevents unbounded memory growth
 
     if (!options.noDiskCache) {
       // We can't await in constructor, so we provide an init method
@@ -143,15 +147,18 @@ export class TagsCache {
 
   /**
    * Get tags for a file from cache.
+   * Optionally accepts queryMtime — the mtime of the SCM query file for the file's language.
+   * When the query file changes, cached entries are invalidated even if the source file hasn't.
+   * Pass null/undefined for queryMtime to skip this check (backward compat).
    * Returns null on cache miss, mtime mismatch, or corrupted entry.
    */
-  async get(fname: string): Promise<Tag[] | null> {
+  async get(fname: string, queryMtime?: number | null): Promise<Tag[] | null> {
     const mtime = await this.getMtime(fname);
     if (mtime === null) return null;
 
     // Check memory cache first
     const memEntry = this.memoryCache.get(fname);
-    if (memEntry && memEntry.mtime === mtime) {
+    if (memEntry && memEntry.mtime === mtime && memEntry.queryMtime === (queryMtime ?? null)) {
       return memEntry.tags;
     }
 
@@ -166,6 +173,7 @@ export class TagsCache {
             entry &&
             typeof entry.mtime === "number" &&
             entry.mtime === mtime &&
+            entry.queryMtime === (queryMtime ?? null) &&
             Array.isArray(entry.tags)
           ) {
             // Promote to memory cache
@@ -194,11 +202,11 @@ export class TagsCache {
    * Store tags for a file in cache.
    * Failure to write to disk is non-fatal — memory cache is sufficient fallback.
    */
-  async set(fname: string, tags: Tag[]): Promise<void> {
+  async set(fname: string, tags: Tag[], queryMtime?: number | null): Promise<void> {
     const mtime = await this.getMtime(fname);
     if (mtime === null) return;
 
-    const entry: CacheEntry = { mtime, tags };
+    const entry: CacheEntry = { mtime, queryMtime: queryMtime ?? null, tags };
     this.memoryCache.set(fname, entry);
 
     if (this.useFilePersistence) {
@@ -207,6 +215,17 @@ export class TagsCache {
         await fs.writeFile(filePath, JSON.stringify(entry), "utf-8");
       } catch {
         // Write failed — memory cache is sufficient fallback
+      }
+    }
+
+    // Evict oldest entries when memory cache exceeds hard cap
+    if (this.memoryCache.size > this.maxMemoryEntries) {
+      const toEvict = this.memoryCache.size - this.maxMemoryEntries;
+      let evicted = 0;
+      for (const key of this.memoryCache.keys()) {
+        if (evicted >= toEvict) break;
+        this.memoryCache.delete(key);
+        evicted++;
       }
     }
   }

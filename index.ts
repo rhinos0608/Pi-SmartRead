@@ -1,20 +1,20 @@
-import type { ExtensionAPI, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { createIntentReadTool } from "./intent-read.js";
 import { createReadManyTool } from "./read-many.js";
 import registerRepoTools from "./repomap-tool.js";
-import { wrapBuiltinReadTool, wrapReadManyTool, wrapIntentReadTool } from "./hook.js";
+import { wrapBuiltinReadTool, registerSessionHooks } from "./hook.js";
 
 export default function (pi: ExtensionAPI) {
-  // Override the built-in read tool with repo-map first-read interception
+  // 1. Session hooks: eager repo-map generation + startup injection
+  registerSessionHooks(pi);
+
+  // 2. Override built-in read with contextual enrichment (imports, git recency)
   pi.registerTool(wrapBuiltinReadTool());
 
-  // Wrap with repo-map hook interceptor
-  const readManyDef = createReadManyTool() as unknown as ToolDefinition;
-  const intentReadDef = createIntentReadTool() as unknown as ToolDefinition;
+  // 3. Custom tools (no hook wrapping — enrichment flows through the inner read)
+  pi.registerTool(createReadManyTool() as never);
+  pi.registerTool(createIntentReadTool() as never);
 
-  pi.registerTool(wrapReadManyTool(readManyDef));
-  pi.registerTool(wrapIntentReadTool(intentReadDef));
-
-  // Register repo_map and search_symbols (no hook needed)
+  // 4. Standalone tools
   registerRepoTools(pi);
 }
