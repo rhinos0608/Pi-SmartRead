@@ -28,6 +28,7 @@ import { probeQuery, type ProbeResult } from "./query-probe.js";
 import { rerank, type RerankerInput } from "./rerank.js";
 import { chunkTextAst, type ChunkResult } from "./chunking.js";
 import { applyHyde, type HydeResult } from "./hyde.js";
+import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -361,6 +362,33 @@ export function createIntentReadTool(
             }
           } catch { /* skip individual failures */ }
         }
+      }
+      // 2d: Graphify neighbor expansion (uses graphify-out/graph.json when available)
+      // Finds related files through all edge types (calls, imports, references,
+      // conceptually_related_to, etc.) — much richer than regex import scanning alone.
+      const graphifySlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+      if (graphifySlots > 0) {
+        try {
+          const enricher = getGraphifyEnricher(ctx.cwd);
+          if (enricher.isAvailable) {
+            const graphifySeedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
+            for (const seedFile of graphifySeedFiles) {
+              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+              try {
+                const related = enricher.getRelatedFilesForPath(seedFile.path);
+                for (const rel of related) {
+                  if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+                  const normalized = normalizeCandidatePath(ctx.cwd, rel.path);
+                  if (existingPaths.has(normalized)) continue;
+                  existingPaths.add(normalized);
+                  resolvedFiles.push({ path: rel.path });
+                  graphEdges.push({ from: seedFile.path, to: rel.path, type: rel.relation, confidence: rel.confidenceScore });
+                  graphDistanceMap.set(normalized, 2);
+                }
+              } catch { /* skip individual failures */ }
+            }
+          }
+        } catch { /* graphify unavailable — skip silently */ }
       }
       const addedGraphPaths = resolvedFiles.slice(candidateCountBeforeGraph).map((file) => file.path);
 

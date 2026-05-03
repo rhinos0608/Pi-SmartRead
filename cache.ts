@@ -14,12 +14,16 @@ import { promises as fs, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
+export type TagConfidence = "extracted" | "inferred" | "ambiguous";
+
 export interface Tag {
   relFname: string;
   fname: string;
   line: number;
   name: string;
   kind: "def" | "ref";
+  /** How the tag was found: extracted (AST/parser), inferred (regex/fallback), ambiguous (uncertain) */
+  confidence?: TagConfidence;
 }
 
 export interface TagsCacheOptions {

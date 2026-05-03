@@ -133,6 +133,8 @@ export interface SearchResult {
   name: string;
   kind: "def" | "ref";
   context: string;
+  /** Confidence level: extracted (AST), inferred (text fallback), ambiguous */
+  confidence?: "extracted" | "inferred" | "ambiguous";
 }
 
 const FALLBACK_DEFINITION_PATTERNS: RegExp[] = [
@@ -225,6 +227,8 @@ async function searchIdentifiersByText(
         name: match.name,
         kind: match.kind,
         context,
+        // Regex-based match is inferred (not AST-verified)
+        confidence: match.kind === "def" ? "inferred" : "inferred",
       });
     }
   }
@@ -1139,6 +1143,8 @@ export class RepoMap {
         name: tag.name,
         kind: tag.kind,
         context,
+        // Tree-sitter tags are extracted (AST-verified)
+        confidence: tag.confidence ?? "extracted",
       });
     }
 

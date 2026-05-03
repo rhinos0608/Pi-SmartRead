@@ -6,3 +6,4 @@ node_modules/
 .pi-smartread.embeddings.cache/
 *.wasm
 .pi-smartread.tags.cache/*
+graphify-out/

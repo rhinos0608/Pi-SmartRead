@@ -13,6 +13,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { RepoMap } from "./repomap.js";
 import createSearchTool from "./search-tool.js";
+import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 // ── Tool: repo_map ────────────────────────────────────────────────
 
@@ -145,9 +146,49 @@ function createRepoTool(): ToolDefinition {
         };
       }
 
-      // Return the map — startup injection is independent
+      // Enrich with graphify knowledge graph data (when available)
+      let enrichedMap = result.map;
+      try {
+        const enricher = getGraphifyEnricher(cwd);
+        if (enricher.isAvailable) {
+          const s = enricher.stats;
+          const sections: string[] = [
+            "",
+            "## Graph Knowledge",
+            `The knowledge graph contains ${s?.nodeCount ?? "?"} concepts across ${s?.fileCount ?? "?"} files ` +
+            `with ${s?.edgeCount ?? "?"} relationships in ${s?.communityCount ?? "?"} architectural clusters.`,
+            "",
+          ];
+
+          const gods = enricher.getGodNodes(6);
+          if (gods.length > 0) {
+            sections.push("Core abstractions:");
+            for (const g of gods) {
+              sections.push(`  • ${g.label} — ${g.degree} connections`);
+            }
+            sections.push("");
+          }
+
+          if ((s?.communityCount ?? 0) > 1) {
+            sections.push("Clusters:");
+            for (let cid = 0; cid < Math.min(s?.communityCount ?? 0, 6); cid++) {
+              const files = enricher.getCommunityFiles(cid);
+              if (files.length === 0) continue;
+              const stems = files
+                .map((f) => f.split("/").pop() ?? f)
+                .slice(0, 3);
+              sections.push(`  • Cluster ${cid}: ${stems.join(", ")}${files.length > 3 ? ` (+${files.length - 3})` : ""}`);
+            }
+          }
+
+          enrichedMap = result.map + "\n" + sections.join("\n");
+        }
+      } catch {
+        // Graphify enrichment is best-effort
+      }
+
       return {
-        content: [{ type: "text" as const, text: result.map }],
+        content: [{ type: "text" as const, text: enrichedMap }],
         details: result.stats,
       };
     },

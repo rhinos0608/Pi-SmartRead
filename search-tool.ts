@@ -30,6 +30,7 @@ import { filenameToLang } from "./languages.js";
 import { loadSearchConfig, type SearchConfig } from "./config.js";
 import { bm25Scores, computeRrfScores } from "./scoring.js";
 import { fetchEmbeddings } from "./embedding.js";
+import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 // ── Schema ────────────────────────────────────────────────────────
 
@@ -449,10 +450,11 @@ async function handleSymbols(
 
   for (const r of results) {
     const kind = r.kind === "def" ? "def" : "ref";
+    const confidence = r.confidence ?? "extracted";
     const contextStr = r.context
       ? `\n${r.context.split("\n").map((l) => `  ${l}`).join("\n")}`
       : "";
-    lines.push(`  ${r.file}:${r.line}  [${kind}]  ${r.name}${contextStr}`);
+    lines.push(`  ${r.file}:${r.line}  [${kind}]  [${confidence}]  ${r.name}${contextStr}`);
     lines.push("");
   }
 
@@ -705,6 +707,27 @@ async function handleCode(
 
   // 3. Score definitions
   const scored = await scoreDefinitions(allDefs, query, cwd, signal);
+
+  // 3b. Graph centrality boost: slightly boost definitions in files that are
+  // important nodes in the graphify knowledge graph (when available).
+  // Uses a small multiplier (0-20%) so BM25 + embedding signals dominate.
+  try {
+    const enricher = getGraphifyEnricher(cwd);
+    if (enricher.isAvailable) {
+      for (const def of scored) {
+        const centrality = enricher.getFileCentrality(def.file);
+        if (centrality > 0) {
+          // Boost by up to 20% for highly central files
+          const boost = 1 + Math.min(centrality, 20) * 0.01;
+          def.score *= boost;
+        }
+      }
+      scored.sort((a, b) => b.score - a.score);
+    }
+  } catch {
+    // Graphify boost is best-effort
+  }
+
   const top = scored.slice(0, maxResults);
 
   if (top.length === 0) {

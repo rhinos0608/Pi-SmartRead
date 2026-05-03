@@ -278,6 +278,194 @@ export async function findSrcFiles(
   return results;
 }
 
+// ── Context-mode ignore/include support (port of graphify's .graphifyignore / .graphifyinclude) ──
+
+interface ContextModeRule {
+  pattern: string;
+  negated: boolean;
+  anchored: boolean;
+  regex: RegExp;
+}
+
+const VCS_MARKERS = [".git", ".hg", ".svn", "_darcs"] as const;
+
+/** Walk upward from start; return the first directory containing a VCS marker. */
+function findVcsRoot(start: string): string | null {
+  let current = resolve(start);
+  const osModule = require("os");
+  const home = osModule.homedir();
+  while (true) {
+    if (VCS_MARKERS.some((m) => existsSync(join(current, m)))) return current;
+    const parent = resolve(current, "..");
+    if (parent === current || current === home) return null;
+    current = parent;
+  }
+}
+
+/** Parse a single line from a .context-mode-ignore file (gitignore-like). */
+function parseContextModeLine(line: string): ContextModeRule | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+
+  let pattern = trimmed;
+  let negated = false;
+  if (pattern.startsWith("!")) {
+    negated = true;
+    pattern = pattern.slice(1);
+  }
+  let anchored = false;
+  if (pattern.startsWith("/")) {
+    anchored = true;
+    pattern = pattern.slice(1);
+  }
+  if (pattern.endsWith("/")) {
+    pattern = pattern.slice(0, -1);
+  }
+
+  // Convert glob to regex (~gitignore semantics)
+  const escaped = pattern
+    .replace(/\\/g, "\\\\")
+    .replace(/\./g, "\\.")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]");
+
+  const regexSource = anchored
+    ? `^${escaped}$`
+    : pattern.includes("/")
+      ? `^${escaped}$`
+      : `(?:^|/)${escaped}$`;
+
+  try {
+    return { pattern: trimmed, negated, anchored, regex: new RegExp(regexSource) };
+  } catch {
+    return null;
+  }
+}
+
+/** Load patterns from .context-mode-ignore/.context-mode-include files upward to VCS root. */
+function loadContextModeRules(rootDir: string, type: "ignore" | "include"): ContextModeRule[] {
+  const filename = type === "ignore" ? ".context-mode-ignore" : ".context-mode-include";
+  const root = resolve(rootDir);
+  const ceiling = findVcsRoot(root) ?? root;
+
+  // Collect dirs from ceiling down to root
+  const dirs: string[] = [];
+  let current = root;
+  while (true) {
+    dirs.push(current);
+    if (current === ceiling) break;
+    const parent = resolve(current, "..");
+    if (parent === current) break;
+    current = parent;
+  }
+  dirs.reverse(); // ceiling first, root last for last-match-wins
+
+  const rules: ContextModeRule[] = [];
+  const seen = new Set<string>();
+  const fsMod = require("fs");
+
+  for (const d of dirs) {
+    const filePath = join(d, filename);
+    if (!existsSync(filePath)) continue;
+    try {
+      const raw = fsMod.readFileSync(filePath, "utf-8");
+      for (const line of raw.split("\n")) {
+        const rule = parseContextModeLine(line);
+        if (rule && !seen.has(rule.pattern)) {
+          seen.add(rule.pattern);
+          rules.push(rule);
+        }
+      }
+    } catch {
+      // skip unreadable
+    }
+  }
+  return rules;
+}
+
+/** Check if a relative path matches any rule using last-match-wins semantics. */
+function isMatchedByRules(relPath: string, rules: ContextModeRule[]): boolean {
+  const normalized = relPath.replace(/\\/g, "/");
+  let matched = false;
+  for (const rule of rules) {
+    if (rule.regex.test(normalized)) {
+      matched = !rule.negated;
+    }
+  }
+  return matched;
+}
+
+/**
+ * File discovery augmented with .context-mode-ignore and .context-mode-include support.
+ * - Ignore rules work like .gitignore: paths matching the final pattern are excluded.
+ * - Include rules opt hidden files/dirs back into the scan.
+ * These files are looked up from scan root to VCS root (ceiling at .git).
+ */
+export async function findSrcFilesWithContextMode(
+  rootDir: string,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const ignoreRules = loadContextModeRules(rootDir, "ignore");
+  const includeRules = loadContextModeRules(rootDir, "include");
+  const resolvedRoot = resolve(rootDir);
+
+  const results: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    if (signal?.aborted || results.length >= maxFiles) return;
+
+    let dirHandle: Awaited<ReturnType<typeof fs.opendir>>;
+    try {
+      dirHandle = await fs.opendir(dir);
+    } catch {
+      return;
+    }
+
+    try {
+      for await (const entry of dirHandle) {
+        if (signal?.aborted || results.length >= maxFiles) return;
+
+        const fullPath = join(dir, entry.name);
+        const relPath = relative(resolvedRoot, fullPath);
+        const isDir = entry.isDirectory();
+
+        // Check context-mode ignore rules first
+        if (ignoreRules.length > 0 && isMatchedByRules(relPath, ignoreRules)) {
+          continue;
+        }
+
+        if (isDir) {
+          const isHidden = entry.name.startsWith(".");
+          if (isHidden) {
+            // Check include rules for hidden dirs
+            if (!isMatchedByRules(relPath, includeRules)) {
+              // Could a child path match an include pattern?
+              const couldContain = includeRules.some((r) =>
+                r.pattern.startsWith(relPath + "/"),
+              );
+              if (!couldContain) continue;
+            }
+          }
+          if (IGNORE_DIRS.has(entry.name)) continue;
+          await walk(fullPath);
+        } else if (entry.isFile() && isSupportedFile(fullPath)) {
+          // Hidden files need include rule
+          if (entry.name.startsWith(".") && !isMatchedByRules(relPath, includeRules)) {
+            continue;
+          }
+          results.push(fullPath);
+        }
+      }
+    } catch {
+      // Ignore errors during iteration
+    }
+  }
+
+  await walk(resolvedRoot);
+  return results;
+}
+
 /**
  * Find only source files with names matching identifiers (used for focused scans).
  */
@@ -340,4 +528,5 @@ export async function findFilesMatching(
 
   await walk(resolvedRoot);
   return results;
+
 }

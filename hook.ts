@@ -21,6 +21,7 @@ import { RepoMap } from "./repomap.js";
 import { ContextGraph } from "./context-graph.js";
 import { isRecentlyModified } from "./git-history.js";
 import { LruCache } from "./utils.js";
+import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 // ── Shared ContextGraph cache (module-level) ──
 // Build once per repo, reuse across reads. Prevents O(repo_files * read_calls) parsing.
@@ -50,6 +51,9 @@ async function generateCompactMap(
   cwd: string,
   _signal?: AbortSignal,
 ): Promise<{ map: string; stats: Record<string, unknown> } | null> {
+  let map: string | null = null;
+  let stats: Record<string, unknown> = {};
+
   try {
     const rm = new RepoMap(cwd);
     const result = await rm.getRepoMap({
@@ -59,7 +63,8 @@ async function generateCompactMap(
       mapTokens: 2048,
       verbose: false,
     });
-    return { map: result.map, stats: result.stats as unknown as Record<string, unknown> };
+    map = result.map;
+    stats = result.stats as unknown as Record<string, unknown>;
   } catch {
     try {
       const rm = new RepoMap(cwd);
@@ -69,11 +74,57 @@ async function generateCompactMap(
         mapTokens: 2048,
         verbose: false,
       });
-      return { map: result.map, stats: result.stats as unknown as Record<string, unknown> };
+      map = result.map;
+      stats = result.stats as unknown as Record<string, unknown>;
     } catch {
       return null;
     }
   }
+
+  // Enrich with graphify knowledge graph data (when available)
+  try {
+    const enricher = getGraphifyEnricher(cwd);
+    if (enricher.isAvailable) {
+      const s = enricher.stats;
+      const sections: string[] = [
+        "",
+        "## Graph Knowledge",
+        `The knowledge graph contains ${s?.nodeCount ?? "?"} concepts across ${s?.fileCount ?? "?"} files ` +
+        `with ${s?.edgeCount ?? "?"} relationships in ${s?.communityCount ?? "?"} architectural clusters.`,
+        "",
+      ];
+
+      // God nodes — core abstractions of the codebase
+      const gods = enricher.getGodNodes(8);
+      if (gods.length > 0) {
+        sections.push("Core abstractions (most connected concepts):");
+        for (const g of gods) {
+          sections.push(`  • ${g.label} — ${g.degree} connections`);
+        }
+        sections.push("");
+      }
+
+      // Describe communities briefly — useful for high-level orientation
+      if ((s?.communityCount ?? 0) > 1) {
+        sections.push("Architectural clusters:");
+        for (let cid = 0; cid < Math.min(s?.communityCount ?? 0, 8); cid++) {
+          const files = enricher.getCommunityFiles(cid);
+          if (files.length === 0) continue;
+          // Pick representative filename stems for the community
+          const stems = files
+            .map((f) => f.split("/").pop() ?? f)
+            .slice(0, 4);
+          sections.push(`  • Cluster ${cid}: ${stems.join(", ")}${files.length > 4 ? ` (+${files.length - 4})` : ""}`);
+        }
+      }
+
+      map = map ? map + "\n" + sections.join("\n") : sections.join("\n");
+    }
+  } catch {
+    // Graphify enrichment is best-effort
+  }
+
+  return { map, stats };
 }
 
 // ── Startup repo-map injection (event-based) ──────────────────────
@@ -106,8 +157,9 @@ export function resetSessionState(): void {
  * - session_shutdown: resets the injected-flag for the next session.
  */
 export function registerSessionHooks(pi: ExtensionAPI): void {
-  pi.on("session_start", (event, ctx) => {
-    if (event.reason !== "startup") return;
+  pi.on("session_start", (_event, ctx) => {
+    // Reset flag so map is injected fresh on any session start (new/resume/fork/reload)
+    repoMapInjectedThisSession = false;
     const key = computeRepoKey(ctx.cwd);
     const promise = generateCompactMap(ctx.cwd).then((r) => r?.map ?? null);
     startupRepoMapCache.set(key, promise);
@@ -233,6 +285,44 @@ async function interceptContextualRead(
     // 2. Git recency
     if (await isRecentlyModified(cwd, fullPath)) {
       contextLines.push("• Recently modified (last 7 days).");
+    }
+
+    // 3. Graphify enrichment (uses graphify-out/graph.json when available).
+    // Shows related files via calls, references, conceptual edges — not just imports.
+    try {
+      const enricher = getGraphifyEnricher(cwd);
+      if (enricher.isAvailable) {
+        const related = enricher.getRelatedFilesForPath(fullPath);
+        if (related.length > 0) {
+          const grouped = new Map<string, string[]>();
+          for (const r of related) {
+            const relKey = r.relation;
+            let list = grouped.get(relKey);
+            if (!list) {
+              list = [];
+              grouped.set(relKey, list);
+            }
+            list.push(r.targetLabel);
+          }
+          for (const [relType, labels] of grouped) {
+            const shown = labels.slice(0, 6).join(", ");
+            contextLines.push(`• Graph: ${relType} ${shown}${labels.length > 6 ? "…" : ""}`);
+          }
+        }
+
+        const community = enricher.getFileCommunity(fullPath);
+        if (community !== undefined) {
+          const communitySize = enricher.getCommunityFiles(community).length;
+          contextLines.push(`• Community ${community} (${communitySize} files)`);
+        }
+
+        const centrality = enricher.getFileCentrality(fullPath);
+        if (centrality > 0) {
+          contextLines.push(`• Graph centrality: ${centrality} connections`);
+        }
+      }
+    } catch {
+      // Graphify enrichment is best-effort
     }
   } catch (err) {
     contextLines.push(`• Context unavailable: ${(err as Error).message}`);
