@@ -20,7 +20,7 @@ import path from "node:path";
 import { RepoMap } from "./repomap.js";
 import { ContextGraph } from "./context-graph.js";
 import { isRecentlyModified } from "./git-history.js";
-import { LruCache } from "./utils.js";
+import { LruCache, prefixLinesWithAnchors } from "./utils.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 // ── Shared ContextGraph cache (module-level) ──
@@ -328,12 +328,24 @@ async function interceptContextualRead(
     contextLines.push(`• Context unavailable: ${(err as Error).message}`);
   }
 
-  // Only append if we found useful context
-  if (contextLines.length > 2) {
-    const textContent = result.content.find(
-      (c: { type: string }) => c.type === "text",
-    ) as { type: "text"; text: string } | undefined;
-    if (textContent) {
+  // Find text content for anchor embedding and context appending
+  const textContent = result.content.find(
+    (c: { type: string }) => c.type === "text",
+  ) as { type: "text"; text: string } | undefined;
+
+  if (textContent) {
+    // Embed LINE| hashline anchors so the model can reference specific lines
+    // in hashline-format edits without reproducing text.
+    // Only apply anchoring when content doesn't already have line prefixes.
+    // Heuristic: if first 5 lines don't contain a "N|" pattern, it's raw content.
+    const firstFewLines = textContent.text.split("\n", 5).join("\n");
+    const alreadyAnchored = /^\d+\|/.test(firstFewLines);
+    if (!alreadyAnchored) {
+      textContent.text = prefixLinesWithAnchors(textContent.text);
+    }
+
+    // Append contextual annotations
+    if (contextLines.length > 2) {
       textContent.text += contextLines.join("\n");
     }
   }

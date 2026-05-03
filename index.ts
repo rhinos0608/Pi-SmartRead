@@ -3,6 +3,7 @@ import { createIntentReadTool } from "./intent-read.js";
 import { createReadManyTool } from "./read-many.js";
 import registerRepoTools from "./repomap-tool.js";
 import { wrapBuiltinReadTool, registerSessionHooks } from "./hook.js";
+import { createGraphMutateTool } from "./graph-mutate.js";
 
 export default function (pi: ExtensionAPI) {
   // 1. Session hooks: eager repo-map generation + startup injection
@@ -18,7 +19,10 @@ export default function (pi: ExtensionAPI) {
   // 4. Standalone tools
   registerRepoTools(pi);
 
-  // 5. Graphify knowledge graph is consumed internally by intent_read's
+  // 5. Graph mutation tool — receives breakage/co-change edges from Smart-Edit
+  pi.registerTool(createGraphMutateTool() as never);
+
+  // 6. Graphify knowledge graph is consumed internally by intent_read's
   //    neighbor expansion (Phase 2d), hook.ts's contextual enrichment,
   //    and search-tool.ts's centrality boosting. No separate tools needed.
 }

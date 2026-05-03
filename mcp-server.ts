@@ -20,6 +20,7 @@ import { createInterface } from "node:readline";
 import { cwd } from "node:process";
 import { createIntentReadTool } from "./intent-read.js";
 import { createReadManyTool } from "./read-many.js";
+import { createGraphMutateTool } from "./graph-mutate.js";
 import registerRepoTools from "./repomap-tool.js";
 import type { ExtensionAPI, ToolDefinition, ToolCallContext } from "@mariozechner/pi-coding-agent";
 
@@ -68,6 +69,15 @@ function buildToolRegistry(): RegisteredTool[] {
   // Minimal extension API stub for tool creation
   const extensionCwd = cwd();
   const stubCtx = { cwd: extensionCwd } as any;
+
+  // Graph mutate tool (feedback loop from Smart-Edit diagnostics/git)
+  const graphMutateDef = createGraphMutateTool() as unknown as ToolDefinition;
+  tools.push({
+    name: graphMutateDef.name,
+    description: graphMutateDef.description,
+    inputSchema: graphMutateDef.parameters as Record<string, unknown>,
+    execute: graphMutateDef.execute,
+  });
 
   // Intent read tool
   const intentReadDef = createIntentReadTool() as unknown as ToolDefinition;

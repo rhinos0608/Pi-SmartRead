@@ -392,6 +392,35 @@ export function createIntentReadTool(
       }
       const addedGraphPaths = resolvedFiles.slice(candidateCountBeforeGraph).map((file) => file.path);
 
+      // 2e: Mutation edge expansion (breakage + co-change from Smart-Edit feedback loop)
+      // These edges are observed from post-edit diagnostic cascades and git history co-change
+      // analysis — empirical coupling signals not captured by static analysis.
+      const mutationSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
+      if (mutationSlots > 0 && hasProjectMarker) {
+        // Use sharedGraph's getMutationNeighbours which reads from EdgeStore
+        const mutationSeedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
+        for (const seedFile of mutationSeedFiles) {
+          if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+          try {
+            const neighbours = sharedGraph.getMutationNeighbours(seedFile.path);
+            for (const n of neighbours) {
+              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+              const normalized = normalizeCandidatePath(ctx.cwd, n.path);
+              if (existingPaths.has(normalized)) continue;
+              existingPaths.add(normalized);
+              resolvedFiles.push({ path: n.path });
+              graphEdges.push({
+                from: seedFile.path,
+                to: n.path,
+                type: n.provenance.type,
+                confidence: n.provenance.confidence,
+              });
+              graphDistanceMap.set(normalized, 2);
+            }
+          } catch { /* skip individual failures */ }
+        }
+      }
+
       // 4. Read files
       const readTool = readToolFactory(ctx.cwd);
       interface FileReadResult { path: string; ok: boolean; body?: string; error?: string; }

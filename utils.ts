@@ -150,9 +150,34 @@ export function validatePath(path: string): void {
 	}
 }
 
+/**
+ * Prefix each line of body with a 1-based line number and pipe separator.
+ * This produces hashline-compatible output that smart-edit can reference
+ * in edits via the hashline format: { pos: '42|', end: '45|' }.
+ *
+ * Line-numbered format: "42|    return x;"
+ * Empty lines keep the line number for positional reference.
+ * The separator '|' is chosen to be single-token in BPE and visually clear.
+ */
+export function prefixLinesWithAnchors(body: string): string {
+	const lines = body.split("\n");
+	return lines.map((line, i) => {
+		const lineNum = i + 1;
+		return `${lineNum}|${line}`;
+	}).join("\n");
+}
+
+/**
+ * Format a content block with hashline-friendly line-number prefixes.
+ *
+ * Each line is prefixed with "LINE|" so the model can reference specific
+ * lines in edits without reproducing text. Smart-edit's hashline edit
+ * format supports "LINE|" anchors as an alternative to "LINE+HASH".
+ */
 export function formatContentBlock(path: string, body: string, index: number): string {
 	const delimiter = pickDelimiter(path, index, body);
-	return `@${path}\n<<'${delimiter}'\n${body}\n${delimiter}`;
+	const anchoredBody = prefixLinesWithAnchors(body);
+	return `@${path}\n<<'${delimiter}'\n${anchoredBody}\n${delimiter}`;
 }
 
 export function canFitSection(
