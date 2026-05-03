@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -736,5 +736,173 @@ describe("intent_read: Phase 4 filename prefilter in directory mode", () => {
         { cwd: "/" } as any,
       ),
     ).rejects.toThrow(/query/i);
+  });
+});
+
+describe("intent_read: structural reranker integration", () => {
+  it("includes reranking metadata in details when rerankEnabled is true", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-rerank-"));
+    try {
+      writeFileSync(join(root, "pi-smartread.config.json"), JSON.stringify({
+        baseUrl: "http://localhost:11434/v1",
+        model: "test",
+        rerankEnabled: true,
+      }));
+
+      const fileA = join(root, "a.ts");
+      const fileB = join(root, "b.ts");
+      writeFileSync(fileA, "export function auth() { return true; }");
+      writeFileSync(fileB, "export function database() { return true; }");
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: readFileSync(fileA, "utf-8"), [fileB]: readFileSync(fileB, "utf-8") }) as any,
+        makeEmbedder([[1, 0], [1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "auth", files: [{ path: fileA }, { path: fileB }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.reranking).toBeDefined();
+      expect(details.reranking.status).toBe("ok");
+      expect(details.reranking.candidateCount).toBe(2);
+      expect(typeof details.reranking.changedOrder).toBe("boolean");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not include reranking metadata when rerankEnabled is false", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth code" }) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.reranking).toBeUndefined();
+  });
+
+  it("reranking falls back to original order on error", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-rerank-fail-"));
+    try {
+      writeFileSync(join(root, "pi-smartread.config.json"), JSON.stringify({
+        baseUrl: "http://localhost:11434/v1",
+        model: "test",
+        rerankEnabled: true,
+      }));
+
+      const fileA = join(root, "a.ts");
+      writeFileSync(fileA, "auth code");
+
+      // Only 1 file, reranker should still work (single candidate)
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: readFileSync(fileA, "utf-8") }) as any,
+        makeEmbedder([[1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "auth", files: [{ path: fileA }] },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.reranking).toBeDefined();
+      expect(details.reranking.status).toBe("ok");
+      // Single candidate: no reordering possible
+      expect(details.reranking.changedOrder).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("intent_read: graph augmentation observability", () => {
+  it("reports graphAugmentation metadata with edgesUsed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-graph-meta-"));
+    try {
+      const fileA = join(root, "a.ts");
+      const fileB = join(root, "b.ts");
+      writeFileSync(fileA, "import { helper } from './b';\nexport const auth = helper();\n");
+      writeFileSync(fileB, "export function helper() { return 'authentication helper'; }\n");
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: "authentication entry", [fileB]: "authentication helper" }) as any,
+        makeEmbedder([[1, 0], [1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "authentication", files: [{ path: fileA }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.graphAugmentation).toBeDefined();
+      expect(details.graphAugmentation.addedPaths).toContain(fileB);
+      expect(details.graphAugmentation.candidateCountBefore).toBe(1);
+      expect(details.graphAugmentation.candidateCountAfter).toBe(2);
+      expect(details.graphAugmentation.edgesUsed).toBeDefined();
+      expect(details.graphAugmentation.edgesUsed.length).toBeGreaterThan(0);
+      expect(details.graphAugmentation.edgesUsed[0].type).toBe("imports");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("intent_read: ranking signals metadata", () => {
+  it("reports rankingSignals with bm25 and embeddings flags", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth code" }) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.rankingSignals).toEqual({ bm25: true, embeddings: true });
+  });
+
+  it("reports embeddings=false when embedding fails", async () => {
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "/a": "auth code" }) as any,
+      makeFailingEmbedder("ECONNREFUSED"),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    const details = result.details as any;
+    expect(details.rankingSignals).toEqual({ bm25: true, embeddings: false });
+    expect(details.embeddingStatus).toBe("failed_fallback_bm25");
   });
 });

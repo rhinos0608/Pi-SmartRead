@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { rerank, type RerankerInput } from "../../rerank.js";
+import { describe, expect, it, vi } from "vitest";
+import { rerank, externalRerank, rerankWithExternal, type RerankerInput } from "../../rerank.js";
 
 describe("rerank", () => {
   it("returns empty array for empty input", () => {
@@ -92,5 +92,221 @@ describe("rerank", () => {
     expect(results[0]!.signals.rrfWeight).toBe(0.5);
     expect(results[0]!.signals.structuralWeight).toBe(0.4);
     expect(results[0]!.signals.proximityWeight).toBe(0.1);
+  });
+});
+
+describe("externalRerank", () => {
+  it("returns success with Cohere-style response", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        results: [
+          { index: 2, relevance_score: 0.95 },
+          { index: 0, relevance_score: 0.80 },
+          { index: 1, relevance_score: 0.30 },
+        ],
+      }),
+    });
+
+    // Temporarily override global fetch
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const result = await externalRerank({
+        query: "test query",
+        documents: ["doc1", "doc2", "doc3"],
+        baseUrl: "https://api.example.com/v1",
+        apiKey: "test-key",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.rankedIndices).toEqual([2, 0, 1]);
+      expect(result.scores).toEqual([0.95, 0.80, 0.30]);
+      expect(mockFetch).toHaveBeenCalledOnce();
+
+      // Verify the request was made correctly
+      const [url, options] = mockFetch.mock.calls[0]!;
+      expect(url).toBe("https://api.example.com/v1/rerank");
+      expect(options.method).toBe("POST");
+      expect(options.headers.Authorization).toBe("Bearer test-key");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns success with scores-based response", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ scores: [0.3, 0.9, 0.6] }),
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const result = await externalRerank({
+        query: "test",
+        documents: ["a", "b", "c"],
+        baseUrl: "https://api.example.com",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.rankedIndices).toEqual([1, 2, 0]); // sorted by desc score
+      expect(result.scores).toEqual([0.9, 0.6, 0.3]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns success with ranked_indices response", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ranked_indices: [2, 0, 1] }),
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const result = await externalRerank({
+        query: "test",
+        documents: ["a", "b", "c"],
+        baseUrl: "https://api.example.com",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.rankedIndices).toEqual([2, 0, 1]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns failure on HTTP error", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const result = await externalRerank({
+        query: "test",
+        documents: ["a"],
+        baseUrl: "https://api.example.com",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("429");
+      expect(result.rankedIndices).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns failure on network error", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const result = await externalRerank({
+        query: "test",
+        documents: ["a"],
+        baseUrl: "https://api.example.com",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("ECONNREFUSED");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns failure on unrecognized response format", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ unexpected: "format" }),
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const result = await externalRerank({
+        query: "test",
+        documents: ["a"],
+        baseUrl: "https://api.example.com",
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Unrecognized");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("rerankWithExternal", () => {
+  it("uses external reranker when available", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        results: [
+          { index: 1, relevance_score: 0.95 },
+          { index: 0, relevance_score: 0.80 },
+        ],
+      }),
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const candidates: RerankerInput[] = [
+        { path: "/a.ts", rrfScore: 10, keywordScore: 5 },
+        { path: "/b.ts", rrfScore: 8, keywordScore: 4 },
+      ];
+
+      const result = await rerankWithExternal(
+        candidates,
+        "test query",
+        ["content of a", "content of b"],
+        { baseUrl: "https://api.example.com" },
+      );
+
+      expect(result.externalUsed).toBe(true);
+      expect(result.results).toHaveLength(2);
+      // External ranked index 1 (b) first, index 0 (a) second
+      const bResult = result.results.find((r) => r.path === "/b.ts")!;
+      const aResult = result.results.find((r) => r.path === "/a.ts")!;
+      expect(bResult.newRank).toBe(0);
+      expect(aResult.newRank).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("falls back to structural reranker on external failure", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("timeout"));
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const candidates: RerankerInput[] = [
+        { path: "/a.ts", rrfScore: 10, keywordScore: 5 },
+        { path: "/b.ts", rrfScore: 8, keywordScore: 4, graphDistance: 0 },
+      ];
+
+      const result = await rerankWithExternal(
+        candidates,
+        "test",
+        ["a", "b"],
+        { baseUrl: "https://api.example.com" },
+      );
+
+      expect(result.externalUsed).toBe(false);
+      expect(result.externalError).toContain("timeout");
+      expect(result.results).toHaveLength(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

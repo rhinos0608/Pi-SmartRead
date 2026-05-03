@@ -1,4 +1,25 @@
 {
+  "baseUrl": "http://localhost:1234/v1",
+  "model": "text-embedding-embeddinggemma-300m",
   "probeEnabled": true,
-  "rerankEnabled": true
+  "rerankEnabled": true,
+  "hydeEnabled": true,
+  "search": {
+    "enrich": {
+      "default": {
+        "callers": true,
+        "resolution": true,
+        "symbols": true
+      },
+      "resolve": {
+        "callers": true
+      },
+      "symbols": {
+        "resolution": true
+      },
+      "code": {
+        "symbols": true
+      }
+    }
+  }
 }

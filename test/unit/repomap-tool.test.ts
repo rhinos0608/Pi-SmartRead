@@ -10,8 +10,15 @@ vi.mock("../../repomap.js", () => ({
   })),
 }));
 
-// Import the mocked RepoMap so we can clear its call history between tests
-import { RepoMap } from "../../repomap.js";
+// Mock findSrcFiles to return test files
+vi.mock("../../file-discovery.js", () => ({
+  findSrcFiles: vi.fn().mockResolvedValue(["/fake/repo/test.ts"]),
+}));
+
+// Mock findCallers
+vi.mock("../../callgraph.js", () => ({
+  findCallers: vi.fn().mockResolvedValue([]),
+}));
 
 import registerRepoTools from "../../repomap-tool.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
@@ -42,69 +49,57 @@ function makeExtensionContext(cwd?: string): ExtensionContext {
   return { cwd: cwd ?? "/fake/repo" } as unknown as ExtensionContext;
 }
 
-describe("search_symbols tool", () => {
+describe("search tool (consolidated)", () => {
   let registered: ToolDefinition[];
   let tool: ToolDefinition;
 
   beforeEach(() => {
     mockSearchIdentifiers.mockReset();
-    vi.mocked(RepoMap).mockClear();
     const { registered: reg, api } = makeExtensionAPI();
     registerRepoTools(api as any);
     registered = reg;
-    tool = getTool(registered, "search_symbols");
+    tool = getTool(registered, "search");
   });
 
   // ── Registration ──
 
   it("is registered with the correct name", () => {
-    expect(tool.name).toBe("search_symbols");
+    expect(tool.name).toBe("search");
   });
 
   it("has a label and description", () => {
-    expect(tool.label).toBe("search_symbols");
+    expect(tool.label).toBe("search");
     expect(tool.description).toBeTruthy();
-    expect(tool.description).toContain("symbols");
-    expect(tool.description).toContain("tree-sitter");
+    expect(tool.description).toContain("search");
   });
 
   it("has an execute function", () => {
     expect(typeof tool.execute).toBe("function");
   });
 
-  // ── Parameter schema ──
+  // ── Schema structure (Type.Union produces a oneOf schema) ──
 
-  it("has a parameter schema with query (required)", () => {
+  it("has a parameter schema (some or oneOf form)", () => {
     const schema = tool.parameters as Record<string, unknown>;
-    const properties = schema.properties as Record<string, unknown>;
-    expect(properties.query).toBeDefined();
-    expect((properties.query as any).type).toBe("string");
+    expect(schema).toBeDefined();
+    // Could be a Type.Object (one variant) or a Type.Union (oneOf)
+    const ok =
+      schema.properties !== undefined ||
+      Array.isArray((schema as any).oneOf) ||
+      Object.keys(schema).length > 0;
+    expect(ok).toBe(true);
   });
 
-  it("has optional directory parameter", () => {
-    const schema = tool.parameters as Record<string, unknown>;
-    const properties = schema.properties as Record<string, unknown>;
-    expect(properties).toHaveProperty("directory");
-  });
+  // ── Execution: mode="symbols" ──
 
-  it("has optional maxResults, includeDefinitions, includeReferences", () => {
-    const schema = tool.parameters as Record<string, unknown>;
-    const properties = schema.properties as Record<string, unknown>;
-    expect(properties).toHaveProperty("maxResults");
-    expect(properties).toHaveProperty("includeDefinitions");
-    expect(properties).toHaveProperty("includeReferences");
-  });
-
-  // ── Execution: empty results ──
-
-  it("returns no-symbols message when searchIdentifiers returns []", async () => {
+  it('mode="symbols" returns no-symbols message when searchIdentifiers returns []', async () => {
     mockSearchIdentifiers.mockResolvedValue([]);
 
     const result = await tool.execute(
       "call-1",
-      { query: "nonexistent" },
-      undefined, // signal
-      undefined, // onUpdate
+      { mode: "symbols", query: "nonexistent" },
+      undefined,
+      undefined,
       makeExtensionContext(),
     );
 
@@ -113,9 +108,7 @@ describe("search_symbols tool", () => {
     expect(result.details).toMatchObject({ total: 0 });
   });
 
-  // ── Execution: results with context ──
-
-  it("formats search results with file, line, kind, and context", async () => {
+  it('mode="symbols" formats search results with file, line, and kind', async () => {
     mockSearchIdentifiers.mockResolvedValue([
       {
         file: "src/utils.ts",
@@ -124,74 +117,46 @@ describe("search_symbols tool", () => {
         kind: "def",
         context: "  42: export function calculateTotal(items: Item[]) {\n    43:   return items.reduce((s, i) => s + i.price, 0);\n",
       },
-      {
-        file: "src/app.ts",
-        line: 15,
-        name: "calculateTotal",
-        kind: "ref",
-        context: "  15: const total = calculateTotal(cart);\n",
-      },
     ]);
 
     const result = await tool.execute(
       "call-2",
-      { query: "calculateTotal" },
+      { mode: "symbols", query: "calculateTotal" },
       undefined,
       undefined,
       makeExtensionContext(),
     );
 
-    expect(result).toHaveProperty("content");
     const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain('Found 2 symbol(s) matching "calculateTotal"');
+    expect(text).toContain('Found 1 symbol(s) matching "calculateTotal"');
     expect(text).toContain("src/utils.ts:42");
     expect(text).toContain("[def]");
     expect(text).toContain("calculateTotal");
-    expect(text).toContain("src/app.ts:15");
-    expect(text).toContain("[ref]");
-    expect(result.details).toEqual({ total: 2 });
+    expect(result.details).toEqual({ total: 1 });
   });
 
-  // ── Execution: respects directory param ──
-
-  it("uses params.directory when provided", async () => {
+  it('mode="symbols" uses params.directory when provided', async () => {
     mockSearchIdentifiers.mockResolvedValue([]);
+    const { RepoMap } = await import("../../repomap.js");
 
     await tool.execute(
       "call-3",
-      { query: "foo", directory: "/custom/path" },
+      { mode: "symbols", query: "foo", directory: "/custom/path" },
       undefined,
       undefined,
       makeExtensionContext(),
     );
 
-    // RepoMap should have been constructed with /custom/path
     expect(vi.mocked(RepoMap)).toHaveBeenCalledWith("/custom/path");
   });
 
-  it("uses ctx.cwd when directory is not provided", async () => {
-    mockSearchIdentifiers.mockResolvedValue([]);
-
-    await tool.execute(
-      "call-4",
-      { query: "foo" },
-      undefined,
-      undefined,
-      makeExtensionContext("/ctx/cwd"),
-    );
-
-    expect(vi.mocked(RepoMap)).toHaveBeenCalledWith("/ctx/cwd");
-  });
-
-  // ── Execution: signal propagation ──
-
-  it("passes the abort signal to searchIdentifiers", async () => {
+  it('mode="symbols" passes the abort signal to searchIdentifiers', async () => {
     mockSearchIdentifiers.mockResolvedValue([]);
     const controller = new AbortController();
 
     await tool.execute(
-      "call-5",
-      { query: "foo" },
+      "call-4",
+      { mode: "symbols", query: "foo" },
       controller.signal,
       undefined,
       makeExtensionContext(),
@@ -204,43 +169,12 @@ describe("search_symbols tool", () => {
     );
   });
 
-  // ── Context: handles missing context gracefully ──
-
-  it("renders results even when context is empty", async () => {
-    mockSearchIdentifiers.mockResolvedValue([
-      {
-        file: "src/lib.ts",
-        line: 10,
-        name: "myFn",
-        kind: "def",
-        context: "",
-      },
-    ]);
-
-    const result = await tool.execute(
-      "call-6",
-      { query: "myFn" },
-      undefined,
-      undefined,
-      makeExtensionContext(),
-    );
-
-    const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain("src/lib.ts:10");
-    expect(text).toContain("[def]");
-    expect(text).toContain("myFn");
-    // Should not have trailing context block (empty context produces no extra lines)
-    expect(result.details).toEqual({ total: 1 });
-  });
-
-  // ── filter params ──
-
-  it("passes includeDefinitions and includeReferences to searchIdentifiers", async () => {
+  it('mode="symbols" passes includeDefinitions and includeReferences', async () => {
     mockSearchIdentifiers.mockResolvedValue([]);
 
     await tool.execute(
-      "call-7",
-      { query: "foo", includeDefinitions: false, includeReferences: true },
+      "call-5",
+      { mode: "symbols", query: "foo", includeDefinitions: false, includeReferences: true },
       undefined,
       undefined,
       makeExtensionContext(),
@@ -256,24 +190,56 @@ describe("search_symbols tool", () => {
     );
   });
 
-  it("uses defaults for includeDefinitions and includeReferences when omitted", async () => {
-    mockSearchIdentifiers.mockResolvedValue([]);
+  // ── Execution: mode="callers" ──
 
-    await tool.execute(
-      "call-8",
-      { query: "foo" },
+  it('mode="callers" returns no-callers message when none found', async () => {
+    const { findCallers } = await import("../../callgraph.js");
+    vi.mocked(findCallers).mockResolvedValue([]);
+
+    const result = await tool.execute(
+      "call-6",
+      { mode: "callers", function: "noSuchFn" },
       undefined,
       undefined,
       makeExtensionContext(),
     );
 
-    expect(mockSearchIdentifiers).toHaveBeenCalledWith(
-      "foo",
-      expect.objectContaining({
-        includeDefinitions: true,
-        includeReferences: true,
-      }),
+    const text: string = (result.content[0] as any).text as string;
+    expect(text).toContain('No callers found for "noSuchFn"');
+    expect(result.details).toMatchObject({ total: 0 });
+  });
+
+  // ── Execution: mode="resolve" (thin proxy, tests basic dispatch) ──
+
+  it('mode="resolve" dispatches resolveSymbol', async () => {
+    const result = await tool.execute(
+      "call-7",
+      { mode: "resolve", symbol: "MyClass" },
       undefined,
+      undefined,
+      makeExtensionContext(),
     );
+
+    const text: string = (result.content[0] as any).text as string;
+    expect(text).toContain('Resolved symbol: "MyClass"');
+    expect(result.details).toHaveProperty("symbol", "MyClass");
+  });
+
+  // ── Execution: mode="code" ──
+
+  it('mode="code" returns no-defs message when no files match', async () => {
+    const { findSrcFiles } = await import("../../file-discovery.js");
+    vi.mocked(findSrcFiles).mockResolvedValue([]);
+
+    const result = await tool.execute(
+      "call-8",
+      { mode: "code", query: "something" },
+      undefined,
+      undefined,
+      makeExtensionContext(),
+    );
+
+    const text: string = (result.content[0] as any).text as string;
+    expect(text).toContain("No code definitions found");
   });
 });

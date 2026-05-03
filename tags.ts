@@ -9,7 +9,7 @@
  * This is critical for C++, Rust, and many languages where .scm files
  * define only definitions. Matches Aider's behavior in repomap.py.
  */
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -70,7 +70,7 @@ export function loadLanguage(lang: SupportedLanguage): Grammar | null {
   return language;
 }
 
-function getQueryPath(lang: SupportedLanguage): string | null {
+export function getQueryPath(lang: SupportedLanguage): string | null {
   const names = QUERY_NAME_ALIASES[lang] ?? [lang];
 
   // Try tree-sitter-language-pack first (bundled aider queries)
@@ -276,8 +276,25 @@ export async function getTagsRaw(
 }
 
 /**
+ * Get the mtime of the SCM query file for a given source file path.
+ * Returns null when the language has no query file or the file is missing.
+ */
+function getQueryMtime(fname: string): number | null {
+  const lang = filenameToLang(fname);
+  if (!lang) return null;
+  const queryPath = getQueryPath(lang);
+  if (!queryPath) return null;
+  try {
+    return statSync(queryPath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Extract tags with caching support.
  * Uses mtime-based TagsCache to avoid re-parsing unchanged files.
+ * Cache is invalidated when either the source file or its SCM query file changes.
  */
 export async function getTags(
   fname: string,
@@ -285,8 +302,10 @@ export async function getTags(
   cache: TagsCache | null,
   forceRefresh: boolean,
 ): Promise<Tag[]> {
+  const queryMtime = getQueryMtime(fname);
+
   if (cache && !forceRefresh) {
-    const cached = await cache.get(fname);
+    const cached = await cache.get(fname, queryMtime);
     if (cached) return cached;
   }
 
@@ -294,7 +313,7 @@ export async function getTags(
   const { tags, parseTimeMs } = result;
 
   if (cache) {
-    await cache.set(fname, tags);
+    await cache.set(fname, tags, queryMtime);
     cache.recordParseTime(fname, parseTimeMs);
   }
 

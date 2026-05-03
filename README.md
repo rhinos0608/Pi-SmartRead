@@ -1,6 +1,6 @@
 # Pi-SmartRead
 
-Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — multi-file reading, intent-based retrieval, repository mapping, symbol search, cross-file resolution, and call graph analysis.
+Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — multi-file reading, intent-based retrieval, repository mapping, consolidated symbol search, cross-file resolution, call graph analysis, and AST-aware code search.
 
 > Forked from [pi-read-many](https://github.com/Gurpartap/pi-read-many) and evolved into a full code-intelligence toolkit.
 
@@ -14,9 +14,7 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 | `read_multiple_files` | Reads up to 20 files in one call with adaptive output packing |
 | `intent_read` | Ranks candidate files for a query using BM25 + embeddings with RRF fusion |
 | `repo_map` | Builds a PageRank-ranked repository map from native tree-sitter AST tags |
-| `search_symbols` | Finds symbol definitions and references across the repo with code context |
-| `resolve_symbol` | Resolves a symbol name to its definition, all references, and best-guess primary location |
-| `find_callers` | Builds a call graph and finds all callers of a given function |
+| `search` | Consolidated symbol tool: fuzzy symbol search (`mode: "symbols"`), exact symbol resolution with enrichment (`mode: "resolve"`), call graph analysis (`mode: "callers"`), and AST-aware code definition search (`mode: "code"`) |
 
 ---
 
@@ -107,6 +105,11 @@ Use `read_multiple_files` when you already know the exact files to open.
 - **BM25 keyword ranking** — exact identifier and API name matching
 - **Embedding cosine similarity** — conceptual matching via OpenAI-compatible endpoint
 - **RRF fusion** — parameter-free rank combination (k=60)
+- **HyDE query expansion** — hypothetical document embedding for better semantic matching (opt-in)
+- **Graph-aware candidate expansion** — import neighbours, symbol neighbours, and call graph neighbours
+- **Query probing** — extracts identifiers from query and resolves their definition files (opt-in)
+- **Structural reranker** — reorders results using graph distance, probe confidence, temporal signals (opt-in)
+- **External reranker** — optional Cohere/Jina-compatible reranking endpoint with structural fallback
 - **Persistent embedding cache** — disk-backed (`.pi-smartread.embeddings.cache/`) with in-memory LRU layer; survives process restarts
 - **Direct import-neighbour augmentation** — expands candidates via relative imports with symlink/workspace escape guards
 - **Compressed embedding snippets** — noise-stripped, head/tail preserving for efficient embedding
@@ -183,78 +186,63 @@ Generate a repository map using **native tree-sitter AST extraction** by default
 
 ---
 
-## `search_symbols`
+## `search`
 
-Search for symbol definitions and references across the repository.
+Consolidated symbol and code navigation tool. Replaces the previous `search_symbols`, `resolve_symbol`, and `find_callers` tools with a single polymorphic tool.
 
-### What it does
+### Modes
 
-- Uses native tree-sitter tags when available
-- Falls back to text-based search when AST tags are unavailable
-- Supports definition-only or reference-only filtering
-- Returns surrounding code context for each match
+| Mode | What it does | Replaces |
+|---|---|---|
+| `"symbols"` | Fuzzy/substring symbol search across the repo with code context | `search_symbols` |
+| `"resolve"` | Resolves a symbol to all its definitions, references, and best-guess primary location. Auto-appends callers when enrichment is enabled (default). | `resolve_symbol` |
+| `"callers"` | Finds all functions that call a given function via tree-sitter call graph analysis. Supports TS/JS/TSX, Python, Go, and Rust. | `find_callers` |
+| `"code"` | AST-aware code definition search. Parses all source files with tree-sitter, extracts definitions (functions, classes, methods), and returns complete structural blocks ranked by BM25 + optional embedding re-rank. | _(new)_ |
 
-### Example
+### Enrichment
 
+By default (`enrich: true`), each mode cross-references results:
+
+- `mode="resolve"` — auto-appends callers to the resolved symbol
+- `mode="symbols"` — auto-resolves the top result
+- `mode="code"` — tags results with symbol resolution metadata
+
+Set `enrich: false` on any call to return bare results. Enrichment behaviour can be fine-tuned per mode in `pi-smartread.config.json` under `search.enrich`.
+
+### Examples
+
+**Find a symbol:**
 ```json
 {
-  "query": "getRepoMap",
-  "directory": ".",
-  "maxResults": 10,
-  "includeDefinitions": true,
-  "includeReferences": false
+  "mode": "symbols",
+  "query": "getRepoMap"
 }
 ```
 
----
-
-## `resolve_symbol`
-
-Resolve a symbol name across the repository — find its definition, all references, and the most likely primary definition.
-
-### What it does
-
-- Parses all source files with tree-sitter
-- Extracts definitions and references from AST tags
-- Disambiguates when a symbol is defined in multiple files
-- Prioritizes by proximity: same file → direct import → same directory → shared parent
-
-### Example
-
+**Resolve a symbol with callers:**
 ```json
 {
+  "mode": "resolve",
   "symbol": "User",
   "context": "src/models/user.ts:42",
-  "directory": ".",
-  "maxResults": 50
+  "enrich": true
 }
 ```
 
-### Output
-
-- `definitions[]` — all definition locations with kind, scope, and context
-- `references[]` — all reference locations with context
-- `bestDefinition` — the highest-confidence match based on context proximity
-
----
-
-## `find_callers`
-
-Find all functions that call a given function across the repository.
-
-### What it does
-
-- Builds a call graph from tree-sitter ASTs
-- Extracts `call_expression` nodes and maps them to enclosing function definitions
-- Supports TypeScript, JavaScript, and TSX
-
-### Example
-
+**Find callers:**
 ```json
 {
-  "function": "getConfig",
-  "directory": ".",
-  "maxResults": 50
+  "mode": "callers",
+  "function": "getConfig"
+}
+```
+
+**Search code by intent:**
+```json
+{
+  "mode": "code",
+  "query": "authentication middleware",
+  "filePattern": "*.ts"
 }
 ```
 
@@ -265,6 +253,8 @@ Find all functions that call a given function across the repository.
 Pi-SmartRead supports tree-sitter analysis for **41 languages**:
 
 Bash, C, C#, C++, Clojure, Common Lisp, CSS, D, Dart, Elisp, Elixir, Elm, Fortran, Gleam, Go, Haskell, HCL (Terraform), Java, JavaScript, JSX, Julia, Kotlin, Lua, MATLAB, OCaml, PHP, Pony, Python, QL (CodeQL), R, Racket, Ruby, Rust, Scala, Solidity, Swift, TypeScript, TSX, Udev, Zig
+
+**Call graph support** (for `search mode="callers"` and call-graph candidate expansion): TypeScript, JavaScript, TSX, Python, Go, Rust.
 
 Languages without dedicated tree-sitter parsers still work for `read_multiple_files` and `intent_read` (via BM25 text ranking).
 
@@ -298,6 +288,9 @@ Create `pi-smartread.config.json` in the current directory or any parent:
 | `maxChunksPerFile` | `PI_SMARTREAD_MAX_CHUNKS` | — | No | Max chunks per file (default: 12) |
 | `probeEnabled` | — | — | No | Enable symbol-based query probing for intent_read (default: false, experimental) |
 | `rerankEnabled` | — | — | No | Enable structural reranking after RRF for intent_read (default: false, experimental) |
+| `hydeEnabled` | — | — | No | Enable HyDE query expansion — embeds a hypothetical code document instead of raw query (default: false) |
+| `externalReranker` | — | — | No | External reranker API config object (see below) |
+| `search.enrich` | — | — | No | Per-mode enrichment config for the `search` tool (see `search` section) |
 
 ### Caching
 
@@ -308,6 +301,89 @@ Pi-SmartRead uses a **two-tier embedding cache**:
 ### Behavior when config is missing
 
 If `baseUrl` or `model` is missing, the extension still loads. `intent_read` throws before reading files. BM25-only fallback applies only after configuration is valid and the embedding request itself fails.
+
+---
+
+## Advanced retrieval features
+
+### HyDE query expansion
+
+**HyDE** (Hypothetical Document Embeddings) improves semantic matching for natural-language queries. Instead of embedding the raw query, it generates a synthetic code document that would answer the query, then embeds that document.
+
+**How it works:**
+1. Extracts code identifiers from the query (filters common words)
+2. Detects the query pattern (function, class, config, module)
+3. Generates a hypothetical code snippet using templates
+4. Embeds the snippet as the query vector
+
+This is a **no-LLM** implementation — deterministic templates, zero extra latency, no additional cost.
+
+Enable in config:
+
+```json
+{
+  "hydeEnabled": true
+}
+```
+
+When active, `details.hyde` reports the generated document, detected pattern, and extracted identifiers.
+
+### External reranker
+
+An optional external reranker API can replace the local structural reranker. Supports Cohere, Jina, or any compatible endpoint.
+
+```json
+{
+  "rerankEnabled": true,
+  "externalReranker": {
+    "baseUrl": "https://api.cohere.com/v1",
+    "apiKey": "your-api-key",
+    "model": "rerank-english-v3.0",
+    "timeoutMs": 10000,
+    "maxDocuments": 20
+  }
+}
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `baseUrl` | (required) | Reranker API base URL |
+| `apiKey` | — | Bearer token |
+| `model` | — | Model name (provider-specific) |
+| `timeoutMs` | 10000 | Request timeout |
+| `maxDocuments` | 20 | Max documents per request |
+
+**Supported response formats:** Cohere-style (`results[{index, relevance_score}]`), ranked indices (`ranked_indices[]`), or scores array (`scores[]`). Falls back to structural reranking on failure.
+
+### Query probing
+
+When `probeEnabled: true`, the probe phase extracts probable code identifiers from the query and resolves them against the repository's symbol graph. This adds definition files as candidates before ranking — useful when the query mentions a symbol name but not the file it's defined in.
+
+### Retrieval benchmarks
+
+Pi-SmartRead includes a benchmark suite that measures retrieval quality with standard IR metrics:
+
+```bash
+npx vitest run test/unit/retrieval-benchmark.test.ts
+```
+
+Metrics tracked: **Recall@k**, **Precision@k**, **MRR** (Mean Reciprocal Rank), **NDCG@k** (Normalized Discounted Cumulative Gain).
+
+The aggregate summary is printed during the test run. Use these metrics to detect regressions when modifying retrieval logic.
+
+---
+
+## MCP server
+
+Pi-SmartRead includes a standalone **MCP (Model Context Protocol) stdio server** for use with Claude Desktop, Cursor, or any MCP-compatible client.
+
+```bash
+npm run mcp-server
+```
+
+Exposes: `intent_read`, `read_multiple_files`, `repo_map`, `search`.
+
+See **[docs/mcp-quickstart.md](docs/mcp-quickstart.md)** for full setup instructions.
 
 ---
 
@@ -330,10 +406,10 @@ Delimiter parts: `WORD` (readable dictionary word), `INDEX` (1-based file index)
 
 Pi-SmartRead uses **native tree-sitter bindings** (not WASM) for all AST operations:
 
-- Native parsers: `tree-sitter`, `tree-sitter-javascript`, `tree-sitter-typescript`
+- Native parsers: `tree-sitter`, `tree-sitter-javascript`, `tree-sitter-typescript`, `tree-sitter-python`, `tree-sitter-go`, `tree-sitter-rust`
 - Query files from the bundled `queries/` directory
 - Chunked callback parsing for large files (avoids the native binding failure on files >32KB)
-- Text fallback in `search_symbols` when AST tags are unavailable
+- Text fallback in `search mode="symbols"` when AST tags are unavailable
 
 ---
 
@@ -371,7 +447,7 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 
 **`intent_read` is not using semantic ranking** — Check `pi-smartread.config.json` or the `PI_SMARTREAD_EMBEDDING_*` environment variables.
 
-**`search_symbols` returns no results after an update** — Reload Pi with `/reload`.
+**`search mode="symbols"` returns no results after an update** — Reload Pi with `/reload`.
 
 **I only want a quick structure overview** — Call `repo_map` with `compact: true`.
 
@@ -380,6 +456,9 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 ## Related docs
 
 - `docs/research-deep-dive.md` — Design research, ecosystem analysis, implemented retrieval patterns, and roadmap
+- `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan for advanced retrieval
+- `docs/phase-6-8-implementation-notes.md` — Implementation notes for external reranker, MCP server, HyDE, benchmarks, and multi-language call graphs
+- `docs/mcp-quickstart.md` — MCP server setup guide for Claude Desktop, Cursor, and generic clients
 - `progress.md` — Implementation snapshot
 
 ---
