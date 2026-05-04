@@ -74,6 +74,46 @@ export function measureText(text: string): TextMetrics {
 	};
 }
 
+// ─── Hashline init tracking ─────────────────────────────────────────────
+
+let _hashlineModule: typeof import("./hashline.js") | null = null;
+let _hashlineInitPromise: Promise<void> | null = null;
+
+/**
+ * Initialize hashline engine. Must be called before prefixLinesWithAnchors
+ * or formatContentBlock. Idempotent — safe to call multiple times.
+ */
+export async function ensureHashlineReady(): Promise<void> {
+  if (_hashlineModule) return;
+  if (!_hashlineInitPromise) {
+    _hashlineInitPromise = (async () => {
+      const mod = await import("./hashline.js");
+      await mod.initHashline();
+      _hashlineModule = mod;
+    })();
+  }
+  await _hashlineInitPromise;
+}
+
+/**
+ * Check if hashline engine is ready.
+ */
+export function isHashlineReady(): boolean {
+  return _hashlineModule !== null;
+}
+
+/**
+ * Get the hashline module (throws if not initialized).
+ */
+function __hashlineModule(): typeof import("./hashline.js") {
+  if (!_hashlineModule) {
+    throw new Error(
+      "Hashline not initialized. Call ensureHashlineReady() before using hashline functions."
+    );
+  }
+  return _hashlineModule;
+}
+
 export function createPathHash(path: string): string {
 	// Deterministic tiny hash (no Node crypto dependency)
 	let hash = 5381;
@@ -151,28 +191,28 @@ export function validatePath(path: string): void {
 }
 
 /**
- * Prefix each line of body with a 1-based line number and pipe separator.
- * This produces hashline-compatible output that smart-edit can reference
- * in edits via the hashline format: { pos: '42|', end: '45|' }.
+ * Prefix each line of body with a hashline 'LINE+ID|' prefix.
  *
- * Line-numbered format: "42|    return x;"
- * Empty lines keep the line number for positional reference.
- * The separator '|' is chosen to be single-token in BPE and visually clear.
+ * Produces format: "42ab|    return x;" where "42" is the line number
+ * and "ab" is a xxHash32-based bigram (BPE single-token).
+ *
+ * Compatible with Pi-SmartEdit's hashline edit format.
+ * Requires ensureHashlineReady() to be called first (throws if not).
  */
 export function prefixLinesWithAnchors(body: string): string {
+	const { formatHashLine } = __hashlineModule();
 	const lines = body.split("\n");
 	return lines.map((line, i) => {
 		const lineNum = i + 1;
-		return `${lineNum}|${line}`;
+		return formatHashLine(lineNum, line);
 	}).join("\n");
 }
 
 /**
- * Format a content block with hashline-friendly line-number prefixes.
+ * Format a content block with hashline-anchored line prefixes.
  *
- * Each line is prefixed with "LINE|" so the model can reference specific
- * lines in edits without reproducing text. Smart-edit's hashline edit
- * format supports "LINE|" anchors as an alternative to "LINE+HASH".
+ * Each line is prefixed with "LINE+ID|" so the model can reference specific
+ * lines via hashline-anchored edits. Requires ensureHashlineReady() first.
  */
 export function formatContentBlock(path: string, body: string, index: number): string {
 	const delimiter = pickDelimiter(path, index, body);

@@ -20,7 +20,7 @@ import path from "node:path";
 import { RepoMap } from "./repomap.js";
 import { ContextGraph } from "./context-graph.js";
 import { isRecentlyModified } from "./git-history.js";
-import { LruCache, prefixLinesWithAnchors } from "./utils.js";
+import { LruCache, prefixLinesWithAnchors, ensureHashlineReady } from "./utils.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 // ── Shared ContextGraph cache (module-level) ──
@@ -241,6 +241,9 @@ async function interceptContextualRead(
   const filePath = params.path as string;
   if (!filePath) return result;
 
+  // Ensure hashline engine is ready for anchor computation
+  await ensureHashlineReady();
+
   const cwd = path.resolve((params.directory as string) ?? ctx.cwd);
   const fullPath = path.resolve(cwd, filePath);
 
@@ -334,12 +337,12 @@ async function interceptContextualRead(
   ) as { type: "text"; text: string } | undefined;
 
   if (textContent) {
-    // Embed LINE| hashline anchors so the model can reference specific lines
-    // in hashline-format edits without reproducing text.
-    // Only apply anchoring when content doesn't already have line prefixes.
-    // Heuristic: if first 5 lines don't contain a "N|" pattern, it's raw content.
+    // Embed hashline LINE+ID| anchors so the model can reference specific
+    // lines via hashline-format edits (e.g., "42ab|function foo() {").
+    // Only apply anchoring when content doesn't already have anchors.
+    // Detect both legacy "42|" and hashline "42ab|" prefixes.
     const firstFewLines = textContent.text.split("\n", 5).join("\n");
-    const alreadyAnchored = /^\d+\|/.test(firstFewLines);
+    const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
     if (!alreadyAnchored) {
       textContent.text = prefixLinesWithAnchors(textContent.text);
     }

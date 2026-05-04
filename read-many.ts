@@ -20,6 +20,7 @@ import {
 	buildPlan,
 	buildPartialSection,
 	createPathHash,
+	ensureHashlineReady,
 	formatContentBlock,
 	measureText,
 	pickDelimiter,
@@ -87,6 +88,9 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 			_onUpdate: unknown,
 			ctx: ExtensionContext,
 		) {
+			// Ensure hashline engine is ready before processing reads
+			await ensureHashlineReady();
+
 			const readTool = readToolFactory(ctx.cwd);
 			const fileDetails: ReadManyFileDetail[] = [];
 			const candidates: FileCandidate[] = [];

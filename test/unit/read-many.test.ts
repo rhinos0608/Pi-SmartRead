@@ -1,6 +1,11 @@
 import { DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { __test, createReadManyTool } from "../../read-many.js";
+import { ensureHashlineReady } from "../../utils.js";
+
+beforeAll(async () => {
+  await ensureHashlineReady();
+});
 
 const {
 	measureText,
@@ -83,7 +88,11 @@ describe("read_multiple_files: helper logic", () => {
 		expect(lines[0]).toBe("@/tmp/file.txt");
 		expect(lines[1]).toMatch(/^<<'ORBIT_3_[0-9A-F]{6}(?:_.*)?'$/);
 		const delimiter = lines[1]!.slice(3, -1);
-		expect(lines.slice(2, -1).join("\n")).toBe("line 1\nline 2");
+		// Body lines now have hashline prefixes (e.g., "1hw|line 1")
+		const bodyLines = lines.slice(2, -1);
+		expect(bodyLines.length).toBe(2);
+		expect(bodyLines[0]).toMatch(/^\d+[a-z]{2}\|line 1$/);
+		expect(bodyLines[1]).toMatch(/^\d+[a-z]{2}\|line 2$/);
 		expect(lines.at(-1)).toBe(delimiter);
 	});
 

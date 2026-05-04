@@ -19,6 +19,7 @@ import {
 import {
   type FileCandidate,
   buildPlan,
+  ensureHashlineReady,
   formatContentBlock,
   measureText,
   validatePath,
@@ -172,6 +173,9 @@ export function createIntentReadTool(
       _onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
+      // 0. Ensure hashline engine is ready
+      await ensureHashlineReady();
+
       // 1. Validate embedding config first (before any reads)
       const embeddingConfig = validateEmbeddingConfig(ctx.cwd);
 

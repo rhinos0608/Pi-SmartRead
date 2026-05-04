@@ -1,13 +1,18 @@
 import { DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   buildPartialSection,
   buildPlan,
   createPathHash,
+  ensureHashlineReady,
   formatContentBlock,
   measureText,
   pickDelimiter,
 } from "../../utils.js";
+
+beforeAll(async () => {
+  await ensureHashlineReady();
+});
 
 function makeCandidate(path: string, text: string, ok: boolean, index: number, body?: string) {
   return { index, path, ok, fullText: text, fullMetrics: measureText(text), body };

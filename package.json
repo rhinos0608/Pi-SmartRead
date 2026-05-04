@@ -60,6 +60,7 @@
     "callgraph.ts",
     "symbol-resolver.ts",
     "persistent-embedding-cache.ts",
+    "hashline.ts",
     "hyde.ts",
     "mcp-server.ts",
     "queries/",
@@ -82,7 +83,8 @@
     "tree-sitter-javascript": "0.23.1",
     "tree-sitter-python": "0.21.0",
     "tree-sitter-rust": "0.21.0",
-    "tree-sitter-typescript": "0.23.2"
+    "tree-sitter-typescript": "0.23.2",
+    "xxhash-wasm": "^1.1.0"
   },
   "optionalDependencies": {
     "@vscode/tree-sitter-wasm": "^0.3.1",

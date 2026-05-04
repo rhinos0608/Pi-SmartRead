@@ -4,6 +4,12 @@ import { createReadManyTool } from "./read-many.js";
 import registerRepoTools from "./repomap-tool.js";
 import { wrapBuiltinReadTool, registerSessionHooks } from "./hook.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
+import { ensureHashlineReady } from "./utils.js";
+
+// Fire-and-forget hashline init at module load time
+ensureHashlineReady().catch((err) =>
+  console.error("[SmartRead] hashline init failed:", err)
+);
 
 export default function (pi: ExtensionAPI) {
   // 1. Session hooks: eager repo-map generation + startup injection

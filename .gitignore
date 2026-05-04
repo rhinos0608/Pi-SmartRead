@@ -8,3 +8,8 @@ node_modules/
 .pi-smartread.tags.cache/*
 .pi-smartread/*
 graphify-out/
+.understand-anything/.understandignore
+.understand-anything/fingerprints.json
+.understand-anything/knowledge-graph.json
+.understand-anything/meta.json
+understand-anything.config.json
