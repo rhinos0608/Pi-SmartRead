@@ -45,6 +45,7 @@ export interface FileCandidate {
 	fullText: string;
 	fullMetrics: TextMetrics;
 	body?: string; // present for successful text/image-summary reads; used for partial rendering
+	startLine?: number;
 }
 
 export interface PackedSection {
@@ -190,6 +191,54 @@ export function validatePath(path: string): void {
 	}
 }
 
+const FILE_LINE_RANGE_RE = /^(.*?)(?::(raw|\d+(?:-\d+)?))$/;
+const URL_LIKE_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//;
+
+export function isUrlLikePath(rawPath: string): boolean {
+	return URL_LIKE_RE.test(rawPath);
+}
+
+export function splitPathAndSelector(rawPath: string): { path: string; selector?: string } {
+	if (!rawPath) {
+		return { path: rawPath };
+	}
+	if (isUrlLikePath(rawPath)) {
+		return { path: rawPath };
+	}
+	const match = FILE_LINE_RANGE_RE.exec(rawPath);
+	if (!match) {
+		return { path: rawPath };
+	}
+	return { path: match[1]!, selector: match[2] };
+}
+
+export function selectorToOffsetLimit(selector?: string): { offset?: number; limit?: number; raw?: boolean } {
+	if (!selector) {
+		return {};
+	}
+	if (selector === "raw") {
+		return { raw: true };
+	}
+	const rangeMatch = /^(\d+)(?:-(\d+))?$/.exec(selector);
+	if (!rangeMatch) {
+		return {};
+	}
+	const start = Number(rangeMatch[1]);
+	const end = rangeMatch[2] ? Number(rangeMatch[2]) : start;
+	if (!Number.isFinite(start) || start < 1 || !Number.isFinite(end) || end < start) {
+		return {};
+	}
+	return {
+		offset: start,
+		limit: end - start + 1,
+	};
+}
+
+export function selectorToStartLine(selector?: string, fallback = 1): number {
+	const { offset } = selectorToOffsetLimit(selector);
+	return offset ?? fallback;
+}
+
 /**
  * Prefix each line of body with a hashline 'LINE+ID|' prefix.
  *
@@ -199,13 +248,20 @@ export function validatePath(path: string): void {
  * Compatible with Pi-SmartEdit's hashline edit format.
  * Requires ensureHashlineReady() to be called first (throws if not).
  */
-export function prefixLinesWithAnchors(body: string): string {
+export function prefixLinesWithAnchors(body: string, startLine = 1): string {
 	const { formatHashLine } = __hashlineModule();
 	const lines = body.split("\n");
 	return lines.map((line, i) => {
-		const lineNum = i + 1;
+		const lineNum = startLine + i;
 		return formatHashLine(lineNum, line);
 	}).join("\n");
+}
+
+export function stripHashlineAnchors(body: string): string {
+	return body
+		.split("\n")
+		.map((line) => line.replace(/^\d+[a-z]{0,2}\|/, ""))
+		.join("\n");
 }
 
 /**
@@ -214,9 +270,15 @@ export function prefixLinesWithAnchors(body: string): string {
  * Each line is prefixed with "LINE+ID|" so the model can reference specific
  * lines via hashline-anchored edits. Requires ensureHashlineReady() first.
  */
-export function formatContentBlock(path: string, body: string, index: number): string {
+export function formatContentBlock(
+	path: string,
+	body: string,
+	index: number,
+	options?: { anchorBody?: boolean; startLine?: number },
+): string {
 	const delimiter = pickDelimiter(path, index, body);
-	const anchoredBody = prefixLinesWithAnchors(body);
+	const anchorBody = options?.anchorBody ?? true;
+	const anchoredBody = anchorBody ? prefixLinesWithAnchors(body, options?.startLine ?? 1) : body;
 	return `@${path}\n<<'${delimiter}'\n${anchoredBody}\n${delimiter}`;
 }
 
@@ -266,7 +328,9 @@ export function buildPartialSection(candidate: FileCandidate, remainingLines: nu
 			return undefined;
 		}
 
-		const partialText = formatContentBlock(candidate.path, trunc.content, candidate.index + 1);
+		const partialText = formatContentBlock(candidate.path, trunc.content, candidate.index + 1, {
+			startLine: candidate.startLine ?? 1,
+		});
 		const metrics = measureText(partialText);
 
 		if (metrics.lines <= remainingLines && metrics.bytes <= remainingBytes) {

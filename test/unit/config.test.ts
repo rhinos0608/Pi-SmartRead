@@ -16,23 +16,28 @@ describe("config: validateEmbeddingConfig", () => {
     delete process.env.PI_SMARTREAD_MAX_CHUNKS;
   });
 
-  it("throws when baseUrl is missing", () => {
+  it("returns null when baseUrl is missing", () => {
     process.env.PI_SMARTREAD_EMBEDDING_MODEL = "text-embedding-3-small";
-    expect(() => validateEmbeddingConfig(SAFE_CWD)).toThrow(/baseUrl/);
+    expect(validateEmbeddingConfig(SAFE_CWD)).toBeNull();
   });
 
-  it("throws when model is missing", () => {
+  it("returns null when model is missing", () => {
     process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
-    expect(() => validateEmbeddingConfig(SAFE_CWD)).toThrow(/model/);
+    expect(validateEmbeddingConfig(SAFE_CWD)).toBeNull();
+  });
+
+  it("returns null when both are missing", () => {
+    expect(validateEmbeddingConfig(SAFE_CWD)).toBeNull();
   });
 
   it("reads PI_SMARTREAD_EMBEDDING_BASE_URL and PI_SMARTREAD_EMBEDDING_MODEL", () => {
     process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
     process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
     const cfg = validateEmbeddingConfig(SAFE_CWD);
-    expect(cfg.baseUrl).toBe("http://localhost:11434/v1");
-    expect(cfg.model).toBe("nomic-embed-text");
-    expect(cfg.apiKey).toBeUndefined();
+    expect(cfg).not.toBeNull();
+    expect(cfg!.baseUrl).toBe("http://localhost:11434/v1");
+    expect(cfg!.model).toBe("nomic-embed-text");
+    expect(cfg!.apiKey).toBeUndefined();
   });
 
   it("reads API key from PI_SMARTREAD_EMBEDDING_API_KEY", () => {
@@ -40,15 +45,17 @@ describe("config: validateEmbeddingConfig", () => {
     process.env.PI_SMARTREAD_EMBEDDING_MODEL = "nomic-embed-text";
     process.env.PI_SMARTREAD_EMBEDDING_API_KEY = "sk-test";
     const cfg = validateEmbeddingConfig(SAFE_CWD);
-    expect(cfg.apiKey).toBe("sk-test");
+    expect(cfg).not.toBeNull();
+    expect(cfg!.apiKey).toBe("sk-test");
   });
 
   it("falls back to legacy EMBEDDING_BASE_URL and EMBEDDING_MODEL", () => {
     process.env.EMBEDDING_BASE_URL = "http://legacy:11434/v1";
     process.env.EMBEDDING_MODEL = "legacy-model";
     const cfg = validateEmbeddingConfig(SAFE_CWD);
-    expect(cfg.baseUrl).toBe("http://legacy:11434/v1");
-    expect(cfg.model).toBe("legacy-model");
+    expect(cfg).not.toBeNull();
+    expect(cfg!.baseUrl).toBe("http://legacy:11434/v1");
+    expect(cfg!.model).toBe("legacy-model");
   });
 
   it("PI_SMARTREAD_ variables take precedence over legacy EMBEDDING_ variables", () => {
@@ -57,19 +64,13 @@ describe("config: validateEmbeddingConfig", () => {
     process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://primary:11434/v1";
     process.env.PI_SMARTREAD_EMBEDDING_MODEL = "primary-model";
     const cfg = validateEmbeddingConfig(SAFE_CWD);
-    expect(cfg.baseUrl).toBe("http://primary:11434/v1");
-    expect(cfg.model).toBe("primary-model");
+    expect(cfg).not.toBeNull();
+    expect(cfg!.baseUrl).toBe("http://primary:11434/v1");
+    expect(cfg!.model).toBe("primary-model");
   });
 
-  it("error message points to both config file and env var names", () => {
-    expect.assertions(2);
-    try {
-      validateEmbeddingConfig(SAFE_CWD);
-    } catch (err) {
-      const msg = (err as Error).message;
-      expect(msg).toContain("pi-smartread.config.json");
-      expect(msg).toContain("PI_SMARTREAD_EMBEDDING_BASE_URL");
-    }
+  it("returns null when config is missing (no env vars set)", () => {
+    expect(validateEmbeddingConfig(SAFE_CWD)).toBeNull();
   });
 
   it("throws when chunkSizeChars is not positive", () => {
@@ -100,8 +101,9 @@ describe("config: validateEmbeddingConfig", () => {
     process.env.PI_SMARTREAD_CHUNK_OVERLAP = "128";
     process.env.PI_SMARTREAD_MAX_CHUNKS = "8";
     const cfg = validateEmbeddingConfig(SAFE_CWD);
-    expect(cfg.chunkSizeChars).toBe(1024);
-    expect(cfg.chunkOverlapChars).toBe(128);
-    expect(cfg.maxChunksPerFile).toBe(8);
+    expect(cfg).not.toBeNull();
+    expect(cfg!.chunkSizeChars).toBe(1024);
+    expect(cfg!.chunkOverlapChars).toBe(128);
+    expect(cfg!.maxChunksPerFile).toBe(8);
   });
 });

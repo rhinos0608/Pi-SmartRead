@@ -24,6 +24,9 @@ import {
 	formatContentBlock,
 	measureText,
 	pickDelimiter,
+	stripHashlineAnchors,
+	selectorToOffsetLimit,
+	splitPathAndSelector,
 	validatePath,
 } from "./utils.js";
 
@@ -101,23 +104,31 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 				}
 
 				const request = params.files[i]!;
-				validatePath(request.path);
+				const { path: targetPath, selector } = splitPathAndSelector(request.path);
+				validatePath(targetPath);
+				const selectorArgs = selectorToOffsetLimit(selector);
+				const rawMode = selectorArgs.raw === true;
 				const input: ReadToolInput = {
-					path: request.path,
-					offset: request.offset,
-					limit: request.limit,
+					path: targetPath,
+					offset: selectorArgs.offset ?? request.offset,
+					limit: selectorArgs.limit ?? request.limit,
 				};
 
 				try {
 					const result = await readTool.execute(`${toolCallId}:${i}`, input, signal, undefined);
 					const details = result.details as ReadToolDetails | undefined;
+					const displayContent = (details as { displayContent?: { text?: string; startLine?: number } } | undefined)
+						?.displayContent;
 
 					const textChunks = result.content
 						.filter((item): item is { type: "text"; text: string } => item.type === "text")
 						.map((item) => item.text);
 					const imageCount = result.content.filter((item) => item.type === "image").length;
 
-					let body = textChunks.join("\n");
+					const renderedBody = displayContent?.text ?? textChunks.join("\n");
+					const firstFewLines = renderedBody.split("\n", 5).join("\n");
+					const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
+					let body = displayContent?.text ?? renderedBody;
 					if (!body) {
 						body =
 							imageCount > 0
@@ -127,18 +138,24 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 						body += `\n[${imageCount} image attachment(s) omitted; use read on this file for image payload.]`;
 					}
 
-					const fullText = formatContentBlock(request.path, body, i + 1);
+					const startLine = displayContent?.startLine ?? selectorArgs.offset ?? request.offset ?? 1;
+					const rawBody = alreadyAnchored ? stripHashlineAnchors(body) : body;
+					const fullText = formatContentBlock(request.path, body, i + 1, {
+						anchorBody: rawMode ? false : !alreadyAnchored,
+						startLine,
+					});
 					candidates.push({
 						index: i,
-						path: request.path,
+						path: targetPath,
 						ok: true,
 						fullText,
 						fullMetrics: measureText(fullText),
-						body,
+						body: rawBody,
+						startLine,
 					});
 
 					fileDetails.push({
-						path: request.path,
+						path: targetPath,
 						ok: true,
 						imageCount,
 						truncation: details?.truncation,
@@ -148,14 +165,14 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 					const fullText = formatContentBlock(request.path, `[Error: ${message}]`, i + 1);
 					candidates.push({
 						index: i,
-						path: request.path,
+						path: targetPath,
 						ok: false,
 						fullText,
 						fullMetrics: measureText(fullText),
 					});
 
 					fileDetails.push({
-						path: request.path,
+						path: targetPath,
 						ok: false,
 						error: message,
 					});

@@ -28,9 +28,13 @@ type StubReadResult = {
 	details?: any;
 };
 
-function createToolWithMap(map: Record<string, StubReadResult | Error>) {
+function createToolWithMap(
+	map: Record<string, StubReadResult | Error>,
+	inspect?: (input: { path: string; offset?: number; limit?: number }) => void,
+) {
 	const readTool = {
-		execute: async (_toolCallId: string, input: { path: string }) => {
+		execute: async (_toolCallId: string, input: { path: string; offset?: number; limit?: number }) => {
+			inspect?.(input);
 			const value = map[input.path];
 			if (!value) {
 				throw new Error(`No stub for path: ${input.path}`);
@@ -61,6 +65,35 @@ describe("read_multiple_files: helper logic", () => {
 		expect(createPathHash("/tmp/a.txt")).toBe(createPathHash("/tmp/a.txt"));
 		expect(createPathHash("/tmp/a.txt")).not.toBe(createPathHash("/tmp/b.txt"));
 		expect(createPathHash("/tmp/a.txt")).toMatch(/^[0-9A-F]{6}$/);
+	});
+
+	it("normalizes selectors and preserves absolute hashline offsets", async () => {
+		const seen: Array<{ path: string; offset?: number; limit?: number }> = [];
+		const tool = createToolWithMap(
+			{
+				"/window.ts": {
+					content: [{ type: "text", text: "line 2\nline 3" }],
+					details: { displayContent: { text: "line 2\nline 3", startLine: 2 } },
+				},
+			},
+			(input) => seen.push(input),
+		);
+
+		const result = await tool.execute(
+			"call-selector",
+			{
+				files: [{ path: "/window.ts:2-3" }],
+			},
+			undefined,
+			undefined,
+			{ cwd: "/" } as any,
+		);
+
+		expect(seen).toEqual([{ path: "/window.ts", offset: 2, limit: 2 }]);
+		const text = (result.content[0] as any).text as string;
+		expect(text).toContain("@/window.ts:2-3");
+		expect(text).toMatch(/\n2[a-z]{2}\|line 2/);
+		expect(text).toMatch(/\n3[a-z]{2}\|line 3/);
 	});
 
 	it("adds suffix when delimiter collides with content", () => {

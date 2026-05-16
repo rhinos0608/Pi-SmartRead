@@ -7,7 +7,7 @@ Pi-SmartRead ships a lightweight **MCP (Model Context Protocol) stdio server** t
 ## One-liner for Claude Code
 
 ```bash
-claude mcp add pi-smartread -- npx tsx /absolute/path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts
+claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/mcp-server.ts
 ```
 
 The project lives in a nested `Pi-SmartRead/Pi-SmartRead/` structure. The server file is at the inner level. Run this from your project directory — the server uses that `cwd` for file operations.
@@ -26,17 +26,20 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 
 | MCP Tool | Description |
 |---|---|
+| `deep_search` | Agentic deep repository search: structural + symbol + semantic + graph channels with RRF fusion |
+| `graph_mutate` | Record semantic coupling edges (breakage, co-change) into the context graph |
 | `intent_read` | Hybrid retrieval: BM25 keyword + semantic embeddings with RRF fusion |
 | `read_multiple_files` | Read up to 20 files in one call with adaptive packing |
 | `repo_map` | PageRank-ranked repository map from tree-sitter ASTs |
 | `search` | Consolidated symbol tool: fuzzy search (`symbols`), resolution with enrichment (`resolve`), call graph (`callers`), AST-aware code search (`code`) |
+| `smartread_status` | Health check: embedding config, file discovery, cache status |
 
 ---
 
 ## Prerequisites
 
 - **Node.js ≥ 20**
-- **`npm install`** in the `Pi-SmartRead/Pi-SmartRead/` directory
+- **`npm install`** in the `Pi-SmartRead/` directory
 - **`tsx`** (included as a dev dependency — no global install needed)
 - **Embedding config** (only for `intent_read` semantic ranking — BM25-only works without it)
 
@@ -47,13 +50,13 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 ### Preferred: CLI one-liner
 
 ```bash
-claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts
+claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/mcp-server.ts
 ```
 
 Add `--scope project` to share the config with your team via `.mcp.json` (committed to version control):
 
 ```bash
-claude mcp add pi-smartread --scope project -- npx tsx /path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts
+claude mcp add pi-smartread --scope project -- npx tsx /path/to/Pi-SmartRead/mcp-server.ts
 ```
 
 ### Alternative: `.mcp.json` (project-scoped, team-shared)
@@ -65,7 +68,7 @@ Place a `.mcp.json` at your project root:
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts"]
+      "args": ["tsx", "/path/to/Pi-SmartRead/mcp-server.ts"]
     }
   }
 }
@@ -82,7 +85,7 @@ Edit your Claude Code user config:
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts"]
+      "args": ["tsx", "/path/to/Pi-SmartRead/mcp-server.ts"]
     }
   }
 }
@@ -127,7 +130,7 @@ Add to `.cursor/mcp.json` in your project root:
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts"]
+      "args": ["tsx", "/path/to/Pi-SmartRead/mcp-server.ts"]
     }
   }
 }

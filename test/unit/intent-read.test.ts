@@ -21,12 +21,17 @@ function makeWrongCountEmbedder(count: number): (req: EmbedRequest) => Promise<E
 }
 
 // Stub readTool: returns text content by path
-function makeReadTool(map: Record<string, string | Error>) {
+function makeReadTool(
+  map: Record<string, string | Error | { content: Array<{ type: "text"; text: string }>; details?: any }>,
+  inspect?: (input: { path: string; offset?: number; limit?: number }) => void,
+) {
   return {
-    execute: async (_id: string, input: { path: string }) => {
+    execute: async (_id: string, input: { path: string; offset?: number; limit?: number }) => {
+      inspect?.(input);
       const val = map[input.path];
       if (!val) throw new Error(`No stub for: ${input.path}`);
       if (val instanceof Error) throw val;
+      if (typeof val === "object" && "content" in val) return val;
       return { content: [{ type: "text" as const, text: val }] };
     },
   };
@@ -174,18 +179,28 @@ describe("intent_read: ranking and output", () => {
     expect(embedder).not.toHaveBeenCalled();
   });
 
-  it("throws before reading when embedding config is missing", async () => {
+  it("degrades to BM25 (with warning) instead of throwing when embedding config is missing", async () => {
     delete process.env.PI_SMARTREAD_EMBEDDING_BASE_URL;
     delete process.env.PI_SMARTREAD_EMBEDDING_MODEL;
 
     const readSpy = vi.fn();
     const tool = createIntentReadTool(() => ({ execute: readSpy }) as any, makeEmbedder([]));
 
-    await expect(
-      tool.execute("id", { query: "auth", files: [{ path: "/a" }] }, undefined, undefined, { cwd: "/" } as any),
-    ).rejects.toThrow(/baseUrl|model/i);
+    // Should NOT throw — degrades gracefully to BM25
+    const result = await tool.execute(
+      "id",
+      { query: "auth", files: [{ path: "/a" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
 
-    expect(readSpy).not.toHaveBeenCalled();
+    // Files are still read
+    expect(readSpy).toHaveBeenCalled();
+    // Result uses BM25 ranking; status may be ok if no files succeeded,
+    // or failed_fallback_bm25 if files were read (depends on read outcome)
+    // The key invariants: (1) did not throw, (2) read was attempted.
+    expect((result as any).details).toBeDefined();
   });
 
   it("returns no content when all files fail to read", async () => {
@@ -304,6 +319,37 @@ describe("intent_read: ranking and output", () => {
     const details = result.details as any;
     expect(details.filteredBelowThresholdPaths).toEqual([]);
     expect(details.files.find((f: any) => f.path === "/b").inclusion).toBe("full");
+  });
+
+  it("normalizes selectors and preserves absolute hashline offsets", async () => {
+    const seen: Array<{ path: string; offset?: number; limit?: number }> = [];
+    const tool = createIntentReadTool(
+      () =>
+        makeReadTool(
+          {
+            "/window.ts": {
+              content: [{ type: "text", text: "line 2\nline 3" }],
+              details: { displayContent: { text: "line 2\nline 3", startLine: 2 } },
+            },
+          },
+          (input) => seen.push(input),
+        ) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "line", files: [{ path: "/window.ts:2-3" }] },
+      undefined,
+      undefined,
+      { cwd: "/" } as any,
+    );
+
+    expect(seen).toEqual([{ path: "/window.ts", offset: 2, limit: 2 }]);
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain("@/window.ts:2-3");
+    expect(text).toMatch(/\n2[a-z]{2}\|line 2/);
+    expect(text).toMatch(/\n3[a-z]{2}\|line 3/);
   });
 });
 

@@ -68,6 +68,41 @@ describe("wrapBuiltinReadTool", () => {
     expect(content?.content?.[0]?.text).toContain("export const x = 1");
   });
 
+  it("anchors reads from selector-based line windows using absolute line numbers", async () => {
+    writeFileSync(join(tmpDir, "hello.ts"), "one\ntwo\nthree\n");
+
+    const tool = wrapBuiltinReadTool();
+    const result = await tool.execute(
+      "cid-selector",
+      { path: "hello.ts:2-3" },
+      undefined,
+      undefined,
+      makeMockContext(tmpDir),
+    );
+
+    const text = (result as { content: { text: string }[] }).content[0]?.text ?? "";
+    expect(text).toMatch(/^2[a-z]{2}\|two/m);
+    expect(text).toMatch(/^3[a-z]{2}\|three/m);
+  });
+
+  it("respects raw reads without injecting anchors or context", async () => {
+    writeFileSync(join(tmpDir, "hello.ts"), "one\ntwo\nthree\n");
+
+    const tool = wrapBuiltinReadTool();
+    const result = await tool.execute(
+      "cid-raw",
+      { path: "hello.ts:raw" },
+      undefined,
+      undefined,
+      makeMockContext(tmpDir),
+    );
+
+    const text = (result as { content: { text: string }[] }).content[0]?.text ?? "";
+    expect(text).toContain("one\ntwo\nthree");
+    expect(text).not.toMatch(/^\d+[a-z]{0,2}\|/m);
+    expect(text).not.toContain("🔍 Context for");
+  });
+
   it("preserves read metadata (name, label, description)", () => {
     const tool = wrapBuiltinReadTool();
     expect(tool.name).toBe("read");
@@ -171,9 +206,12 @@ describe("registerSessionHooks", () => {
     );
 
     // Should have appended repo map
-    const typed = result as { systemPrompt?: string } | undefined;
+    const typed = result as { systemPrompt?: string | string[] } | undefined;
     expect(typed).toBeDefined();
-    expect(typed!.systemPrompt).toContain("Repository Map");
+    const promptText = Array.isArray(typed!.systemPrompt)
+      ? typed!.systemPrompt.join("\n")
+      : typed!.systemPrompt;
+    expect(promptText).toContain("Repository Map");
   });
 
   it("before_agent_start returns undefined for subsequent turns", async () => {

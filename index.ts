@@ -3,6 +3,7 @@ import { createIntentReadTool } from "./intent-read.js";
 import { createReadManyTool } from "./read-many.js";
 import registerRepoTools from "./repomap-tool.js";
 import { wrapBuiltinReadTool, registerSessionHooks } from "./hook.js";
+import { createDeepSearchTool, createSmartReadStatusTool } from "./deep-search.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
 import { ensureHashlineReady } from "./utils.js";
 
@@ -21,6 +22,8 @@ export default function (pi: ExtensionAPI) {
   // 3. Custom tools (no hook wrapping — enrichment flows through the inner read)
   pi.registerTool(createReadManyTool() as never);
   pi.registerTool(createIntentReadTool() as never);
+  pi.registerTool(createDeepSearchTool() as never);
+  pi.registerTool(createSmartReadStatusTool() as never);
 
   // 4. Standalone tools
   registerRepoTools(pi);

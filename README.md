@@ -15,6 +15,9 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 | `intent_read` | Ranks candidate files for a query using BM25 + embeddings with RRF fusion |
 | `repo_map` | Builds a PageRank-ranked repository map from native tree-sitter AST tags |
 | `search` | Consolidated symbol tool: fuzzy symbol search (`mode: "symbols"`), exact symbol resolution with enrichment (`mode: "resolve"`), call graph analysis (`mode: "callers"`), and AST-aware code definition search (`mode: "code"`) |
+| `deep_search` | Agentic deep repository search orchestrating structural code search, symbol search, semantic ranking, graph expansion, RRF fusion, provenance, and follow-up suggestions |
+| `smartread_status` | Lightweight health check reporting embedding configuration, source-file discovery, and cache directory status |
+| `graph_mutate` | Records semantic coupling observations (breakage edges, co-change edges) into the context graph |
 
 ---
 
@@ -32,15 +35,13 @@ If Pi is already running:
 
 ---
 
-## First-read repo map hook
+## Startup repo map injection
 
-On the **first** `read`, `read_multiple_files`, or `intent_read` call in a repository, Pi-SmartRead may intercept the request and return a **compact repo map** instead of the requested file contents. This gives the agent orientation before deeper reads.
+On the **first** turn of every session, Pi-SmartRead injects a compact repo map into the system prompt — no tool call required, no wasted round trips. The map shows the repository's most important files, symbols, and (when available) architectural clusters from the knowledge graph.
 
-After that first intercept:
-- Future reads pass through normally
-- An explicit `repo_map` call also suppresses later first-read interception for that repo
+On **first-read** of individual files via `read`, `read_multiple_files`, or `intent_read`, Pi-SmartRead may also enrich the response with contextual annotations (import relationships, git recency, graph knowledge).
 
-If you see an intercept response, simply re-issue the original read.
+If you see an intercept response on first read, simply re-issue the original read.
 
 ---
 
@@ -248,6 +249,103 @@ Set `enrich: false` on any call to return bare results. Enrichment behaviour can
 
 ---
 
+## `deep_search`
+
+Agentic deep repository search that orchestrates multiple search channels into a unified ranked response with provenance tracking.
+
+### What it does
+
+Orchestrates four parallel search channels:
+
+1. **Structural channel** — AST-aware code definition search across all source files
+2. **Symbol channel** — Tree-sitter symbol extraction for exact identifier matches
+3. **Semantic channel** — BM25 + optional embedding-based file ranking
+4. **Graph channel** — Expands candidates via import neighbours, symbol neighbours, and call graph relationships
+
+Results are fused with **Reciprocal Rank Fusion (k=60)** and enriched with caller/callee/import hints.
+
+### Example
+
+```json
+{
+  "query": "authentication middleware",
+  "depth": "standard",
+  "scope": "code",
+  "limit": 15,
+  "maxSnippetChars": 400
+}
+```
+
+### Options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `query` | — | Natural language question or code symbol |
+| `depth` | `standard` | `quick` (code+symbols), `standard` (+semantic+graph), `thorough` (+caller enrichment) |
+| `scope` | `all` | Filter to `code`, `docs`, `tests`, or `all` |
+| `limit` | `15` | Maximum matches to return (1-50) |
+| `maxSnippetChars` | `400` | Max characters per code snippet (100-1000) |
+| `outputBudget` | `4096` | Approximate output token budget (1k-16k) |
+| `includeRelationships` | `false` | Include caller/callee/import hints for top matches |
+| `filePattern` | — | Glob/regex to restrict files, e.g. `*.ts` |
+| `focusFiles` | `[]` | Personalize ranking toward these files |
+| `rerank` | `false` | Run optional reranker on top candidates (reserved for configured V2 rerankers) |
+
+---
+
+## `smartread_status`
+
+Lightweight health check for Pi-SmartRead. Reports embedding configuration, source-file discovery, and cache directory status — useful for diagnosing retrieval issues before running expensive searches.
+
+### Example
+
+```json
+{
+  "detail": "summary"
+}
+```
+
+Returns:
+- **Embedding backend** — whether `baseUrl` and `model` are configured
+- **Source file discovery** — file counts by language
+- **Cache directories** — presence and size of embedding and tags caches
+
+---
+
+## `graph_mutate`
+
+Records semantic coupling observations into Pi-SmartRead's context graph. Edges are event-sourced to disk and survive session restarts.
+
+### Breakage edges
+
+When editing file A causes type-checking errors in file B:
+
+```json
+{
+  "breakage": [
+    { "from": "src/types/user.ts", "to": "src/services/auth.ts", "context": "renamed User.id field", "confidence": 0.9 }
+  ]
+}
+```
+
+The next `intent_read` touching A will automatically include B as a candidate.
+
+### Co-change edges
+
+When files A and B consistently change together in git history:
+
+```json
+{
+  "coChange": [
+    { "from": "src/api/routes.ts", "to": "src/api/validators.ts", "context": "commit: abc1234", "confidence": 0.7 }
+  ]
+}
+```
+
+Edge weight decays with time.
+
+---
+
 ## Supported languages
 
 Pi-SmartRead supports tree-sitter analysis for **41 languages**:
@@ -298,9 +396,17 @@ Pi-SmartRead uses a **two-tier embedding cache**:
 - **In-memory LRU** (64 entries) — fast repeat lookups within a session
 - **Persistent disk cache** (`.pi-smartread.embeddings.cache/`) — survives restarts, keyed by SHA-256 content hash of the request
 
-### Behavior when config is missing
+### Graceful BM25 degradation
 
-If `baseUrl` or `model` is missing, the extension still loads. `intent_read` throws before reading files. BM25-only fallback applies only after configuration is valid and the embedding request itself fails.
+Pi-SmartRead is designed for agent robustness — missing embeddings degrade to BM25-only with a loud warning, not hard-fail. `intent_read` always proceeds, regardless of embedding config status:
+
+| Scenario | Behaviour |
+|---|---|
+| Config missing (`baseUrl`/`model` not set) | Loud `console.warn`, proceeds with BM25 |
+| Config valid, embedding API unreachable | Falls back to BM25 silently |
+| Config valid, API returns wrong vector count | Falls back to BM25, reports in `details.embeddingError` |
+
+All tools (`intent_read`, `search mode="code"`, `deep_search`) degrade gracefully. Only config authoring errors (e.g. `chunkSizeChars: "foo"`) throw.
 
 ---
 
@@ -381,7 +487,7 @@ Pi-SmartRead includes a standalone **MCP (Model Context Protocol) stdio server**
 npm run mcp-server
 ```
 
-Exposes: `intent_read`, `read_multiple_files`, `repo_map`, `search`.
+Exposes: `deep_search`, `graph_mutate`, `intent_read`, `read_multiple_files`, `repo_map`, `search`, `smartread_status`.
 
 See **[docs/mcp-quickstart.md](docs/mcp-quickstart.md)** for full setup instructions.
 
@@ -459,6 +565,8 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 - `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan for advanced retrieval
 - `docs/phase-6-8-implementation-notes.md` — Implementation notes for external reranker, MCP server, HyDE, benchmarks, and multi-language call graphs
 - `docs/mcp-quickstart.md` — MCP server setup guide for Claude Desktop, Cursor, and generic clients
+- `docs/deep-search-spec.md` — Technical specification for `deep_search` tool
+- `docs/deep-search-implementation.md` — Implementation details and channel architecture
 - `progress.md` — Implementation snapshot
 
 ---

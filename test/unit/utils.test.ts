@@ -1,6 +1,7 @@
 import { DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
+  type FileCandidate,
   buildPartialSection,
   buildPlan,
   createPathHash,
@@ -8,13 +9,16 @@ import {
   formatContentBlock,
   measureText,
   pickDelimiter,
+  selectorToOffsetLimit,
+  selectorToStartLine,
+  splitPathAndSelector,
 } from "../../utils.js";
 
 beforeAll(async () => {
   await ensureHashlineReady();
 });
 
-function makeCandidate(path: string, text: string, ok: boolean, index: number, body?: string) {
+function makeCandidate(path: string, text: string, ok: boolean, index: number, body?: string): FileCandidate {
   return { index, path, ok, fullText: text, fullMetrics: measureText(text), body };
 }
 
@@ -59,17 +63,50 @@ describe("utils: formatContentBlock", () => {
     const delimiter = lines[1]!.slice(3, -1);
     expect(lines.at(-1)).toBe(delimiter);
   });
+
+  it("supports absolute hashline offsets for partial content", () => {
+    const block = formatContentBlock("/tmp/file.txt", "line 20\nline 21", 3, { startLine: 20 });
+    const bodyLines = block.split("\n").slice(2, -1);
+    expect(bodyLines[0]).toMatch(/^20[a-z]{2}\|line 20$/);
+    expect(bodyLines[1]).toMatch(/^21[a-z]{2}\|line 21$/);
+  });
+});
+
+describe("utils: selector parsing", () => {
+  it("splits file selectors from local paths", () => {
+    expect(splitPathAndSelector("/tmp/file.ts:2-4")).toEqual({ path: "/tmp/file.ts", selector: "2-4" });
+    expect(splitPathAndSelector("/tmp/file.ts:raw")).toEqual({ path: "/tmp/file.ts", selector: "raw" });
+  });
+
+  it("leaves URL-like paths untouched", () => {
+    expect(splitPathAndSelector("https://example.com/file.ts:2-4")).toEqual({
+      path: "https://example.com/file.ts:2-4",
+    });
+  });
+
+  it("converts selectors to offset and limit", () => {
+    expect(selectorToOffsetLimit("2-4")).toEqual({ offset: 2, limit: 3 });
+    expect(selectorToOffsetLimit("5")).toEqual({ offset: 5, limit: 1 });
+    expect(selectorToOffsetLimit("raw")).toEqual({ raw: true });
+  });
+
+  it("returns the selector start line with fallback", () => {
+    expect(selectorToStartLine("7-9")).toBe(7);
+    expect(selectorToStartLine(undefined, 3)).toBe(3);
+  });
 });
 
 describe("utils: buildPartialSection", () => {
   it("fits within remaining budget", () => {
     const body = Array.from({ length: 200 }, (_, i) => `line-${i}-${"x".repeat(20)}`).join("\n");
     const candidate = makeCandidate("/tmp/large.txt", "ignored", true, 0, body);
+    candidate.startLine = 12;
     const partial = buildPartialSection(candidate, 40, 1500);
     expect(partial).toBeDefined();
     const m = measureText(partial!);
     expect(m.lines).toBeLessThanOrEqual(40);
     expect(m.bytes).toBeLessThanOrEqual(1500);
+    expect(partial?.split("\n")[2]).toMatch(/^12[a-z]{2}\|line-0-/);
   });
 });
 

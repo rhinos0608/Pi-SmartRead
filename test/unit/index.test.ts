@@ -12,7 +12,7 @@ beforeEach(async () => {
 });
 
 describe("index extension wiring", () => {
-  it("registers all tools: read, read_multiple_files, intent_read, repo_map, search", () => {
+  it("registers all tools for the Pi extension path", () => {
     const registered: { name: string; execute: unknown }[] = [];
     const handlers: Record<string, (...args: unknown[]) => unknown> = {};
 
@@ -31,8 +31,11 @@ describe("index extension wiring", () => {
     expect(names).toContain("read");
     expect(names).toContain("read_multiple_files");
     expect(names).toContain("intent_read");
+    expect(names).toContain("deep_search");
+    expect(names).toContain("smartread_status");
     expect(names).toContain("repo_map");
     expect(names).toContain("search");
+    expect(names).toContain("graph_mutate");
     expect(registered.every((t) => typeof t.execute === "function")).toBe(true);
 
     // Should also register session hooks

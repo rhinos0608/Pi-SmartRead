@@ -234,6 +234,11 @@ async function scoreDefinitions(
     const { validateEmbeddingConfig } = await import("./config.js");
     const embeddingConfig = validateEmbeddingConfig(cwd);
 
+    if (!embeddingConfig) {
+      // Config missing — BM25-only results are fine
+      return defs.sort((a, b) => b.score - a.score);
+    }
+
     if (signal?.aborted) throw new Error("Operation aborted");
 
     // Chunk bodies for embedding (truncate long bodies)
@@ -705,19 +710,35 @@ async function handleCode(
     }
   }
 
-  // 3. Score definitions
-  const scored = await scoreDefinitions(allDefs, query, cwd, signal);
+  // 3. BM25 pre-filter: score all definitions cheaply, then only pass
+  // top candidates through expensive embedding + RRF re-ranking.
+  const preFilterN = Math.min(maxResults * 5, 200);
+  const bm25All = bm25Scores(query, allDefs.map((d) => d.body));
+  for (let i = 0; i < allDefs.length; i++) {
+    allDefs[i]!.score = bm25All[i] ?? 0;
+  }
+  allDefs.sort((a, b) => b.score - a.score);
 
-  // 3b. Graph centrality boost: slightly boost definitions in files that are
+  // Split: top N get embedding re-rank; rest keep BM25-only scores
+  const topForEmbedding = allDefs.slice(0, preFilterN);
+  const bm25Only = allDefs.slice(preFilterN);
+
+  // 4. Score top definitions (BM25 + optional embedding re-rank)
+  const scored = topForEmbedding.length > 0
+    ? await scoreDefinitions(topForEmbedding, query, cwd, signal)
+    : [];
+
+  // 4b. Graph centrality boost: slightly boost definitions in files that are
   // important nodes in the graphify knowledge graph (when available).
   // Uses a small multiplier (0-20%) so BM25 + embedding signals dominate.
+  // Applies only to scored group (embedding candidates); BM25-only group
+  // uses raw BM25 ordering without centrality adjustment.
   try {
     const enricher = getGraphifyEnricher(cwd);
     if (enricher.isAvailable) {
       for (const def of scored) {
         const centrality = enricher.getFileCentrality(def.file);
         if (centrality > 0) {
-          // Boost by up to 20% for highly central files
           const boost = 1 + Math.min(centrality, 20) * 0.01;
           def.score *= boost;
         }
@@ -728,7 +749,13 @@ async function handleCode(
     // Graphify boost is best-effort
   }
 
-  const top = scored.slice(0, maxResults);
+  // Merge: scored group (top BM25 + embedding re-rank) comes first,
+  // then BM25-only remainder in their own order. Scores are on different
+  // scales (RRF for scored, raw BM25 for bm25Only) so they must NOT be
+  // merged and re-sorted together.
+  const allResults = [...scored, ...bm25Only.sort((a, b) => b.score - a.score)];
+
+  const top = allResults.slice(0, maxResults);
 
   if (top.length === 0) {
     return {

@@ -20,7 +20,14 @@ import path from "node:path";
 import { RepoMap } from "./repomap.js";
 import { ContextGraph } from "./context-graph.js";
 import { isRecentlyModified } from "./git-history.js";
-import { LruCache, prefixLinesWithAnchors, ensureHashlineReady } from "./utils.js";
+import {
+   LruCache,
+   ensureHashlineReady,
+   isUrlLikePath,
+   prefixLinesWithAnchors,
+   selectorToOffsetLimit,
+   splitPathAndSelector,
+} from "./utils.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 // ── Shared ContextGraph cache (module-level) ──
@@ -30,101 +37,101 @@ const contextualGraphCache = new LruCache<ContextGraph>(3);
 // ── Key computation ───────────────────────────────────────────────
 
 function findGitRoot(dir: string): string | null {
-  let current = path.resolve(dir);
-  while (true) {
-    if (existsSync(path.join(current, ".git"))) return current;
-    const parent = path.dirname(current);
-    if (parent === current) return null;
-    current = parent;
-  }
+   let current = path.resolve(dir);
+   while (true) {
+      if (existsSync(path.join(current, ".git"))) return current;
+      const parent = path.dirname(current);
+      if (parent === current) return null;
+      current = parent;
+   }
 }
 
 function computeRepoKey(cwd: string): string {
-  const resolved = path.resolve(cwd);
-  const gitRoot = findGitRoot(resolved);
-  return gitRoot ?? resolved;
+   const resolved = path.resolve(cwd);
+   const gitRoot = findGitRoot(resolved);
+   return gitRoot ?? resolved;
 }
 
 // ── Repo map generation (shared by startup hook) ──
 
 async function generateCompactMap(
-  cwd: string,
-  _signal?: AbortSignal,
+   cwd: string,
+   _signal?: AbortSignal,
 ): Promise<{ map: string; stats: Record<string, unknown> } | null> {
-  let map: string | null = null;
-  let stats: Record<string, unknown> = {};
+   let map: string | null = null;
+   let stats: Record<string, unknown> = {};
 
-  try {
-    const rm = new RepoMap(cwd);
-    const result = await rm.getRepoMap({
-      useImportBased: false,
-      autoFallback: true,
-      compact: true,
-      mapTokens: 2048,
-      verbose: false,
-    });
-    map = result.map;
-    stats = result.stats as unknown as Record<string, unknown>;
-  } catch {
-    try {
+   try {
       const rm = new RepoMap(cwd);
       const result = await rm.getRepoMap({
-        useImportBased: true,
-        compact: true,
-        mapTokens: 2048,
-        verbose: false,
+         useImportBased: false,
+         autoFallback: true,
+         compact: true,
+         mapTokens: 2048,
+         verbose: false,
       });
       map = result.map;
       stats = result.stats as unknown as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-
-  // Enrich with graphify knowledge graph data (when available)
-  try {
-    const enricher = getGraphifyEnricher(cwd);
-    if (enricher.isAvailable) {
-      const s = enricher.stats;
-      const sections: string[] = [
-        "",
-        "## Graph Knowledge",
-        `The knowledge graph contains ${s?.nodeCount ?? "?"} concepts across ${s?.fileCount ?? "?"} files ` +
-        `with ${s?.edgeCount ?? "?"} relationships in ${s?.communityCount ?? "?"} architectural clusters.`,
-        "",
-      ];
-
-      // God nodes — core abstractions of the codebase
-      const gods = enricher.getGodNodes(8);
-      if (gods.length > 0) {
-        sections.push("Core abstractions (most connected concepts):");
-        for (const g of gods) {
-          sections.push(`  • ${g.label} — ${g.degree} connections`);
-        }
-        sections.push("");
+   } catch {
+      try {
+         const rm = new RepoMap(cwd);
+         const result = await rm.getRepoMap({
+            useImportBased: true,
+            compact: true,
+            mapTokens: 2048,
+            verbose: false,
+         });
+         map = result.map;
+         stats = result.stats as unknown as Record<string, unknown>;
+      } catch {
+         return null;
       }
+   }
 
-      // Describe communities briefly — useful for high-level orientation
-      if ((s?.communityCount ?? 0) > 1) {
-        sections.push("Architectural clusters:");
-        for (let cid = 0; cid < Math.min(s?.communityCount ?? 0, 8); cid++) {
-          const files = enricher.getCommunityFiles(cid);
-          if (files.length === 0) continue;
-          // Pick representative filename stems for the community
-          const stems = files
-            .map((f) => f.split("/").pop() ?? f)
-            .slice(0, 4);
-          sections.push(`  • Cluster ${cid}: ${stems.join(", ")}${files.length > 4 ? ` (+${files.length - 4})` : ""}`);
-        }
+   // Enrich with graphify knowledge graph data (when available)
+   try {
+      const enricher = getGraphifyEnricher(cwd);
+      if (enricher.isAvailable) {
+         const s = enricher.stats;
+         const sections: string[] = [
+            "",
+            "## Graph Knowledge",
+            `The knowledge graph contains ${s?.nodeCount ?? "?"} concepts across ${s?.fileCount ?? "?"} files ` +
+            `with ${s?.edgeCount ?? "?"} relationships in ${s?.communityCount ?? "?"} architectural clusters.`,
+            "",
+         ];
+
+         // God nodes — core abstractions of the codebase
+         const gods = enricher.getGodNodes(8);
+         if (gods.length > 0) {
+            sections.push("Core abstractions (most connected concepts):");
+            for (const g of gods) {
+               sections.push(`  • ${g.label} — ${g.degree} connections`);
+            }
+            sections.push("");
+         }
+
+         // Describe communities briefly — useful for high-level orientation
+         if ((s?.communityCount ?? 0) > 1) {
+            sections.push("Architectural clusters:");
+            for (let cid = 0; cid < Math.min(s?.communityCount ?? 0, 8); cid++) {
+               const files = enricher.getCommunityFiles(cid);
+               if (files.length === 0) continue;
+               // Pick representative filename stems for the community
+               const stems = files
+                  .map((f) => f.split("/").pop() ?? f)
+                  .slice(0, 4);
+               sections.push(`  • Cluster ${cid}: ${stems.join(", ")}${files.length > 4 ? ` (+${files.length - 4})` : ""}`);
+            }
+         }
+
+         map = map ? map + "\n" + sections.join("\n") : sections.join("\n");
       }
+   } catch {
+      // Graphify enrichment is best-effort
+   }
 
-      map = map ? map + "\n" + sections.join("\n") : sections.join("\n");
-    }
-  } catch {
-    // Graphify enrichment is best-effort
-  }
-
-  return { map, stats };
+   return { map, stats };
 }
 
 // ── Startup repo-map injection (event-based) ──────────────────────
@@ -144,8 +151,8 @@ let repoMapInjectedThisSession = false;
  * Clears the injected flag and repo map cache.
  */
 export function resetSessionState(): void {
-  repoMapInjectedThisSession = false;
-  startupRepoMapCache.clear();
+   repoMapInjectedThisSession = false;
+   startupRepoMapCache.clear();
 }
 
 /**
@@ -157,45 +164,43 @@ export function resetSessionState(): void {
  * - session_shutdown: resets the injected-flag for the next session.
  */
 export function registerSessionHooks(pi: ExtensionAPI): void {
-  pi.on("session_start", (_event, ctx) => {
-    // Reset flag so map is injected fresh on any session start (new/resume/fork/reload)
-    repoMapInjectedThisSession = false;
-    const key = computeRepoKey(ctx.cwd);
-    const promise = generateCompactMap(ctx.cwd).then((r) => r?.map ?? null);
-    startupRepoMapCache.set(key, promise);
-  });
+   pi.on("session_start", (_event, ctx) => {
+      // Reset flag so map is injected fresh on any session start (new/resume/fork/reload)
+      repoMapInjectedThisSession = false;
+      const key = computeRepoKey(ctx.cwd);
+      const promise = generateCompactMap(ctx.cwd).then((r) => r?.map ?? null);
+      startupRepoMapCache.set(key, promise);
+   });
 
-  pi.on("before_agent_start", async (event, ctx) => {
-    if (repoMapInjectedThisSession) return;
-    repoMapInjectedThisSession = true;
+   pi.on("before_agent_start", async (event, ctx) => {
+      if (repoMapInjectedThisSession) return;
+      repoMapInjectedThisSession = true;
 
-    const key = computeRepoKey(ctx.cwd);
-    const mapPromise = startupRepoMapCache.get(key) ?? Promise.resolve(null);
-    const map = await mapPromise;
-    if (!map) return;
+      const key = computeRepoKey(ctx.cwd);
+      const mapPromise = startupRepoMapCache.get(key) ?? Promise.resolve(null);
+      const map = await mapPromise;
+      if (!map) return;
 
-    return {
-      systemPrompt: [
-        event.systemPrompt,
-        "",
-        "## Repository Map",
-        "The following is a compact overview of this repository's structure:",
-        "",
-        map,
-      ].join("\n"),
-    };
-  });
+      const systemPromptParts = Array.isArray((event as any).systemPrompt)
+         ? (event as any).systemPrompt as string[]
+         : [(event as any).systemPrompt as string];
+      return {
+         systemPrompt: [...systemPromptParts, "", "## Repository Map",
+            "The following is a compact overview of this repository's structure:",
+            "", map],
+      } as any;
+   });
 
-  pi.on("session_shutdown", () => {
-    repoMapInjectedThisSession = false;
-  });
+   pi.on("session_shutdown", () => {
+      repoMapInjectedThisSession = false;
+   });
 }
 
 // ── Response types ────────────────────────────────────────────────
 
 interface HookResponse {
-  content: { type: "text"; text: string }[];
-  details: Record<string, unknown>;
+   content: { type: "text"; text: string }[];
+   details: Record<string, unknown>;
 }
 
 // ── Contextual read enrichment ────────────────────────────────────
@@ -211,149 +216,172 @@ interface HookResponse {
  * Failures append a warning line instead of blocking the read.
  */
 async function interceptContextualRead(
-  params: Record<string, unknown>,
-  originalExecute: (
-    toolCallId: string,
-    params: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    onUpdate: unknown,
-    ctx: ExtensionContext,
-  ) => Promise<unknown>,
-  toolCallId: string,
-  signal: AbortSignal | undefined,
-  onUpdate: unknown,
-  ctx: ExtensionContext,
+   params: Record<string, unknown>,
+   originalExecute: (
+      toolCallId: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+      ctx: ExtensionContext,
+   ) => Promise<unknown>,
+   toolCallId: string,
+   signal: AbortSignal | undefined,
+   onUpdate: unknown,
+   ctx: ExtensionContext,
 ): Promise<unknown> {
-  // Execute the original read first
-  const result = (await originalExecute(
-    toolCallId,
-    params,
-    signal,
-    onUpdate,
-    ctx,
-  )) as HookResponse;
+   const filePath = params.path as string;
+   if (!filePath) {
+      return originalExecute(toolCallId, params, signal, onUpdate, ctx);
+   }
+   const { path: targetPath, selector } = splitPathAndSelector(filePath);
+   const selectorArgs = selectorToOffsetLimit(selector);
+   const rawMode = selectorArgs.raw === true;
+   const normalizedParams: Record<string, unknown> = { ...params, path: targetPath };
+   if (selectorArgs.offset !== undefined) normalizedParams.offset = selectorArgs.offset;
+   if (selectorArgs.limit !== undefined) normalizedParams.limit = selectorArgs.limit;
 
-  // Only enrich text content results
-  if (!result || !Array.isArray(result.content)) {
-    return result;
-  }
+   const displayStartLine = selectorArgs.offset ?? (typeof params.offset === "number" ? params.offset : undefined) ?? 1;
 
-  const filePath = params.path as string;
-  if (!filePath) return result;
+   if (rawMode) {
+      return originalExecute(toolCallId, normalizedParams, signal, onUpdate, ctx);
+   }
 
-  // Ensure hashline engine is ready for anchor computation
-  await ensureHashlineReady();
+   // Execute the original read first
+   const result = (await originalExecute(
+      toolCallId,
+      normalizedParams,
+      signal,
+      onUpdate,
+      ctx,
+   )) as HookResponse;
 
-  const cwd = path.resolve((params.directory as string) ?? ctx.cwd);
-  const fullPath = path.resolve(cwd, filePath);
+   // Only enrich text content results
+   if (!result || !Array.isArray(result.content)) {
+      return result;
+   }
 
-  if (!existsSync(fullPath)) return result;
+   // Ensure hashline engine is ready for anchor computation
+   await ensureHashlineReady();
 
-  const contextLines: string[] = ["", "---", `🔍 Context for ${filePath}:`];
+   const cwd = path.resolve((params.directory as string) ?? ctx.cwd);
+   if (isUrlLikePath(targetPath)) return result;
 
-  try {
-    // 1. Structural context via shared cached ContextGraph
-    let graph = contextualGraphCache.get(cwd);
-    if (!graph) {
-      graph = new ContextGraph(cwd);
-      contextualGraphCache.set(cwd, graph);
-    }
-    await graph.buildContextGraph({
-      forceRefresh: false,
-      includeSymbols: true,
-      includeCalls: false,
-    });
+   const fullPath = path.resolve(cwd, targetPath);
 
-    const neighbours = await graph.getFileNeighbours(fullPath, {
-      includeSymbols: false,
-      includeCalls: false,
-    });
+   if (!existsSync(fullPath)) return result;
 
-    const importedBy = neighbours
-      .filter((n) => n.provenance.type === "imported_by")
-      .map((n) => path.relative(cwd, n.path));
-    const imports = neighbours
-      .filter((n) => n.provenance.type === "imports")
-      .map((n) => path.relative(cwd, n.path));
+   const contextLines: string[] = ["", "---", `🔍 Context for ${targetPath}:`];
 
-    if (importedBy.length > 0)
-      contextLines.push(
-        `• Imported by: ${importedBy.slice(0, 8).join(", ")}${importedBy.length > 8 ? "…" : ""}`,
-      );
-    if (imports.length > 0)
-      contextLines.push(
-        `• Imports: ${imports.slice(0, 8).join(", ")}${imports.length > 8 ? "…" : ""}`,
-      );
-
-    // 2. Git recency
-    if (await isRecentlyModified(cwd, fullPath)) {
-      contextLines.push("• Recently modified (last 7 days).");
-    }
-
-    // 3. Graphify enrichment (uses graphify-out/graph.json when available).
-    // Shows related files via calls, references, conceptual edges — not just imports.
-    try {
-      const enricher = getGraphifyEnricher(cwd);
-      if (enricher.isAvailable) {
-        const related = enricher.getRelatedFilesForPath(fullPath);
-        if (related.length > 0) {
-          const grouped = new Map<string, string[]>();
-          for (const r of related) {
-            const relKey = r.relation;
-            let list = grouped.get(relKey);
-            if (!list) {
-              list = [];
-              grouped.set(relKey, list);
-            }
-            list.push(r.targetLabel);
-          }
-          for (const [relType, labels] of grouped) {
-            const shown = labels.slice(0, 6).join(", ");
-            contextLines.push(`• Graph: ${relType} ${shown}${labels.length > 6 ? "…" : ""}`);
-          }
-        }
-
-        const community = enricher.getFileCommunity(fullPath);
-        if (community !== undefined) {
-          const communitySize = enricher.getCommunityFiles(community).length;
-          contextLines.push(`• Community ${community} (${communitySize} files)`);
-        }
-
-        const centrality = enricher.getFileCentrality(fullPath);
-        if (centrality > 0) {
-          contextLines.push(`• Graph centrality: ${centrality} connections`);
-        }
+   try {
+      // 1. Structural context via shared cached ContextGraph
+      let graph = contextualGraphCache.get(cwd);
+      if (!graph) {
+         graph = new ContextGraph(cwd);
+         contextualGraphCache.set(cwd, graph);
       }
-    } catch {
-      // Graphify enrichment is best-effort
-    }
-  } catch (err) {
-    contextLines.push(`• Context unavailable: ${(err as Error).message}`);
-  }
+      await graph.buildContextGraph({
+         forceRefresh: false,
+         includeSymbols: true,
+         includeCalls: false,
+      });
 
-  // Find text content for anchor embedding and context appending
-  const textContent = result.content.find(
-    (c: { type: string }) => c.type === "text",
-  ) as { type: "text"; text: string } | undefined;
+      const neighbours = await graph.getFileNeighbours(fullPath, {
+         includeSymbols: false,
+         includeCalls: false,
+      });
 
-  if (textContent) {
-    // Embed hashline LINE+ID| anchors so the model can reference specific
-    // lines via hashline-format edits (e.g., "42ab|function foo() {").
-    // Only apply anchoring when content doesn't already have anchors.
-    // Detect both legacy "42|" and hashline "42ab|" prefixes.
-    const firstFewLines = textContent.text.split("\n", 5).join("\n");
-    const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
-    if (!alreadyAnchored) {
-      textContent.text = prefixLinesWithAnchors(textContent.text);
-    }
+      const importedBy = neighbours
+         .filter((n) => n.provenance.type === "imported_by")
+         .map((n) => path.relative(cwd, n.path));
+      const imports = neighbours
+         .filter((n) => n.provenance.type === "imports")
+         .map((n) => path.relative(cwd, n.path));
 
-    // Append contextual annotations
-    if (contextLines.length > 2) {
-      textContent.text += contextLines.join("\n");
-    }
-  }
+      if (importedBy.length > 0)
+         contextLines.push(
+            `• Imported by: ${importedBy.slice(0, 8).join(", ")}${importedBy.length > 8 ? "…" : ""}`,
+         );
+      if (imports.length > 0)
+         contextLines.push(
+            `• Imports: ${imports.slice(0, 8).join(", ")}${imports.length > 8 ? "…" : ""}`,
+         );
 
-  return result;
+      // 2. Git recency
+      if (await isRecentlyModified(cwd, fullPath)) {
+         contextLines.push("• Recently modified (last 7 days).");
+      }
+
+      // 3. Graphify enrichment (uses graphify-out/graph.json when available).
+      // Shows related files via calls, references, conceptual edges — not just imports.
+      try {
+         const enricher = getGraphifyEnricher(cwd);
+         if (enricher.isAvailable) {
+            const related = enricher.getRelatedFilesForPath(fullPath);
+            if (related.length > 0) {
+               const grouped = new Map<string, string[]>();
+               for (const r of related) {
+                  const relKey = r.relation;
+                  let list = grouped.get(relKey);
+                  if (!list) {
+                     list = [];
+                     grouped.set(relKey, list);
+                  }
+                  list.push(r.targetLabel);
+               }
+               for (const [relType, labels] of grouped) {
+                  const shown = labels.slice(0, 6).join(", ");
+                  contextLines.push(`• Graph: ${relType} ${shown}${labels.length > 6 ? "…" : ""}`);
+               }
+            }
+
+            const community = enricher.getFileCommunity(fullPath);
+            if (community !== undefined) {
+               const communitySize = enricher.getCommunityFiles(community).length;
+               contextLines.push(`• Community ${community} (${communitySize} files)`);
+            }
+
+            const centrality = enricher.getFileCentrality(fullPath);
+            if (centrality > 0) {
+               contextLines.push(`• Graph centrality: ${centrality} connections`);
+            }
+         }
+      } catch {
+         // Graphify enrichment is best-effort
+      }
+   } catch (err) {
+      contextLines.push(`• Context unavailable: ${(err as Error).message}`);
+   }
+
+   // Find text content for anchor embedding and context appending
+   const textContent = result.content.find(
+      (c: { type: string }) => c.type === "text",
+   ) as { type: "text"; text: string } | undefined;
+
+   if (textContent) {
+      const originalText = textContent.text;
+      if (result.details && typeof result.details === "object") {
+         (result.details as Record<string, unknown>).displayContent = {
+            text: originalText,
+            startLine: displayStartLine,
+         };
+      }
+      // Embed hashline LINE+ID| anchors so the model can reference specific
+      // lines via hashline-format edits (e.g., "42ab|function foo() {").
+      // Only apply anchoring when content doesn't already have anchors.
+      // Detect both legacy "42|" and hashline "42ab|" prefixes.
+      const firstFewLines = textContent.text.split("\n", 5).join("\n");
+      const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
+      if (!alreadyAnchored) {
+         textContent.text = prefixLinesWithAnchors(textContent.text, displayStartLine);
+      }
+
+      // Append contextual annotations
+      if (contextLines.length > 2) {
+         textContent.text += contextLines.join("\n");
+      }
+   }
+
+   return result;
 }
 
 // ── Built-in read override ────────────────────────────────────────
@@ -372,55 +400,55 @@ async function interceptContextualRead(
  * No first-read repo-map intercept — that is handled by registerSessionHooks().
  */
 export function wrapBuiltinReadTool(): ToolDefinition {
-  const baseDef = createReadToolDefinition(".");
+   const baseDef = createReadToolDefinition(".");
 
-  // Build the original execute delegate that creates a fresh
-  // definition with the runtime cwd on every call.
-  const createDelegatedExecute = (
-    ctx: ExtensionContext,
-  ): ((
-    toolCallId: string,
-    params: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    onUpdate: unknown,
-    _ctx: ExtensionContext,
-  ) => Promise<unknown>) => {
-    const freshDef = createReadToolDefinition(ctx.cwd);
-    return freshDef.execute.bind(freshDef) as (
+   // Build the original execute delegate that creates a fresh
+   // definition with the runtime cwd on every call.
+   const createDelegatedExecute = (
+      ctx: ExtensionContext,
+   ): ((
       toolCallId: string,
       params: Record<string, unknown>,
       signal: AbortSignal | undefined,
       onUpdate: unknown,
       _ctx: ExtensionContext,
-    ) => Promise<unknown>;
-  };
+   ) => Promise<unknown>) => {
+      const freshDef = createReadToolDefinition(ctx.cwd);
+      return freshDef.execute.bind(freshDef) as (
+         toolCallId: string,
+         params: Record<string, unknown>,
+         signal: AbortSignal | undefined,
+         onUpdate: unknown,
+         _ctx: ExtensionContext,
+      ) => Promise<unknown>;
+   };
 
-  return {
-    name: baseDef.name,
-    label: baseDef.label,
-    description: baseDef.description,
-    promptSnippet: baseDef.promptSnippet,
-    promptGuidelines: baseDef.promptGuidelines,
-    parameters: baseDef.parameters,
-    renderCall: baseDef.renderCall,
-    renderResult: baseDef.renderResult,
+   return {
+      name: baseDef.name,
+      label: baseDef.label,
+      description: baseDef.description,
+      promptSnippet: baseDef.promptSnippet,
+      promptGuidelines: baseDef.promptGuidelines,
+      parameters: baseDef.parameters,
+      renderCall: baseDef.renderCall,
+      renderResult: baseDef.renderResult,
 
-    async execute(
-      toolCallId: string,
-      params: Record<string, unknown>,
-      signal: AbortSignal | undefined,
-      onUpdate: unknown,
-      ctx: ExtensionContext,
-    ) {
-      // Wrap with contextual enrichment only
-      return interceptContextualRead(
-        params,
-        createDelegatedExecute(ctx),
-        toolCallId,
-        signal,
-        onUpdate,
-        ctx,
-      );
-    },
-  } as unknown as ToolDefinition;
+      async execute(
+         toolCallId: string,
+         params: Record<string, unknown>,
+         signal: AbortSignal | undefined,
+         onUpdate: unknown,
+         ctx: ExtensionContext,
+      ) {
+         // Wrap with contextual enrichment only
+         return interceptContextualRead(
+            params,
+            createDelegatedExecute(ctx),
+            toolCallId,
+            signal,
+            onUpdate,
+            ctx,
+         );
+      },
+   } as unknown as ToolDefinition;
 }

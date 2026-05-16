@@ -3,12 +3,13 @@ import { isAbsolute, join, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionContext,
+  ReadToolDetails,
   ReadToolInput,
   ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import { createReadTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@mariozechner/pi-coding-agent";
 import { validateEmbeddingConfig } from "./config.js";
-import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings } from "./embedding.js";
+import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings, fetchEmbeddingsSharded, SHARD_SIZE } from "./embedding.js";
 import { PersistentEmbeddingCache } from "./persistent-embedding-cache.js";
 import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
 import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
@@ -22,6 +23,9 @@ import {
   ensureHashlineReady,
   formatContentBlock,
   measureText,
+  stripHashlineAnchors,
+  selectorToOffsetLimit,
+  splitPathAndSelector,
   validatePath,
   LruCache,
 } from "./utils.js";
@@ -176,8 +180,19 @@ export function createIntentReadTool(
       // 0. Ensure hashline engine is ready
       await ensureHashlineReady();
 
-      // 1. Validate embedding config first (before any reads)
+      // 1. Validate embedding config — null means baseUrl or model is missing.
+      // Degrade gracefully to BM25-only with a loud warning instead of hard-failing.
+      // This is the right behaviour for an agentic retrieval tool.
       const embeddingConfig = validateEmbeddingConfig(ctx.cwd);
+
+      if (!embeddingConfig) {
+        console.warn(
+          "[Pi-SmartRead] Embedding config missing (baseUrl/model not set). " +
+            "intent_read will operate in BM25-only mode. " +
+            "Set baseUrl/model in pi-smartread.config.json or via " +
+            "PI_SMARTREAD_EMBEDDING_BASE_URL / PI_SMARTREAD_EMBEDDING_MODEL env vars to enable semantic ranking.",
+        );
+      }
 
       // Embedding API tracking (updated after embed call; may degrade to fallback)
       let embeddingStatus: EmbeddingStatus = "ok";
@@ -246,7 +261,7 @@ export function createIntentReadTool(
         existsSync(join(ctx.cwd, "Cargo.toml")) ||
         existsSync(join(ctx.cwd, "go.mod"));
       
-      if (hasProjectMarker && embeddingConfig.probeEnabled === true) {
+      if (hasProjectMarker && embeddingConfig?.probeEnabled === true) {
         await sharedGraph.buildContextGraph({ forceRefresh: false, includeSymbols: true, includeCalls: true });
       }
 
@@ -259,7 +274,7 @@ export function createIntentReadTool(
       // tree-sitter which is expensive and not needed for simple file-scoped queries.
       let probing: ProbeResult | undefined;
       const probeAddedPaths: string[] = [];
-      if (embeddingConfig.probeEnabled === true) {
+      if (embeddingConfig?.probeEnabled === true) {
         const probeSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
         if (probeSlots > 0) {
           try {
@@ -329,7 +344,7 @@ export function createIntentReadTool(
 
       // 2b: Symbol neighbours (uses pre-built symbol index from shared graph)
       const symbolSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      if (symbolSlots > 0 && embeddingConfig.probeEnabled === true) {
+      if (symbolSlots > 0 && embeddingConfig?.probeEnabled === true) {
         const seedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
         for (const seedFile of seedFiles) {
           if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
@@ -349,7 +364,7 @@ export function createIntentReadTool(
       }
       // 2c: Call graph neighbours (caller/callee expansion for high-confidence function symbols)
       const callSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      if (callSlots > 0 && embeddingConfig.probeEnabled === true) {
+      if (callSlots > 0 && embeddingConfig?.probeEnabled === true) {
         const callSeedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
         for (const seedFile of callSeedFiles) {
           if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
@@ -427,29 +442,96 @@ export function createIntentReadTool(
 
       // 4. Read files
       const readTool = readToolFactory(ctx.cwd);
-      interface FileReadResult { path: string; ok: boolean; body?: string; error?: string; }
+      interface FileReadResult {
+        path: string;
+        displayPath: string;
+        ok: boolean;
+        body?: string;
+        renderedBody?: string;
+        startLine?: number;
+        anchorBody?: boolean;
+        error?: string;
+      }
       const fileResults: FileReadResult[] = [];
 
-      for (let i = 0; i < resolvedFiles.length; i++) {
+      const CONCURRENCY = 6;
+      // Pre-allocate to maintain insertion order across parallel batches
+      const orderedResults: (FileReadResult | undefined)[] = new Array(resolvedFiles.length);
+
+      for (let batchStart = 0; batchStart < resolvedFiles.length; batchStart += CONCURRENCY) {
         if (signal?.aborted) throw new Error("Operation aborted");
 
-        const req = resolvedFiles[i]!;
-        try {
-          validatePath(req.path);
-          const input: ReadToolInput = { path: req.path, offset: req.offset, limit: req.limit };
-          const result = await readTool.execute(`${toolCallId}:${i}`, input, signal, undefined);
+        const batchEnd = Math.min(batchStart + CONCURRENCY, resolvedFiles.length);
+        const batchPromises: Promise<void>[] = [];
 
-          const body = result.content
-            .filter((item): item is { type: "text"; text: string } => item.type === "text")
-            .map((item) => item.text)
-            .join("\n");
+        for (let j = batchStart; j < batchEnd; j++) {
+          const i = j;
+          const req = resolvedFiles[i]!;
+          batchPromises.push(
+            (async () => {
+              try {
+                const { path: targetPath, selector } = splitPathAndSelector(req.path);
+                validatePath(targetPath);
+                const selectorArgs = selectorToOffsetLimit(selector);
+                const rawMode = selectorArgs.raw === true;
+                const input: ReadToolInput = {
+                  path: targetPath,
+                  offset: selectorArgs.offset ?? req.offset,
+                  limit: selectorArgs.limit ?? req.limit,
+                };
+                const result = await readTool.execute(`${toolCallId}:${i}`, input, signal, undefined);
+                const details = result.details as ReadToolDetails | undefined;
+                const displayContent = (
+                  details as { displayContent?: { text?: string; startLine?: number } } | undefined
+                )?.displayContent;
 
-          fileResults.push({ path: req.path, ok: true, body: body || "[No text content]" });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          fileResults.push({ path: req.path, ok: false, error: message });
-          if (params.stopOnError) throw err;
+                const renderedBody = displayContent?.text ?? result.content
+                  .filter((item): item is { type: "text"; text: string } => item.type === "text")
+                  .map((item) => item.text)
+                  .join("\n");
+                const firstFewLines = renderedBody.split("\n", 5).join("\n");
+                const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
+                let body = displayContent?.text ?? renderedBody;
+                const startLine = displayContent?.startLine ?? selectorArgs.offset ?? req.offset ?? 1;
+                if (!body) {
+                  body = "[No text content]";
+                }
+                const rawBody = alreadyAnchored ? stripHashlineAnchors(body) : body;
+                const displayPath = req.path;
+
+                orderedResults[i] = {
+                  path: targetPath,
+                  displayPath,
+                  ok: true,
+                  body: rawBody,
+                  renderedBody: body,
+                  startLine,
+                  anchorBody: rawMode ? false : !alreadyAnchored,
+                };
+              } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                orderedResults[i] = { path: req.path, displayPath: req.path, ok: false, error: message };
+              }
+            })(),
+          );
         }
+
+        await Promise.allSettled(batchPromises);
+
+        // stopOnError: throw first error after batch completes
+        if (params.stopOnError) {
+          for (let j = batchStart; j < batchEnd; j++) {
+            const r = orderedResults[j];
+            if (r && !r.ok) {
+              throw new Error(r.error);
+            }
+          }
+        }
+      }
+
+      // Collect results in original order
+      for (const r of orderedResults) {
+        if (r) fileResults.push(r);
       }
 
       const successfulFiles = fileResults.filter((f) => f.ok);
@@ -485,9 +567,9 @@ export function createIntentReadTool(
 
       if (successfulFiles.length > 0) {
         // Chunk each successful file's body
-        const chunkSizeChars = embeddingConfig.chunkSizeChars;
-        const chunkOverlapChars = embeddingConfig.chunkOverlapChars;
-        const maxChunksPerFile = embeddingConfig.maxChunksPerFile;
+        const chunkSizeChars = embeddingConfig?.chunkSizeChars ?? 4096;
+        const chunkOverlapChars = embeddingConfig?.chunkOverlapChars ?? 512;
+        const maxChunksPerFile = embeddingConfig?.maxChunksPerFile ?? 12;
 
         // Map file index -> its chunks (using AST-aware chunking when available)
         const fileChunks: ChunkResult[][] = [];
@@ -529,54 +611,65 @@ export function createIntentReadTool(
         // raw query with a generated hypothetical code document for embedding.
         // This improves semantic matching for abstract/natural-language queries.
         hydeResult = applyHyde({
-          enabled: embeddingConfig.hydeEnabled === true,
+          enabled: embeddingConfig?.hydeEnabled === true,
           query,
         });
         const embeddingQuery = hydeResult.applied ? hydeResult.document : query;
 
-        // Attempt embedding — fall back to BM25-only on failure
-        try {
-          const embeddingRequest = {
-            ...embeddingConfig,
-            inputs: [embeddingQuery, ...allChunkTexts],
-          };
-          const embeddingCacheKey = createEmbeddingCacheKey(embeddingRequest, query, allChunkTexts);
+        // Attempt embedding if config is available — fall back to BM25-only on failure
+        if (!embeddingConfig) {
+          embeddingStatus = "failed_fallback_bm25";
+          embeddingError = "embedding config not available";
+        } else {
+          try {
+            const { baseUrl, model, apiKey } = embeddingConfig;
+            const embeddingRequest: EmbedRequest = {
+              baseUrl,
+              model,
+              apiKey,
+              inputs: [embeddingQuery, ...allChunkTexts],
+            };
+            const embeddingCacheKey = createEmbeddingCacheKey(embeddingRequest, query, allChunkTexts);
 
-          // Check persistent cache first, then memory LRU
-          const persistentCache = persistentCaches.get(ctx.cwd) ?? new PersistentEmbeddingCache(ctx.cwd);
-          persistentCaches.set(ctx.cwd, persistentCache);
+            // Check persistent cache first, then memory LRU
+            const persistentCache = persistentCaches.get(ctx.cwd) ?? new PersistentEmbeddingCache(ctx.cwd);
+            persistentCaches.set(ctx.cwd, persistentCache);
 
-          const persistentKey = PersistentEmbeddingCache.computeKey(embeddingRequest, query, allChunkTexts);
-          let embeddingResult: EmbedResult | null = null;
+            const persistentKey = PersistentEmbeddingCache.computeKey(embeddingRequest, query, allChunkTexts);
+            let embeddingResult: EmbedResult | null = null;
 
-          // Check memory LRU
-          const cachedMemResult = embeddingLruCache.get(embeddingCacheKey);
-          if (cachedMemResult) {
-            embeddingCacheHit = true;
-            embeddingResult = cachedMemResult;
-          }
-
-          // Check persistent disk cache
-          if (!embeddingResult) {
-            const persistentResult = persistentCache.get(persistentKey);
-            if (persistentResult) {
+            // Check memory LRU
+            const cachedMemResult = embeddingLruCache.get(embeddingCacheKey);
+            if (cachedMemResult) {
               embeddingCacheHit = true;
-              embeddingResult = persistentResult;
-              // Promote to memory
-              embeddingLruCache.set(embeddingCacheKey, persistentResult);
+              embeddingResult = cachedMemResult;
             }
-          }
 
-          // Call API if no cache hit
-          if (!embeddingResult) {
-            embeddingResult = await fetchEmbeddingsImpl(embeddingRequest);
-          }
+            // Check persistent disk cache
+            if (!embeddingResult) {
+              const persistentResult = persistentCache.get(persistentKey);
+              if (persistentResult) {
+                embeddingCacheHit = true;
+                embeddingResult = persistentResult;
+                // Promote to memory
+                embeddingLruCache.set(embeddingCacheKey, persistentResult);
+              }
+            }
 
-          const { vectors } = embeddingResult;
-          if (!cachedMemResult) {
-            embeddingLruCache.set(embeddingCacheKey, { vectors });
-            persistentCache.set(persistentKey, { vectors });
-          }
+            // Call API if no cache hit — use sharded path for large batches
+            if (!embeddingResult) {
+              if (embeddingRequest.inputs.length > SHARD_SIZE) {
+                embeddingResult = await fetchEmbeddingsSharded(embeddingRequest);
+              } else {
+                embeddingResult = await fetchEmbeddingsImpl(embeddingRequest);
+              }
+            }
+
+            const { vectors } = embeddingResult;
+            if (!cachedMemResult) {
+              embeddingLruCache.set(embeddingCacheKey, { vectors });
+              persistentCache.set(persistentKey, { vectors });
+            }
 
           if (vectors.length === allChunkTexts.length + 1) {
             const queryVec = vectors[0]!;
@@ -621,6 +714,7 @@ export function createIntentReadTool(
           embeddingStatus = "failed_fallback_bm25";
           embeddingError = err instanceof Error ? err.message : String(err);
         }
+        }  // end embedding attempt when config is available
 
         let rrfScores: number[];
         let rrfRanks: number[];
@@ -676,7 +770,7 @@ export function createIntentReadTool(
           .sort((a, b) => (ranksByPath.get(a) ?? Infinity) - (ranksByPath.get(b) ?? Infinity));
 
         // Phase 5: optional structural reranker (off by default, gated behind config)
-        if (embeddingConfig.rerankEnabled === true && rankedSuccessOrder.length > 0) {
+        if (embeddingConfig?.rerankEnabled === true && rankedSuccessOrder.length > 0) {
           const { isRecentlyModified } = await import("./git-history.js");
           
           const rerankInputs: RerankerInput[] = await Promise.all(
@@ -737,8 +831,12 @@ export function createIntentReadTool(
       const topKOrdered = rankedSuccessOrder.slice(0, effectiveTopK);
       const packCandidates: FileCandidate[] = topKOrdered.map((path, i) => {
         const f = successfulFiles.find((x) => x.path === path)!;
-        const body = f.body!;
-        const fullText = formatContentBlock(path, body, i + 1);
+        const body = f.renderedBody ?? f.body!;
+        const displayPath = f.displayPath;
+        const fullText = formatContentBlock(displayPath, body, i + 1, {
+          anchorBody: f.anchorBody ?? true,
+          startLine: f.startLine ?? 1,
+        });
         return {
           index: i,
           path,

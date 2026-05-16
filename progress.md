@@ -5,6 +5,10 @@ Complete — all implementation plan phases delivered
 
 ## Completed (2026-05-03)
 
+### Parallel deep_search Channels
+- **File:** `deep-search.ts`
+- **Change:** Made 4 search channels run in parallel where possible. Phase 1: code + symbol channels run simultaneously via `Promise.allSettled` (they share no state). Phase 2: semantic channel runs in parallel with phase 1 (it only needs pre-computed `discoveredFiles`). Phase 3: graph channel runs after phases 1+2 (requires `graphSeeds` from structural+symbol results). All existing `try/catch` error handling with `degraded[]` array preserved.
+
 ### Bug Fix: AST Chunker Infinite Loop
 - **File:** `ast-chunker.ts`
 - **Problem:** Tree-walking cursor loop compared `cursor.currentNode === rootNode` using reference equality. web-tree-sitter creates new Node wrappers on each `currentNode` access, so the comparison always failed → infinite loop.

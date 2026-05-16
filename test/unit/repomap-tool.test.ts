@@ -5,9 +5,9 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 const mockSearchIdentifiers = vi.fn();
 
 vi.mock("../../repomap.js", () => ({
-  RepoMap: vi.fn().mockImplementation(() => ({
-    searchIdentifiers: mockSearchIdentifiers,
-  })),
+  RepoMap: vi.fn().mockImplementation(function () {
+    return { searchIdentifiers: mockSearchIdentifiers };
+  }),
 }));
 
 // Mock findSrcFiles to return test files

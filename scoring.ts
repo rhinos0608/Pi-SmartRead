@@ -97,7 +97,7 @@ export function bm25Scores(query: string, documents: string[]): number[] {
   const tokenizedDocs = documents.map(tokenize);
   const avgDocLen = Math.max(1, tokenizedDocs.reduce((sum, d) => sum + d.length, 0) / N);
 
-  const queryTokens = [...new Set(tokenize(query))];
+  const queryTokens = tokenize(query);
 
   // df: number of documents containing each unique query token
   const df = new Map<string, number>();

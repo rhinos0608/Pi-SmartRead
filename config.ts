@@ -142,22 +142,18 @@ function loadRaw(cwd?: string): RawConfig {
   };
 }
 
-export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig {
+/**
+ * Validate embedding configuration.
+ *
+ * Returns null if baseUrl or model is missing, allowing the caller to
+ * degrade gracefully to BM25-only mode with a warning instead of hard-failing.
+ * Throws only for invalid numeric values (which indicate a config authoring error).
+ */
+export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig | null {
   const raw = loadRaw(cwd);
 
-  if (!raw.baseUrl) {
-    throw new Error(
-      "Embedding baseUrl is required. Set it in pi-smartread.config.json " +
-        "(in the current directory or any parent) or via the " +
-        "PI_SMARTREAD_EMBEDDING_BASE_URL environment variable.",
-    );
-  }
-  if (!raw.model) {
-    throw new Error(
-      "Embedding model is required. Set it in pi-smartread.config.json " +
-        "(in the current directory or any parent) or via the " +
-        "PI_SMARTREAD_EMBEDDING_MODEL environment variable.",
-    );
+  if (!raw.baseUrl || !raw.model) {
+    return null;
   }
 
   if (raw.chunkSizeChars !== undefined && (!Number.isInteger(raw.chunkSizeChars) || raw.chunkSizeChars <= 0)) {

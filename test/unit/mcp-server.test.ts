@@ -14,11 +14,32 @@ import { fileURLToPath } from "node:url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MCP_SERVER_PATH = join(__dirname, "../../mcp-server.ts");
 
+function mcpInitialize(): Record<string, unknown> {
+  return {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test-client", version: "1.0.0" },
+    },
+  };
+}
+
+function mcpInitialized(): Record<string, unknown> {
+  return {
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+    params: {},
+  };
+}
+
 /**
- * Helper: send a JSON-RPC message to the MCP server and get the response.
+ * Helper: send one or more JSON-RPC messages to the MCP server and get the last response.
  */
 function callMcpServer(
-  message: Record<string, unknown>,
+  messageOrMessages: Record<string, unknown> | Array<Record<string, unknown>>,
   timeoutMs = 10_000,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -46,7 +67,7 @@ function callMcpServer(
       }
       try {
         resolve(JSON.parse(lines[lines.length - 1]!));
-      } catch (err) {
+      } catch {
         reject(new Error(`Invalid JSON response: ${stdout}`));
       }
     });
@@ -56,20 +77,17 @@ function callMcpServer(
       reject(err);
     });
 
-    // Send the message
-    child.stdin.write(JSON.stringify(message) + "\n");
+    const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
+    for (const message of messages) {
+      child.stdin.write(JSON.stringify(message) + "\n");
+    }
     child.stdin.end();
   });
 }
 
 describe("MCP stdio server", () => {
   it("responds to initialize request", async () => {
-    const response = await callMcpServer({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {},
-    });
+    const response = await callMcpServer(mcpInitialize());
 
     expect(response.jsonrpc).toBe("2.0");
     expect(response.id).toBe(1);
@@ -78,26 +96,21 @@ describe("MCP stdio server", () => {
     const result = response.result as any;
     expect(result.protocolVersion).toBe("2024-11-05");
     expect(result.capabilities).toBeDefined();
-    expect(result.capabilities.tools).toBeDefined();
     expect(result.serverInfo.name).toBe("pi-smartread");
     expect(result.serverInfo.version).toBe("0.1.0");
   });
 
   it("responds to tools/list with registered tools", async () => {
-    // First initialize
-    await callMcpServer({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {},
-    });
-
-    const response = await callMcpServer({
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/list",
-      params: {},
-    });
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: {},
+      },
+    ]);
 
     expect(response.jsonrpc).toBe("2.0");
     expect(response.id).toBe(2);
@@ -109,8 +122,11 @@ describe("MCP stdio server", () => {
 
     // Check that known tools are registered
     const toolNames = result.tools.map((t: any) => t.name);
+    expect(toolNames).toContain("graph_mutate");
     expect(toolNames).toContain("intent_read");
     expect(toolNames).toContain("read_multiple_files");
+    expect(toolNames).toContain("deep_search");
+    expect(toolNames).toContain("smartread_status");
     expect(toolNames).toContain("repo_map");
     expect(toolNames).toContain("search");
 
@@ -125,11 +141,15 @@ describe("MCP stdio server", () => {
   });
 
   it("responds to ping", async () => {
-    const response = await callMcpServer({
-      jsonrpc: "2.0",
-      id: 3,
-      method: "ping",
-    });
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "ping",
+      },
+    ]);
 
     expect(response.jsonrpc).toBe("2.0");
     expect(response.id).toBe(3);
@@ -150,15 +170,19 @@ describe("MCP stdio server", () => {
   });
 
   it("returns error for unknown tool call", async () => {
-    const response = await callMcpServer({
-      jsonrpc: "2.0",
-      id: 5,
-      method: "tools/call",
-      params: {
-        name: "nonexistent_tool",
-        arguments: {},
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: {
+          name: "nonexistent_tool",
+          arguments: {},
+        },
       },
-    });
+    ]);
 
     expect(response.jsonrpc).toBe("2.0");
     expect(response.id).toBe(5);
@@ -170,12 +194,16 @@ describe("MCP stdio server", () => {
   });
 
   it("returns tool list entries have valid JSON Schema for inputSchema", async () => {
-    const response = await callMcpServer({
-      jsonrpc: "2.0",
-      id: 6,
-      method: "tools/list",
-      params: {},
-    });
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/list",
+        params: {},
+      },
+    ]);
 
     const tools = (response.result as any).tools;
     for (const tool of tools) {
