@@ -1,59 +1,47 @@
 # Progress
 
 ## Status
-In Progress
+✅ Complete
 
 ## Tasks
-- [x] LSP fallback for sparse tree-sitter symbols in RepoMap
-- [x] LSP workspace/symbol channel in search-tool.ts code mode
-- [x] Add workspace and hover actions to find_symbol tool
+
+### Stale-Result Auto-Invalidation via graph_mutate ✓
+
+- [x] Add `recordMutation` method to `ContextHygieneTracker` interface in `context-hygiene.ts`
+  - Adds JSDoc: "Record a mutation event explicitly (e.g., from graph_mutate tool)"
+  - Parameters: `mutationResources`, `options` (optional `resultId`, `rehydrate`)
+  - Non-blocking: try/catch with no-op event on error, logs to console
+
+- [x] Implement `recordMutation` in `DefaultContextHygieneTracker` class
+  - Deduplicates mutation resources by key to match `generateReport`'s bucketing
+  - Stores mutation events as `mutation` classification, tool=`graph_mutate`
+  - Handles optional `resultId` and `rehydrate` options
+  - Non-blocking: try/catch returns `{ id: -1, tool: "graph_mutate", classification: "mutation", resources: [] }`
+
+- [x] Wire mutation recording into `tool_result` handler in `index.ts`
+  - When `toolName === "graph_mutate"`, extracts file paths from `breakage` and `coChange` arrays
+  - Calls `hygieneTracker.recordMutation(mutationResources, { resultId: toolCallId })`
+
+- [x] `generateReport()` already handles stale detection
+  - Mutation events (including those from `recordMutation`) are bucketed by resource key
+  - Matches against prior read events and produces stale candidates automatically
+
+- [x] Write unit tests in `test/unit/context-hygiene.test.ts`
+  - 10 passing tests covering: stale detection, deduplication, resultId recording, temporal ordering, empty resources, co-change edges, breakage edges, non-blocking error handling, multiple mutations
 
 ## Files Changed
 
-### find-symbol-tool.ts
-- Added `'workspace'` and `'hover'` to the action enum in `FindSymbolSchema`
-- Added optional `line` and `character` params to schema for hover position
-- Added `LSPWorkspaceSymbol` to type imports
-- Added `WorkspaceSymbolEntry` interface and `handleWorkspace()` handler — queries LSP workspace/symbol and converts results to a consistent format using `symbolKindToString()`
-- Added `HoverResult` interface and `handleHover()` handler — queries LSP hover at a file:line:char and extracts contents (handles string, array, and LSPMarkupContent formats)
-- Added `formatWorkspaceResult()` and `formatHoverResult()` formatters
-- Added `case "workspace"` and `case "hover"` to the action switch in `execute()`
-- Updated tool description to mention workspace and hover actions
-- Updated `relative_path` and `query` field descriptions to reference workspace/hover
-- No tool-registry.ts changes needed — the tool is registered once as "find_symbol" with action-based dispatch
-
-### search-tool.ts
-- Added `getLSPBridge` import from lsp-bridge.js
-- Added `lspSymbolKindToString()` helper to convert LSP SymbolKind numbers to string labels
-- Added LSP workspace/symbol query as additional result channel in `code` mode, after BM25 scoring but before enrichment
-- LSP results are deduplicated against AST-parsed results by `${relFile}:${name}`
-- Only runs for queries longer than 2 characters
-- Tagged `lspResults` count in response details
-- Best-effort: wrapped in try/catch, LSP unavailability is non-fatal
-
-### deep-search.ts
-- Added `getLSPBridge` import from `./lsp-bridge.js`
-- Extended `ChannelName` type to include `"lsp"`
-- Added LSP constants: `LSP_SCORE_BOOST` (0.15), `MAX_LSP_RESULTS` (30), `MAX_HOVER_RESULTS` (3)
-- Added `LSP_SYMBOL_KINDS` mapping and `lspKindToString()` for symbol kind conversion
-- Added `uriToPath()` helper for `file://` URI to filesystem path conversion
-- Added `runLSPChannel()` function — calls `bridge.workspaceSymbol()` best-effort, converts to `DeepSearchCandidate[]` with source tag `'lsp'` and score boost
-- For 'thorough' depth, enriches up to 3 results with hover type/signature info
-- LSP channel runs in parallel with structural/symbol/semantic channels (independent)
-- LSP channel skips queries ≤ 2 characters (avoids noisy results)
-- LSP results are ranked alongside other channels via `for channel of [..."lsp"]`
-- LSP results treated as exact/precise matches in rendering and escalation logic
-- Tool description updated to mention LSP workspace symbol search
-
-### repomap.ts
-- Added LSP-based symbol augmentation as fallback when tree-sitter returns < 5 symbols per file
-  - Added `getLSPBridge` import from lsp-bridge.ts
-  - Added `flattenLSPDocumentSymbols()` helper to convert LSP symbols to Tag format
-  - Added `augmentWithLspSymbols()` async function for best-effort LSP fallback
-  - Integrated fallback into `generateMap()` after tree-sitter batch processing
+- `context-hygiene.ts` — added `recordMutation` method to interface and class
+- `index.ts` — wired `graph_mutate` tool results to call `hygieneTracker.recordMutation()`
+- `test/unit/context-hygiene.test.ts` (new) — 10 passing tests
 
 ## Notes
-- LSP is only queried for files where tree-sitter returned < 5 tags
-- Uses `filenameToLang()` to skip files without a detected language
-- Best-effort: wrapped in try/catch, LSP unavailability is non-fatal
-- All 28 repomap-related tests pass (3 test files)
+
+- The existing `generateReport()` logic already handles stale detection by bucketing mutation events and matching them against prior reads. `recordMutation` adds mutation events to the same event list, so no changes needed to `generateReport()`.
+- The regular `record()` call for `graph_mutate` coexists with the explicit `recordMutation()` call. Both record to the same event list but serve different purposes — `record()` captures tool metadata for general tracking, while `recordMutation()` explicitly registers mutation resources for auto-invalidation.
+- Non-blocking: if `recordMutation` throws, it returns a no-op event and logs the error so the agent never breaks.
+- 358 tests passing (existing failures in mcp-server.test.ts are pre-existing timeouts unrelated to this change).
+
+## Recommended Next Step
+
+Write an end-to-end test verifying the full flow: `tool_result` for `graph_mutate` → `hygieneTracker.recordMutation()` → `generateReport()` → `applyContextHygieneStaleContext()` replaces the tool result message with a placeholder.

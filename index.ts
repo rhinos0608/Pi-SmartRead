@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerSessionHooks } from "./hook.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
+import { setDoomLoopState } from "./smartread-status.js";
 import { loadExperimentalConfig } from "./config.js";
 import { ensureHashlineReady } from "./utils.js";
 import { ToolRegistry } from "./tool-registry.js";
@@ -34,6 +35,10 @@ import {
 import {
   applyBashContextGuard,
   resolveBashContextGuardConfig,
+  resolveGuardProfile,
+  GUARD_HINT_GENERIC,
+  GUARD_HINT_DEEP_SEARCH,
+  GUARD_HINT_RE,
   suggestShellCommands,
 } from "./bash-context-guard.js";
 
@@ -46,6 +51,8 @@ export default function (pi: ExtensionAPI) {
   // ── Shared state ────────────────────────────────────────────────
   const hygieneTracker = resetContextHygieneTracker();
   const doomLoopState = createDoomLoopState();
+  // Share doom-loop state with smartread_status tool
+  setDoomLoopState(doomLoopState);
   const bashContextGuardConfig = resolveBashContextGuardConfig();
 
   // ── Helper: extract resources from tool params for context hygiene ──
@@ -90,6 +97,28 @@ export default function (pi: ExtensionAPI) {
         resources: resourcesForTool(toolName, input),
       });
       hygieneTracker.record(metadata, { resultId: toolCallId });
+
+      // ── Auto-invalidation: record graph_mutate mutations for stale detection ──
+      if (toolName === "graph_mutate") {
+        const mutationResources: ContextHygieneResource[] = [];
+        const breakage = input.breakage as Array<{ from?: string; to?: string }> | undefined;
+        if (Array.isArray(breakage)) {
+          for (const edge of breakage) {
+            if (edge.from) mutationResources.push(buildFileResource(edge.from));
+            if (edge.to) mutationResources.push(buildFileResource(edge.to));
+          }
+        }
+        const coChange = input.coChange as Array<{ from?: string; to?: string }> | undefined;
+        if (Array.isArray(coChange)) {
+          for (const edge of coChange) {
+            if (edge.from) mutationResources.push(buildFileResource(edge.from));
+            if (edge.to) mutationResources.push(buildFileResource(edge.to));
+          }
+        }
+        if (mutationResources.length > 0) {
+          hygieneTracker.recordMutation(mutationResources, { resultId: toolCallId });
+        }
+      }
     }
 
     // ── LSP incremental document tracking ──
@@ -158,6 +187,58 @@ export default function (pi: ExtensionAPI) {
         content.unshift({ type: "text" as const, text: prefix });
       }
       return { ...event, content };
+    }
+
+    // ── Bash context guard: cap oversized output for SmartRead tools ──
+    const SMARTREAD_GUARD_TOOLS = new Set(["deep_search", "search", "intent_read", "read_multiple_files"]);
+    if (SMARTREAD_GUARD_TOOLS.has(toolName) && Array.isArray(event.content)) {
+      const textContent = event.content
+        .filter((c: any): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
+        .map((c: any) => c.text)
+        .join("\n");
+
+      if (textContent) {
+        // Use tool-specific profile; pass base config for env var overrides
+        const profile = resolveGuardProfile(toolName, bashContextGuardConfig);
+        const lineCount = textContent === "" ? 0 : textContent.split("\n").length;
+        const byteCount = Buffer.byteLength(textContent, "utf8");
+        const trimWanted = profile.maxLines > 0 && profile.maxBytes > 0 &&
+          (lineCount > profile.maxLines || byteCount > profile.maxBytes);
+
+        if (trimWanted) {
+          const result = applyBashContextGuard({
+            text: textContent,
+            command: undefined,
+            config: {
+              enabled: true,
+              maxLines: profile.maxLines,
+              maxBytes: profile.maxBytes,
+              headLines: profile.headLines,
+              tailLines: profile.tailLines,
+            },
+          });
+
+          if (result.text !== textContent) {
+            const nonTextContent = event.content.filter(
+              (c: any) => !(c.type === "text" && typeof c.text === "string"),
+            );
+            // Replace default hint with tool-specific hint
+            const toolHint = toolName === "deep_search" ? GUARD_HINT_DEEP_SEARCH : GUARD_HINT_GENERIC;
+            const guardedText = result.text.replace(
+              GUARD_HINT_RE,
+              toolHint + "\n",
+            );
+            return {
+              ...event,
+              content: [{ type: "text", text: guardedText }, ...nonTextContent],
+              details: {
+                ...(event.details && typeof event.details === "object" ? event.details : {}),
+                bashContextGuard: { ...result.metadata, toolName },
+              },
+            };
+          }
+        }
+      }
     }
 
     // ── Bash context guard: cap oversized bash output ──

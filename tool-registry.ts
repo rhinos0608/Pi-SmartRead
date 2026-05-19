@@ -22,6 +22,8 @@ export enum ToolCategory {
   MUTATE = "mutate",
   /** Git-backed annotations (experimental) */
   NOTES = "notes",
+  /** Health checks and status reporting */
+  STATUS = "status",
 }
 
 // ── Registration shape ─────────────────────────────────────────────

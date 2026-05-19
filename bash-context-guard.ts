@@ -16,6 +16,52 @@ export const BASH_CONTEXT_GUARD_DEFAULT_MAX_BYTES = 50 * 1024;
 export const BASH_CONTEXT_GUARD_DEFAULT_HEAD_LINES = 80;
 export const BASH_CONTEXT_GUARD_DEFAULT_TAIL_LINES = 120;
 
+/** Per-tool guard profile — merged on top of base config from env vars */
+export interface BashContextGuardProfile {
+  maxLines: number;
+  maxBytes: number;
+  headLines: number;
+  tailLines: number;
+}
+
+export const GUARD_HINT_GENERIC = "💡 To see specific sections, re-run with offset/limit parameters or narrow the query.";
+export const GUARD_HINT_DEEP_SEARCH = "💡 Use a more specific query or narrower scope to reduce output size.";
+
+export const GUARD_HINT_RE = /💡 (To see specific sections|Use a more specific query)[^\n]*\n/;
+
+/** Tool-specific overrides for the bash context guard. */
+export const TOOL_GUARD_PROFILES: Record<string, Partial<BashContextGuardProfile>> = {
+  // Deep search returns large result sets
+  deep_search: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
+  // Search can return substantial context
+  search: { maxLines: 2500, maxBytes: 60 * 1024, headLines: 100, tailLines: 140 },
+  // Intent read produces graph-augmented content
+  intent_read: { maxLines: 2500, maxBytes: 60 * 1024, headLines: 100, tailLines: 140 },
+  // Default profile (also used for bash)
+  default: { maxLines: 2000, maxBytes: 50 * 1024, headLines: 80, tailLines: 120 },
+};
+
+/**
+ * Merge base config with tool-specific profile overrides.
+ * Falls back to 'default' profile if tool not in map.
+ */
+export function resolveGuardProfile(
+  toolName: string,
+  baseConfig?: BashContextGuardConfig,
+): BashContextGuardProfile {
+  const base = baseConfig ?? resolveBashContextGuardConfig();
+  const profile = TOOL_GUARD_PROFILES[toolName];
+  if (profile) {
+    return {
+      maxLines: profile.maxLines ?? base.maxLines,
+      maxBytes: profile.maxBytes ?? base.maxBytes,
+      headLines: profile.headLines ?? base.headLines,
+      tailLines: profile.tailLines ?? base.tailLines,
+    };
+  }
+  return base;
+}
+
 const BASH_CONTEXT_GUARD_PREVIEW_LINE_MAX_BYTES = 1024;
 const POSITIVE_BASE10_INT = /^[1-9][0-9]*$/;
 
@@ -117,7 +163,10 @@ function isProtectedNotice(line: string): boolean {
     /^Command exited with code \d+/.test(trimmed) ||
     trimmed.startsWith("⚠ REPEATED-CALL WARNING:") ||
     trimmed.startsWith("⚠ ALTERNATING-CALL WARNING:") ||
-    trimmed.startsWith("⚠ DOOM-LOOP WARNING:")
+    trimmed.startsWith("⚠ DOOM-LOOP WARNING:") ||
+    // Guard hint lines for truncated output
+    trimmed === GUARD_HINT_GENERIC ||
+    trimmed === GUARD_HINT_DEEP_SEARCH
   );
 }
 
@@ -145,6 +194,7 @@ function renderPreview(options: {
   command?: string;
   metadata: BashContextGuardMetadata;
   preservedNotices: string[];
+  toolName?: string;
 }): string {
   const { bodyLines, preservedNotices } = {
     ...splitPreviewLines(options.text),
@@ -159,6 +209,10 @@ function renderPreview(options: {
   const omitted = bodyLines.slice(headEnd, tailStart);
   const omittedText = omitted.join("\n");
   const command = compactCommand(options.command);
+
+  // Generate tool-specific hint for truncated output
+  const hint = options.toolName === "deep_search" ? GUARD_HINT_DEEP_SEARCH : GUARD_HINT_GENERIC;
+
   const rendered: string[] = [
     "[Bash context guard: preview]",
     `Full post-RTK output: ${options.outputPath}`,
@@ -169,7 +223,7 @@ function renderPreview(options: {
   if (preservedNotices.length > 0) rendered.push("", "Preserved notices:", ...preservedNotices);
   rendered.push("", "Head:", ...head);
   if (omitted.length > 0) rendered.push(`... omitted ${omitted.length} lines / ${byteCount(omittedText)} bytes ...`);
-  rendered.push("Tail:", ...tail, "[End Bash context guard preview]");
+  rendered.push("Tail:", ...tail, "", hint, "[End Bash context guard preview]");
   return rendered.join("\n");
 }
 

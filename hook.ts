@@ -38,6 +38,12 @@ import {
 } from "./utils.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { getLSPBridge } from "./lsp-bridge.js";
+import {
+  scanMicroagents as doScanMicroagents,
+  matchMicroagents,
+  renderMicroagentContext,
+  type Microagent,
+} from "./microagents.js";
 
 // ── Shared ContextGraph cache (module-level) ──
 // Build once per repo, reuse across reads. Prevents O(repo_files * read_calls) parsing.
@@ -180,6 +186,8 @@ export function resetSessionState(): void {
    searchLowResultHintShownThisSession = false;
    startupRepoMapCache.clear();
    startupGitContextCache.clear();
+   // ── Microagent cache ──────────────────────────────────────────────
+   cachedMicroagents = [];
 }
 
 /**
@@ -224,6 +232,9 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
       // Cache git config/root for file-read path to avoid repeated lookups
       sessionGitCacheKey = key;
       sessionGitCache = { gitConfig, gitRoot: gitConfig.enabled ? findGitRoot(ctx.cwd) : null };
+
+      // Scan microagents and cache them for the session
+      cachedMicroagents = doScanMicroagents(ctx.cwd);
    });
 
    pi.on("before_agent_start", async (event, ctx) => {
@@ -236,7 +247,7 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
          startupGitContextCache.get(key) ?? Promise.resolve(null),
       ]);
 
-      if (!map && !gitCtx?.contextString && !gitCtx?.notesString) return;
+      if (!map && !gitCtx?.contextString && !gitCtx?.notesString && cachedMicroagents.length === 0) return;
 
       const systemPromptParts = Array.isArray((event as any).systemPrompt)
          ? (event as any).systemPrompt as string[]
@@ -256,6 +267,12 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
 
       if (gitCtx?.notesString) {
          additions.push("", gitCtx.notesString);
+      }
+
+      // Add alwaysLoad microagents to system prompt
+      const alwaysLoadMicroagents = cachedMicroagents.filter(m => m.frontmatter.alwaysLoad);
+      if (alwaysLoadMicroagents.length > 0) {
+         additions.push("", renderMicroagentContext(alwaysLoadMicroagents));
       }
 
       return {
@@ -575,4 +592,29 @@ export function wrapBuiltinReadTool(): ToolDefinition {
          );
       },
    } as unknown as ToolDefinition;
+}
+
+// ── Microagent system ──────────────────────────────────────────────
+
+/** Module-level cache of scanned microagents (scanned once per session) */
+let cachedMicroagents: Microagent[] = [];
+
+/**
+ * Export for other tools to retrieve matching microagent context.
+ * Returns rendered microagent context string, or null if no matches.
+ *
+ * @param query - Query string to match against microagent triggers
+ * @returns Rendered context string or null if no matching agents
+ */
+export function getMatchingMicroagents(query: string): string | null {
+   const matched = matchMicroagents(cachedMicroagents, query);
+   if (matched.length === 0) return null;
+   return renderMicroagentContext(matched);
+}
+
+/**
+ * Export cached microagents (for testing/debugging).
+ */
+export function getCachedMicroagents(): Microagent[] {
+   return cachedMicroagents;
 }

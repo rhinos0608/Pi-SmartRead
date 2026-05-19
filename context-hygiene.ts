@@ -318,6 +318,18 @@ export interface ContextHygieneReport {
 
 export interface ContextHygieneTracker {
   record(metadata: ContextHygieneMetadata, options?: { resultId?: string }): ContextHygieneEvent;
+  /**
+   * Record a mutation event explicitly (e.g., from graph_mutate tool).
+   * Stores the mutation and, on the next generateReport() call, automatically
+   * creates stale records for any prior read-context results whose resources
+   * overlap with the mutated file paths.
+   *
+   * Non-blocking: if recording fails, logs and continues.
+   */
+  recordMutation(
+    mutationResources: ContextHygieneResource[],
+    options?: { resultId?: string; rehydrate?: ContextHygieneRehydrateDescriptor },
+  ): ContextHygieneEvent;
   generateReport(): ContextHygieneReport;
 }
 
@@ -342,6 +354,45 @@ class DefaultContextHygieneTracker implements ContextHygieneTracker {
     this.events.push(event);
     if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
     return event;
+  }
+
+  recordMutation(
+    mutationResources: ContextHygieneResource[],
+    options: { resultId?: string; rehydrate?: ContextHygieneRehydrateDescriptor } = {},
+  ): ContextHygieneEvent {
+    try {
+      // Deduplicate resources by key to match generateReport's bucketing
+      const seen = new Set<string>();
+      const deduped: ContextHygieneResource[] = [];
+      for (const r of mutationResources) {
+        if (seen.has(r.key)) continue;
+        seen.add(r.key);
+        deduped.push({ ...r } as ContextHygieneResource);
+      }
+
+      const event: ContextHygieneEvent = {
+        id: this.nextEventId++,
+        tool: "graph_mutate",
+        classification: "mutation",
+        resources: deduped,
+      };
+      if (options.resultId) event.resultId = options.resultId;
+      if (options.rehydrate) event.rehydrate = { ...options.rehydrate, input: { ...options.rehydrate.input } };
+
+      this.events.push(event);
+      if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
+      return event;
+    } catch (err) {
+      // Non-blocking: log and continue
+      console.error("[context-hygiene] recordMutation failed:", err instanceof Error ? err.message : String(err));
+      // Return a no-op event so callers don't break
+      return {
+        id: -1,
+        tool: "graph_mutate",
+        classification: "mutation" as const,
+        resources: [],
+      };
+    }
   }
 
   generateReport(): ContextHygieneReport {

@@ -114,7 +114,11 @@ export function consumeDoomLoopWarning(
 
 // ─── Rendering ───────────────────────────────────────────────────────
 
-import { SUGGESTIONS, GENERIC_SUGGESTION } from "./doom-loop-suggestions.js";
+import {
+  SUGGESTIONS,
+  type Suggestion,
+  GENERIC_SUGGESTION,
+} from "./doom-loop-suggestions.js";
 
 const COMPACT_LINE_BUDGET = 80;
 const STEP_PREFIX = "  → ";
@@ -157,10 +161,25 @@ function parseFingerprintInput(fingerprint: string): Record<string, unknown> {
   }
 }
 
-function suggestionsFor(toolName: string): string[] {
+function suggestionsFor(toolName: string): Suggestion[] {
   const entry = SUGGESTIONS[toolName];
   if (entry && entry.length > 0) return [...entry];
-  return [GENERIC_SUGGESTION];
+  return [{ text: GENERIC_SUGGESTION }];
+}
+
+/** Format a DoomLoopSuggestion into a readable line with optional tool hint */
+function formatSuggestion(suggestion: Suggestion): string {
+  if (typeof suggestion === "string") {
+    return `  • ${suggestion}`;
+  }
+  const bullet = `  • ${suggestion.text}`;
+  if (suggestion.toolHint) {
+    const inputStr = suggestion.toolInput
+      ? JSON.stringify(suggestion.toolInput).replace(/\"/g, '"')
+      : "{}";
+    return `${bullet}\n    → Consider calling: ${suggestion.toolHint}(${inputStr})`;
+  }
+  return bullet;
 }
 
 function renderSuggestionBullets(toolNames: string[]): string {
@@ -171,7 +190,9 @@ function renderSuggestionBullets(toolNames: string[]): string {
     seen.add(name);
     const bullets = suggestionsFor(name);
     lines.push(`For ${name}:`);
-    for (const bullet of bullets) lines.push(`  • ${bullet}`);
+    for (const suggestion of bullets) {
+      lines.push(formatSuggestion(suggestion));
+    }
   }
   return lines.join("\n");
 }
