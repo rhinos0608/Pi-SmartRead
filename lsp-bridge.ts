@@ -793,24 +793,39 @@ function cachedManager(root: string): LSPManager {
 // Kick off LSP server startup at module load time for the current
 // working directory (typically the project root). Servers start in
 // the background before the first tool call.
+const EAGER_INIT_TIMEOUT_MS = 8000;
+
 const eagerRoot = process.cwd();
 if (eagerRoot && existsSync(eagerRoot)) {
+  let timedOut = false;
+  setTimeout(() => { timedOut = true; }, EAGER_INIT_TIMEOUT_MS);
   (async () => {
-    const info = detectProjectLanguages(eagerRoot);
-    if (info.supportedLanguages.length > 0) {
-      const mgr = new LSPManager(eagerRoot);
-      managerCache.set(eagerRoot, mgr);
-      await mgr.startAll();
-    }
+    try {
+      const info = detectProjectLanguages(eagerRoot);
+      if (timedOut) return;
+      if (info.supportedLanguages.length > 0) {
+        const mgr = new LSPManager(eagerRoot);
+        managerCache.set(eagerRoot, mgr);
+        await Promise.race([
+          mgr.startAll(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("eager init timeout")), EAGER_INIT_TIMEOUT_MS)),
+        ]);
+      }
+    } catch { /* LSP initialization is best-effort */ }
   })().catch(() => {});
 }
 
 // ── Public API ────────────────────────────────────────────────────
 
+const BRIDGE_INIT_TIMEOUT_MS = 5000;
+
 export async function getLSPBridge(): Promise<LSPBridge | null> {
   if (!initAttempted) {
     initAttempted = true;
-    bridgeInstance = await createBridge();
+    bridgeInstance = await Promise.race([
+      createBridge(),
+      new Promise<LSPBridge | null>((resolve) => setTimeout(() => resolve(null), BRIDGE_INIT_TIMEOUT_MS)),
+    ]);
   }
   return bridgeInstance;
 }
