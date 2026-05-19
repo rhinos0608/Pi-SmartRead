@@ -1,47 +1,52 @@
 # Progress
 
 ## Status
-✅ Complete
+In Progress
 
 ## Tasks
 
-### Stale-Result Auto-Invalidation via graph_mutate ✓
-
-- [x] Add `recordMutation` method to `ContextHygieneTracker` interface in `context-hygiene.ts`
-  - Adds JSDoc: "Record a mutation event explicitly (e.g., from graph_mutate tool)"
-  - Parameters: `mutationResources`, `options` (optional `resultId`, `rehydrate`)
-  - Non-blocking: try/catch with no-op event on error, logs to console
-
-- [x] Implement `recordMutation` in `DefaultContextHygieneTracker` class
-  - Deduplicates mutation resources by key to match `generateReport`'s bucketing
-  - Stores mutation events as `mutation` classification, tool=`graph_mutate`
-  - Handles optional `resultId` and `rehydrate` options
-  - Non-blocking: try/catch returns `{ id: -1, tool: "graph_mutate", classification: "mutation", resources: [] }`
-
-- [x] Wire mutation recording into `tool_result` handler in `index.ts`
-  - When `toolName === "graph_mutate"`, extracts file paths from `breakage` and `coChange` arrays
-  - Calls `hygieneTracker.recordMutation(mutationResources, { resultId: toolCallId })`
-
-- [x] `generateReport()` already handles stale detection
-  - Mutation events (including those from `recordMutation`) are bucketed by resource key
-  - Matches against prior read events and produces stale candidates automatically
-
-- [x] Write unit tests in `test/unit/context-hygiene.test.ts`
-  - 10 passing tests covering: stale detection, deduplication, resultId recording, temporal ordering, empty resources, co-change edges, breakage edges, non-blocking error handling, multiple mutations
-
 ## Files Changed
-
-- `context-hygiene.ts` — added `recordMutation` method to interface and class
-- `index.ts` — wired `graph_mutate` tool results to call `hygieneTracker.recordMutation()`
-- `test/unit/context-hygiene.test.ts` (new) — 10 passing tests
 
 ## Notes
 
-- The existing `generateReport()` logic already handles stale detection by bucketing mutation events and matching them against prior reads. `recordMutation` adds mutation events to the same event list, so no changes needed to `generateReport()`.
-- The regular `record()` call for `graph_mutate` coexists with the explicit `recordMutation()` call. Both record to the same event list but serve different purposes — `record()` captures tool metadata for general tracking, while `recordMutation()` explicitly registers mutation resources for auto-invalidation.
-- Non-blocking: if `recordMutation` throws, it returns a no-op event and logs the error so the agent never breaks.
-- 358 tests passing (existing failures in mcp-server.test.ts are pre-existing timeouts unrelated to this change).
+Researched Orama (@orama/orama) integration for code intelligence hybrid search:
+- Package: @orama/orama v3.1.18 (0 deps, Apache 2.0)
+- Schema with vector[N] properties, hybrid search with HybridWeights config
+- Built-in save()/load() for persistence — critical for extension restart
+- Custom Tokenizer interface supports camelCase splitting
+- BM25 defaults: k=1.2, b=0.75, d=0.5, configurable per-query
+- ~2 KB gzipped, search in μs for small datasets
 
-## Recommended Next Step
+See research/orama-brief.md
 
-Write an end-to-end test verifying the full flow: `tool_result` for `graph_mutate` → `hygieneTracker.recordMutation()` → `generateReport()` → `applyContextHygieneStaleContext()` replaces the tool result message with a placeholder.
+Researched sqlite-vec integration:
+- Package: sqlite-vec v0.1.9 (MIT OR Apache), prebuilt binaries, no native compilation
+- vec0 virtual tables: float[N], int8[N], bit[N]; metadata columns, partition keys, auxiliary columns
+- KNN search with SQL WHERE filters on metadata + partition keys
+- Works with better-sqlite3, bun:sqlite, node:sqlite via load()
+- Persist in .smartread/vectordb/vectors.db with _schema_version migration
+- Bulk insert via transactions; partition keys critical for 10k+ file perf
+- Distance metrics: L2 (default), cosine; max 16 metadata + 16 auxiliary + 4 partition columns
+
+See research/sqlite-vec-brief.md
+
+Researched MCP SDK v1.29.0 advanced features:
+- Prompts (ListPromptsRequestSchema / GetPromptRequestSchema)
+- Resources (ListResourcesRequestSchema / ReadResourceRequestSchema)
+- ResourceLink content type for tool results
+- completable() for prompt argument autocompletion
+- Capabilities object changes needed
+- Full integration example with code
+
+See research/mcp-advanced-brief.md
+
+Researched @huggingface/transformers.js for local embedding provider:
+- Package: @huggingface/transformers v4.2.0 (successor to @xenova/transformers v2.17.2)
+- Feature extraction pipeline with built-in pooling/normalization → float[][]
+- Offline mode via env.allowRemoteModels=false, env.localModelPath
+- Model: Xenova/all-MiniLM-L6-v2 (384-dim, q8=22MB, fp16=43MB, fp32=86MB)
+- ~1-4s cold start, 10-50ms/batch inference after warm
+- Bun support present but known issues on 1.3.13+ (shutdown crash #30431)
+- Adapter layer can be drop-in via existing fetchEmbeddingsImpl injection point
+
+See research/transformersjs-brief.md
