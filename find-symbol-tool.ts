@@ -27,6 +27,7 @@ import { loadGrammar } from "./grammar-loader.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { ToolCategory, ToolRegistry } from "./tool-registry.js";
 import { getLSPBridge, type LSPBridge, type LSPDocumentSymbol, type LSPWorkspaceSymbol } from "./lsp-bridge.js";
+import { expandToMonorepoRoots } from "./monorepo-detector.js";
 
 // ── Schema ─────────────────────────────────────────────────────────
 
@@ -68,7 +69,7 @@ const FindSymbolSchema = Type.Object({
     }),
   ),
   max_results: Type.Optional(
-    Type.Number({ description: "Maximum results to return (1-100, default: 30).", minimum: 1, maximum: 100 }),
+    Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000 }),
   ),
   line: Type.Optional(
     Type.Number({
@@ -83,7 +84,7 @@ const FindSymbolSchema = Type.Object({
     }),
   ),
   directory: Type.Optional(
-    Type.String({ description: "Root directory (default: extension working directory)." }),
+    Type.String({ description: "Root directory (default: extension working directory).", default: "." }),
   ),
 });
 
@@ -229,7 +230,13 @@ async function handleSymbol(
   cwd: string,
   signal?: AbortSignal,
 ) {
-  const allFiles = await findSrcFiles(root, 50_000, signal);
+  const searchRoots = expandToMonorepoRoots(root);
+  let allFiles: string[] = [];
+  for (const sr of searchRoots) {
+    const files = await findSrcFiles(sr, 50_000, signal);
+    allFiles.push(...files);
+  }
+  allFiles = [...new Set(allFiles)];
   const matches: SymbolEntry[] = [];
   let totalDefs = 0;
 
@@ -749,8 +756,13 @@ async function handleImplementations(
 
     // Tree-sitter heuristic fallback
     if (implementors.length === 0) {
-      const allFiles = await findSrcFiles(root, 30_000, signal);
-      for (const filePath of allFiles) {
+      const implSearchRoots = expandToMonorepoRoots(root);
+      let implAllFiles: string[] = [];
+      for (const sr of implSearchRoots) {
+        implAllFiles.push(...await findSrcFiles(sr, 30_000, signal));
+      }
+      implAllFiles = [...new Set(implAllFiles)];
+      for (const filePath of implAllFiles) {
     if (signal?.aborted) break;
     if (implementors.length >= maxResults) break;
 

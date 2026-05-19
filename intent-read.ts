@@ -51,11 +51,11 @@ const IntentReadSchema = Type.Object({
         offset: Type.Optional(Type.Number({ minimum: 0 })),
         limit: Type.Optional(Type.Number({ minimum: 1 })),
       }),
-      { minItems: 1, maxItems: 20 },
+      { minItems: 1, maxItems: 500 },
     ),
   ),
-  directory: Type.Optional(Type.String({ description: "Directory to scan (non-recursive, max 20 files)" })),
-  topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: "Max results to return (default 20)" })),
+  directory: Type.Optional(Type.String({ description: "Directory to scan (non-recursive, max 20 files)", default: "." })),
+  topK: Type.Optional(Type.Number({ minimum: 1, maximum: 10000, description: "Max results to return (default 20)" })),
   stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first read error (default false)" })),
 });
 
@@ -66,7 +66,7 @@ type EmbeddingStatus = "ok" | "failed_fallback_bm25";
 
 const INTENT_READ_CACHE_SIZE = 64;
 const MIN_RELEVANCE_SCORE = 0.05;
-const MAX_INTENT_READ_FILES = 20;
+const MAX_INTENT_READ_FILES = 500;
 
 const contextGraphCache = new LruCache<ContextGraph>(10);
 

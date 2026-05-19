@@ -29,6 +29,7 @@ import { bm25Scores, computeRrfScores } from "./scoring.js";
 import { fetchEmbeddings } from "./embedding.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
+import { expandToMonorepoRoots } from "./monorepo-detector.js";
 import { createDeepSearchTool } from "./deep-search.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 
@@ -58,18 +59,20 @@ const SearchSchema = Type.Object({
   directory: Type.Optional(
     Type.String({
       description: "Root directory to search (default: extension working directory)",
+      default: ".",
     }),
   ),
   folder: Type.Optional(
     Type.String({
       description: "Alias for directory. Root folder to search (default: extension working directory)",
+      default: ".",
     }),
   ),
   maxResults: Type.Optional(
     Type.Number({
-      description: "Maximum results to return (1-500)",
+      description: "Maximum results to return (1-10000)",
       minimum: 1,
-      maximum: 500,
+      maximum: 10000,
     }),
   ),
   filePattern: Type.Optional(
@@ -367,7 +370,13 @@ async function handleGrep(
   const maxResults = params.maxResults ?? 30;
   const startTime = Date.now();
 
-  const allFiles = await findSrcFiles(cwd, 50_000, signal);
+  const searchRoots = expandToMonorepoRoots(cwd);
+  let allFiles: string[] = [];
+  for (const root of searchRoots) {
+    const files = await findSrcFiles(root, 50_000, signal);
+    allFiles.push(...files);
+  }
+  allFiles = [...new Set(allFiles)];
   const matches: CodeDefinition[] = [];
   let totalDefs = 0;
   const maxChars = 3_000_000;
@@ -458,8 +467,14 @@ async function handleCode(
   const startTime = Date.now();
   const query = params.query!.trim();
 
-  // 1. Discover source files
-  const allFiles = await findSrcFiles(cwd, 50_000, signal);
+  // 1. Discover source files (with monorepo workspace expansion)
+  const searchRoots = expandToMonorepoRoots(cwd);
+  let allFiles: string[] = [];
+  for (const root of searchRoots) {
+    const files = await findSrcFiles(root, 50_000, signal);
+    allFiles.push(...files);
+  }
+  allFiles = [...new Set(allFiles)];
   const maxChars = 3_000_000;
 
   // 2. Extract AST definitions from all files

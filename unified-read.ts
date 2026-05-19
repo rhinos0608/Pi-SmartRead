@@ -43,13 +43,14 @@ const UnifiedReadSchema = Type.Object({
     Type.String({
       description:
         "Root directory (default: extension cwd). For mode=file: directory containing the file. For mode=intent: directory to scan (non-recursive, max 20 files).",
+      default: ".",
     }),
   ),
   topK: Type.Optional(
     Type.Number({
       description: "Max top-K results to return for intent mode (default 20)",
       minimum: 1,
-      maximum: 20,
+      maximum: 10000,
     }),
   ),
   // ── multiple mode params ──
@@ -60,7 +61,7 @@ const UnifiedReadSchema = Type.Object({
         offset: Type.Optional(Type.Number({ minimum: 1 })),
         limit: Type.Optional(Type.Number({ minimum: 1 })),
       }),
-      { minItems: 1, maxItems: 20, description: "Files to read (required for mode=multiple)" },
+      { minItems: 1, maxItems: 10000, description: "Files to read (required for mode=multiple)" },
     ),
   ),
   // ── shared ──

@@ -2,7 +2,6 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerSessionHooks } from "./hook.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
-import { setDoomLoopState } from "./smartread-status.js";
 import { loadExperimentalConfig } from "./config.js";
 import { ensureHashlineReady } from "./utils.js";
 import { ToolRegistry } from "./tool-registry.js";
@@ -51,8 +50,6 @@ export default function (pi: ExtensionAPI) {
   // ── Shared state ────────────────────────────────────────────────
   const hygieneTracker = resetContextHygieneTracker();
   const doomLoopState = createDoomLoopState();
-  // Share doom-loop state with smartread_status tool
-  setDoomLoopState(doomLoopState);
   const bashContextGuardConfig = resolveBashContextGuardConfig();
 
   // ── Helper: extract resources from tool params for context hygiene ──

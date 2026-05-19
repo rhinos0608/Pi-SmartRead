@@ -39,8 +39,8 @@ const ReadManySchema = Type.Object({
 		}),
 		{
 			minItems: 1,
-			maxItems: 20,
-			description: "Files to read in the exact order listed (max 20)",
+			maxItems: 10000,
+			description: "Files to read in the exact order listed (max 10000)",
 		},
 	),
 	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)" })),

@@ -1,5 +1,7 @@
 # Deep Search Implementation Plan
 
+> **Note (2026-05-19):** Deep search shipped and was later consolidated into the unified `search` tool as `mode: "deep"`. The implementation lives in `deep-search.ts` and is invoked by `search-tool.ts` when `mode="deep"`. The `smartread_status` tool referenced below was removed.
+
 ## Source brief
 
 This plan implements the MVP from `/Users/rhinesharar/Pi-SmartRead/tmp/deep-search-research.md`:
@@ -15,8 +17,8 @@ This plan implements the MVP from `/Users/rhinesharar/Pi-SmartRead/tmp/deep-sear
 
 Create one module exporting:
 
-- `createDeepSearchTool()`;
-- `createSmartReadStatusTool()`;
+- `createDeepSearchTool()`; ✅ Shipped
+- ~~`createSmartReadStatusTool()`~~ — Removed; functionality absorbed into cross-cutting health checks
 - narrow helper types for matches, provenance, depth, and scope.
 
 The module depends on existing primitives instead of duplicating index builders:
@@ -29,7 +31,7 @@ The module depends on existing primitives instead of duplicating index builders:
 
 ### 2. Register tools
 
-Update `mcp-registry.ts` to push both tools before lower-level repo tools. This makes them visible through `tools/list` and keeps existing tools unchanged.
+Update `mcp-registry.ts` to register the deep search tool. ✅ Shipped — `deep_search` now accessible via `search mode="deep"`.
 
 ### 3. Package metadata
 

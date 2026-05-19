@@ -1,8 +1,10 @@
 # Deep Research: Code-Aware Retrieval, Repo Mapping & Agent Integration
 
-> **Date:** 2026-05-01
+> **Date:** 2026-05-01 (original) | **Updated:** 2026-05-19
 > **Scope:** Cross-referencing Pi-SmartRead against the ecosystem of code intelligence tools
 > **Sources:** GitHub (live API), Reddit (r/LocalLLaMA), Hacker News, Academic (arXiv), Code-level analysis
+>
+> **Note:** This document was written before the tool consolidation that merged `read_multiple_files`/`intent_read` into unified `read`, `search_symbols`/`resolve_symbol`/`find_callers`/`deep_search` into unified `search`, and before context hygiene, doom-loop detection, bash context guard, LSP bridge, microagents, and `find_symbol` were added. See the README for current tool API.
 
 ---
 
@@ -10,19 +12,19 @@
 
 Pi-SmartRead occupies a niche at the intersection of **code-aware hybrid retrieval**, **repository mapping via tree-sitter + PageRank**, and **agent tool extension**. The landscape is vibrant with ~6 directly comparable projects, each contributing distinct patterns. Three high-ROI patterns emerge for immediate integration: **RRF fusion scoring**, **AST-aware chunking with context headers**, and **graph-neighbour augmentation**. Medium-term: **cross-encoder re-ranking**, **model-agnostic embedding registry**, and **HyDE query expansion**.
 
-## Current Implementation Snapshot (2026-05-01)
+## Current Implementation Snapshot (2026-05-19)
 
-Pi-SmartRead is now an independent fork at `rhinos0608/Pi-SmartRead`, detached from the upstream `Gurpartap/pi-read-many`. It ships 7 code-intelligence tools:
+Pi-SmartRead is an independent fork at `rhinos0608/Pi-SmartRead`, detached from the upstream `Gurpartap/pi-read-many`. It ships consolidated code-intelligence tools:
 
-- `read_multiple_files` with adaptive packing under Pi output limits
-- `intent_read` with BM25 + embedding similarity, RRF fusion, persistent disk-backed embedding cache, LRU in-memory layer, direct import-neighbour augmentation, and compressed embedding snippets
-- `repo_map` with tree-sitter-first ranking (41 languages), PageRank personalization, and import-based fallback
-- `search_symbols` with native tree-sitter symbol extraction plus text fallback
-- `resolve_symbol` with cross-file resolution, context-aware disambiguation, and best-guess definition selection
-- `find_callers` with call graph extraction from tree-sitter ASTs (TypeScript, JavaScript, TSX)
-- First-read hook that intercepts the initial read-like call per repo to return a compact repo map
-- Native `tree-sitter` parsers for JavaScript and TypeScript (not WASM)
-- Chunked callback parsing in `tags.ts`, which avoids the native binding failure on large TypeScript files
+- `read` — unified reader with three modes: `file` (single file with context enrichment), `intent` (BM25 + embedding hybrid RRF retrieval), `multiple` (up to 20 files with adaptive packing)
+- `search` — consolidated search with three modes: `grep` (AST-aware definition search), `code` (BM25 + embedding with symbol resolution enrichment), `deep` (agentic multi-channel deep search with RRF fusion)
+- `repo_map` — PageRank-ranked repository map with tree-sitter-first ranking (41 languages) and import-based fallback
+- `find_symbol` — symbol-level exploration: name search, file outline, references, declaration, implementations (tree-sitter + LSP), workspace-wide LSP search, hover info
+- `graph_mutate` [experimental] — records breakage/co-change edges into the context graph
+- Cross-cutting features: context hygiene (stale tracking), doom-loop detection, bash context guard, startup repo map injection, read enrichment (imports, git recency, graphify), LSP bridge, microagents
+- Native `tree-sitter` parsers for JavaScript, TypeScript, Python, Go, Rust (not WASM)
+- WASM grammar loader for additional languages via `@vscode/tree-sitter-wasm`
+- Chunked callback parsing in `tags.ts`, which avoids the native binding failure on large files
 
 Treat the rest of this document as research, implementation rationale, and roadmap context around that shipped baseline.
 
@@ -294,28 +296,38 @@ Pi-SmartRead currently exists as a Pi extension. All three comparable tools (Arb
 
 ## Part 5: Prioritized Adoption Roadmap
 
-### Completed
+### Completed (as of 2026-05-19)
 1. ~~**RRF fusion in `scoring.ts`**~~ — shipped via RRF(k=60).
-2. ~~**Context-header chunking in `chunking.ts`**~~ — initial integration with file/function/class headers and compressed embedding text.
-3. ~~**LRU query cache in `intent_read`**~~ — shipped (64-entry in-memory).
-4. ~~**Graph-neighbour augmentation**~~ — initial direct relative import-neighbour expansion shipped.
+2. ~~**Context-header chunking in `chunking.ts`**~~ — shipped with file/function/class headers and compressed embedding text.
+3. ~~**LRU query cache**~~ — shipped (64-entry in-memory).
+4. ~~**Graph-neighbour augmentation**~~ — direct relative import-neighbour expansion shipped.
 5. ~~**Context compression**~~ — shipped for embedding snippets.
 6. ~~**Minimum score threshold**~~ — shipped for low-signal candidates.
 7. ~~**Persistent embedding cache**~~ — shipped (disk-backed, survives restarts).
-8. ~~**Call graph analysis**~~ — shipped via `find_callers`.
-9. ~~**Cross-file symbol resolution**~~ — shipped via `resolve_symbol`.
+8. ~~**Call graph analysis**~~ — shipped for TS/JS/TSX, Python, Go, Rust via `callgraph.ts`.
+9. ~~**Cross-file symbol resolution**~~ — shipped via `find_symbol` and `search` enrichment.
 10. ~~**41-language support**~~ — shipped for repo_map.
+11. ~~**HyDE query expansion**~~ — shipped (no-LLM deterministic templates).
+12. ~~**External reranker**~~ — shipped (Cohere/Jina-compatible endpoint).
+13. ~~**MCP server**~~ — shipped via `@modelcontextprotocol/sdk`.
+14. ~~**Call graph multi-language**~~ — Python, Go, Rust support shipped.
+15. ~~**Retrieval benchmarks**~~ — shipped (Recall@k, Precision@k, MRR, NDCG).
+16. ~~**Context hygiene**~~ — shipped (stale context tracking across all tool results).
+17. ~~**Doom-loop detection**~~ — shipped (3+ repeated calls detection with suggestions).
+18. ~~**Bash context guard**~~ — shipped (head+tail preview with temp file fallback).
+19. ~~**LSP bridge**~~ — shipped (file open tracking, mutation-aware re-reads).
+20. ~~**Microagents**~~ — shipped (`.pi-smartread/microagents/` trigger-based rules).
+21. ~~**Tool consolidation**~~ — `read` (file/intent/multiple), `search` (grep/code/deep), `find_symbol` (7 actions).
 
 ### Medium-Term (High ROI, Higher Effort)
-- **Cross-encoder re-ranking** — add lightweight re-ranker on top-20 results. Needs model loading.
-- **HyDE query expansion** — generate hypothetical code/docs for better embedding. Needs LLM call.
-- **MCP server exposure** — wrap tools for Cursor/Claude Code. New module.
-
-### Long-Term (Architectural)
 - **Model registry** — multiple embedding model options with hash fallback
 - **Incremental indexing** — watch mode for real-time updates
+- **Query-result cache** — keyed by query/depth/cwd/index timestamp
+
+### Long-Term (Architectural)
 - **Portable export** — single-file project maps
 - **Community detection** — group code into logical clusters
+- **SCIP index integration** — more precise symbol resolution
 
 ---
 
@@ -336,8 +348,8 @@ Pi-SmartRead currently exists as a Pi extension. All three comparable tools (Arb
 
 ## Part 7: Gaps & Unknowns
 
-1. **Retrieval quality still lacks formal benchmarks** — no Recall@k, MRR, or NDCG measurements to quantify retrieval quality over time.
-2. **Embedding model in use is deployment-specific** — the OpenAI-compatible endpoint could proxy to very different embedding models depending on the environment.
-3. **AST chunking is still partial** — context-header chunking and snippet compression are implemented, but full AST-unit chunking remains future work.
-4. **Call graph is TypeScript/JavaScript/TSX only** — `find_callers` does not yet support Python, Go, Rust, or other languages with tree-sitter parsers.
+1. ~~**Retrieval quality still lacks formal benchmarks**~~ — ✅ Shipped: Recall@k, Precision@k, MRR, NDCG in `test/unit/retrieval-benchmark.test.ts`.
+2. **Embedding model in use is deployment-specific** — still true; the OpenAI-compatible endpoint could proxy to very different embedding models depending on the environment.
+3. **AST chunking is still partial** — context-header chunking and snippet compression implemented; WASM grammar loader (`grammar-loader.ts`) provides additional language support; full AST-unit chunking remains future work.
+4. ~~**Call graph is TypeScript/JavaScript/TSX only**~~ — ✅ Shipped: Python, Go, Rust support via native tree-sitter parsers.
 5. **Test corpus needed** — a standard set of 5-10 open-source repos of varying sizes would make retrieval regressions easier to catch and compare.

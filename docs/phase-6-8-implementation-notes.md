@@ -1,11 +1,13 @@
 # Phase 6–8 Implementation Notes
 
+> **Note (2026-05-19):** All features documented below are shipped and in production. The MCP server now uses `@modelcontextprotocol/sdk` (not bare JSON-RPC as originally planned). `smartread_status` tool was removed in a later consolidation.
+
 Covers the implementation of the remaining gaps from the advanced retrieval plan:
-- Phase 6: External/preference reranker endpoint
-- Phase 8: MCP adapter (stdio server)
-- HyDE query expansion
-- Retrieval benchmarks (Recall@k/MRR)
-- Call graph multi-language support (Python, Go, Rust)
+- Phase 6: External/preference reranker endpoint ✅
+- Phase 8: MCP adapter (stdio server) ✅
+- HyDE query expansion ✅
+- Retrieval benchmarks (Recall@k/MRR) ✅
+- Call graph multi-language support (Python, Go, Rust) ✅
 
 ---
 
@@ -94,39 +96,29 @@ If the external API fails (timeout, HTTP error, network error, unrecognized form
 
 ## Phase 8 — MCP Adapter (stdio Server)
 
-**Status:** ✅ Done
-**Files:** `mcp-server.ts`, `test/unit/mcp-server.test.ts`, `docs/mcp-quickstart.md`
+**Status:** ✅ Done (implementation approach changed — now uses `@modelcontextprotocol/sdk`)
+**Files:** `mcp-server.ts`, `mcp-registry.ts`, `tool-registry.ts`, `docs/mcp-quickstart.md`
 
 ### What changed
 
-A standalone MCP stdio server that exposes SmartRead tools via the Model Context Protocol. No additional dependencies — speaks JSON-RPC 2.0 over stdin/stdout directly.
+A standalone MCP stdio server that exposes SmartRead tools via the Model Context Protocol. Uses `@modelcontextprotocol/sdk` for protocol compliance.
 
 ### Design decisions
 
-- **No SDK dependency** — the MCP protocol is simple enough (JSON-RPC 2.0) that a lightweight implementation avoids pulling in the 20+ transitive dependencies of `@modelcontextprotocol/sdk`
-- **Same tool implementations** — reuses `createIntentReadTool()`, `createReadManyTool()`, and `registerRepoTools()` directly; no code duplication
+- **Uses `@modelcontextprotocol/sdk`** — switched from bare JSON-RPC to the official SDK for better protocol compliance and future-proofing
+- **Same tool implementations** — all tools registered through the shared `ToolRegistry`; no code duplication
 - **Standalone entrypoint** — `mcp-server.ts` is a separate entry point that doesn't affect the Pi extension
-- **No hooks** — MCP doesn't support the first-read repo map interception; tools behave identically to their Pi extension counterparts
+- **No hooks** — MCP doesn't support context hygiene, doom-loop detection, or first-read repo map interception; tools behave as direct function calls
 
 ### Tools exposed
 
 | MCP Tool | Maps to | Description |
 |---|---|---|
-| `intent_read` | `createIntentReadTool()` | Hybrid RRF retrieval |
-| `read_multiple_files` | `createReadManyTool()` | Multi-file reader |
-| `repo_map` | `registerRepoTools()` | Repository symbol map |
-| `search_symbols` | `registerRepoTools()` | Symbol search |
-| `find_callers` | `registerRepoTools()` | Call graph queries |
-
-### Protocol support
-
-| MCP Method | Status |
-|---|---|
-| `initialize` | ✅ Returns protocol version, capabilities, server info |
-| `notifications/initialized` | ✅ Acknowledged (no response) |
-| `tools/list` | ✅ Returns all tools with JSON Schema |
-| `tools/call` | ✅ Executes tools, returns content or error |
-| `ping` | ✅ Health check |
+| `read` | `createUnifiedReadTool()` | Unified reader (file/intent/multiple) |
+| `search` | `createSearchTool()` | Consolidated search (grep/code/deep) |
+| `repo_map` | `createRepoTool()` | Repository PageRank map |
+| `find_symbol` | `find-symbol-tool.ts` | Symbol exploration (7 actions) |
+| `graph_mutate` | `createGraphMutateTool()` | [experimental] Graph coupling edges |
 
 ### Running
 
@@ -137,15 +129,6 @@ npx tsx mcp-server.ts
 ```
 
 See `docs/mcp-quickstart.md` for full setup instructions for Claude Desktop, Cursor, and generic MCP clients.
-
-### Tests (6 new)
-
-- Initialize handshake
-- Tool list with all expected tools
-- Ping response
-- Unknown method error
-- Unknown tool call error
-- Input schema validation
 
 ---
 
@@ -344,16 +327,15 @@ All pinned to 0.21.x for compatibility with the existing `tree-sitter@0.21.1`.
 
 ---
 
-## Test Summary
+## Test Summary (as of original implementation)
 
-| Category | New Tests | Total Tests |
-|---|---|---|
-| Call graph (Python/Go/Rust) | +10 | 16 |
-| Retrieval benchmarks | +8 | 8 |
-| External reranker | +8 | 16 |
-| HyDE | +13 | 13 |
-| MCP server | +6 | 6 |
-| **Total new** | **+45** | — |
-| **Full suite** | — | **330** |
+| Category | New Tests |
+|---|---|
+| Call graph (Python/Go/Rust) | +10 |
+| Retrieval benchmarks | +8 |
+| External reranker | +8 |
+| HyDE | +13 |
+| MCP server | +6 |
+| **Total new** | **+45** |
 
-All 330 tests pass. Typecheck clean (zero errors).
+> Note: The test suite has grown since these numbers were recorded. Refer to `npm test` for current counts.

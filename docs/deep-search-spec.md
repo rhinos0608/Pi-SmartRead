@@ -1,10 +1,12 @@
 # Deep Search Specification
 
+> **Note (2026-05-19):** The standalone `deep_search` tool has been consolidated into the unified `search` tool as `mode: "deep"`. The channel architecture and ranking model described below remain accurate, but the tool is now accessed via `search` with `mode: "deep"`.
+
 ## Goal
 
-`deep_search` gives agents one query-driven entry point for repository investigation. It orchestrates existing Pi-SmartRead retrieval primitives, fuses their evidence, and returns ranked matches with provenance and follow-up actions.
+Deep search gives agents one query-driven entry point for repository investigation. It orchestrates existing Pi-SmartRead retrieval primitives, fuses their evidence, and returns ranked matches with provenance and follow-up actions.
 
-It does not replace `search`, `intent_read`, `repo_map`, or `read_multiple_files`. It is the workflow layer an agent calls first when it needs a coherent answer to a natural-language codebase question.
+It is the workflow layer an agent calls first when it needs a coherent answer to a natural-language codebase question.
 
 ## User experience
 
@@ -21,7 +23,7 @@ A caller provides a question such as `how does auth middleware work?` and receiv
 
 | Field | Type | Default | Bounds | Description |
 |---|---:|---:|---:|---|
-| `query` | string | required | 1-500 chars | Natural-language question or code symbol. |
+| `query` | string | required | 1-500 chars | Natural-language question or code symbol. (In the unified `search` tool, `mode` must be set to `"deep"`.) |
 | `depth` | `quick \| standard \| thorough` | `standard` | enum | Controls orchestration cost and relationship enrichment. |
 | `scope` | `code \| docs \| tests \| all` | `all` | enum | Filters discovered files by content type. |
 | `directory` | string | working directory | path | Root directory to search. |

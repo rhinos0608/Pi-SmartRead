@@ -1,6 +1,6 @@
 # Pi-SmartRead
 
-Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — multi-file reading, intent-based retrieval, repository mapping, consolidated symbol search, cross-file resolution, call graph analysis, and AST-aware code search.
+Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — unified file reading, intent-based retrieval, repository mapping, consolidated symbol/code/deep search, cross-file resolution, call graph analysis, and AST-aware code search.
 
 > Forked from [pi-read-many](https://github.com/Gurpartap/pi-read-many) and evolved into a full code-intelligence toolkit.
 
@@ -10,14 +10,25 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 
 | Tool | What it does |
 |---|---|
-| `read` | Wraps Pi's built-in `read` — may intercept the first repo read to show a compact repo map for orientation |
-| `read_multiple_files` | Reads up to 20 files in one call with adaptive output packing |
-| `intent_read` | Ranks candidate files for a query using BM25 + embeddings with RRF fusion |
-| `repo_map` | Builds a PageRank-ranked repository map from native tree-sitter AST tags |
-| `search` | Consolidated symbol tool: fuzzy symbol search (`mode: "symbols"`), exact symbol resolution with enrichment (`mode: "resolve"`), call graph analysis (`mode: "callers"`), and AST-aware code definition search (`mode: "code"`) |
-| `deep_search` | Agentic deep repository search orchestrating structural code search, symbol search, semantic ranking, graph expansion, RRF fusion, provenance, and follow-up suggestions |
-| `smartread_status` | Lightweight health check reporting embedding configuration, source-file discovery, and cache directory status |
-| `graph_mutate` | Records semantic coupling observations (breakage edges, co-change edges) into the context graph |
+| `read` | Unified reader: single-file with context enrichment (`file`), intent-based hybrid RRF retrieval (`intent`), multi-file batch with adaptive packing (`multiple`) |
+| `search` | Consolidated search: AST-aware definition grep (`grep`), BM25 + embedding code search with symbol enrichment (`code`), agentic multi-channel deep search (`deep`) |
+| `repo_map` | PageRank-ranked repository map from native tree-sitter AST tags |
+| `find_symbol` | Symbol-level exploration: name search, file outline, references, declaration, implementations, workspace-wide LSP search, hover info |
+| `graph_mutate` | [experimental] Records semantic coupling observations (breakage edges, co-change edges) into the context graph |
+
+### Cross-cutting features
+
+Pi-SmartRead also provides passive safety and enrichment that runs across all tool calls:
+
+| Feature | What it does |
+|---|---|
+| **Context hygiene** | Tracks every read tool result; marks stale reads in the context window after file mutations |
+| **Doom-loop detection** | Warns when the LLM repeats identical tool calls 3+ times, with tool-specific suggestions |
+| **Bash context guard** | Caps oversized bash output to head+tail preview, writes full output to temp file |
+| **Startup repo map injection** | Injects a compact repo map on the first turn of every session — no wasted round trips |
+| **Read enrichment** | Appends import relationships, git recency, branch notes, and graphify knowledge to every file read |
+| **LSP bridge** | Tracks opened files on the language server for faster subsequent LSP queries; closes mutated files for fresh re-reads |
+| **Microagents** | Scans `.pi-smartread/microagents/` for markdown-based agent instructions with trigger-based or always-loaded rules |
 
 ---
 
@@ -35,91 +46,59 @@ If Pi is already running:
 
 ---
 
-## Startup repo map injection
+## `read`
 
-On the **first** turn of every session, Pi-SmartRead injects a compact repo map into the system prompt — no tool call required, no wasted round trips. The map shows the repository's most important files, symbols, and (when available) architectural clusters from the knowledge graph.
+Unified file reading with three modes.
 
-On **first-read** of individual files via `read`, `read_multiple_files`, or `intent_read`, Pi-SmartRead may also enrich the response with contextual annotations (import relationships, git recency, graph knowledge).
+### Modes
 
-If you see an intercept response on first read, simply re-issue the original read.
+| Mode | Use when | Replaces |
+|---|---|---|
+| `file` (default) | Reading a single known file with contextual enrichment | Built-in `read` |
+| `intent` | You have a query but don't know which files are relevant | `intent_read` |
+| `multiple` | You know the exact files to open | `read_multiple_files` |
 
----
+### `mode: "file"`
 
-## `read_multiple_files`
-
-Read multiple known files in one call.
-
-**Key behavior:**
-- Reads files in request order
-- Supports per-file `offset` and `limit`
-- Continues on errors by default
-- Uses adaptive packing under Pi output limits
-- Returns stable per-file heredoc blocks
-- Supports up to **20 files** per call
-
-**Packing:** Starts with strict request-order packing, then switches to smallest-first **only** when that includes more complete successful files. Output order still follows the original request order.
-
-### Example
+Single file read with contextual enrichment (import relationships, git recency, graphify knowledge). On the first read-like call in a repo, may return a compact repo map — simply re-issue the read.
 
 ```json
 {
-  "files": [
-    { "path": "src/a.ts" },
-    { "path": "src/b.ts", "offset": 40, "limit": 120 }
-  ],
-  "stopOnError": false
+  "mode": "file",
+  "path": "src/auth.ts",
+  "offset": 40,
+  "limit": 120
 }
 ```
 
-### Returned details
+### `mode: "intent"`
 
-`details.packing` includes `strategy`, `switchedForCoverage`, `fullIncludedCount`, `fullIncludedSuccessCount`, `partialIncludedPath`, and `omittedPaths`.
+Find the most relevant files for a query using hybrid retrieval.
 
----
-
-## `intent_read`
-
-Find the most relevant files for a query when you don't already know which files matter.
-
-### When to use it
-
-- "find the auth middleware"
-- "which files implement repo mapping?"
-- "what code is relevant to this bug?"
-
-Use `read_multiple_files` when you already know the exact files to open.
-
-### How it works
-
+**How it works:**
 1. Resolves candidates from explicit files or a non-recursive directory scan
 2. Augments candidates with direct in-workspace relative import neighbours
-3. Reads candidate files
-4. Chunks file content with overlap
-5. Builds compressed embedding text with structural headers (imports stripped, whitespace collapsed, head/tail preserved)
-6. Ranks files using **BM25 + semantic similarity**
-7. Fuses ranks with **Reciprocal Rank Fusion (RRF, k=60)**
-8. Filters low-signal candidates
-9. Returns top-K files with scores and metadata
+3. Reads candidate files and chunks content with overlap
+4. Builds compressed embedding text with structural headers
+5. Ranks files using **BM25 + semantic similarity**
+6. Fuses ranks with **Reciprocal Rank Fusion (RRF, k=60)**
+7. Returns top-K files with scores and provenance metadata
 
-### Retrieval features
-
+**Retrieval features:**
 - **BM25 keyword ranking** — exact identifier and API name matching
 - **Embedding cosine similarity** — conceptual matching via OpenAI-compatible endpoint
-- **RRF fusion** — parameter-free rank combination (k=60)
+- **RRF fusion** — parameter-free rank combination
 - **HyDE query expansion** — hypothetical document embedding for better semantic matching (opt-in)
-- **Graph-aware candidate expansion** — import neighbours, symbol neighbours, and call graph neighbours
-- **Query probing** — extracts identifiers from query and resolves their definition files (opt-in)
+- **Graph-aware candidate expansion** — import neighbours, symbol neighbours, call graph neighbours
+- **Query probing** — extracts identifiers from query and resolves definition files (opt-in)
 - **Structural reranker** — reorders results using graph distance, probe confidence, temporal signals (opt-in)
-- **External reranker** — optional Cohere/Jina-compatible reranking endpoint with structural fallback
-- **Persistent embedding cache** — disk-backed (`.pi-smartread.embeddings.cache/`) with in-memory LRU layer; survives process restarts
-- **Direct import-neighbour augmentation** — expands candidates via relative imports with symlink/workspace escape guards
-- **Compressed embedding snippets** — noise-stripped, head/tail preserving for efficient embedding
-- **BM25-only degradation** — graceful fallback when the embedding request fails after config validation
-
-### Example
+- **External reranker** — optional Cohere/Jina-compatible reranking endpoint
+- **Persistent embedding cache** — disk-backed (`.pi-smartread.embeddings.cache/`) with in-memory LRU layer
+- **BM25-only degradation** — graceful fallback when embedding config is missing or unreachable
 
 ```json
 {
+  "mode": "intent",
   "query": "authentication middleware",
   "files": [
     { "path": "src/auth.ts" },
@@ -129,19 +108,97 @@ Use `read_multiple_files` when you already know the exact files to open.
 }
 ```
 
-### Output
+The output includes framed heredoc blocks plus ranking metadata in `details.files` with path, relevance scores, and inclusion status.
 
-A single combined text payload using framed heredoc blocks, plus ranking metadata in `details.files`:
+### `mode: "multiple"`
 
-| Field | Type | Meaning |
+Read up to 20 files in one call with adaptive output packing.
+
+**Key behavior:**
+- Reads files in request order
+- Supports per-file `offset` and `limit`
+- Continues on errors by default
+- Uses adaptive packing under Pi output limits
+- Returns stable per-file heredoc blocks
+
+```json
+{
+  "mode": "multiple",
+  "files": [
+    { "path": "src/a.ts" },
+    { "path": "src/b.ts", "offset": 40, "limit": 120 }
+  ],
+  "stopOnError": false
+}
+```
+
+`details.packing` includes `strategy`, `switchedForCoverage`, `fullIncludedCount`, `fullIncludedSuccessCount`, `partialIncludedPath`, and `omittedPaths`.
+
+---
+
+## `search`
+
+Consolidated search with three modes.
+
+### Modes
+
+| Mode | What it does | Use when |
 |---|---|---|
-| `path` | `string` | Resolved file path |
-| `ok` | `boolean` | Whether reading succeeded |
-| `keywordRank` / `keywordRelevance` | `number` / classifier | BM25 rank plus discrete relevance (`exact`, `strong`, `related`, `weak`, `none`) |
-| `semanticRank` / `semanticRelevance` | `number` / classifier | Embedding rank plus discrete relevance |
-| `fusedRank` / `fusedRelevance` | `number` / classifier | Hybrid rank plus discrete relevance |
-| `rankedBy` | `"bm25" \| "hybrid"` | Ranking mode used |
-| `inclusion` | `string` | `full`, `partial`, `omitted`, `not_top_k`, `below_threshold`, or `error` |
+| `grep` (default) | AST-aware definition search: finds function/class/method definitions matching by name. Fast, no embeddings. | "find the `getConfig` function" |
+| `code` | BM25 + optional embedding re-rank with symbol resolution and caller enrichment. | "find authentication middleware implementation" |
+| `deep` | Agentic multi-channel deep search orchestrating code, symbol, semantic, and graph channels with RRF fusion. | "how does the auth system work?" |
+
+### Enrichment
+
+In `code` mode, results are enriched by default: top symbols are resolved and caller info is appended. Set `enrich: false` for bare results.
+
+### Examples
+
+**AST-aware definition grep:**
+```json
+{
+  "mode": "grep",
+  "query": "getRepoMap"
+}
+```
+
+**Code search with enrichment:**
+```json
+{
+  "mode": "code",
+  "query": "authentication middleware",
+  "directory": "src",
+  "filePattern": "*.ts"
+}
+```
+
+**Deep search:**
+```json
+{
+  "mode": "deep",
+  "query": "how does JWT token validation work?",
+  "depth": "standard",
+  "scope": "code",
+  "directory": "src",
+  "limit": 15,
+  "maxSnippetChars": 400,
+  "includeRelationships": true
+}
+```
+
+### Deep search options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `depth` | `standard` | `quick` (code+symbols), `standard` (+semantic+graph), `thorough` (+caller enrichment) |
+| `scope` | `all` | Filter to `code`, `docs`, `tests`, or `all` |
+| `directory` / `folder` | working directory | Root directory to search |
+| `limit` | 15 | Maximum matches (1–50) |
+| `maxSnippetChars` | 400 | Max chars per snippet (100–1000) |
+| `outputBudget` | 4096 | Approximate output token budget (1k–16k) |
+| `includeRelationships` | false | Include caller/callee/import hints for top matches |
+| `filePattern` | — | Glob to restrict files, e.g. `*.ts` |
+| `focusFiles` | `[]` | Personalize ranking toward these files |
 
 ---
 
@@ -174,152 +231,79 @@ Generate a repository map using **native tree-sitter AST extraction** by default
 
 | Option | Default | Meaning |
 |---|---|---|
-| `mapTokens` | 4096 | Token budget for the rendered map (256–32768) |
+| `mapTokens` | 4096 | Token budget (256–32768) |
 | `focusFiles` | `[]` | Files to personalize PageRank toward |
-| `priorityIdentifiers` | `[]` | Identifiers to boost in ranking |
-| `mentionedIdents` | `[]` | Identifiers from the user query — used for file-path matching |
-| `mentionedFnames` | `[]` | File paths from the user query — used for personalization |
-| `excludeUnranked` | `false` | Exclude files with zero PageRank |
-| `forceRefresh` | `false` | Ignore cache and re-parse |
-| `useImportBased` | `false` | Force import-only ranking (faster, less precise) |
-| `autoFallback` | `true` | Fall back automatically if AST parsing fails |
-| `compact` | `false` | Terse single-line-per-file view |
+| `priorityIdentifiers` | `[]` | Identifiers to boost |
+| `mentionedIdents` | `[]` | Identifiers from user query for file-path matching |
+| `mentionedFnames` | `[]` | File paths from user query for personalization |
+| `excludeUnranked` | false | Exclude files with zero PageRank |
+| `forceRefresh` | false | Ignore cache and re-parse |
+| `useImportBased` | false | Force import-only ranking (faster, less precise) |
+| `autoFallback` | true | Fall back automatically if AST parsing fails |
+| `compact` | false | Terse single-line-per-file view |
 
 ---
 
-## `search`
+## `find_symbol`
 
-Consolidated symbol and code navigation tool. Replaces the previous `search_symbols`, `resolve_symbol`, and `find_callers` tools with a single polymorphic tool.
+Symbol-level code exploration with seven actions.
 
-### Modes
+### Actions
 
-| Mode | What it does | Replaces |
-|---|---|---|
-| `"symbols"` | Fuzzy/substring symbol search across the repo with code context | `search_symbols` |
-| `"resolve"` | Resolves a symbol to all its definitions, references, and best-guess primary location. Auto-appends callers when enrichment is enabled (default). | `resolve_symbol` |
-| `"callers"` | Finds all functions that call a given function via tree-sitter call graph analysis. Supports TS/JS/TSX, Python, Go, and Rust. | `find_callers` |
-| `"code"` | AST-aware code definition search. Parses all source files with tree-sitter, extracts definitions (functions, classes, methods), and returns complete structural blocks ranked by BM25 + optional embedding re-rank. | _(new)_ |
-
-### Enrichment
-
-By default (`enrich: true`), each mode cross-references results:
-
-- `mode="resolve"` — auto-appends callers to the resolved symbol
-- `mode="symbols"` — auto-resolves the top result
-- `mode="code"` — tags results with symbol resolution metadata
-
-Set `enrich: false` on any call to return bare results. Enrichment behaviour can be fine-tuned per mode in `pi-smartread.config.json` under `search.enrich`.
+| Action | What it does |
+|---|---|
+| `symbol` (default) | Find symbols by name/pattern. Supports qualified paths (`ClassName.methodName`). |
+| `overview` | File outline via AST analysis — all top-level symbols with types and line ranges. |
+| `references` | All reference locations for a symbol across the codebase. |
+| `declaration` | Find the definition/declaration of a symbol with optional context file. |
+| `implementations` | Find types that implement an interface or extend a class. |
+| `workspace` | Workspace-wide symbol search via LSP. |
+| `hover` | Type/signature/quick-info at a file position via LSP. |
 
 ### Examples
 
-**Find a symbol:**
 ```json
 {
-  "mode": "symbols",
-  "query": "getRepoMap"
+  "action": "symbol",
+  "query": "UserService.create"
 }
 ```
 
-**Resolve a symbol with callers:**
 ```json
 {
-  "mode": "resolve",
-  "symbol": "User",
-  "context": "src/models/user.ts:42",
-  "enrich": true
+  "action": "overview",
+  "path": "src/services/auth.ts"
 }
 ```
 
-**Find callers:**
 ```json
 {
-  "mode": "callers",
-  "function": "getConfig"
+  "action": "references",
+  "query": "Authenticator",
+  "context": "src/middleware/auth.ts:15"
 }
 ```
 
-**Search code by intent:**
 ```json
 {
-  "mode": "code",
-  "query": "authentication middleware",
-  "directory": "src",
-  "filePattern": "*.ts"
+  "action": "hover",
+  "path": "src/services/auth.ts",
+  "line": 42,
+  "column": 12
 }
 ```
-
-`directory` and its alias `folder` limit all search modes to a specific root.
 
 ---
 
-## `deep_search`
+## `graph_mutate` [experimental]
 
-Agentic deep repository search that orchestrates multiple search channels into a unified ranked response with provenance tracking.
-
-### What it does
-
-Orchestrates four parallel search channels:
-
-1. **Structural channel** — AST-aware code definition search across all source files
-2. **Symbol channel** — Tree-sitter symbol extraction for exact identifier matches
-3. **Semantic channel** — BM25 + optional embedding-based file ranking
-4. **Graph channel** — Expands candidates via import neighbours, symbol neighbours, and call graph relationships
-
-Results are fused with **Reciprocal Rank Fusion (k=60)** and enriched with caller/callee/import hints.
-
-### Example
+Records semantic coupling observations into the context graph. Edges are event-sourced to disk and survive session restarts. Disabled by default — enable via `pi-smartread.config.json`:
 
 ```json
 {
-  "query": "authentication middleware",
-  "depth": "standard",
-  "scope": "code",
-  "directory": "src",
-  "limit": 15,
-  "maxSnippetChars": 400
+  "experimental": { "graphMutate": true }
 }
 ```
-
-### Options
-
-| Option | Default | Meaning |
-|---|---|---|
-| `query` | — | Natural language question or code symbol |
-| `depth` | `standard` | `quick` (code+symbols), `standard` (+semantic+graph), `thorough` (+caller enrichment) |
-| `scope` | `all` | Filter to `code`, `docs`, `tests`, or `all` |
-| `directory` / `folder` | working directory | Root directory/folder to search |
-| `limit` | `15` | Maximum matches to return (1-50) |
-| `maxSnippetChars` | `400` | Max characters per code snippet (100-1000) |
-| `outputBudget` | `4096` | Approximate output token budget (1k-16k) |
-| `includeRelationships` | `false` | Include caller/callee/import hints for top matches |
-| `filePattern` | — | Glob/regex to restrict files, e.g. `*.ts` |
-| `focusFiles` | `[]` | Personalize ranking toward these files |
-| `rerank` | `false` | Run optional reranker on top candidates (reserved for configured V2 rerankers) |
-
----
-
-## `smartread_status`
-
-Lightweight health check for Pi-SmartRead. Reports embedding configuration, source-file discovery, and cache directory status — useful for diagnosing retrieval issues before running expensive searches.
-
-### Example
-
-```json
-{
-  "detail": "summary"
-}
-```
-
-Returns:
-- **Embedding backend** — whether `baseUrl` and `model` are configured
-- **Source file discovery** — file counts by language
-- **Cache directories** — presence and size of embedding and tags caches
-
----
-
-## `graph_mutate`
-
-Records semantic coupling observations into Pi-SmartRead's context graph. Edges are event-sourced to disk and survive session restarts.
 
 ### Breakage edges
 
@@ -333,7 +317,7 @@ When editing file A causes type-checking errors in file B:
 }
 ```
 
-The next `intent_read` touching A will automatically include B as a candidate.
+The next `read mode="intent"` touching A will automatically include B as a candidate.
 
 ### Co-change edges
 
@@ -357,9 +341,9 @@ Pi-SmartRead supports tree-sitter analysis for **41 languages**:
 
 Bash, C, C#, C++, Clojure, Common Lisp, CSS, D, Dart, Elisp, Elixir, Elm, Fortran, Gleam, Go, Haskell, HCL (Terraform), Java, JavaScript, JSX, Julia, Kotlin, Lua, MATLAB, OCaml, PHP, Pony, Python, QL (CodeQL), R, Racket, Ruby, Rust, Scala, Solidity, Swift, TypeScript, TSX, Udev, Zig
 
-**Call graph support** (for `search mode="callers"` and call-graph candidate expansion): TypeScript, JavaScript, TSX, Python, Go, Rust.
+**Call graph support** (for code search enrichment and deep search): TypeScript, JavaScript, TSX, Python, Go, Rust.
 
-Languages without dedicated tree-sitter parsers still work for `read_multiple_files` and `intent_read` (via BM25 text ranking).
+Languages without dedicated tree-sitter parsers still work for file reading and BM25 text ranking.
 
 ---
 
@@ -367,7 +351,7 @@ Languages without dedicated tree-sitter parsers still work for `read_multiple_fi
 
 ### Embedding backend
 
-`intent_read` semantic ranking uses an **OpenAI-compatible embeddings API**.
+Semantic ranking uses an **OpenAI-compatible embeddings API**.
 
 Create `pi-smartread.config.json` in the current directory or any parent:
 
@@ -389,21 +373,20 @@ Create `pi-smartread.config.json` in the current directory or any parent:
 | `chunkSizeChars` | `PI_SMARTREAD_CHUNK_SIZE` | — | No | Target chunk size (default: 4096) |
 | `chunkOverlapChars` | `PI_SMARTREAD_CHUNK_OVERLAP` | — | No | Chunk overlap (default: 512) |
 | `maxChunksPerFile` | `PI_SMARTREAD_MAX_CHUNKS` | — | No | Max chunks per file (default: 12) |
-| `probeEnabled` | — | — | No | Enable symbol-based query probing for intent_read (default: false, experimental) |
-| `rerankEnabled` | — | — | No | Enable structural reranking after RRF for intent_read (default: false, experimental) |
-| `hydeEnabled` | — | — | No | Enable HyDE query expansion — embeds a hypothetical code document instead of raw query (default: false) |
-| `externalReranker` | — | — | No | External reranker API config object (see below) |
-| `search.enrich` | — | — | No | Per-mode enrichment config for the `search` tool (see `search` section) |
+| `probeEnabled` | — | — | No | Enable symbol-based query probing (default: false) |
+| `rerankEnabled` | — | — | No | Enable structural reranking after RRF (default: false) |
+| `hydeEnabled` | — | — | No | Enable HyDE query expansion (default: false) |
+| `externalReranker` | — | — | No | External reranker API config (see below) |
 
 ### Caching
 
 Pi-SmartRead uses a **two-tier embedding cache**:
 - **In-memory LRU** (64 entries) — fast repeat lookups within a session
-- **Persistent disk cache** (`.pi-smartread.embeddings.cache/`) — survives restarts, keyed by SHA-256 content hash of the request
+- **Persistent disk cache** (`.pi-smartread.embeddings.cache/`) — survives restarts, keyed by SHA-256 content hash
 
 ### Graceful BM25 degradation
 
-Pi-SmartRead is designed for agent robustness — missing embeddings degrade to BM25-only with a loud warning, not hard-fail. `intent_read` always proceeds, regardless of embedding config status:
+Pi-SmartRead is designed for agent robustness — missing embeddings degrade to BM25-only with a warning, not hard-fail:
 
 | Scenario | Behaviour |
 |---|---|
@@ -411,7 +394,7 @@ Pi-SmartRead is designed for agent robustness — missing embeddings degrade to 
 | Config valid, embedding API unreachable | Falls back to BM25 silently |
 | Config valid, API returns wrong vector count | Falls back to BM25, reports in `details.embeddingError` |
 
-All tools (`intent_read`, `search mode="code"`, `deep_search`) degrade gracefully. Only config authoring errors (e.g. `chunkSizeChars: "foo"`) throw.
+All retrieval modes degrade gracefully. Only config authoring errors (e.g. `chunkSizeChars: "foo"`) throw.
 
 ---
 
@@ -419,23 +402,9 @@ All tools (`intent_read`, `search mode="code"`, `deep_search`) degrade gracefull
 
 ### HyDE query expansion
 
-**HyDE** (Hypothetical Document Embeddings) improves semantic matching for natural-language queries. Instead of embedding the raw query, it generates a synthetic code document that would answer the query, then embeds that document.
+**HyDE** (Hypothetical Document Embeddings) improves semantic matching by generating a synthetic code document from the query, then embedding that instead of the raw query text. This is a **no-LLM** implementation — deterministic templates, zero extra latency.
 
-**How it works:**
-1. Extracts code identifiers from the query (filters common words)
-2. Detects the query pattern (function, class, config, module)
-3. Generates a hypothetical code snippet using templates
-4. Embeds the snippet as the query vector
-
-This is a **no-LLM** implementation — deterministic templates, zero extra latency, no additional cost.
-
-Enable in config:
-
-```json
-{
-  "hydeEnabled": true
-}
-```
+Enable in config: `"hydeEnabled": true`
 
 When active, `details.hyde` reports the generated document, detected pattern, and extracted identifiers.
 
@@ -456,31 +425,54 @@ An optional external reranker API can replace the local structural reranker. Sup
 }
 ```
 
-| Field | Default | Description |
-|---|---|---|
-| `baseUrl` | (required) | Reranker API base URL |
-| `apiKey` | — | Bearer token |
-| `model` | — | Model name (provider-specific) |
-| `timeoutMs` | 10000 | Request timeout |
-| `maxDocuments` | 20 | Max documents per request |
-
-**Supported response formats:** Cohere-style (`results[{index, relevance_score}]`), ranked indices (`ranked_indices[]`), or scores array (`scores[]`). Falls back to structural reranking on failure.
+Falls back to structural reranking on failure.
 
 ### Query probing
 
-When `probeEnabled: true`, the probe phase extracts probable code identifiers from the query and resolves them against the repository's symbol graph. This adds definition files as candidates before ranking — useful when the query mentions a symbol name but not the file it's defined in.
+When `probeEnabled: true`, the probe phase extracts probable code identifiers from the query and resolves them against the repository's symbol graph, adding definition files as candidates before ranking.
+
+### Git context enrichment
+
+When enabled (on by default), every file read is enriched with git recency info, co-commit hotspots, and branch notes. Configure via:
+
+```json
+{
+  "gitContext": {
+    "enabled": true,
+    "readEnrichmentCommits": 3,
+    "tokenBudget": {
+      "gitLog": 800,
+      "coCommitHotspots": 400,
+      "gitNotes": 600
+    }
+  }
+}
+```
+
+### Microagents
+
+Place markdown files with YAML frontmatter in `.pi-smartread/microagents/` or `.openhands/microagents/`. Agents can be always-loaded or triggered by query keywords:
+
+```markdown
+---
+triggers: ["auth", "jwt", "oauth"]
+alwaysLoad: false
+name: "auth-conventions"
+description: "Auth service conventions"
+---
+
+# Auth Conventions
+- JWT tokens use RS256
+- Middleware order: auth → rate-limit → handler
+```
 
 ### Retrieval benchmarks
 
-Pi-SmartRead includes a benchmark suite that measures retrieval quality with standard IR metrics:
+Pi-SmartRead includes a benchmark suite measuring recall, precision, MRR, and NDCG:
 
 ```bash
 npx vitest run test/unit/retrieval-benchmark.test.ts
 ```
-
-Metrics tracked: **Recall@k**, **Precision@k**, **MRR** (Mean Reciprocal Rank), **NDCG@k** (Normalized Discounted Cumulative Gain).
-
-The aggregate summary is printed during the test run. Use these metrics to detect regressions when modifying retrieval logic.
 
 ---
 
@@ -492,24 +484,9 @@ Pi-SmartRead includes a standalone **MCP (Model Context Protocol) stdio server**
 npm run mcp-server
 ```
 
-Exposes: `deep_search`, `graph_mutate`, `intent_read`, `read_multiple_files`, `repo_map`, `search`, `smartread_status`.
+Exposes: `read`, `search`, `repo_map`, `find_symbol`, and (if experimental features are enabled) `graph_mutate` and git notes tools.
 
 See **[docs/mcp-quickstart.md](docs/mcp-quickstart.md)** for full setup instructions.
-
----
-
-## Output format
-
-`read_multiple_files` and `intent_read` return framed file blocks:
-
-```
-@path/to/file
-<<'WORD_INDEX_HASH'
-...file content...
-WORD_INDEX_HASH
-```
-
-Delimiter parts: `WORD` (readable dictionary word), `INDEX` (1-based file index), `HASH` (deterministic short hash of the path). Collisions are automatically retried with a safe suffix.
 
 ---
 
@@ -519,8 +496,10 @@ Pi-SmartRead uses **native tree-sitter bindings** (not WASM) for all AST operati
 
 - Native parsers: `tree-sitter`, `tree-sitter-javascript`, `tree-sitter-typescript`, `tree-sitter-python`, `tree-sitter-go`, `tree-sitter-rust`
 - Query files from the bundled `queries/` directory
-- Chunked callback parsing for large files (avoids the native binding failure on files >32KB)
-- Text fallback in `search mode="symbols"` when AST tags are unavailable
+- Chunked callback parsing for large files
+- Text fallback when AST tags are unavailable
+
+A **WASM grammar loader** (`grammar-loader.ts`) provides additional language support via `@vscode/tree-sitter-wasm` for AST-boundary chunking.
 
 ---
 
@@ -556,22 +535,25 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 
 **I got a repo map instead of my read result** — Expected on the first read-like call in a repository. Re-issue the read.
 
-**`intent_read` is not using semantic ranking** — Check `pi-smartread.config.json` or the `PI_SMARTREAD_EMBEDDING_*` environment variables.
-
-**`search mode="symbols"` returns no results after an update** — Reload Pi with `/reload`.
+**Semantic ranking is not working** — Check `pi-smartread.config.json` or the `PI_SMARTREAD_EMBEDDING_*` environment variables. BM25-only ranking will still work.
 
 **I only want a quick structure overview** — Call `repo_map` with `compact: true`.
+
+**Doom-loop warning appears** — The LLM repeated identical tool calls 3+ times. Try a different search query or use `repo_map` to get oriented.
 
 ---
 
 ## Related docs
 
-- `docs/research-deep-dive.md` — Design research, ecosystem analysis, implemented retrieval patterns, and roadmap
-- `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan for advanced retrieval
-- `docs/phase-6-8-implementation-notes.md` — Implementation notes for external reranker, MCP server, HyDE, benchmarks, and multi-language call graphs
-- `docs/mcp-quickstart.md` — MCP server setup guide for Claude Desktop, Cursor, and generic clients
-- `docs/deep-search-spec.md` — Technical specification for `deep_search` tool
-- `docs/deep-search-implementation.md` — Implementation details and channel architecture
+- `docs/research-deep-dive.md` — Design research, ecosystem analysis, and roadmap (some sections predate consolidation)
+- `docs/advanced-retrieval-spec.md` — Proposed architecture for graph-aware retrieval
+- `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan
+- `docs/advancec-retrieval-research.md` — Academic and industry research survey
+- `docs/pi-hashline-readmap-research.md` — Cross-extension integration analysis
+- `docs/deep-search-spec.md` — Deep search specification (predates consolidation into `search mode="deep"`)
+- `docs/deep-search-implementation.md` — Deep search implementation plan
+- `docs/phase-6-8-implementation-notes.md` — Notes on external reranker, MCP server, HyDE, benchmarks, multi-language call graphs
+- `docs/mcp-quickstart.md` — MCP server setup for Claude Desktop, Cursor, and generic clients
 - `progress.md` — Implementation snapshot
 
 ---

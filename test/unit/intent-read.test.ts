@@ -538,8 +538,8 @@ describe("intent_read: graph-neighbour augmentation", () => {
       );
 
       const details = result.details as any;
-      expect(details.processedCount).toBe(20);
-      expect(details.graphAugmentation.addedPaths).toEqual([files[19], files[20]]);
+      expect(details.processedCount).toBe(21);
+      expect(details.graphAugmentation.addedPaths).toEqual([files[19], files[20], files[21]]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

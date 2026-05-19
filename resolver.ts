@@ -8,7 +8,7 @@ export interface DirectoryResolution {
   countBeforeCap: number;
 }
 
-export function resolveDirectory(directory: string, cap = 20): DirectoryResolution {
+export function resolveDirectory(directory: string, cap = 10000): DirectoryResolution {
   const resolved = resolve(directory);
 
   // Validate cap

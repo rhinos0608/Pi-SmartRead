@@ -16,7 +16,6 @@ import createSearchTool from "./search-tool.js";
 import { createRepoTool } from "./repomap-tool.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
-import { createSmartReadStatusTool } from "./smartread-status.js";
 import { loadExperimentalConfig } from "./config.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 
@@ -36,8 +35,6 @@ function reg(name: string, factory: () => ToolDefinition, category: ToolCategory
 reg("read", () => createUnifiedReadTool() as unknown as ToolDefinition, ToolCategory.READ);
 reg("search", () => createSearchTool() as unknown as ToolDefinition, ToolCategory.SEARCH);
 reg("repo_map", () => createRepoTool() as unknown as ToolDefinition, ToolCategory.MAP);
-reg("smartread_status", () => createSmartReadStatusTool() as unknown as ToolDefinition, ToolCategory.STATUS);
-
 const experimental = loadExperimentalConfig();
 if (experimental.graphMutate) {
   reg("graph_mutate", () => createGraphMutateTool() as unknown as ToolDefinition, ToolCategory.MUTATE, true);

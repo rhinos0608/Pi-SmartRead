@@ -1,13 +1,13 @@
 # MCP Server Quickstart
 
-Pi-SmartRead ships a lightweight **MCP (Model Context Protocol) stdio server** that exposes its code intelligence tools to any MCP-compatible client — no SDK dependency required.
+Pi-SmartRead ships an **MCP (Model Context Protocol) stdio server** that exposes its code intelligence tools to any MCP-compatible client — Claude Code, Claude Desktop, Cursor, etc.
 
 ---
 
 ## One-liner for Claude Code
 
 ```bash
-claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/mcp-server.ts
+claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts
 ```
 
 The project lives in a nested `Pi-SmartRead/Pi-SmartRead/` structure. The server file is at the inner level. Run this from your project directory — the server uses that `cwd` for file operations.
@@ -26,13 +26,11 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 
 | MCP Tool | Description |
 |---|---|
-| `deep_search` | Agentic deep repository search: structural + symbol + semantic + graph channels with RRF fusion |
-| `graph_mutate` | Record semantic coupling edges (breakage, co-change) into the context graph |
-| `intent_read` | Hybrid retrieval: BM25 keyword + semantic embeddings with RRF fusion |
-| `read_multiple_files` | Read up to 20 files in one call with adaptive packing |
+| `read` | Unified reader: single-file (`file`), intent-based hybrid RRF retrieval (`intent`), multi-file batch (`multiple`) |
+| `search` | Consolidated search: AST-aware grep (`grep`), BM25+embedding code search (`code`), agentic deep search (`deep`) |
 | `repo_map` | PageRank-ranked repository map from tree-sitter ASTs |
-| `search` | Consolidated symbol tool: fuzzy search (`symbols`), resolution with enrichment (`resolve`), call graph (`callers`), AST-aware code search (`code`) |
-| `smartread_status` | Health check: embedding config, file discovery, cache status |
+| `find_symbol` | Symbol-level exploration: name search, outline, references, declaration, implementations, workspace LSP search, hover |
+| `graph_mutate` | [experimental] Record semantic coupling edges (breakage, co-change) into the context graph |
 
 ---
 
@@ -41,7 +39,7 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 - **Node.js ≥ 20**
 - **`npm install`** in the `Pi-SmartRead/` directory
 - **`tsx`** (included as a dev dependency — no global install needed)
-- **Embedding config** (only for `intent_read` semantic ranking — BM25-only works without it)
+- **Embedding config** (only for semantic ranking — BM25-only works without it)
 
 ---
 
@@ -160,42 +158,6 @@ The server reads JSON-RPC 2.0 messages from **stdin** and writes responses to **
 
 ---
 
-## Test it manually (from Pi-SmartRead directory)
-
-### Initialize
-
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | npm run mcp-server
-```
-
-Expected response:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "protocolVersion": "2024-11-05",
-    "capabilities": { "tools": {} },
-    "serverInfo": { "name": "pi-smartread", "version": "0.1.0" }
-  }
-}
-```
-
-### List available tools
-
-```bash
-echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | npm run mcp-server
-```
-
-### Call a tool
-
-```bash
-echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"mode":"symbols","query":"RepoMap","directory":"."}}}' | npm run mcp-server
-```
-
----
-
 ## Environment variables
 
 The MCP server inherits all Pi-SmartRead configuration from environment variables:
@@ -238,92 +200,29 @@ Or in `.mcp.json`:
 
 ---
 
-## MCP protocol reference
-
-### Messages the server handles
-
-| Method | Description |
-|---|---|
-| `initialize` | Handshake — returns server capabilities and info |
-| `notifications/initialized` | Client acknowledgment (no response, handled in `start()`) |
-| `tools/list` | Returns all available tools with their JSON Schema |
-| `tools/call` | Executes a tool with the given arguments |
-| `ping` | Health check — returns `{}` |
-
-### Tool call format
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "intent_read",
-    "arguments": {
-      "query": "authentication middleware",
-      "files": [
-        { "path": "src/auth.ts" },
-        { "path": "src/middleware.ts" }
-      ],
-      "topK": 5
-    }
-  }
-}
-```
-
-### Tool call response
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "content": [
-      { "type": "text", "text": "... file contents ..." }
-    ],
-    "isError": false
-  }
-}
-```
-
-### Error response
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32601,
-    "message": "Method not found: unknown/method"
-  }
-}
-```
-
----
-
 ## How it differs from the Pi extension
 
 | | Pi Extension | MCP Server |
 |---|---|---|
-| **Transport** | Pi's internal tool API | MCP stdio (JSON-RPC 2.0) |
+| **Transport** | Pi's internal tool API | MCP stdio (via `@modelcontextprotocol/sdk`) |
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
-| **Hooks** | First-read repo map interception | No hooks (direct tool calls) |
+| **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
 | **Install** | `pi install git:...` | `npx tsx mcp-server.ts` |
-| **Same tools?** | Yes (fewer — consolidated) | Yes — same underlying implementations |
+| **Same tools?** | Yes — same underlying implementations |  |
 
 ---
 
 ## Troubleshooting
 
-**`claude mcp add` fails with "Connection closed"** — Make sure `node` and `npx` are on your PATH. If using nvm, ensure nvm loads in non-interactive shells. On Windows, add `cmd /c` before `npx`.
+**`claude mcp add` fails with "Connection closed"** — Make sure `node` and `npx` are on your PATH. If using nvm, ensure nvm loads in non-interactive shells.
 
-**Server exits immediately when testing** — Make sure you're piping valid JSON-RPC to stdin. The server reads line-by-line and exits when stdin closes.
+**Server exits immediately when testing** — Make sure you're piping valid JSON-RPC to stdin.
 
 **"Cannot find package 'tsx'"** — Run `npm install` in the Pi-SmartRead directory, or install tsx globally (`npm i -g tsx`).
 
 **No semantic ranking** — The MCP server uses the same embedding config as the Pi extension. Set `PI_SMARTREAD_EMBEDDING_BASE_URL` and `PI_SMARTREAD_EMBEDDING_MODEL`, or place a `pi-smartread.config.json` in the working directory.
 
-**Tool returns "Error: Embedding baseUrl is required"** — The `intent_read` tool requires embedding config. Use `read_multiple_files` or `search` for config-free operation, or configure embeddings.
+**Tool returns "Error: Embedding baseUrl is required"** — Use `read` or `search mode="grep"` for config-free operation, or configure embeddings.
 
 **Configuration changes not taking effect** — Restart Claude Code (or the respective MCP client) after changing config. Run `claude mcp list` to verify connected servers.
 
@@ -332,17 +231,21 @@ Or in `.mcp.json`:
 ## Architecture
 
 ```
-┌─────────────────┐    stdin (JSON-RPC)    ┌──────────────────┐
-│   MCP Client    │ ──────────────────────→ │   mcp-server.ts  │
-│ (Claude Code,   │                         │                  │
-│  Claude Desktop,│ ←────────────────────── │  Tool Registry   │
-│  Cursor, etc.)  │   stdout (JSON-RPC)     │  ┌────────────┐ │
-└─────────────────┘                         │  │intent_read  │ │
-                                            │  │read_many    │ │
-                                            │  │repo_map     │ │
-                                            │  │search       │ │
-                                            │  └────────────┘ │
-                                            └──────────────────┘
+┌─────────────────┐    stdin (JSON-RPC)    ┌──────────────────────┐
+│   MCP Client    │ ──────────────────────→ │   mcp-server.ts     │
+│ (Claude Code,   │                         │  (@modelcontext     │
+│  Claude Desktop,│ ←────────────────────── │   protocol/sdk)     │
+│  Cursor, etc.)  │   stdout (JSON-RPC)     │                      │
+└─────────────────┘                         │  Tool Registry       │
+                                            │  ┌────────────────┐ │
+                                            │  │ read (unified)  │ │
+                                            │  │ search          │ │
+                                            │  │ repo_map        │ │
+                                            │  │ find_symbol     │ │
+                                            │  │ graph_mutate*   │ │
+                                            │  └────────────────┘ │
+                                            └──────────────────────┘
+                                            * experimental
 ```
 
-The MCP server is a thin JSON-RPC wrapper. All business logic lives in the same modules used by the Pi extension — no code duplication.
+The MCP server is a thin wrapper over `@modelcontextprotocol/sdk`. All business logic lives in the same modules used by the Pi extension — no code duplication.

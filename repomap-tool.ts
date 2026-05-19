@@ -22,6 +22,7 @@ const RepoMapSchema = Type.Object({
     Type.String({
       description:
         "Root directory to map (default: extension working directory)",
+      default: ".",
     }),
   ),
   mapTokens: Type.Optional(
