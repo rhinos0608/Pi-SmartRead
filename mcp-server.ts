@@ -21,8 +21,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { buildToolRegistry } from "./mcp-registry.js";
+import { MCP_PROMPTS } from "./mcp-prompts.js";
+import { MCP_RESOURCES, resolveResource } from "./mcp-resources.js";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 
 // ── Build Registry ─────────────────────────────────────────────────
@@ -33,7 +39,7 @@ const tools: ToolDefinition[] = buildToolRegistry();
 
 const server = new Server(
   { name: "pi-smartread", version: "0.1.0" },
-  { capabilities: { tools: {} } },
+  { capabilities: { tools: {}, prompts: {}, resources: {} } },
 );
 
 // ── Handlers ───────────────────────────────────────────────────────
@@ -90,6 +96,83 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+});
+
+// ── Prompts ──────────────────────────────────────────────────────────────────
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  return { prompts: MCP_PROMPTS };
+});
+
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+
+  if (name === "explain-code") {
+    const lang = args?.language ?? "code";
+    return {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: `Please explain how this ${lang} works:\n\n${args?.code ?? ""}`,
+          },
+        },
+      ],
+    };
+  }
+
+  if (name === "review-diff") {
+    const lang = args?.language ?? "the code";
+    return {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: `Please review this ${lang} diff for potential issues, bugs, security concerns, and style improvements:\n\n${args?.diff ?? ""}`,
+          },
+        },
+      ],
+    };
+  }
+
+  if (name === "architectural-analysis") {
+    const filePath = args?.filePath ?? "";
+    const query = args?.query ? `Focus on: ${args.query}` : "Provide a general architectural overview.";
+    return {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: `Please perform an architectural analysis of the file \`${filePath}\`.\n\n${query}`,
+          },
+        },
+      ],
+    };
+  }
+
+  throw new Error(`Prompt not found: ${name}`);
+});
+
+// ── Resources ─────────────────────────────────────────────────────────────────
+server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  return { resources: MCP_RESOURCES };
+});
+
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const resolved = resolveResource(request.params.uri);
+  return {
+    contents: [
+      {
+        uri: resolved.uri,
+        mimeType: resolved.mimeType,
+        text: resolved.text,
+      },
+    ],
+  };
 });
 
 // ── Graceful Shutdown ──────────────────────────────────────────────

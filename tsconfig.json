@@ -14,11 +14,13 @@
     "types": ["node"]
   },
   "include": [
+    "*.d.ts",
     "index.ts", "read-many.ts", "utils.ts", "config.ts",
     "scoring.ts", "chunking.ts", "embedding.ts", "resolver.ts",
     "intent-read.ts", "languages.ts", "cache.ts", "pagerank.ts",
     "tree-context.ts", "file-discovery.ts", "tags.ts", "repomap.ts",
-    "repomap-tool.ts", "hook.ts", "special.ts", "mcp-server.ts", "mcp-registry.ts", "deep-search.ts",
+    "repomap-tool.ts", "hook.ts", "special.ts", "mcp-server.ts", "mcp-registry.ts", "mcp-prompts.ts", "mcp-resources.ts", "deep-search.ts",
+    "orama-search.ts", "sqlite-vec-store.ts", "local-embedding-provider.ts",
     "git-context.ts", "git-notes.ts", "git-notes-tool.ts", "git-history.ts",
     "test/**/*.ts"
   ]

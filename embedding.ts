@@ -10,7 +10,58 @@ export interface EmbedResult {
   vectors: number[][];
 }
 
-// Token estimation constants
+import { LocalEmbeddingProvider } from "./local-embedding-provider.js";
+
+let cachedLocalProvider: LocalEmbeddingProvider | null = null;
+let cachedLocalProviderKey: string = "";
+
+function makeLocalProviderKey(req: LocalEmbedRequest): string {
+  return JSON.stringify({
+    modelId: req.modelId,
+    modelDir: req.modelDir,
+    dtype: req.dtype,
+    normalize: req.normalize,
+  });
+}
+
+export interface LocalEmbedRequest {
+  inputs: string[];
+  modelId?: string;
+  modelDir?: string;
+  dtype?: "fp32" | "fp16" | "q8";
+  normalize?: boolean;
+}
+
+/**
+ * Fetch embeddings using a local `LocalEmbeddingProvider` instead of an API.
+ *
+ * The provider is constructed and initialised on first call for a given
+ * configuration and then reused (singleton).  If `@huggingface/transformers`
+ * is not installed the call will throw with a descriptive error.
+ */
+export async function fetchLocalEmbeddings(
+  req: LocalEmbedRequest
+): Promise<EmbedResult> {
+  if (req.inputs.length === 0) {
+    return { vectors: [] };
+  }
+
+  const key = makeLocalProviderKey(req);
+  if (!cachedLocalProvider || cachedLocalProviderKey !== key) {
+    const provider = new LocalEmbeddingProvider({
+      modelId: req.modelId,
+      modelDir: req.modelDir,
+      dtype: req.dtype,
+      normalize: req.normalize,
+    });
+    await provider.initialize();
+    cachedLocalProvider = provider;
+    cachedLocalProviderKey = key;
+  }
+
+  const vectors = await cachedLocalProvider.embed(req.inputs);
+  return { vectors };
+}
 export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 export const MAX_ESTIMATED_TOKENS_PER_INPUT = 2048;
 export const MAX_ESTIMATED_TOKENS_PER_BATCH = 32768;

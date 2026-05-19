@@ -1,0 +1,8 @@
+## Review
+- Correct: lifecycle is guarded; `close()` marks the store closed and closes the raw DB handle, and tests cover closed-store errors. `sqlite-vec-store.ts:292-295, 462-465`; `test/unit/sqlite-vec-store.test.ts:522-556`
+- [BLOCKER] `insertChunks()` is not atomic on failure: it `BEGIN`s, but the `finally` always `COMMIT`s, so a mid-batch error will persist partial inserts instead of rolling back. `sqlite-vec-store.ts:296-331`
+- [WARN] Fallback blob storage/search uses `Float32Array.buffer` directly. That can corrupt embeddings for any sliced/view Float32Array (non-zero `byteOffset` / shorter view) because the whole backing buffer is stored and queried, not just the logical bytes. `sqlite-vec-store.ts:321-323, 441-442`
+- [WARN] The fallback path still depends on `vec_distance_cosine()`, but `loadVecExtension()` failures are swallowed. If sqlite-vec cannot load, the created BLOB table is not actually searchable. `sqlite-vec-store.ts:190-196, 258-276, 430-452`
+- [WARN] Tests cover the vec0 path and reopen/persistence, but they do not force the BLOB fallback path or validate view/sliced-embedding round trips, so the corruption risk above is untested. `test/unit/sqlite-vec-store.test.ts:53-77, 111-199, 403-483, 560-639`
+- [NIT] Type safety is intentionally loose: `bun-types.d.ts` exposes `prepare(): any` and `Bun: any`, and the store still uses `any[]` row casts. The wrapper contains the blast radius, but the Bun/SQLite abstraction could be tightened. `bun-types.d.ts:4-15`; `sqlite-vec-store.ts:25-38, 355-383, 411-442`
+- [NIT] `_schema_version` works, but it has no key/uniqueness constraint; `MAX(version)` is fine for v1, yet duplicate rows remain possible. `sqlite-vec-store.ts:203-215, 278-286`
