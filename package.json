@@ -42,6 +42,7 @@
     "read-many.ts",
     "config.ts",
     "chunking.ts",
+    "classifiers.ts",
     "context-graph.ts",
     "embedding.ts",
     "graph-mutate.ts",

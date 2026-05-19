@@ -7,6 +7,8 @@ import type { Tag } from "./cache.js";
 import { resolveSymbol } from "./symbol-resolver.js";
 import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
 import { LruCache } from "./utils.js";
+import { autoPopulateEdgeStore, extractCoCommitPairs, findGitRoot } from "./git-context.js";
+import { loadGitContextConfig } from "./config.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -37,6 +39,7 @@ export interface ContextGraphOptions {
   includeSymbols?: boolean;
   includeCalls?: boolean; // Phase 1: mostly ignored, kept for API stability
   forceRefresh?: boolean;
+  skipGitPopulation?: boolean; // Skip first-run git co-commit auto-population
 }
 
 export interface GraphNeighbour {
@@ -146,6 +149,17 @@ export class ContextGraph {
     // These are persisted observations from post-edit diagnostic cascades
     // and git history co-change analysis (Smart-Edit integration).
     this.loadMutationEdges();
+
+    if (this.mutationEdges.size === 0 && !options.skipGitPopulation) {
+      const config = loadGitContextConfig(this.root);
+      const limit = config.coCommitAnalysisLimit ?? 100;
+      findGitRoot(this.root).then(async (gitRoot) => {
+        if (!gitRoot) return;
+        const pairs = await extractCoCommitPairs(gitRoot, limit);
+        await autoPopulateEdgeStore(gitRoot, pairs);
+        this.loadMutationEdges();
+      }).catch(() => {});
+    }
 
     const allFiles = await findSrcFiles(this.root);
     

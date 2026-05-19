@@ -122,13 +122,13 @@ describe("MCP stdio server", () => {
 
     // Check that known tools are registered
     const toolNames = result.tools.map((t: any) => t.name);
-    expect(toolNames).toContain("graph_mutate");
-    expect(toolNames).toContain("intent_read");
-    expect(toolNames).toContain("read_multiple_files");
-    expect(toolNames).toContain("deep_search");
-    expect(toolNames).toContain("smartread_status");
-    expect(toolNames).toContain("repo_map");
+    expect(toolNames).toContain("read");
     expect(toolNames).toContain("search");
+    expect(toolNames).toContain("repo_map");
+    expect(toolNames).toContain("find_symbol");
+    // graph_mutate and git_notes are experimental — disabled by default
+    expect(toolNames).not.toContain("graph_mutate");
+    expect(toolNames).not.toContain("git_notes");
 
     // Each tool should have required fields
     for (const tool of result.tools) {

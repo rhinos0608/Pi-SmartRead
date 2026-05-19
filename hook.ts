@@ -21,6 +21,14 @@ import { RepoMap } from "./repomap.js";
 import { ContextGraph } from "./context-graph.js";
 import { isRecentlyModified } from "./git-history.js";
 import {
+   autoPopulateEdgeStore,
+   buildStartupGitContext,
+   findGitRoot as findGitRootAsync,
+   getFileCommitContext,
+} from "./git-context.js";
+import { loadGitContextConfig } from "./config.js";
+import { formatBranchNotes, scanBranchNotes } from "./git-notes.js";
+import {
    LruCache,
    ensureHashlineReady,
    isUrlLikePath,
@@ -29,6 +37,7 @@ import {
    splitPathAndSelector,
 } from "./utils.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
+import { getLSPBridge } from "./lsp-bridge.js";
 
 // ── Shared ContextGraph cache (module-level) ──
 // Build once per repo, reuse across reads. Prevents O(repo_files * read_calls) parsing.
@@ -142,17 +151,35 @@ async function generateCompactMap(
  * before_agent_start awaits the promise if generation is still in-flight.
  */
 const startupRepoMapCache = new Map<string, Promise<string | null>>();
+const startupGitContextCache = new Map<string, Promise<{ contextString: string | null; notesString: string | null } | null>>();
 
 /** Only inject the map once per session (across reloads/resumes etc.) */
 let repoMapInjectedThisSession = false;
+let searchLowResultHintShownThisSession = false;
+
+/** Session-scoped git context cache for file-read path (avoids repeated config/root lookups) */
+interface SessionGitCache {
+   gitConfig: ReturnType<typeof loadGitContextConfig>;
+   gitRoot: string | null;
+}
+let sessionGitCache: SessionGitCache | null = null;
+let sessionGitCacheKey: string | null = null;
+
+export function shouldShowLowResultHint(): boolean {
+   if (searchLowResultHintShownThisSession) return false;
+   searchLowResultHintShownThisSession = true;
+   return true;
+}
 
 /**
  * Reset session state — for testing and explicit reload scenarios.
- * Clears the injected flag and repo map cache.
+ * Clears the injected flag, repo map cache, and session-scoped search hints.
  */
 export function resetSessionState(): void {
    repoMapInjectedThisSession = false;
+   searchLowResultHintShownThisSession = false;
    startupRepoMapCache.clear();
+   startupGitContextCache.clear();
 }
 
 /**
@@ -165,11 +192,38 @@ export function resetSessionState(): void {
  */
 export function registerSessionHooks(pi: ExtensionAPI): void {
    pi.on("session_start", (_event, ctx) => {
-      // Reset flag so map is injected fresh on any session start (new/resume/fork/reload)
-      repoMapInjectedThisSession = false;
+      resetSessionState();
       const key = computeRepoKey(ctx.cwd);
-      const promise = generateCompactMap(ctx.cwd).then((r) => r?.map ?? null);
-      startupRepoMapCache.set(key, promise);
+      const mapPromise = generateCompactMap(ctx.cwd).then((r) => r?.map ?? null);
+      const gitConfig = loadGitContextConfig(ctx.cwd);
+      const gitBudget = gitConfig.tokenBudget.gitLog + gitConfig.tokenBudget.coCommitHotspots;
+      const gitPromise = gitConfig.enabled ? buildStartupGitContext(ctx.cwd, gitBudget)
+         .then(async (result) => {
+            const gitRoot = result.coCommitPairs.length > 0 || result.branchCommits.length > 0
+               ? await findGitRootAsync(ctx.cwd)
+               : null;
+            if (gitRoot && result.coCommitPairs.length > 0) {
+               await autoPopulateEdgeStore(gitRoot, result.coCommitPairs);
+            }
+            if (!gitRoot || result.branchCommits.length === 0) {
+               return { contextString: result.contextString, notesString: null };
+            }
+
+            const notes = await scanBranchNotes(gitRoot, result.branchCommits, gitConfig.notesRefs);
+            const notesString = formatBranchNotes(notes, gitConfig.tokenBudget.gitNotes);
+            return {
+               contextString: result.contextString,
+               notesString: notesString || null,
+            };
+         })
+         .catch(() => null) : Promise.resolve(null);
+
+      startupRepoMapCache.set(key, mapPromise);
+      startupGitContextCache.set(key, gitPromise);
+
+      // Cache git config/root for file-read path to avoid repeated lookups
+      sessionGitCacheKey = key;
+      sessionGitCache = { gitConfig, gitRoot: gitConfig.enabled ? findGitRoot(ctx.cwd) : null };
    });
 
    pi.on("before_agent_start", async (event, ctx) => {
@@ -177,22 +231,43 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
       repoMapInjectedThisSession = true;
 
       const key = computeRepoKey(ctx.cwd);
-      const mapPromise = startupRepoMapCache.get(key) ?? Promise.resolve(null);
-      const map = await mapPromise;
-      if (!map) return;
+      const [map, gitCtx] = await Promise.all([
+         startupRepoMapCache.get(key) ?? Promise.resolve(null),
+         startupGitContextCache.get(key) ?? Promise.resolve(null),
+      ]);
+
+      if (!map && !gitCtx?.contextString && !gitCtx?.notesString) return;
 
       const systemPromptParts = Array.isArray((event as any).systemPrompt)
          ? (event as any).systemPrompt as string[]
          : [(event as any).systemPrompt as string];
-      return {
-         systemPrompt: [...systemPromptParts, "", "## Repository Map",
+
+      const additions: string[] = [...systemPromptParts];
+
+      if (map) {
+         additions.push("", "## Repository Map",
             "The following is a compact overview of this repository's structure:",
-            "", map],
+            "", map);
+      }
+
+      if (gitCtx?.contextString) {
+         additions.push("", gitCtx.contextString);
+      }
+
+      if (gitCtx?.notesString) {
+         additions.push("", gitCtx.notesString);
+      }
+
+      return {
+         systemPrompt: additions,
       } as any;
    });
 
    pi.on("session_shutdown", () => {
       repoMapInjectedThisSession = false;
+      searchLowResultHintShownThisSession = false;
+      sessionGitCache = null;
+      sessionGitCacheKey = null;
    });
 }
 
@@ -308,7 +383,38 @@ async function interceptContextualRead(
 
       // 2. Git recency
       if (await isRecentlyModified(cwd, fullPath)) {
-         contextLines.push("• Recently modified (last 7 days).");
+         contextLines.push("• Recently modified (last day).");
+      }
+
+      try {
+         // Use session cache if available for the same repo key, otherwise fall back to per-read calls
+         const repoKey = computeRepoKey(cwd);
+         let gitConfig: ReturnType<typeof loadGitContextConfig>;
+         let gitRoot: string | null;
+         if (sessionGitCacheKey === repoKey && sessionGitCache) {
+            gitConfig = sessionGitCache.gitConfig;
+            gitRoot = sessionGitCache.gitRoot;
+         } else {
+            gitConfig = loadGitContextConfig(cwd);
+            gitRoot = gitConfig.enabled ? await findGitRootAsync(cwd) : null;
+         }
+         if (gitRoot) {
+            const relPath = path.relative(gitRoot, fullPath);
+            const commits = await getFileCommitContext(gitRoot, relPath, gitConfig.readEnrichmentCommits);
+            if (commits.length > 0) {
+               contextLines.push("• Recent commits:");
+               for (const commit of commits) {
+                  contextLines.push(`  ${commit.hash} (${commit.relativeDate}) ${commit.subject}`);
+                  for (const trailer of commit.trailers) {
+                     if (gitConfig.showTrailerKeys.includes(trailer.key)) {
+                        contextLines.push(`    ${trailer.key}: ${trailer.value}`);
+                     }
+                  }
+               }
+            }
+         }
+      } catch {
+         // File commit context is best-effort
       }
 
       // 3. Graphify enrichment (uses graphify-out/graph.json when available).
@@ -348,6 +454,24 @@ async function interceptContextualRead(
       } catch {
          // Graphify enrichment is best-effort
       }
+      // 4. LSP enrichment: document outline + type hints
+      try {
+        const bridge = await getLSPBridge();
+        if (bridge && bridge.isAvailable()) {
+          const symbols = await bridge.getDocumentSymbols(fullPath, cwd);
+          if (symbols.length > 0) {
+            const topLevel = symbols.filter(
+              (s) => !s.children || s.children.length === 0 || s.name === s.name,
+            );
+            const shown = topLevel.slice(0, 10).map(
+              (s) => `${s.name}${s.children?.length ? ` (${s.children.length} members)` : ""}`,
+            );
+            contextLines.push(
+              `• LSP symbols: ${shown.join(", ")}${topLevel.length > 10 ? "…" : ""}`,
+            );
+          }
+        }
+      } catch { /* LSP enrichment is best-effort */ }
    } catch (err) {
       contextLines.push(`• Context unavailable: ${(err as Error).message}`);
    }

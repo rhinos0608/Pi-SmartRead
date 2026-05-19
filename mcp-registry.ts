@@ -1,120 +1,57 @@
 /**
  * MCP Tool Registry for Pi-SmartRead.
  *
- * Extracts tool construction from mcp-server.ts into a focused registry module
- * with consistent manifest entries (name, description, inputSchema, execute).
+ * Consumes from the central ToolRegistry and produces flat tool lists
+ * for the MCP stdio server. Keeps the MCP server itself free of
+ * registration logic.
  *
- * Borrows Rhythm Chamber's per-tool module convention while preserving
- * existing Pi extension-API tool factories.
+ * This module is the single point where all tools are registered with
+ * the central registry before being consumed by the MCP server or pi
+ * extension API.
  */
-import { cwd } from "node:process";
-import { createIntentReadTool } from "./intent-read.js";
-import { createReadManyTool } from "./read-many.js";
+import { ToolRegistry, ToolCategory } from "./tool-registry.js";
+import { registerFindSymbolTool } from "./find-symbol-tool.js";
+import { createUnifiedReadTool } from "./unified-read.js";
+import createSearchTool from "./search-tool.js";
+import { createRepoTool } from "./repomap-tool.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
-import { createDeepSearchTool, createSmartReadStatusTool } from "./deep-search.js";
-import registerRepoTools from "./repomap-tool.js";
-import type { ExtensionAPI, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { createGitNotesTools } from "./git-notes-tool.js";
+import { loadExperimentalConfig } from "./config.js";
+import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 
-// ── Types ──────────────────────────────────────────────────────────
+// ── Register all tools with the central registry ───────────────────
 
-export interface RegisteredTool {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  execute: ToolDefinition["execute"];
+// Explicitly initialize registry before calling registerFindSymbolTool()
+// (it depends on ToolRegistry.getInstance() being available)
+const registry = ToolRegistry.getInstance();
+
+registerFindSymbolTool();
+
+function reg(name: string, factory: () => ToolDefinition, category: ToolCategory, experimental = false): void {
+  const def = factory();
+  registry.register({ name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category, experimental });
 }
 
-// ── Registry Builder ───────────────────────────────────────────────
+reg("read", () => createUnifiedReadTool() as unknown as ToolDefinition, ToolCategory.READ);
+reg("search", () => createSearchTool() as unknown as ToolDefinition, ToolCategory.SEARCH);
+reg("repo_map", () => createRepoTool() as unknown as ToolDefinition, ToolCategory.MAP);
+
+const experimental = loadExperimentalConfig();
+if (experimental.graphMutate) {
+  reg("graph_mutate", () => createGraphMutateTool() as unknown as ToolDefinition, ToolCategory.MUTATE, true);
+}
+if (experimental.gitNotes) {
+  const notesTools = createGitNotesTools() as unknown as ToolDefinition[];
+  for (const def of notesTools) {
+    registry.register({ name: def.name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category: ToolCategory.NOTES, experimental: true });
+  }
+}
+
+// ── Build ──────────────────────────────────────────────────────────
 
 /**
- * Build and return the full MCP tool registry.
- *
- * Each entry has a consistent manifest shape:
- *   - name:        Tool name (used in tools/list and tools/call)
- *   - description: Human-readable description
- *   - inputSchema: JSON Schema object describing accepted parameters
- *   - execute:     Async function (toolCallId, params, signal, onUpdate, ctx) → result
+ * Build and return the full MCP tool list for the stdio server.
  */
-export function buildToolRegistry(): RegisteredTool[] {
-  const tools: RegisteredTool[] = [];
-
-  // Minimal extension API stub for Pi tool factories
-  const extensionCwd = cwd();
-
-  // ── Graph Mutate Tool ──────────────────────────────────────────
-  const graphMutateDef = createGraphMutateTool() as unknown as ToolDefinition;
-  tools.push({
-    name: graphMutateDef.name,
-    description: graphMutateDef.description,
-    inputSchema: graphMutateDef.parameters as Record<string, unknown>,
-    execute: graphMutateDef.execute,
-  });
-
-  // ── Intent Read Tool ───────────────────────────────────────────
-  const intentReadDef = createIntentReadTool() as unknown as ToolDefinition;
-  tools.push({
-    name: intentReadDef.name,
-    description: intentReadDef.description,
-    inputSchema: intentReadDef.parameters as Record<string, unknown>,
-    execute: intentReadDef.execute,
-  });
-
-  // ── Read Many Tool ─────────────────────────────────────────────
-  const readManyDef = createReadManyTool() as unknown as ToolDefinition;
-  tools.push({
-    name: readManyDef.name,
-    description: readManyDef.description,
-    inputSchema: readManyDef.parameters as Record<string, unknown>,
-    execute: readManyDef.execute,
-  });
-
-  // ── Deep Search Tools ─────────────────────────────────────────
-  const deepSearchDef = createDeepSearchTool() as unknown as ToolDefinition;
-  tools.push({
-    name: deepSearchDef.name,
-    description: deepSearchDef.description,
-    inputSchema: deepSearchDef.parameters as Record<string, unknown>,
-    execute: deepSearchDef.execute,
-  });
-
-  const statusDef = createSmartReadStatusTool() as unknown as ToolDefinition;
-  tools.push({
-    name: statusDef.name,
-    description: statusDef.description,
-    inputSchema: statusDef.parameters as Record<string, unknown>,
-    execute: statusDef.execute,
-  });
-
-  // ── Repo Tools (repo_map, search) ──────────────────────────────
-  const registeredRepoTools: Array<{
-    name: string;
-    description: string;
-    inputSchema: unknown;
-    execute: Function;
-  }> = [];
-  const mockPi: ExtensionAPI = {
-    registerTool(def: ToolDefinition) {
-      registeredRepoTools.push({
-        name: def.name,
-        description: def.description,
-        inputSchema: def.parameters as unknown,
-        execute: def.execute,
-      });
-    },
-    registerHook: (() => {}) as any,
-    getContext: (() => ({ cwd: extensionCwd })) as any,
-  } as unknown as ExtensionAPI;
-
-  registerRepoTools(mockPi);
-
-  for (const tool of registeredRepoTools) {
-    tools.push({
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.inputSchema as Record<string, unknown>,
-      execute: tool.execute as ToolDefinition["execute"],
-    });
-  }
-
-  return tools;
+export function buildToolRegistry(): ToolDefinition[] {
+  return ToolRegistry.getInstance().getToolDefinitions();
 }

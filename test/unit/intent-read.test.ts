@@ -107,7 +107,7 @@ describe("intent_read: ranking and output", () => {
 
     const fileA = details.files.find((f: any) => f.path === "/a");
     expect(fileA.included).toBe(true);
-    expect(fileA.rrfScore).toBeGreaterThan(0);
+    expect(fileA.fusedRelevance).toMatch(/^(exact|strong|related|weak)$/);
     expect(fileA.inclusion).toBe("full");
   });
 
@@ -224,7 +224,7 @@ describe("intent_read: ranking and output", () => {
     expect(details.effectiveTopK).toBe(0);
   });
 
-  it("includes per-file semanticRank, keywordRank, and rrfScore for successful files", async () => {
+  it("includes per-file ranks and relevance classifiers for successful files", async () => {
     const tool = createIntentReadTool(
       () => makeReadTool({ "/a": "authentication middleware" }) as any,
       makeEmbedder([[1, 0], [1, 0]]),
@@ -242,9 +242,13 @@ describe("intent_read: ranking and output", () => {
     const fileDetail = details.files[0];
     expect(typeof fileDetail.semanticRank).toBe("number");
     expect(typeof fileDetail.keywordRank).toBe("number");
-    expect(typeof fileDetail.rrfScore).toBe("number");
-    expect(typeof fileDetail.semanticScore).toBe("number");
-    expect(typeof fileDetail.keywordScore).toBe("number");
+    expect(typeof fileDetail.fusedRank).toBe("number");
+    expect(fileDetail.semanticRelevance).toMatch(/^(exact|strong|related|weak|none)$/);
+    expect(fileDetail.keywordRelevance).toMatch(/^(exact|strong|related|weak|none)$/);
+    expect(fileDetail.fusedRelevance).toMatch(/^(exact|strong|related|weak|none)$/);
+    expect(fileDetail.semanticScore).toBeUndefined();
+    expect(fileDetail.keywordScore).toBeUndefined();
+    expect(fileDetail.rrfScore).toBeUndefined();
   });
 
   it("includes embeddingStatus=ok and rankingSignals when embeddings succeed", async () => {
@@ -395,10 +399,13 @@ describe("intent_read: embedding failure fallback", () => {
     const details = result.details as any;
     const fileDetail = details.files[0];
     expect(fileDetail.keywordRank).toEqual(expect.any(Number));
-    expect(fileDetail.keywordScore).toEqual(expect.any(Number));
-    expect(fileDetail.rrfScore).toEqual(expect.any(Number));
+    expect(fileDetail.keywordRelevance).toMatch(/^(exact|strong|related|weak|none)$/);
+    expect(fileDetail.fusedRank).toEqual(expect.any(Number));
+    expect(fileDetail.fusedRelevance).toMatch(/^(exact|strong|related|weak|none)$/);
     expect(fileDetail.semanticRank).toBeUndefined();
-    expect(fileDetail.semanticScore).toBeUndefined();
+    expect(fileDetail.semanticRelevance).toBeUndefined();
+    expect(fileDetail.keywordScore).toBeUndefined();
+    expect(fileDetail.rrfScore).toBeUndefined();
   });
 
   it("falls back to BM25 when embedding returns wrong vector count", async () => {
@@ -469,7 +476,7 @@ describe("intent_read: embedding failure fallback", () => {
     const details = result.details as any;
     const fileA = details.files.find((f: any) => f.path === "/a");
     const fileB = details.files.find((f: any) => f.path === "/b");
-    expect(fileA.keywordScore).toBeGreaterThan(fileB.keywordScore);
+    expect(fileA.keywordRank).toBeLessThan(fileB.keywordRank);
   });
 });
 
@@ -640,7 +647,7 @@ describe("intent_read: graph-neighbour augmentation", () => {
 });
 
 describe("intent_read: Phase 2 ranking observability", () => {
-  it("includes chunkIndex, chunkScore, and rankedBy for successful files with embeddings", async () => {
+  it("includes chunkIndex, chunkRelevance, and rankedBy for successful files with embeddings", async () => {
     // 2 files × 1 chunk = 2 chunks → need query + 2 = 3 vectors
     const tool = createIntentReadTool(
       () => makeReadTool({ "/a": "auth logic", "/b": "db schema" }) as any,
@@ -661,7 +668,8 @@ describe("intent_read: Phase 2 ranking observability", () => {
     const fileB = details.files.find((f: any) => f.path === "/b");
 
     expect(fileA.chunkIndex).toBe(0);
-    expect(typeof fileA.chunkScore).toBe("number");
+    expect(fileA.chunkRelevance).toMatch(/^(exact|strong|related|weak|none)$/);
+    expect(fileA.chunkScore).toBeUndefined();
     expect(fileA.rankedBy).toBe("hybrid");
 
     // fileB got -Infinity semantic score, still hybrid (embeddings succeeded)
@@ -692,7 +700,7 @@ describe("intent_read: Phase 2 ranking observability", () => {
       const best = details.chunkInfo.bestChunkByFile[0];
       expect(typeof best.path).toBe("string");
       expect(typeof best.chunkIndex).toBe("number");
-      expect(typeof best.score).toBe("number");
+      expect(best.relevance).toMatch(/^(exact|strong|related|weak|none)$/);
       expect(typeof best.startChar).toBe("number");
       expect(typeof best.endChar).toBe("number");
       expect(typeof best.preview).toBe("string");

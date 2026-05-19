@@ -34,6 +34,13 @@ import { rerank, type RerankerInput } from "./rerank.js";
 import { chunkTextAst, type ChunkResult } from "./chunking.js";
 import { applyHyde, type HydeResult } from "./hyde.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
+import {
+  classifyConfidence,
+  classifyRelevanceByScore,
+  classifySimilarity,
+  type ConfidenceClass,
+  type RelevanceClass,
+} from "./classifiers.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -89,20 +96,29 @@ interface IntentReadFileDetail {
   ok: boolean;
   error?: string;
   semanticRank?: number;
-  semanticScore?: number;
+  semanticRelevance?: RelevanceClass;
   keywordRank?: number;
-  keywordScore?: number;
-  rrfScore?: number;
+  keywordRelevance?: RelevanceClass;
+  fusedRank?: number;
+  fusedRelevance?: RelevanceClass;
   selectedForPacking: boolean;
   included: boolean;
   inclusion: InclusionStatus;
   chunkIndex?: number;
-  chunkScore?: number;
+  chunkRelevance?: RelevanceClass;
   rankedBy: "bm25" | "hybrid";
   /** Graph distance from seed files (0 = seed, 1 = import, 2 = symbol neighbour). */
   graphDistance?: number;
-  /** Confidence from query probing (1.0 = direct symbol match). */
-  probeConfidence?: number;
+  /** Confidence from query probing, bucketed for public output. */
+  probeConfidence?: ConfidenceClass;
+}
+
+interface WorkingIntentReadFileDetail extends IntentReadFileDetail {
+  semanticScore?: number;
+  keywordScore?: number;
+  rrfScore?: number;
+  chunkScore?: number;
+  probeConfidenceScore?: number;
 }
 
 interface IntentReadDetails {
@@ -123,14 +139,14 @@ interface IntentReadDetails {
   astChunking?: { usedAst: boolean; wasmAvailable: boolean; parseTimeMs: number; symbolCount: number };
   embeddingCache: { hit: boolean; size: number; maxSize: number; persistent?: boolean; diskEntries?: number };
   filteredBelowThresholdPaths: string[];
-  graphAugmentation: { addedPaths: string[]; candidateCountBefore: number; candidateCountAfter: number; edgesUsed?: Array<{ from: string; to: string; type: string; confidence: number }> };
+  graphAugmentation: { addedPaths: string[]; candidateCountBefore: number; candidateCountAfter: number; edgesUsed?: Array<{ from: string; to: string; type: string; confidence: ConfidenceClass }> };
   chunkInfo?: {
     totalChunks: number;
     filesChunked: number;
     bestChunkByFile: {
       path: string;
       chunkIndex: number;
-      score: number;
+      relevance: RelevanceClass;
       startChar: number;
       endChar: number;
       preview: string;
@@ -538,7 +554,7 @@ export function createIntentReadTool(
       const erroredFiles = fileResults.filter((f) => !f.ok);
 
       // 5. Embed + score (skip if no successful files)
-      const fileDetails = new Map<string, Partial<IntentReadFileDetail>>();
+      const fileDetails = new Map<string, Partial<WorkingIntentReadFileDetail>>();
       for (const f of fileResults) {
         fileDetails.set(f.path, { path: f.path, ok: f.ok, error: f.error, rankedBy: "bm25" });
       }
@@ -552,7 +568,7 @@ export function createIntentReadTool(
       const bestChunkByFile: {
         path: string;
         chunkIndex: number;
-        score: number;
+        relevance: RelevanceClass;
         startChar: number;
         endChar: number;
         preview: string;
@@ -689,11 +705,12 @@ export function createIntentReadTool(
                 const fileDetail = fileDetails.get(path)!;
                 fileDetail.chunkIndex = bestChunkIndex;
                 fileDetail.chunkScore = maxScore;
+                fileDetail.chunkRelevance = classifySimilarity(maxScore);
                 const bestChunk = fileChunks[fi]![bestChunkIndex]!;
                 bestChunkByFile.push({
                   path,
                   chunkIndex: bestChunkIndex,
-                  score: maxScore,
+                  relevance: classifySimilarity(maxScore),
                   startChar: bestChunk.startChar,
                   endChar: bestChunk.endChar,
                   preview: (bestChunk.embeddingText ?? bestChunk.text).substring(0, 120),
@@ -728,14 +745,20 @@ export function createIntentReadTool(
           rrfRanks = computeRanks(rrfScores, paths);
         }
 
+        const maxKeywordScore = Math.max(...keywordScoresArr, 0);
+        const maxRrfScore = Math.max(...rrfScores, 0);
         for (let i = 0; i < successfulFiles.length; i++) {
           const base = fileDetails.get(paths[i]!)!;
           base.keywordRank = keywordRanks[i]!;
           base.keywordScore = keywordScoresArr[i];
+          base.keywordRelevance = classifyRelevanceByScore(base.keywordScore, maxKeywordScore);
           base.rrfScore = rrfScores[i];
+          base.fusedRank = rrfRanks[i]!;
+          base.fusedRelevance = classifyRelevanceByScore(base.rrfScore, maxRrfScore);
           if (embeddingStatus === "ok") {
             base.semanticRank = semanticRanks[i]!;
             base.semanticScore = semanticScores[i]!;
+            base.semanticRelevance = classifySimilarity(base.semanticScore);
             base.rankedBy = "hybrid";
           } else {
             base.rankedBy = "bm25" as "bm25";
@@ -747,7 +770,8 @@ export function createIntentReadTool(
           const detail = fileDetails.get(path)!;
           const normalized = normalizeCandidatePath(ctx.cwd, path);
           if (probeAddedSet.has(normalized)) {
-            detail.probeConfidence = 1.0;
+            detail.probeConfidenceScore = 1.0;
+            detail.probeConfidence = classifyConfidence(detail.probeConfidenceScore);
             detail.graphDistance = 0;
           } else if (graphDistanceMap.has(normalized)) {
             detail.graphDistance = graphDistanceMap.get(normalized);
@@ -787,7 +811,7 @@ export function createIntentReadTool(
                 keywordScore: detail.keywordScore ?? 0,
                 semanticScore: detail.semanticScore,
                 graphDistance: detail.graphDistance,
-                probeConfidence: detail.probeConfidence,
+                probeConfidence: detail.probeConfidenceScore,
                 temporalScore,
               };
             })
@@ -905,11 +929,23 @@ export function createIntentReadTool(
 
       const outputText = sections.join("\n\n");
 
-      // 7. Build details.files: successful files in RRF order, then errored files in input order
+      // 7. Build details.files: successful files in RRF order, then errored files in input order.
+      // Strip internal numeric scores; public output uses discrete classifiers.
+      const toPublicFileDetail = (detail: Partial<WorkingIntentReadFileDetail>): IntentReadFileDetail => {
+        const {
+          semanticScore: _semanticScore,
+          keywordScore: _keywordScore,
+          rrfScore: _rrfScore,
+          chunkScore: _chunkScore,
+          probeConfidenceScore: _probeConfidenceScore,
+          ...publicDetail
+        } = detail;
+        return publicDetail as IntentReadFileDetail;
+      };
       const allFileDetails: IntentReadFileDetail[] = [
-        ...rankedSuccessOrder.map((path: string) => fileDetails.get(path) as IntentReadFileDetail),
-        ...filteredBelowThresholdPaths.map((path: string) => fileDetails.get(path) as IntentReadFileDetail),
-        ...erroredFiles.map((f: FileReadResult) => fileDetails.get(f.path) as IntentReadFileDetail),
+        ...rankedSuccessOrder.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
+        ...filteredBelowThresholdPaths.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
+        ...erroredFiles.map((f: FileReadResult) => toPublicFileDetail(fileDetails.get(f.path)!)),
       ];
 
       const partialIncludedPath =
@@ -949,7 +985,12 @@ export function createIntentReadTool(
           addedPaths: addedGraphPaths,
           candidateCountBefore: candidateCountBeforeGraph,
           candidateCountAfter: resolvedFiles.length,
-          ...(graphEdges.length > 0 && { edgesUsed: graphEdges }),
+          ...(graphEdges.length > 0 && {
+            edgesUsed: graphEdges.map((edge) => ({
+              ...edge,
+              confidence: classifyConfidence(edge.confidence),
+            })),
+          }),
         },
         ...(probing && { probing }),
         ...(hydeResult.applied && { hyde: hydeResult }),

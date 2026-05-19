@@ -24,6 +24,8 @@ A caller provides a question such as `how does auth middleware work?` and receiv
 | `query` | string | required | 1-500 chars | Natural-language question or code symbol. |
 | `depth` | `quick \| standard \| thorough` | `standard` | enum | Controls orchestration cost and relationship enrichment. |
 | `scope` | `code \| docs \| tests \| all` | `all` | enum | Filters discovered files by content type. |
+| `directory` | string | working directory | path | Root directory to search. |
+| `folder` | string | working directory | path | Alias for `directory`. |
 | `limit` | number | `15` | 1-50 | Maximum fused matches to return. |
 | `maxSnippetChars` | number | `400` | 100-1000 | Maximum snippet length per match. |
 | `outputBudget` | number | `4096` | 1024-16384 | Approximate token budget for returned markdown. |

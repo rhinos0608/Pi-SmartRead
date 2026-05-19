@@ -1,13 +1,19 @@
-import { existsSync, readdirSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { validateEmbeddingConfig } from "./config.js";
 import { EdgeStore, findDirectImportNeighbours, isReadableWorkspaceFile } from "./context-graph.js";
 import { createIntentReadTool } from "./intent-read.js";
 import createSearchTool from "./search-tool.js";
 import { findSrcFiles } from "./file-discovery.js";
 import { computeRanks, tokenize } from "./scoring.js";
+import { RepoMap } from "./repomap.js";
+import {
+  classifyRelevance,
+  type RelevanceClass,
+  relevanceClassWeight,
+} from "./classifiers.js";
+import { getLSPBridge } from "./lsp-bridge.js";
 
 const DeepSearchSchema = Type.Object({
   query: Type.String({
@@ -30,6 +36,16 @@ const DeepSearchSchema = Type.Object({
       enum: ["code", "docs", "tests", "all"],
       description: "Content type filter",
       default: "all",
+    }),
+  ),
+  directory: Type.Optional(
+    Type.String({
+      description: "Root directory to search (default: extension working directory)",
+    }),
+  ),
+  folder: Type.Optional(
+    Type.String({
+      description: "Alias for directory. Root folder to search (default: extension working directory)",
     }),
   ),
   limit: Type.Optional(
@@ -82,28 +98,26 @@ const DeepSearchSchema = Type.Object({
   ),
 });
 
-const StatusSchema = Type.Object({
-  detail: Type.Optional(
-    Type.Unsafe<"summary" | "full">({
-      type: "string",
-      enum: ["summary", "full"],
-      default: "summary",
-    }),
-  ),
-});
-
 type DeepSearchInput = Static<typeof DeepSearchSchema>;
-type StatusInput = Static<typeof StatusSchema>;
 type DeepSearchDepth = "quick" | "standard" | "thorough";
 type DeepSearchScope = "code" | "docs" | "tests" | "all";
-type ChannelName = "semantic" | "structural" | "symbol" | "graph";
+type ChannelName = "semantic" | "structural" | "symbol" | "graph" | "lsp";
 
 interface ProvenanceSignal {
   channel: ChannelName;
   signal: string;
+  /** Internal numeric signal used only for ranking; public tool output uses strength. */
   rawScore: number;
   rank: number;
   /** Which query terms contributed to this provenance (populated for semantic channel). */
+  matchedTerms?: string[];
+}
+
+interface PublicProvenanceSignal {
+  channel: ChannelName;
+  signal: string;
+  strength: RelevanceClass;
+  rank: number;
   matchedTerms?: string[];
 }
 
@@ -126,8 +140,21 @@ interface DeepSearchMatch {
   name: string;
   kind: string;
   snippet: string;
+  /** Internal fused score used only for sorting; public tool output uses relevance. */
   score: number;
   provenance: ProvenanceSignal[];
+  callers?: Array<{ file: string; name: string }>;
+}
+
+interface PublicDeepSearchMatch {
+  handle: string;
+  file: string;
+  lines?: { start: number; end: number };
+  name: string;
+  kind: string;
+  snippet: string;
+  relevance: RelevanceClass;
+  provenance: PublicProvenanceSignal[];
   callers?: Array<{ file: string; name: string }>;
 }
 
@@ -154,6 +181,10 @@ interface DeepSearchDetails {
   coverage?: QueryTermCoverage[];
 }
 
+interface PublicDeepSearchDetails extends Omit<DeepSearchDetails, "matches"> {
+  matches: PublicDeepSearchMatch[];
+}
+
 const RRF_K = 60;
 const DEFAULT_LIMIT = 15;
 const DEFAULT_SNIPPET_CHARS = 400;
@@ -176,6 +207,110 @@ const IGNORED_DIRS = new Set([
   ".pi-smartread.embeddings.cache",
 ]);
 
+// ── LSP channel constants ────────────────────────────────────
+
+const LSP_SCORE_BOOST = 0.15;
+const MAX_LSP_RESULTS = 30;
+const MAX_HOVER_RESULTS = 3;
+
+// ── Escalation helpers ─────────────────────────────────────────
+
+const TEST_PATH_RE = /(^|\/|\\)(test|tests|__tests__|spec)(\/|$|\\)/;
+
+/**
+ * Check if deep_search should escalate to a compact repo_map.
+ * Triggers when 3+ query terms were not found AND (no structural matches
+ * exist OR all structural/symbol matches come from test files).
+ */
+function shouldEscalateToRepoMap(
+  coverage: QueryTermCoverage[] | undefined,
+  matches: DeepSearchMatch[],
+): boolean {
+  if (!coverage || coverage.length === 0) return false;
+
+  const notFoundCount = coverage.filter((c) => c.status === "not_found").length;
+  if (notFoundCount < 3) return false;
+
+  const structuralMatches = matches.filter((m) =>
+    m.provenance.some((p) => p.channel === "structural" || p.channel === "symbol" || p.channel === "lsp"),
+  );
+
+  return structuralMatches.length === 0 || structuralMatches.every((m) => TEST_PATH_RE.test(m.file));
+}
+
+/**
+ * Generate a compact repo-map summary for escalation fallback.
+ * Returns a short markdown snippet (~600 chars) summarizing the repo.
+ */
+async function getCompactRepoSummary(
+  cwd: string,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  if (signal?.aborted) return "";
+
+  try {
+    const rm = new RepoMap(cwd);
+    const result = await rm.getRepoMap({
+      mapTokens: 1200,
+      focusFiles: [],
+      priorityIdentifiers: [],
+      mentionedIdents: [],
+      mentionedFnames: [],
+      excludeUnranked: false,
+      forceRefresh: false,
+      useImportBased: false,
+      autoFallback: true,
+      compact: true,
+      verbose: false,
+    });
+
+    if (!result.map) return "";
+
+    const summary = result.map.length > 800
+      ? result.map.slice(0, 600).trimEnd() + "\n…"
+      : result.map;
+
+    return `\n## 🗺️ Repo Context (auto-escalated)\n${summary}\n`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Generate search guidelines for agents when escalation triggers.
+ * Based on context-mode's "think in code" and "search technical terms" principles.
+ */
+function generateSearchGuidelines(notFoundTerms: string[]): string {
+  const lines: string[] = [];
+
+  lines.push("### 🔍 Search Guidelines (auto-generated)");
+  lines.push("");
+  lines.push("Your query had limited matches. For better results:");
+  lines.push("");
+  lines.push("**1. Use specific technical terms, not concepts:**");
+  lines.push(`   - ❌ "${notFoundTerms.slice(0, 2).join('" or "') || 'entry point'}" (concept)`);
+  lines.push("   - ✅ `createDeepSearchTool` (exact symbol name)");
+  lines.push("   - ✅ `parseCodeCandidates` (function name)");
+  lines.push("   - ✅ `QueryTermCoverage` (interface/type name)");
+  lines.push("");
+  lines.push("**2. Think in code:**");
+  lines.push("   - Analyze/count/filter data → write code via `ctx_execute(language, code)`");
+  lines.push("   - Process files → `ctx_execute_file(path, language, code)`");
+  lines.push("   - Program the analysis, don't compute it mentally");
+  lines.push("");
+  lines.push("**3. Use repo_map for broad context:**");
+  lines.push("   - `repo_map(compact: true)` → single-line file summaries");
+  lines.push("   - `repo_map(focusFiles: [\"file.ts\"])` → personalized ranking");
+  lines.push("");
+  lines.push("**4. Multi-channel search:**");
+  lines.push("   - `search mode=symbols query=term` → find symbol definitions");
+  lines.push("   - `search mode=code query=term` → AST-aware code search");
+  lines.push("   - `search mode=resolve symbol=name` → resolve to definition");
+  lines.push("");
+
+  return lines.join("\n");
+}
+
 function clampInteger(value: number | undefined, min: number, max: number, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(min, Math.min(max, Math.trunc(value)));
@@ -187,6 +322,18 @@ function normalizeDepth(value: DeepSearchInput["depth"]): DeepSearchDepth {
 
 function normalizeScope(value: DeepSearchInput["scope"]): DeepSearchScope {
   return value === "code" || value === "docs" || value === "tests" || value === "all" ? value : "all";
+}
+
+function resolveDeepSearchRoot(params: DeepSearchInput, defaultCwd: string): string {
+  const directory = params.directory?.trim();
+  const folder = params.folder?.trim();
+
+  if (directory && folder && resolve(defaultCwd, directory) !== resolve(defaultCwd, folder)) {
+    throw new Error("Provide either directory or folder, not both");
+  }
+
+  const requested = directory ?? folder;
+  return requested ? resolve(defaultCwd, requested) : defaultCwd;
 }
 
 function toRelativePath(cwd: string, path: string): string {
@@ -256,6 +403,51 @@ function compilePathFilter(pattern: string | undefined): ((path: string) => bool
 function extensionOf(path: string): string {
   const match = /\.[^.\/]+$/.exec(path.toLowerCase());
   return match?.[0] ?? "";
+}
+
+// ── LSP helpers ─────────────────────────────────────────────
+
+/** LSP SymbolKind values (matching VS Code SymbolKind convention). */
+const LSP_SYMBOL_KINDS: Record<number, string> = {
+  1: "file",
+  2: "module",
+  3: "namespace",
+  4: "package",
+  5: "class",
+  6: "method",
+  7: "property",
+  8: "field",
+  9: "constructor",
+  10: "enum",
+  11: "interface",
+  12: "function",
+  13: "variable",
+  14: "constant",
+  15: "string",
+  16: "number",
+  17: "boolean",
+  18: "array",
+  19: "object",
+  20: "key",
+  21: "null",
+  22: "enumMember",
+  23: "struct",
+  24: "event",
+  25: "operator",
+  26: "typeParameter",
+};
+
+function lspKindToString(kind: number): string {
+  return LSP_SYMBOL_KINDS[kind] ?? "symbol";
+}
+
+/** Convert a file:// URI to an absolute filesystem path. */
+function uriToPath(uri: string): string {
+  const decoded = decodeURIComponent(uri);
+  if (decoded.startsWith("file://")) {
+    return decoded.slice(7); // strip "file://" prefix
+  }
+  return decoded;
 }
 
 async function discoverDocFiles(root: string, limit: number, signal?: AbortSignal): Promise<string[]> {
@@ -338,7 +530,7 @@ function parseCodeCandidates(text: string, channel: ChannelName): DeepSearchCand
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    const match = /^\s{2}(.+?):(\d+)-(\d+)\s+\[([^\]]+)]\s+(.+?)\s+score=([\d.-]+)/.exec(line);
+    const match = /^\s{2}(.+?):(\d+)-(\d+)\s+\[([^\]]+)]\s+(.+?)\s+relevance=(exact|strong|related|weak|none)\s+rank=(\d+)/.exec(line);
     if (!match) continue;
 
     const snippetLines: string[] = [];
@@ -348,14 +540,15 @@ function parseCodeCandidates(text: string, channel: ChannelName): DeepSearchCand
       snippetLines.push(snippetLine.replace(/^\s{4}/, ""));
     }
 
+    const rank = Number(match[7]) || candidates.length + 1;
     candidates.push({
       file: match[1]!,
       line: Number(match[2]),
       endLine: Number(match[3]),
       kind: match[4]!,
       name: match[5]!.trim(),
-      rawScore: Number(match[6]) || 0,
-      rank: candidates.length + 1,
+      rawScore: relevanceClassWeight(match[6] as RelevanceClass) + 1 / (RRF_K + rank),
+      rank,
       snippet: snippetLines.join("\n"),
       channel,
     });
@@ -396,25 +589,27 @@ function parseSemanticCandidates(cwd: string, result: unknown): DeepSearchCandid
       path?: unknown;
       ok?: unknown;
       included?: unknown;
-      rrfScore?: unknown;
-      keywordScore?: unknown;
-      semanticScore?: unknown;
-      chunkScore?: unknown;
+      fusedRelevance?: unknown;
+      keywordRelevance?: unknown;
+      semanticRelevance?: unknown;
+      chunkRelevance?: unknown;
       chunkIndex?: unknown;
     };
     if (item.ok !== true || item.included !== true || typeof item.path !== "string") continue;
-    const score = typeof item.rrfScore === "number" ? item.rrfScore : 0;
+    const relevance = typeof item.fusedRelevance === "string"
+      ? item.fusedRelevance as RelevanceClass
+      : "related";
     const rel = toRelativePath(cwd, item.path);
     candidates.push({
       file: rel,
       kind: "file",
       name: rel.split("/").pop() ?? rel,
-      rawScore: score,
+      rawScore: relevanceClassWeight(relevance),
       rank: candidates.length + 1,
       snippet: [
-        typeof item.semanticScore === "number" ? `semantic=${item.semanticScore.toFixed(3)}` : undefined,
-        typeof item.keywordScore === "number" ? `keyword=${item.keywordScore.toFixed(3)}` : undefined,
-        typeof item.chunkScore === "number" ? `chunk=${item.chunkScore.toFixed(3)}` : undefined,
+        typeof item.semanticRelevance === "string" ? `semantic=${item.semanticRelevance}` : undefined,
+        typeof item.keywordRelevance === "string" ? `keyword=${item.keywordRelevance}` : undefined,
+        typeof item.chunkRelevance === "string" ? `chunk=${item.chunkRelevance}` : undefined,
         typeof item.chunkIndex === "number" ? `best chunk #${item.chunkIndex}` : undefined,
       ]
         .filter(Boolean)
@@ -538,7 +733,7 @@ function generateFollowUps(
   const topFiles = [...new Set(matches.map((m) => m.file))].slice(0, 5);
   if (topFiles.length > 0) {
     lines.push(
-      `- Read full files: \`read_multiple_files\` [${topFiles.join(", ")}]`,
+      `- Read full files: \`read mode=multiple\` with files: [${topFiles.join(", ")}]`,
     );
   }
 
@@ -655,7 +850,7 @@ function formatMatch(match: DeepSearchMatch): string[] {
 
   const output = [
     `### ${match.file}`,
-    `- **${match.name}** (${matchLines}) — \`score: ${match.score.toFixed(2)}\` — ${signals}`,
+    `- **${match.name}** (${matchLines}) — \`relevance: ${classifyRelevance(match.score)}\` — ${signals}`,
   ];
   if (matchedTerms.length > 0) {
     output.push(`  matched: ${matchedTerms.join(", ")}`);
@@ -678,7 +873,7 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
 
   // Split matches: exact have structural or symbol provenance, semantic-only don't
   const exactMatches = details.matches.filter((m) =>
-    m.provenance.some((p) => p.channel === "structural" || p.channel === "symbol"),
+    m.provenance.some((p) => p.channel === "structural" || p.channel === "symbol" || p.channel === "lsp"),
   );
   const semanticOnlyMatches = details.matches.filter(
     (m) => !exactMatches.includes(m),
@@ -759,7 +954,7 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
     const topFiles = [...new Set(details.matches.map((m) => m.file))].slice(0, 5);
     const topSymbol = details.matches.find((m) => m.kind !== "file")?.name;
     if (topFiles.length > 0) {
-      lines.push(`- Read full files: \`read_multiple_files\` [${topFiles.join(", ")}]`);
+      lines.push(`- Read full files: \`read mode=multiple\` with files: [${topFiles.join(", ")}]`);
     }
     if (topSymbol) {
       lines.push(`- Resolve symbol: \`search\` mode=resolve symbol=${topSymbol}`);
@@ -768,6 +963,29 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
   }
 
   return truncate(lines.join("\n"), maxOutputChars);
+}
+
+function toPublicDeepSearchDetails(details: DeepSearchDetails): PublicDeepSearchDetails {
+  return {
+    ...details,
+    matches: details.matches.map((match) => ({
+      handle: match.handle,
+      file: match.file,
+      ...(match.lines && { lines: match.lines }),
+      name: match.name,
+      kind: match.kind,
+      snippet: match.snippet,
+      relevance: classifyRelevance(match.score),
+      provenance: match.provenance.map((signal) => ({
+        channel: signal.channel,
+        signal: signal.signal,
+        strength: classifyRelevance(Math.min(1, Math.max(0, signal.rawScore))),
+        rank: signal.rank,
+        ...(signal.matchedTerms && { matchedTerms: signal.matchedTerms }),
+      })),
+      ...(match.callers && { callers: match.callers }),
+    })),
+  };
 }
 
 function callerDetails(result: unknown): Array<{ file: string; name: string }> {
@@ -964,12 +1182,91 @@ async function runGraphChannel(
   return candidates;
 }
 
+/**
+ * Run the LSP workspace/symbol retrieval channel.
+ * Best-effort: returns empty array on any failure.
+ */
+async function runLSPChannel(
+  query: string,
+  cwd: string,
+  depth: DeepSearchDepth,
+  maxResults: number,
+  signal: AbortSignal | undefined,
+): Promise<DeepSearchCandidate[]> {
+  if (signal?.aborted) return [];
+  if (query.length <= 2) return [];
+
+  const bridge = await getLSPBridge();
+  if (signal?.aborted) return [];
+  if (!bridge?.isAvailable()) return [];
+
+  let symbols: import("./lsp-bridge.js").LSPWorkspaceSymbol[];
+  try {
+    symbols = await bridge.workspaceSymbol(query, cwd);
+  } catch {
+    return [];
+  }
+
+  if (signal?.aborted || !Array.isArray(symbols) || symbols.length === 0) return [];
+
+  const limit = depth === "thorough" ? Math.min(maxResults * 2, MAX_LSP_RESULTS) : maxResults;
+  const candidates: DeepSearchCandidate[] = [];
+
+  for (let i = 0; i < Math.min(symbols.length, limit); i++) {
+    const sym = symbols[i]!;
+    if (!sym?.name || !sym?.location?.uri) continue;
+
+    const filePath = uriToPath(sym.location.uri);
+    const rel = toRelativePath(cwd, filePath);
+    if (!rel) continue;
+
+    candidates.push({
+      file: rel,
+      line: sym.location.range.start.line + 1,
+      endLine: sym.location.range.end.line + 1,
+      name: sym.name,
+      kind: lspKindToString(sym.kind),
+      rawScore: 1 + LSP_SCORE_BOOST,
+      rank: candidates.length + 1,
+      snippet: "",
+      channel: "lsp",
+    });
+  }
+
+  // For thorough depth, fetch hover info for the first few results
+  // to enrich snippets with type/signature information.
+  if (depth === "thorough" && candidates.length > 0) {
+    const hoverLimit = Math.min(MAX_HOVER_RESULTS, candidates.length);
+    for (let i = 0; i < hoverLimit; i++) {
+      if (signal?.aborted) break;
+      const candidate = candidates[i];
+      if (!candidate || candidate.line === undefined) continue;
+      try {
+        const absPath = resolve(cwd, candidate.file);
+        const hoverResult = await bridge.hover(absPath, candidate.line - 1, 0, cwd);
+        if (hoverResult) {
+          const hoverText = typeof hoverResult.contents === "string"
+            ? hoverResult.contents
+            : Array.isArray(hoverResult.contents)
+              ? hoverResult.contents.map((c) => typeof c === "string" ? c : c.value).join("\n")
+              : "value" in hoverResult.contents ? hoverResult.contents.value : "";
+          if (hoverText) {
+            candidate.snippet = hoverText.slice(0, 200);
+          }
+        }
+      } catch { /* best effort */ }
+    }
+  }
+
+  return candidates;
+}
+
 export function createDeepSearchTool(): ToolDefinition {
   return {
     name: "deep_search",
     label: "deep_search",
     description:
-      "Agentic deep repository search. Orchestrates structural code search, symbol search, optional intent_read semantic ranking, graph expansion, RRF fusion, provenance, and follow-up suggestions in one call.",
+      "Agentic deep repository search. Orchestrates structural code search, symbol search, LSP workspace symbol search, optional intent_read semantic ranking, graph expansion, RRF fusion, provenance, and follow-up suggestions in one call. Use directory/folder to search a specific root.",
     parameters: DeepSearchSchema,
 
     async execute(
@@ -990,7 +1287,7 @@ export function createDeepSearchTool(): ToolDefinition {
       const outputBudget = clampInteger(params.outputBudget, 1_024, 16_384, DEFAULT_OUTPUT_BUDGET);
       const includeRelationships = params.includeRelationships ?? depth === "thorough";
       const focusFiles = (params.focusFiles ?? []).map((file) => file.replace(/\\/g, "/"));
-      const cwd = ctx.cwd;
+      const cwd = resolveDeepSearchRoot(params, ctx.cwd);
       const degraded: string[] = [];
 
       const discoveredFiles = await discoverCandidateFiles(cwd, scope, params.filePattern, signal);
@@ -1030,8 +1327,20 @@ export function createDeepSearchTool(): ToolDefinition {
         }
       })();
 
-      // Wait for phases 1 and 2
-      await Promise.all([phase1Promise, phase2Promise]);
+      // LSP workspace/symbol channel in parallel — independent of file discovery
+      // Best-effort: wraps in try/catch internally
+      const lspPromise = (async () => {
+        if (query.length > 2) {
+          try {
+            channelResults.push(...await runLSPChannel(query, cwd, depth, maxChannelResults, signal));
+          } catch (error) {
+            degraded.push(`lsp channel failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      })();
+
+      // Wait for phases 1, 2, and LSP
+      await Promise.all([phase1Promise, phase2Promise, lspPromise]);
 
       // Phase 3: graph channel (needs seeds from phase 1 results)
       if (depth !== "quick" && scope !== "docs" && channelResults.length > 0) {
@@ -1059,7 +1368,7 @@ export function createDeepSearchTool(): ToolDefinition {
         .filter((candidate) => candidatePathFilter.size === 0 || candidatePathFilter.has(candidate.file))
         .filter((candidate) => pathMatchesScope(candidate.file, scope));
 
-      for (const channel of ["semantic", "structural", "symbol", "graph"] as const) {
+      for (const channel of ["semantic", "structural", "symbol", "graph", "lsp"] as const) {
         const candidates = filteredCandidates.filter((candidate) => candidate.channel === channel);
         const ranks = computeRanks(candidates.map((candidate) => candidate.rawScore), candidates.map((candidate) => candidate.file));
         candidates.forEach((candidate, index) => {
@@ -1093,87 +1402,35 @@ export function createDeepSearchTool(): ToolDefinition {
         ...(coverage && { coverage }),
       };
 
-      return {
-        content: [{ type: "text" as const, text: renderMarkdown(details, outputBudget * 4) }],
-        details,
-      };
-    },
-  } as unknown as ToolDefinition;
-}
+      // Escalation: prepend compact repo-map + guidelines when query had poor coverage
+      // and all structural matches came from test files (or there were no structural matches)
+      const escalate = shouldEscalateToRepoMap(coverage, matches);
+      let rendered = renderMarkdown(details, outputBudget * 4);
 
-function countCacheEntries(root: string, dirname: string): number | undefined {
-  const dir = join(root, dirname);
-  if (!existsSync(dir)) return undefined;
-  try {
-    return readdirSync(dir).length;
-  } catch {
-    return undefined;
-  }
-}
-
-export function createSmartReadStatusTool(): ToolDefinition {
-  return {
-    name: "smartread_status",
-    label: "smartread_status",
-    description:
-      "Lightweight Pi-SmartRead health check. Reports embedding configuration, source-file discovery, and cache directory status before expensive searches.",
-    parameters: StatusSchema,
-
-    async execute(
-      _toolCallId: string,
-      params: StatusInput,
-      signal: AbortSignal | undefined,
-      _onUpdate: unknown,
-      ctx: ExtensionContext,
-    ) {
-      const detail = params.detail === "full" ? "full" : "summary";
-      const sourceFiles = await findSrcFiles(ctx.cwd, MAX_DISCOVERY_FILES, signal);
-      let embeddingStatus = "ok";
-      let embeddingModel = "";
-      try {
-        const config = validateEmbeddingConfig(ctx.cwd);
-        if (config) {
-          embeddingStatus = "ok";
-          embeddingModel = config.model;
-        } else {
-          embeddingStatus = "missing config (baseUrl/model not set) — BM25-only mode";
+      if (escalate) {
+        // Append repo-map summary
+        const repoSummary = await getCompactRepoSummary(cwd, signal);
+        if (repoSummary) {
+          rendered = rendered + "\n" + repoSummary;
         }
-      } catch (error) {
-        embeddingStatus = `error (${error instanceof Error ? error.message : String(error)})`;
-      }
 
-      const tagsCacheEntries = countCacheEntries(ctx.cwd, ".pi-smartread.tags.cache");
-      const embeddingCacheEntries = countCacheEntries(ctx.cwd, ".pi-smartread.embeddings.cache");
-      const lines = [
-        "# SmartRead Status",
-        "",
-        `- CWD: ${ctx.cwd}`,
-        `- Source files discovered: ${sourceFiles.length}${sourceFiles.length >= MAX_DISCOVERY_FILES ? "+" : ""}`,
-        `- Embeddings: ${embeddingStatus}${embeddingModel ? ` (${embeddingModel})` : ""}`,
-        `- Tags cache entries: ${tagsCacheEntries ?? "not present"}`,
-        `- Embedding cache entries: ${embeddingCacheEntries ?? "not present"}`,
-      ];
+        // Append search guidelines
+        if (coverage) {
+          const notFoundTerms = coverage
+            .filter((c) => c.status === "not_found")
+            .map((c) => c.term);
+          if (notFoundTerms.length > 0) {
+            rendered = rendered + "\n" + generateSearchGuidelines(notFoundTerms) + "\n";
+          }
+        }
 
-      if (detail === "full") {
-        lines.push("", "## Registered deep-search support", "");
-        lines.push("- deep_search: orchestrates search + optional intent_read + graph channels");
-        lines.push("- smartread_status: this health check");
-        lines.push("- Existing primitives remain available for drill-down: search, intent_read, repo_map, read_multiple_files");
+        // Enforce outputBudget on the combined content
+        rendered = renderMarkdown({ ...details, matches: [], coverage: undefined }, outputBudget);
       }
 
       return {
-        content: [{ type: "text" as const, text: lines.join("\n") }],
-        details: {
-          cwd: ctx.cwd,
-          detail,
-          sourceFileCount: sourceFiles.length,
-          embeddingStatus,
-          embeddingModel: embeddingModel || undefined,
-          caches: {
-            tags: tagsCacheEntries,
-            embeddings: embeddingCacheEntries,
-          },
-        },
+        content: [{ type: "text" as const, text: rendered }],
+        details: toPublicDeepSearchDetails(details),
       };
     },
   } as unknown as ToolDefinition;

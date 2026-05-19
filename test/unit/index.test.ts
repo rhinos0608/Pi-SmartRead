@@ -29,13 +29,12 @@ describe("index extension wiring", () => {
 
     const names = registered.map((t) => t.name);
     expect(names).toContain("read");
-    expect(names).toContain("read_multiple_files");
-    expect(names).toContain("intent_read");
-    expect(names).toContain("deep_search");
-    expect(names).toContain("smartread_status");
-    expect(names).toContain("repo_map");
     expect(names).toContain("search");
-    expect(names).toContain("graph_mutate");
+    expect(names).toContain("repo_map");
+    expect(names).toContain("find_symbol");
+    // graph_mutate and git_notes are experimental — disabled by default
+    expect(names).not.toContain("graph_mutate");
+    expect(names).not.toContain("git_notes");
     expect(registered.every((t) => typeof t.execute === "function")).toBe(true);
 
     // Should also register session hooks

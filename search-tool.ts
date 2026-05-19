@@ -1,110 +1,134 @@
 /**
  * Consolidated search tool.
  *
- * Replaces three separate tools (search_symbols, find_callers, resolve_symbol)
- * with a single polymorphic `search` tool supporting 4 modes:
+ * Modes:
+ *   - (default)   AST-aware grep — finds definitions whose names match the query.
+ *                  No embeddings, no BM25. Fast, simple, based on tree-sitter.
+ *   - code        AST-aware search + BM25 scoring + optional embedding re-rank
+ *                  + symbol resolution enrichment. Supersedes old symbols/callers/resolve.
+ *   - deep        Full multi-channel orchestration: code + symbols + semantic + graph.
  *
- *   - symbols:  fuzzy/substring symbol search
- *   - callers:  find all callers of a function
- *   - resolve:  resolve a symbol to its definition + references
- *   - code:     AST-aware + semantically ranked code definition search
- *
- * Enrichment (controlled by an `enrich` flag + pi-smartread.config.json):
- * when enabled, each mode cross-references results with other modes.
+ * Modes "symbols", "callers", and "resolve" are removed. Their functionality is
+ * available through the default grep mode (symbol search) and code mode (enrichment
+ * auto-resolves top symbols and shows callers).
  */
 import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
-import type {
-  ExtensionContext,
-  ToolDefinition,
-} from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import Parser, { Query } from "tree-sitter";
-import { RepoMap, type SearchResult } from "./repomap.js";
 import { resolveSymbol } from "./symbol-resolver.js";
 import { findCallers } from "./callgraph.js";
 import { loadLanguage, getQueryPath } from "./tags.js";
 import { findSrcFiles } from "./file-discovery.js";
+import { shouldShowLowResultHint } from "./hook.js";
 import { filenameToLang } from "./languages.js";
-import { loadSearchConfig, type SearchConfig } from "./config.js";
+import { loadSearchConfig } from "./config.js";
 import { bm25Scores, computeRrfScores } from "./scoring.js";
 import { fetchEmbeddings } from "./embedding.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
+import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
+import { createDeepSearchTool } from "./deep-search.js";
+import { getLSPBridge } from "./lsp-bridge.js";
 
 // ── Schema ────────────────────────────────────────────────────────
 
 const SearchSchema = Type.Object({
-  mode: Type.Unsafe<"symbols" | "callers" | "resolve" | "code">({
-    type: "string",
-    enum: ["symbols", "callers", "resolve", "code"],
-  }),
+  mode: Type.Optional(
+    Type.Unsafe<"grep" | "code" | "deep">({
+      type: "string",
+      enum: ["grep", "code", "deep"],
+      description:
+        "Search mode. Default 'grep': AST-aware definition search (fast, no embeddings). 'code': BM25 + optional embedding re-rank with symbol resolution. 'deep': multi-channel orchestration.",
+      default: "grep",
+    }),
+  ),
   query: Type.Optional(
     Type.String({
-      description:
-        "Identifier name, code pattern, or search query depending on mode",
+      description: "Identifier name, code pattern, or search query",
       minLength: 1,
-    }),
-  ),
-  function: Type.Optional(
-    Type.String({
-      description:
-        "Function name to find callers for (e.g., 'getConfig', 'createUser')",
-      minLength: 1,
-    }),
-  ),
-  symbol: Type.Optional(
-    Type.String({
-      description: "The symbol name to resolve (e.g., 'User', 'createUser')",
-      minLength: 1,
-    }),
-  ),
-  context: Type.Optional(
-    Type.String({
-      description:
-        "Context location in format 'file.ts:42'. Helps disambiguate which definition to pick when the symbol is defined in multiple files.",
     }),
   ),
   enrich: Type.Optional(
     Type.Boolean({
-      description:
-        "Auto-enable cross-mode enrichment where supported (default: true)",
+      description: "Enrich code mode results with symbol resolution and caller info (default: true)",
     }),
   ),
   directory: Type.Optional(
     Type.String({
-      description:
-        "Root directory to search (default: extension working directory)",
+      description: "Root directory to search (default: extension working directory)",
+    }),
+  ),
+  folder: Type.Optional(
+    Type.String({
+      description: "Alias for directory. Root folder to search (default: extension working directory)",
     }),
   ),
   maxResults: Type.Optional(
     Type.Number({
-      description: "Maximum results to return",
+      description: "Maximum results to return (1-500)",
       minimum: 1,
       maximum: 500,
     }),
   ),
-  includeDefinitions: Type.Optional(
-    Type.Boolean({
-      description: "Include definition matches (default: true)",
-    }),
-  ),
-  includeReferences: Type.Optional(
-    Type.Boolean({
-      description: "Include reference matches (default: true)",
-    }),
-  ),
   filePattern: Type.Optional(
     Type.String({
-      description:
-        "Glob filter to restrict files (e.g. '*.ts'). Default: all supported source files.",
+      description: "Glob filter to restrict files (e.g. '*.ts'). Default: all supported source files.",
+    }),
+  ),
+  // ── deep mode params ──
+  depth: Type.Optional(
+    Type.Unsafe<"quick" | "standard" | "thorough">({
+      type: "string",
+      enum: ["quick", "standard", "thorough"],
+      description: "Search depth for mode=deep",
+      default: "standard",
+    }),
+  ),
+  scope: Type.Optional(
+    Type.Unsafe<"code" | "docs" | "tests" | "all">({
+      type: "string",
+      enum: ["code", "docs", "tests", "all"],
+      description: "Content type filter for mode=deep",
+      default: "all",
+    }),
+  ),
+  maxSnippetChars: Type.Optional(
+    Type.Number({
+      description: "Max characters per code snippet for mode=deep (100-1000)",
+      minimum: 100,
+      maximum: 1000,
+    }),
+  ),
+  outputBudget: Type.Optional(
+    Type.Number({
+      description: "Approximate output token budget for mode=deep (1k-16k)",
+      minimum: 1024,
+      maximum: 16384,
+    }),
+  ),
+  includeRelationships: Type.Optional(
+    Type.Boolean({
+      description: "Include caller/callee/import hints for top matches in mode=deep",
+    }),
+  ),
+  focusFiles: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Personalize ranking toward these files (like repo_map focusFiles)",
+      maxItems: 20,
+    }),
+  ),
+  rerank: Type.Optional(
+    Type.Boolean({
+      description: "Run optional reranker on top candidates in mode=deep",
     }),
   ),
 });
 
 type SearchInput = Static<typeof SearchSchema>;
 
-// ── Code-definition extraction for mode: "code" ───────────────────
+// ── Code-definition extraction ────────────────────────────────────
 
 interface CodeDefinition {
   file: string;
@@ -114,17 +138,10 @@ interface CodeDefinition {
   name: string;
   kind: string;
   body: string;
-  /** BM25 score against the query (populated after scoring). */
   score: number;
-  /** Embedding cosine similarity (populated after embedding). */
   similarity?: number;
 }
 
-/**
- * Extract all top-level definitions from a source file using tree-sitter.
- * Returns function, class, method, interface, and type alias definitions
- * with their full body text and AST metadata.
- */
 async function extractCodeDefinitions(
   filePath: string,
   relFile: string,
@@ -144,15 +161,10 @@ async function extractCodeDefinitions(
 
   const parser = new Parser();
   parser.setLanguage(grammar);
-  // Use chunked callback to avoid "Invalid argument" on large files (>30KB).
-  // The native tree-sitter binding's default buffer overflows with the default string callback
-  // which returns the entire rest of the string on each invocation. Chunking to 1KB per
-  // call prevents the overflow while keeping overhead negligible.
   const CHUNK_SIZE = 1024;
   const tree = parser.parse((offset) => code.slice(offset, offset + CHUNK_SIZE));
   if (!tree?.rootNode) return [];
 
-  // Load the tag query for this language to find definition nodes
   const queryPath = getQueryPath(lang);
   if (!queryPath || !existsSync(queryPath)) return [];
 
@@ -178,19 +190,16 @@ async function extractCodeDefinitions(
         name = capture.node.text;
       } else if (capture.name.startsWith("definition")) {
         defNode = capture.node;
-        // Derive a readable kind from the capture name (e.g. "definition.function" → "function")
         defKind = capture.name.replace(/^definition\.?/, "") || "definition";
       }
     }
 
     if (!name || !defNode) continue;
 
-    // Deduplicate by file + start position
     const key = `${relFile}:${defNode.startPosition.row}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
-    // Skip very small captures (likely partial matches)
     const text = defNode.text.trim();
     if (text.length < 8) continue;
 
@@ -211,10 +220,6 @@ async function extractCodeDefinitions(
 
 // ── BM25 + optional embedding scoring ─────────────────────────────
 
-/**
- * Score an array of code definitions against a query using BM25,
- * then optionally re-rank with embeddings + RRF fusion.
- */
 async function scoreDefinitions(
   defs: CodeDefinition[],
   query: string,
@@ -223,25 +228,21 @@ async function scoreDefinitions(
 ): Promise<CodeDefinition[]> {
   if (defs.length === 0) return [];
 
-  // 1. BM25 scoring (takes query string + document string array)
   const bm25 = bm25Scores(query, defs.map((d) => d.body));
   for (let i = 0; i < defs.length; i++) {
     defs[i]!.score = bm25[i] ?? 0;
   }
 
-  // 3. Try embedding re-rank if config available
   try {
     const { validateEmbeddingConfig } = await import("./config.js");
     const embeddingConfig = validateEmbeddingConfig(cwd);
 
     if (!embeddingConfig) {
-      // Config missing — BM25-only results are fine
       return defs.sort((a, b) => b.score - a.score);
     }
 
     if (signal?.aborted) throw new Error("Operation aborted");
 
-    // Chunk bodies for embedding (truncate long bodies)
     const embedTexts = defs.map((d) =>
       d.body.length > 2048 ? d.body.slice(0, 2048) : d.body,
     );
@@ -258,9 +259,7 @@ async function scoreDefinitions(
       const queryVec = vectors[0]!;
       for (let i = 0; i < defs.length; i++) {
         const docVec = vectors[i + 1]!;
-        let dot = 0,
-          qMag = 0,
-          dMag = 0;
+        let dot = 0, qMag = 0, dMag = 0;
         for (let j = 0; j < queryVec.length; j++) {
           const qv = queryVec[j] ?? 0;
           const dv = docVec[j] ?? 0;
@@ -268,12 +267,9 @@ async function scoreDefinitions(
           qMag += qv * qv;
           dMag += dv * dv;
         }
-        defs[i]!.similarity =
-          qMag > 0 && dMag > 0 ? dot / (Math.sqrt(qMag) * Math.sqrt(dMag)) : 0;
+        defs[i]!.similarity = qMag > 0 && dMag > 0 ? dot / (Math.sqrt(qMag) * Math.sqrt(dMag)) : 0;
       }
 
-      // 4. RRF fusion of BM25 and embedding scores
-      // computeRrfScores expects 1-based rank arrays (best = rank 1)
       const withBm25 = defs.map((d, i) => ({ i, score: d.score }))
         .sort((a, b) => b.score - a.score);
       const bm25Ranks: number[] = [];
@@ -286,7 +282,6 @@ async function scoreDefinitions(
       for (let i = 0; i < defs.length; i++) simRanks[withSim[i]!.i] = i + 1;
 
       const rrfScores = computeRrfScores(simRanks, bm25Ranks);
-
       for (let i = 0; i < defs.length; i++) {
         defs[i]!.score = rrfScores[i] ?? 0;
       }
@@ -295,404 +290,177 @@ async function scoreDefinitions(
     // Embedding not available — BM25-only results are fine
   }
 
-  // Sort by score descending
   return defs.sort((a, b) => b.score - a.score);
 }
 
-// ── Enrichment helpers ────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────
 
-function shouldEnrich(
-  mode: string,
-  enrichFlag: boolean | undefined,
-  config: SearchConfig,
-): boolean {
-  if (!enrichFlag) return false;
-  const modeEnrich = config.enrich?.[mode as keyof NonNullable<SearchConfig["enrich"]>];
-  if (modeEnrich === undefined) return true; // default: on
-  // Check if any enrichment type is enabled
-  return modeEnrich.callers !== false || modeEnrich.resolution !== false || modeEnrich.symbols !== false;
+function lspSymbolKindToString(kind: number): string {
+  // LSP SymbolKind enum: 1=File,2=Module,3=Namespace,4=Package,5=Class,
+  // 6=Method,7=Property,8=Field,9=Constructor,10=Enum,11=Interface,
+  // 12=Function,13=Variable,14=Constant,15=String,16=Number,17=Boolean,18=Array,
+  // 19=Object,20=Key,21=Null,22=EnumMember,23=Struct,24=Event,25=Operator,26=TypeParameter
+  switch (kind) {
+    case 5: return "class";
+    case 6: return "method";
+    case 7: case 8: return "property";
+    case 9: return "constructor";
+    case 10: return "enum";
+    case 11: return "interface";
+    case 12: return "function";
+    case 13: case 14: return "variable";
+    case 22: return "enum-member";
+    case 23: return "struct";
+    case 24: return "event";
+    default: return "symbol";
+  }
 }
 
-// ── Tool definition ───────────────────────────────────────────────
+function resolveSearchRoot(params: SearchInput, defaultCwd: string): string {
+  const directory = params.directory?.trim();
+  const folder = params.folder?.trim();
 
-/**
- * Create the consolidated `search` tool.
- * The `pi` parameter is optional — when provided, the tool registers itself.
- */
-export default function createSearchTool(): ToolDefinition {
-  const repoMapInstances = new Map<string, RepoMap>();
-
-  function getRepoMap(cwd: string): RepoMap {
-    let instance = repoMapInstances.get(cwd);
-    if (!instance) {
-      instance = new RepoMap(cwd);
-      repoMapInstances.set(cwd, instance);
-    }
-    return instance;
+  if (directory && folder && resolve(defaultCwd, directory) !== resolve(defaultCwd, folder)) {
+    throw new Error("Provide either directory or folder, not both");
   }
 
-  return {
-    name: "search",
-    label: "search",
-    description: `Search for symbols, resolve a symbol to its definition and references, find callers of a function, or search code by pattern. Supports 4 modes: "symbols" (fuzzy symbol search), "resolve" (exact symbol → def + refs), "callers" (function call graph), "code" (AST-aware code definition search with BM25 + optional embedding re-rank). Set enrich=false to disable cross-mode enrichment (default: true).`,
-    parameters: SearchSchema,
-
-    async execute(
-      _toolCallId: string,
-      params: SearchInput,
-      signal: AbortSignal | undefined,
-      _onUpdate: unknown,
-      ctx: ExtensionContext,
-    ) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-
-      const mode = params.mode;
-      const cwd = (params as any).directory ?? ctx.cwd;
-      const config = loadSearchConfig(cwd);
-      const enrich = shouldEnrich(mode, (params as any).enrich ?? true, config);
-
-      switch (mode) {
-        case "symbols":
-          if (typeof params.query !== "string" || !params.query.trim()) {
-            throw new Error('search mode "symbols" requires a non-empty "query"');
-          }
-          return handleSymbols(
-            params as SearchInput & { mode: "symbols"; query: string },
-            cwd,
-            signal,
-            getRepoMap,
-            enrich,
-            config,
-          );
-        case "callers":
-          if (typeof params.function !== "string" || !params.function.trim()) {
-            throw new Error('search mode "callers" requires a non-empty "function"');
-          }
-          return handleCallers(
-            params as SearchInput & { mode: "callers"; function: string },
-            cwd,
-            signal,
-            enrich,
-            config,
-          );
-        case "resolve":
-          if (typeof params.symbol !== "string" || !params.symbol.trim()) {
-            throw new Error('search mode "resolve" requires a non-empty "symbol"');
-          }
-          return handleResolve(
-            params as SearchInput & { mode: "resolve"; symbol: string },
-            cwd,
-            signal,
-            ctx,
-            enrich,
-            config,
-          );
-        case "code":
-          if (typeof params.query !== "string" || !params.query.trim()) {
-            throw new Error('search mode "code" requires a non-empty "query"');
-          }
-          return handleCode(
-            params as SearchInput & { mode: "code"; query: string },
-            cwd,
-            signal,
-            enrich,
-            config,
-          );
-      }
-    },
-  } as unknown as ToolDefinition;
+  const requested = directory ?? folder;
+  return requested ? resolve(defaultCwd, requested) : defaultCwd;
 }
 
-// ── Mode handlers ─────────────────────────────────────────────────
+// ── Handlers ──────────────────────────────────────────────────────
 
-async function handleSymbols(
-  params: SearchInput & { mode: "symbols" },
+async function handleDeep(
+  params: SearchInput,
   cwd: string,
   signal: AbortSignal | undefined,
-  getRepoMap: (cwd: string) => RepoMap,
-  enrich: boolean,
-  config: SearchConfig,
+  ctx: ExtensionContext,
 ) {
-  const rm = getRepoMap(cwd);
-  const startTime = Date.now();
-  if (typeof params.query !== "string" || !params.query.trim()) {
-    throw new Error('search mode "symbols" requires a non-empty "query"');
-  }
-  const query = params.query;
-  const results: SearchResult[] = await rm.searchIdentifiers(
-    query,
+  const deepTool = createDeepSearchTool();
+  return deepTool.execute(
+    "search:deep",
     {
-      maxResults: params.maxResults ?? 50,
-      includeDefinitions: params.includeDefinitions ?? true,
-      includeReferences: params.includeReferences ?? true,
+      query: params.query,
+      depth: params.depth ?? "standard",
+      scope: params.scope ?? "all",
+      directory: params.directory ?? params.folder ?? cwd,
+      limit: params.maxResults ?? 15,
+      maxSnippetChars: params.maxSnippetChars ?? 400,
+      outputBudget: params.outputBudget ?? 4096,
+      includeRelationships: params.includeRelationships,
+      filePattern: params.filePattern,
+      focusFiles: params.focusFiles,
+      rerank: params.rerank,
     },
     signal,
+    undefined,
+    ctx,
   );
+}
 
-  if (results.length === 0) {
-    const allFiles = await findSrcFiles(cwd);
+async function handleGrep(
+  params: SearchInput,
+  cwd: string,
+  signal: AbortSignal | undefined,
+) {
+  const query = params.query!.trim();
+  const maxResults = params.maxResults ?? 30;
+  const startTime = Date.now();
+
+  const allFiles = await findSrcFiles(cwd, 50_000, signal);
+  const matches: CodeDefinition[] = [];
+  let totalDefs = 0;
+  const maxChars = 3_000_000;
+  let totalChars = 0;
+
+  for (const filePath of allFiles) {
+    if (signal?.aborted) throw new Error("Operation aborted");
+    if (matches.length >= maxResults || totalChars > maxChars) break;
+
+    const relFile = relative(cwd, filePath);
+    const defs = await extractCodeDefinitions(filePath, relFile);
+    totalDefs += defs.length;
+
+    for (const d of defs) {
+      totalChars += d.body.length;
+      // Simple case-insensitive substring match on definition name
+      if (d.name.toLowerCase().includes(query.toLowerCase())) {
+        matches.push(d);
+        if (matches.length >= maxResults) break;
+      }
+    }
+  }
+
+  if (matches.length === 0) {
     return {
       content: [
         {
           type: "text" as const,
-          text: `[No symbols found matching "${params.query}". Searched ${allFiles.length} source file(s) in ${cwd}.]`,
+          text: `[No definitions matching "${query}" across ${allFiles.length} source files (${totalDefs} definitions scanned).]`,
         },
       ],
       details: {
         total: 0,
-        query: params.query,
-        directory: cwd,
+        query,
         filesScanned: allFiles.length,
+        definitionsScanned: totalDefs,
         timeMs: Date.now() - startTime,
       },
     };
   }
 
   const lines: string[] = [
-    `Found ${results.length} symbol(s) matching "${params.query}":`,
+    `Found ${matches.length} definition(s) matching "${query}" (${totalDefs} definitions scanned across ${allFiles.length} files, ${Date.now() - startTime}ms):`,
     "",
   ];
 
-  for (const r of results) {
-    const kind = r.kind === "def" ? "def" : "ref";
-    const confidence = r.confidence ?? "extracted";
-    const contextStr = r.context
-      ? `\n${r.context.split("\n").map((l) => `  ${l}`).join("\n")}`
-      : "";
-    lines.push(`  ${r.file}:${r.line}  [${kind}]  [${confidence}]  ${r.name}${contextStr}`);
+  for (let i = 0; i < matches.length; i++) {
+    const d = matches[i]!;
+    lines.push(`  ${d.relFile}:${d.startLine}-${d.endLine}  [${d.kind}]  ${d.name}`);
+    const bodyLines = d.body.split("\n");
+    const previewLines = bodyLines.slice(0, Math.min(bodyLines.length, 4));
+    for (const bl of previewLines) {
+      lines.push(`    ${bl}`);
+    }
+    if (bodyLines.length > 4) {
+      lines.push(`    ... (${bodyLines.length - 4} more lines)`);
+    }
     lines.push("");
   }
 
-  // Enrich: resolve the top result if enabled and config allows
-  if (enrich && results.length > 0) {
-    const configOk = config.enrich?.symbols?.resolution !== false;
-    if (configOk) {
-      const top = results[0]!;
-      try {
-        const resolution = await resolveSymbol(
-          cwd,
-          top.name,
-          top.file,
-          top.line ?? 1,
-          5,
-        );
-        if (resolution.bestDefinition || resolution.definitions.length > 0) {
-          lines.push(`── Enriched: resolved "${top.name}" ──`);
-          lines.push("");
-          if (resolution.bestDefinition) {
-            const bd = resolution.bestDefinition;
-            lines.push(`  Best definition: ${bd.file}:${bd.line}`);
-            lines.push("");
-          }
-        }
-      } catch {
-        // Enrichment is best-effort
-      }
-    }
+  if (matches.length < 3) {
+    lines.push(
+      `> 💡 Only ${matches.length} result(s) found. Try ` +
+        `\`search mode=code query="${query}"\` for ranked BM25 search, or ` +
+        `\`search mode=deep query="${query}"\` for multi-channel semantic search.`,
+    );
+    lines.push("");
   }
 
   return {
     content: [{ type: "text" as const, text: lines.join("\n") }],
-    details: { total: results.length },
-  };
-}
-
-async function handleCallers(
-  params: SearchInput & { mode: "callers" },
-  cwd: string,
-  signal: AbortSignal | undefined,
-  _enrich: boolean,
-  _config: SearchConfig,
-) {
-  const allFiles = await findSrcFiles(cwd, 10_000, signal);
-  if (typeof params.function !== "string" || !params.function.trim()) {
-    throw new Error('search mode "callers" requires a non-empty "function"');
-  }
-  const functionName = params.function;
-  const callers = await findCallers(allFiles, functionName, signal);
-  const max = params.maxResults ?? 50;
-  const shown = callers.slice(0, max);
-
-  if (callers.length === 0) {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `[No callers found for "${functionName}". The function may be uncalled, externally defined, or in an unsupported language.]`,
-        },
-      ],
-      details: { function: functionName, callers: [], total: 0 },
-    };
-  }
-
-  const lines: string[] = [
-    `Found ${callers.length} caller(s) for "${functionName}":`,
-    "",
-  ];
-
-  for (const c of shown) {
-    lines.push(`  ${c.callerFunction} in ${c.file}`);
-  }
-
-  if (callers.length > max) {
-    lines.push("");
-    lines.push(`  ... and ${callers.length - max} more`);
-  }
-
-  return {
-    content: [{ type: "text" as const, text: lines.join("\n") }],
-    details: { function: params.function, callers: shown, total: callers.length },
-  };
-}
-
-async function handleResolve(
-  params: SearchInput & { mode: "resolve" },
-  cwd: string,
-  signal: AbortSignal | undefined,
-  _ctx: ExtensionContext,
-  enrich: boolean,
-  config: SearchConfig,
-) {
-  if (typeof params.symbol !== "string" || !params.symbol.trim()) {
-    throw new Error('search mode "resolve" requires a non-empty "symbol"');
-  }
-  const symbol = params.symbol;
-  // Parse context if provided
-  let contextFile: string | undefined;
-  let contextLine: number | undefined;
-  if (params.context) {
-    const lastColon = params.context.lastIndexOf(":");
-    if (lastColon !== -1 && lastColon < params.context.length - 1) {
-      const trailing = params.context.slice(lastColon + 1);
-      const parsed = parseInt(trailing, 10);
-      if (!isNaN(parsed)) {
-        contextFile = params.context.slice(0, lastColon);
-        contextLine = parsed;
-      } else {
-        contextFile = params.context;
-      }
-    } else {
-      contextFile = params.context;
-    }
-  }
-
-  if (signal?.aborted) throw new Error("Operation aborted");
-
-  const result = await resolveSymbol(
-    cwd,
-    symbol,
-    contextFile,
-    contextLine,
-    params.maxResults ?? 50,
-  );
-
-  // ── Format output ──
-  const lines: string[] = [
-    `Resolved symbol: "${result.symbol}"`,
-    result.contextFile !== "(none)"
-      ? `Context: ${result.contextFile}:${result.contextLine}`
-      : "Context: none provided",
-    `Strategy: ${result.strategy}`,
-    `Scanned ${result.stats.totalFilesScanned} files (${result.stats.parseTimeMs}ms)`,
-    "",
-  ];
-
-  if (result.definitions.length === 0) {
-    lines.push(`[No definitions found for "${result.symbol}"]`);
-    lines.push("");
-    if (result.references.length > 0) {
-      lines.push(`${result.references.length} reference(s) found (symbol may be from an external module):`);
-      lines.push("");
-      for (const r of result.references.slice(0, 20)) {
-        const ctxStr = r.context ? `\n${r.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-        lines.push(`  ${r.file}:${r.line}  [ref]${ctxStr}`);
-        lines.push("");
-      }
-    } else {
-      lines.push("[No references found]");
-    }
-  } else {
-    if (result.bestDefinition) {
-      const bd = result.bestDefinition;
-      const ctxStr = bd.context ? `\n${bd.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-      lines.push(`Best definition → ${bd.file}:${bd.line}  [def]${ctxStr}`);
-      lines.push("");
-    }
-
-    lines.push(`${result.definitions.length} definition(s):`);
-    lines.push("");
-    for (const d of result.definitions) {
-      const ctxStr = d.context ? `\n${d.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-      lines.push(`  ${d.file}:${d.line}  [def]${ctxStr}`);
-      lines.push("");
-    }
-
-    if (result.references.length > 0) {
-      lines.push(`${result.references.length} reference(s):`);
-      lines.push("");
-      for (const r of result.references.slice(0, 30)) {
-        const ctxStr = r.context ? `\n${r.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-        lines.push(`  ${r.file}:${r.line}  [ref]${ctxStr}`);
-        lines.push("");
-      }
-      if (result.references.length > 30) {
-        lines.push(`  ... and ${result.references.length - 30} more references`);
-        lines.push("");
-      }
-    } else {
-      lines.push("[No references found]");
-      lines.push("");
-    }
-  }
-
-  // Enrich: auto-append callers if enabled
-  if (enrich && result.bestDefinition) {
-    const configOk = config.enrich?.resolve?.callers !== false;
-    if (configOk) {
-      try {
-        if (signal?.aborted) throw new Error("Operation aborted");
-        const allFiles = await findSrcFiles(cwd, 10_000, signal);
-        const callers = await findCallers(allFiles, symbol, signal);
-        if (callers.length > 0) {
-          lines.push(`── Enriched: ${callers.length} caller(s) for "${symbol}" ──`);
-          lines.push("");
-          for (const c of callers.slice(0, 20)) {
-            lines.push(`  ${c.callerFunction} in ${c.file}`);
-          }
-          if (callers.length > 20) {
-            lines.push(`  ... and ${callers.length - 20} more`);
-          }
-          lines.push("");
-        }
-      } catch {
-        // Enrichment is best-effort
-      }
-    }
-  }
-
-  return {
-    content: [{ type: "text" as const, text: lines.join("\n") }],
-    details: result,
+    details: {
+      total: matches.length,
+      filesScanned: allFiles.length,
+      definitionsScanned: totalDefs,
+      timeMs: Date.now() - startTime,
+    },
   };
 }
 
 async function handleCode(
-  params: SearchInput & { mode: "code" },
+  params: SearchInput,
   cwd: string,
   signal: AbortSignal | undefined,
   enrich: boolean,
-  config: SearchConfig,
 ) {
   const maxResults = params.maxResults ?? 20;
   const startTime = Date.now();
-  if (typeof params.query !== "string" || !params.query.trim()) {
-    throw new Error('search mode "code" requires a non-empty "query"');
-  }
-  const query = params.query;
+  const query = params.query!.trim();
 
   // 1. Discover source files
   const allFiles = await findSrcFiles(cwd, 50_000, signal);
-  const maxChars = 3_000_000; // Safety: stop processing after this many chars of source
+  const maxChars = 3_000_000;
 
   // 2. Extract AST definitions from all files
   const allDefs: CodeDefinition[] = [];
@@ -710,8 +478,7 @@ async function handleCode(
     }
   }
 
-  // 3. BM25 pre-filter: score all definitions cheaply, then only pass
-  // top candidates through expensive embedding + RRF re-ranking.
+  // 3. BM25 pre-filter
   const preFilterN = Math.min(maxResults * 5, 200);
   const bm25All = bm25Scores(query, allDefs.map((d) => d.body));
   for (let i = 0; i < allDefs.length; i++) {
@@ -719,7 +486,6 @@ async function handleCode(
   }
   allDefs.sort((a, b) => b.score - a.score);
 
-  // Split: top N get embedding re-rank; rest keep BM25-only scores
   const topForEmbedding = allDefs.slice(0, preFilterN);
   const bm25Only = allDefs.slice(preFilterN);
 
@@ -728,32 +494,59 @@ async function handleCode(
     ? await scoreDefinitions(topForEmbedding, query, cwd, signal)
     : [];
 
-  // 4b. Graph centrality boost: slightly boost definitions in files that are
-  // important nodes in the graphify knowledge graph (when available).
-  // Uses a small multiplier (0-20%) so BM25 + embedding signals dominate.
-  // Applies only to scored group (embedding candidates); BM25-only group
-  // uses raw BM25 ordering without centrality adjustment.
+  // Graph centrality boost
   try {
     const enricher = getGraphifyEnricher(cwd);
     if (enricher.isAvailable) {
       for (const def of scored) {
         const centrality = enricher.getFileCentrality(def.file);
         if (centrality > 0) {
-          const boost = 1 + Math.min(centrality, 20) * 0.01;
-          def.score *= boost;
+          def.score *= 1 + Math.min(centrality, 20) * 0.01;
         }
       }
       scored.sort((a, b) => b.score - a.score);
     }
-  } catch {
-    // Graphify boost is best-effort
-  }
+  } catch { /* best-effort */ }
 
-  // Merge: scored group (top BM25 + embedding re-rank) comes first,
-  // then BM25-only remainder in their own order. Scores are on different
-  // scales (RRF for scored, raw BM25 for bm25Only) so they must NOT be
-  // merged and re-sorted together.
   const allResults = [...scored, ...bm25Only.sort((a, b) => b.score - a.score)];
+
+  // 5. LSP workspace/symbol — additional retrieval channel
+  let lspResultsCount = 0;
+  try {
+    const bridge = await getLSPBridge();
+    if (bridge?.isAvailable && query.length > 2) {
+      const root = params.directory ?? params.folder ?? cwd;
+      const wsSymbols = await bridge.workspaceSymbol(query, root);
+      if (wsSymbols.length > 0) {
+        const existingKeys = new Set(allResults.map((d) => `${d.relFile}:${d.name}`));
+        for (const sym of wsSymbols) {
+          const uri = sym.location.uri;
+          const filePath = uri.startsWith("file://") ? uri.slice(7) : uri;
+          const relFile = relative(cwd, filePath);
+          const key = `${relFile}:${sym.name}`;
+          if (existingKeys.has(key)) continue;
+          existingKeys.add(key);
+          lspResultsCount++;
+          allResults.push({
+            file: filePath,
+            relFile,
+            startLine: sym.location.range.start.line + 1,
+            endLine: sym.location.range.end.line + 1,
+            name: sym.name,
+            kind: lspSymbolKindToString(sym.kind),
+            body: "",
+            score: 1.0,
+            similarity: undefined,
+          });
+        }
+      }
+    }
+  } catch { /* LSP workspace/symbol is best-effort */ }
+
+  // Re-sort since LSP entries were pushed with score 1.0
+  if (lspResultsCount > 0) {
+    allResults.sort((a, b) => b.score - a.score);
+  }
 
   const top = allResults.slice(0, maxResults);
 
@@ -767,29 +560,31 @@ async function handleCode(
       ],
       details: {
         total: 0,
-        query: params.query,
+        query,
         filesScanned: allFiles.length,
         definitionsExtracted: allDefs.length,
         timeMs: Date.now() - startTime,
+        lspResults: lspResultsCount,
       },
     };
   }
 
-  // 4. Format results
   const lines: string[] = [
-    `Found ${top.length} definition(s) matching "${query}" (scored ${allDefs.length} definitions across ${allFiles.length} files, ${Date.now() - startTime}ms):`,
+    `Found ${top.length} definition(s) matching "${query}" (${allDefs.length} definitions across ${allFiles.length} files${lspResultsCount > 0 ? `, ${lspResultsCount} from LSP` : ""}, ${Date.now() - startTime}ms):`,
     "",
   ];
+  const maxTopScore = Math.max(...top.map((d) => d.score), 0);
 
-  for (const d of top) {
-    const simStr =
-      d.similarity !== undefined
-        ? `  sim=${d.similarity.toFixed(3)}`
-        : "";
-    lines.push(`  ${d.relFile}:${d.startLine}-${d.endLine}  [${d.kind}]  ${d.name}  score=${d.score.toFixed(3)}${simStr}`);
+  for (let index = 0; index < top.length; index++) {
+    const d = top[index]!;
+    const embeddingStr =
+      d.similarity !== undefined ? `  embedding=${classifySimilarity(d.similarity)}` : "";
+    lines.push(
+      `  ${d.relFile}:${d.startLine}-${d.endLine}  [${d.kind}]  ${d.name}  ` +
+        `relevance=${classifyRelevanceByScore(d.score, maxTopScore)}  rank=${index + 1}${embeddingStr}`,
+    );
     lines.push("");
 
-    // Show a compact preview of the definition body
     const bodyLines = d.body.split("\n");
     const previewLines = bodyLines.slice(0, Math.min(bodyLines.length, 5));
     for (const bl of previewLines) {
@@ -801,34 +596,70 @@ async function handleCode(
     lines.push("");
   }
 
-  // Enrich: tag results with symbol resolution metadata
-  if (enrich && top.length > 0) {
-    const configOk = config.enrich?.code?.symbols !== false;
-    if (configOk) {
-      try {
-        const topNames = [...new Set(top.slice(0, 5).map((d) => d.name))];
-        const resolvedLines: string[] = ["── Enriched symbol resolution ──", ""];
-        for (const name of topNames) {
-          if (signal?.aborted) throw new Error("Operation aborted");
-          try {
-            const resolution = await resolveSymbol(cwd, name, top[0]!.relFile, top[0]!.startLine, 3);
-            if (resolution.bestDefinition) {
-              resolvedLines.push(
-                `  ${name} → ${resolution.bestDefinition.file}:${resolution.bestDefinition.line}`,
-              );
-            }
-          } catch {
-            resolvedLines.push(`  ${name} → (resolution failed)`);
-          }
+  // Auto-escalation hint
+  if (top.length < 3 && enrich !== false && shouldShowLowResultHint()) {
+    lines.push(
+      `> 💡 Only ${top.length} result(s) found. Try ` +
+        `\`search mode=deep query="${query}"\` for multi-channel semantic search + graph expansion.`,
+    );
+    lines.push("");
+  }
+
+  // Enrich: symbol resolution + callers for top matches
+  if (enrich !== false && top.length > 0) {
+    try {
+      // Build a name->first-entry map for correct context per symbol
+      const nameToEntry = new Map<string, typeof top[0]>();
+      for (const entry of top) {
+        if (!nameToEntry.has(entry.name)) {
+          nameToEntry.set(entry.name, entry);
         }
-        if (resolvedLines.length > 1) {
-          lines.push(...resolvedLines);
-          lines.push("");
-        }
-      } catch {
-        // Enrichment is best-effort
       }
-    }
+      const topNames = [...nameToEntry.keys()].slice(0, 5);
+      const resolvedLines: string[] = ["── Enriched ──", ""];
+
+      for (const name of topNames) {
+        if (signal?.aborted) break;
+        try {
+          const entry = nameToEntry.get(name)!;
+          const resolution = await resolveSymbol(cwd, name, entry.relFile, entry.startLine, 3);
+          let defLine = `  ${name} → `;
+          if (resolution.bestDefinition) {
+            defLine += `def: ${resolution.bestDefinition.file}:${resolution.bestDefinition.line}`;
+          } else {
+            defLine += `(no definition found)`;
+          }
+          if (resolution.references.length > 0) {
+            defLine += `  (${resolution.references.length} refs)`;
+          }
+          resolvedLines.push(defLine);
+        } catch {
+          resolvedLines.push(`  ${name} → (resolution failed)`);
+        }
+      }
+
+      // Also find callers for the top result names
+      if (topNames.length > 0 && !signal?.aborted) {
+        try {
+          for (const name of topNames.slice(0, 3)) {
+            try {
+              const callers = await findCallers(allFiles, name, signal);
+              if (callers.length > 0) {
+                resolvedLines.push(
+                  `  ${name} callers: ${callers.slice(0, 5).map((c) => `${c.callerFunction} in ${c.file}`).join(", ")}` +
+                    (callers.length > 5 ? ` (+${callers.length - 5} more)` : ""),
+                );
+              }
+            } catch { /* skip */ }
+          }
+        } catch { /* skip */ }
+      }
+
+      if (resolvedLines.length > 1) {
+        lines.push(...resolvedLines);
+        lines.push("");
+      }
+    } catch { /* enrichment is best-effort */ }
   }
 
   return {
@@ -836,8 +667,57 @@ async function handleCode(
     details: {
       total: top.length,
       totalScored: allDefs.length,
+      lspResults: lspResultsCount,
       filesScanned: allFiles.length,
       timeMs: Date.now() - startTime,
     },
   };
+}
+
+// ── Tool definition ───────────────────────────────────────────────
+
+export default function createSearchTool(): ToolDefinition {
+  return {
+    name: "search",
+    label: "search",
+    description:
+      'Search code by identifier or pattern. Default mode (grep): AST-aware definition search — fast, no embeddings. ' +
+      'mode=code: BM25 + optional embedding re-rank with symbol resolution and caller enrichment. ' +
+      'mode=deep: multi-channel orchestration (code + symbols + semantic + graph). ' +
+      'Use directory/folder to search a specific root.',
+    parameters: SearchSchema,
+
+    async execute(
+      _toolCallId: string,
+      params: SearchInput,
+      signal: AbortSignal | undefined,
+      _onUpdate: unknown,
+      ctx: ExtensionContext,
+    ) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+
+      const mode = params.mode ?? "grep";
+      const cwd = resolveSearchRoot(params, ctx.cwd);
+
+      if (typeof params.query !== "string" || !params.query.trim()) {
+        throw new Error(`search mode "${mode}" requires a non-empty "query"`);
+      }
+
+      switch (mode) {
+        case "grep":
+          return handleGrep(params, cwd, signal);
+
+        case "code": {
+          const config = loadSearchConfig(cwd);
+          const enrich =
+            params.enrich !== false &&
+            (config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false);
+          return handleCode(params, cwd, signal, enrich);
+        }
+
+        case "deep":
+          return handleDeep(params, cwd, signal, ctx);
+      }
+    },
+  } as unknown as ToolDefinition;
 }

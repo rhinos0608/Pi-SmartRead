@@ -53,6 +53,61 @@ export interface SearchConfig {
   };
 }
 
+export interface GitContextConfig {
+  enabled?: boolean;
+  startupLogLimit?: number;
+  coCommitAnalysisLimit?: number;
+  coCommitMinCorrelation?: number;
+  coCommitMinCount?: number;
+  readEnrichmentCommits?: number;
+  showTrailerKeys?: string[];
+  notesRefs?: string[];
+  tokenBudget?: {
+    gitLog?: number;
+    coCommitHotspots?: number;
+    gitNotes?: number;
+  };
+}
+
+export interface ExperimentalFeaturesConfig {
+  /** Enable git notes tool (read/write AI session context on commits). Default: false. */
+  gitNotes?: boolean;
+  /** Enable graph mutation tool (breakage/co-change edge recording). Default: false. */
+  graphMutate?: boolean;
+}
+
+export interface ResolvedGitContextConfig {
+  enabled: boolean;
+  startupLogLimit: number;
+  coCommitAnalysisLimit: number;
+  coCommitMinCorrelation: number;
+  coCommitMinCount: number;
+  readEnrichmentCommits: number;
+  showTrailerKeys: string[];
+  notesRefs: string[];
+  tokenBudget: {
+    gitLog: number;
+    coCommitHotspots: number;
+    gitNotes: number;
+  };
+}
+
+export const DEFAULT_GIT_CONTEXT_CONFIG: ResolvedGitContextConfig = {
+  enabled: true,
+  startupLogLimit: 30,
+  coCommitAnalysisLimit: 100,
+  coCommitMinCorrelation: 0.15,
+  coCommitMinCount: 2,
+  readEnrichmentCommits: 3,
+  showTrailerKeys: ["Constraint", "Directive", "Rejected"],
+  notesRefs: ["refs/notes/pi-smartread", "refs/notes/lore", "refs/notes/opencode", "refs/notes/commits"],
+  tokenBudget: {
+    gitLog: 800,
+    coCommitHotspots: 400,
+    gitNotes: 600,
+  },
+};
+
 export function loadSearchConfig(cwd?: string): SearchConfig {
   const resolvedCwd = cwd ?? process.cwd();
   const configPath = findConfigFile(resolvedCwd);
@@ -60,6 +115,44 @@ export function loadSearchConfig(cwd?: string): SearchConfig {
   try {
     const raw = JSON.parse(readFileSync(configPath, "utf-8")) as { search?: SearchConfig };
     return raw.search ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export function loadGitContextConfig(cwd?: string): ResolvedGitContextConfig {
+  const resolvedCwd = cwd ?? process.cwd();
+  const configPath = findConfigFile(resolvedCwd);
+  let raw: GitContextConfig = {};
+
+  if (configPath) {
+    try {
+      const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as { gitContext?: GitContextConfig };
+      raw = parsed.gitContext ?? {};
+    } catch {
+      raw = {};
+    }
+  }
+
+  return {
+    ...DEFAULT_GIT_CONTEXT_CONFIG,
+    ...raw,
+    tokenBudget: {
+      ...DEFAULT_GIT_CONTEXT_CONFIG.tokenBudget,
+      ...raw.tokenBudget,
+    },
+    showTrailerKeys: raw.showTrailerKeys ?? DEFAULT_GIT_CONTEXT_CONFIG.showTrailerKeys,
+    notesRefs: raw.notesRefs ?? DEFAULT_GIT_CONTEXT_CONFIG.notesRefs,
+  };
+}
+
+export function loadExperimentalConfig(cwd?: string): ExperimentalFeaturesConfig {
+  const resolvedCwd = cwd ?? process.cwd();
+  const configPath = findConfigFile(resolvedCwd);
+  if (!configPath) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as { experimental?: ExperimentalFeaturesConfig };
+    return parsed.experimental ?? {};
   } catch {
     return {};
   }
@@ -77,6 +170,8 @@ interface RawConfig {
   hydeEnabled?: boolean;
   externalReranker?: ExternalRerankerConfig;
   search?: SearchConfig;
+  gitContext?: GitContextConfig;
+  experimental?: ExperimentalFeaturesConfig;
 }
 
 const CONFIG_FILENAME = "pi-smartread.config.json";

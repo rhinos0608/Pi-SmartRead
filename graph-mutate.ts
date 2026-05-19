@@ -43,7 +43,7 @@ export function createGraphMutateTool(): ToolDefinition {
   const def: any = {
     name: "graph_mutate",
     label: "graph_mutate",
-    description: `Record semantic coupling observations (breakage, co-change) into Pi-SmartRead's context graph.
+    description: `[EXPERIMENTAL] Record semantic coupling observations (breakage, co-change) into Pi-SmartRead's context graph.
 
 Breakage edges: when editing file A causes type-checking errors in file B,
 call this tool to record the edge. The next intent_read touching A includes B.

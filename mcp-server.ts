@@ -22,15 +22,12 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import {
-  buildToolRegistry,
-  type RegisteredTool,
-} from "./mcp-registry.js";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { buildToolRegistry } from "./mcp-registry.js";
+import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 
 // ── Build Registry ─────────────────────────────────────────────────
 
-const tools: RegisteredTool[] = buildToolRegistry();
+const tools: ToolDefinition[] = buildToolRegistry();
 
 // ── MCP Server Setup ───────────────────────────────────────────────
 
@@ -46,7 +43,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: tools.map((t) => ({
       name: t.name,
       description: t.description,
-      inputSchema: t.inputSchema as Record<string, unknown>,
+      inputSchema: t.parameters as Record<string, unknown>,
     })),
   };
 });

@@ -137,9 +137,9 @@ A single combined text payload using framed heredoc blocks, plus ranking metadat
 |---|---|---|
 | `path` | `string` | Resolved file path |
 | `ok` | `boolean` | Whether reading succeeded |
-| `keywordRank` / `keywordScore` | `number` | BM25 ranking data |
-| `semanticRank` / `semanticScore` | `number` | Embedding ranking data |
-| `rrfScore` | `number` | Fused RRF score |
+| `keywordRank` / `keywordRelevance` | `number` / classifier | BM25 rank plus discrete relevance (`exact`, `strong`, `related`, `weak`, `none`) |
+| `semanticRank` / `semanticRelevance` | `number` / classifier | Embedding rank plus discrete relevance |
+| `fusedRank` / `fusedRelevance` | `number` / classifier | Hybrid rank plus discrete relevance |
 | `rankedBy` | `"bm25" \| "hybrid"` | Ranking mode used |
 | `inclusion` | `string` | `full`, `partial`, `omitted`, `not_top_k`, `below_threshold`, or `error` |
 
@@ -243,9 +243,12 @@ Set `enrich: false` on any call to return bare results. Enrichment behaviour can
 {
   "mode": "code",
   "query": "authentication middleware",
+  "directory": "src",
   "filePattern": "*.ts"
 }
 ```
+
+`directory` and its alias `folder` limit all search modes to a specific root.
 
 ---
 
@@ -271,6 +274,7 @@ Results are fused with **Reciprocal Rank Fusion (k=60)** and enriched with calle
   "query": "authentication middleware",
   "depth": "standard",
   "scope": "code",
+  "directory": "src",
   "limit": 15,
   "maxSnippetChars": 400
 }
@@ -283,6 +287,7 @@ Results are fused with **Reciprocal Rank Fusion (k=60)** and enriched with calle
 | `query` | — | Natural language question or code symbol |
 | `depth` | `standard` | `quick` (code+symbols), `standard` (+semantic+graph), `thorough` (+caller enrichment) |
 | `scope` | `all` | Filter to `code`, `docs`, `tests`, or `all` |
+| `directory` / `folder` | working directory | Root directory/folder to search |
 | `limit` | `15` | Maximum matches to return (1-50) |
 | `maxSnippetChars` | `400` | Max characters per code snippet (100-1000) |
 | `outputBudget` | `4096` | Approximate output token budget (1k-16k) |

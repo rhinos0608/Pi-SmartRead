@@ -1,18 +1,23 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-// ── Mock the RepoMap module before anything imports it ──
-const mockSearchIdentifiers = vi.fn();
-
-vi.mock("../../repomap.js", () => ({
-  RepoMap: vi.fn().mockImplementation(function () {
-    return { searchIdentifiers: mockSearchIdentifiers };
-  }),
-}));
-
-// Mock findSrcFiles to return test files
+// Mock findSrcFiles
 vi.mock("../../file-discovery.js", () => ({
   findSrcFiles: vi.fn().mockResolvedValue(["/fake/repo/test.ts"]),
+}));
+
+// Mock resolveSymbol
+vi.mock("../../symbol-resolver.js", () => ({
+  resolveSymbol: vi.fn().mockResolvedValue({
+    symbol: "TestSymbol",
+    contextFile: "(none)",
+    contextLine: 1,
+    strategy: "test",
+    stats: { totalFilesScanned: 0, parseTimeMs: 0 },
+    definitions: [],
+    references: [],
+    bestDefinition: null,
+  }),
 }));
 
 // Mock findCallers
@@ -36,10 +41,7 @@ function makeExtensionAPI(): {
   return { registered, api };
 }
 
-function getTool(
-  registered: ToolDefinition[],
-  name: string,
-): ToolDefinition {
+function getTool(registered: ToolDefinition[], name: string): ToolDefinition {
   const tool = registered.find((t) => t.name === name);
   if (!tool) throw new Error(`Tool "${name}" not registered`);
   return tool;
@@ -54,7 +56,6 @@ describe("search tool (consolidated)", () => {
   let tool: ToolDefinition;
 
   beforeEach(() => {
-    mockSearchIdentifiers.mockReset();
     const { registered: reg, api } = makeExtensionAPI();
     registerRepoTools(api as any);
     registered = reg;
@@ -77,152 +78,40 @@ describe("search tool (consolidated)", () => {
     expect(typeof tool.execute).toBe("function");
   });
 
-  // ── Schema structure (Type.Union produces a oneOf schema) ──
-
-  it("has a parameter schema (some or oneOf form)", () => {
+  it("has a parameter schema", () => {
     const schema = tool.parameters as Record<string, unknown>;
     expect(schema).toBeDefined();
-    // Could be a Type.Object (one variant) or a Type.Union (oneOf)
-    const ok =
-      schema.properties !== undefined ||
-      Array.isArray((schema as any).oneOf) ||
-      Object.keys(schema).length > 0;
-    expect(ok).toBe(true);
+    expect(schema.type || (schema as any).oneOf).toBeDefined();
   });
 
-  // ── Execution: mode="symbols" ──
+  // ── Execution: default mode (grep) ──
 
-  it('mode="symbols" returns no-symbols message when searchIdentifiers returns []', async () => {
-    mockSearchIdentifiers.mockResolvedValue([]);
+  it("default mode returns no-defs message when no files match", async () => {
+    const { findSrcFiles } = await import("../../file-discovery.js");
+    vi.mocked(findSrcFiles).mockResolvedValue([]);
 
     const result = await tool.execute(
       "call-1",
-      { mode: "symbols", query: "nonexistent" },
-      undefined,
-      undefined,
-      makeExtensionContext(),
-    );
-
-    expect(result).toHaveProperty("content");
-    expect((result.content[0] as any).text).toContain("No symbols found");
-    expect(result.details).toMatchObject({ total: 0 });
-  });
-
-  it('mode="symbols" formats search results with file, line, and kind', async () => {
-    mockSearchIdentifiers.mockResolvedValue([
-      {
-        file: "src/utils.ts",
-        line: 42,
-        name: "calculateTotal",
-        kind: "def",
-        context: "  42: export function calculateTotal(items: Item[]) {\n    43:   return items.reduce((s, i) => s + i.price, 0);\n",
-      },
-    ]);
-
-    const result = await tool.execute(
-      "call-2",
-      { mode: "symbols", query: "calculateTotal" },
+      { query: "something" },
       undefined,
       undefined,
       makeExtensionContext(),
     );
 
     const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain('Found 1 symbol(s) matching "calculateTotal"');
-    expect(text).toContain("src/utils.ts:42");
-    expect(text).toContain("[def]");
-    expect(text).toContain("calculateTotal");
-    expect(result.details).toEqual({ total: 1 });
+    expect(text).toContain("No definitions matching");
   });
 
-  it('mode="symbols" uses params.directory when provided', async () => {
-    mockSearchIdentifiers.mockResolvedValue([]);
-    const { RepoMap } = await import("../../repomap.js");
-
-    await tool.execute(
-      "call-3",
-      { mode: "symbols", query: "foo", directory: "/custom/path" },
-      undefined,
-      undefined,
-      makeExtensionContext(),
-    );
-
-    expect(vi.mocked(RepoMap)).toHaveBeenCalledWith("/custom/path");
-  });
-
-  it('mode="symbols" passes the abort signal to searchIdentifiers', async () => {
-    mockSearchIdentifiers.mockResolvedValue([]);
-    const controller = new AbortController();
-
-    await tool.execute(
-      "call-4",
-      { mode: "symbols", query: "foo" },
-      controller.signal,
-      undefined,
-      makeExtensionContext(),
-    );
-
-    expect(mockSearchIdentifiers).toHaveBeenCalledWith(
-      "foo",
-      expect.any(Object),
-      controller.signal,
-    );
-  });
-
-  it('mode="symbols" passes includeDefinitions and includeReferences', async () => {
-    mockSearchIdentifiers.mockResolvedValue([]);
-
-    await tool.execute(
-      "call-5",
-      { mode: "symbols", query: "foo", includeDefinitions: false, includeReferences: true },
-      undefined,
-      undefined,
-      makeExtensionContext(),
-    );
-
-    expect(mockSearchIdentifiers).toHaveBeenCalledWith(
-      "foo",
-      expect.objectContaining({
-        includeDefinitions: false,
-        includeReferences: true,
-      }),
-      undefined,
-    );
-  });
-
-  // ── Execution: mode="callers" ──
-
-  it('mode="callers" returns no-callers message when none found', async () => {
-    const { findCallers } = await import("../../callgraph.js");
-    vi.mocked(findCallers).mockResolvedValue([]);
-
-    const result = await tool.execute(
-      "call-6",
-      { mode: "callers", function: "noSuchFn" },
-      undefined,
-      undefined,
-      makeExtensionContext(),
-    );
-
-    const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain('No callers found for "noSuchFn"');
-    expect(result.details).toMatchObject({ total: 0 });
-  });
-
-  // ── Execution: mode="resolve" (thin proxy, tests basic dispatch) ──
-
-  it('mode="resolve" dispatches resolveSymbol', async () => {
-    const result = await tool.execute(
-      "call-7",
-      { mode: "resolve", symbol: "MyClass" },
-      undefined,
-      undefined,
-      makeExtensionContext(),
-    );
-
-    const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain('Resolved symbol: "MyClass"');
-    expect(result.details).toHaveProperty("symbol", "MyClass");
+  it("rejects empty query", async () => {
+    await expect(
+      tool.execute(
+        "call-2",
+        { query: "" },
+        undefined,
+        undefined,
+        makeExtensionContext(),
+      ),
+    ).rejects.toThrow(/query/i);
   });
 
   // ── Execution: mode="code" ──
@@ -232,7 +121,7 @@ describe("search tool (consolidated)", () => {
     vi.mocked(findSrcFiles).mockResolvedValue([]);
 
     const result = await tool.execute(
-      "call-8",
+      "call-3",
       { mode: "code", query: "something" },
       undefined,
       undefined,
@@ -241,5 +130,29 @@ describe("search tool (consolidated)", () => {
 
     const text: string = (result.content[0] as any).text as string;
     expect(text).toContain("No code definitions found");
+  });
+
+  it('mode="deep" requires a query', async () => {
+    await expect(
+      tool.execute(
+        "call-4",
+        { mode: "deep", query: "" },
+        undefined,
+        undefined,
+        makeExtensionContext(),
+      ),
+    ).rejects.toThrow(/query/i);
+  });
+
+  it("rejects conflicting directory and folder", async () => {
+    await expect(
+      tool.execute(
+        "call-5",
+        { query: "anything", directory: "src", folder: "tests" },
+        undefined,
+        undefined,
+        { cwd: "/tmp" } as any,
+      ),
+    ).rejects.toThrow(/directory.*folder|folder.*directory/i);
   });
 });

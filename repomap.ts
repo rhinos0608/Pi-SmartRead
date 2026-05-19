@@ -35,6 +35,8 @@ import { pagerank, buildWeightedEdges } from "./pagerank.js";
 import { renderTreeContext } from "./tree-context.js";
 import { isImportantFile } from "./special.js";
 import { filenameToLang } from "./languages.js";
+import { getLSPBridge } from "./lsp-bridge.js";
+import type { LSPDocumentSymbol } from "./lsp-bridge.js";
 
 // ── Options & Types ───────────────────────────────────────────────
 
@@ -148,6 +150,83 @@ const FALLBACK_DEFINITION_PATTERNS: RegExp[] = [
   /^\s*fn\s+([A-Za-z_$][\w$]*)/i,
   /^\s*module\s+([A-Za-z_$][\w$]*)/i,
 ];
+
+/**
+ * Flatten an LSP document symbol tree into Tag entries.
+ * Recursively walks children to capture nested symbols (methods, etc.).
+ */
+function flattenLSPDocumentSymbols(
+  symbols: LSPDocumentSymbol[],
+  relFname: string,
+  fname: string,
+): Tag[] {
+  const tags: Tag[] = [];
+  function walk(list: LSPDocumentSymbol[]) {
+    for (const sym of list) {
+      tags.push({
+        relFname,
+        fname,
+        line: sym.range.start.line + 1,
+        name: sym.name,
+        kind: "def" as const,
+        confidence: "extracted" as const,
+      });
+      if (sym.children) walk(sym.children);
+    }
+  }
+  walk(symbols);
+  return tags;
+}
+
+/**
+ * Augment sparse tree-sitter tags with LSP document symbols.
+ * Only queries LSP for files with < 5 tree-sitter tags.
+ */
+async function augmentWithLspSymbols(
+  allTags: Tag[],
+  allFiles: string[],
+  root: string,
+  verbose: boolean,
+): Promise<void> {
+  try {
+    const lspBridge = await getLSPBridge();
+    if (!lspBridge) return;
+
+    // Group existing tags by file to check density
+    const tagsByFile = new Map<string, Tag[]>();
+    for (const tag of allTags) {
+      const arr = tagsByFile.get(tag.relFname) ?? [];
+      arr.push(tag);
+      tagsByFile.set(tag.relFname, arr);
+    }
+
+    for (const absFile of allFiles) {
+      const relFname = path.relative(root, absFile);
+      const fileTags = tagsByFile.get(relFname) ?? [];
+      // Only augment files with < 5 tree-sitter symbols
+      if (fileTags.length >= 5) continue;
+
+      const lang = filenameToLang(absFile);
+      if (!lang) continue;
+
+      try {
+        const symbols = await lspBridge.getDocumentSymbols(absFile, root);
+        if (!symbols || symbols.length === 0) continue;
+
+        const lspTags = flattenLSPDocumentSymbols(symbols, relFname, absFile);
+        allTags.push(...lspTags);
+
+        if (verbose) {
+          console.error(`[RepoMap] LSP fallback: ${relFname} — tree-sitter: ${fileTags.length}, LSP: ${lspTags.length}`);
+        }
+      } catch {
+        // Best-effort per file
+      }
+    }
+  } catch {
+    // Best-effort — LSP bridge not available
+  }
+}
 
 function getFallbackMatch(line: string, queryLower: string): { kind: "def" | "ref"; name: string } | null {
   for (const pattern of FALLBACK_DEFINITION_PATTERNS) {
@@ -775,8 +854,12 @@ export class RepoMap {
               progress?.(`Parsing files: ${Math.min(i + batchSize, allFiles.length)}/${allFiles.length}`);
             }
           }
+
+          // ── LSP fallback: augment files with sparse tree-sitter symbols ──
+          await augmentWithLspSymbols(allTags, allFiles, this.root, this.verbose);
         }
       } catch (err) {
+
         if (autoFallback) {
           rankMethod = "import-based";
         } else {

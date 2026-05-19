@@ -102,10 +102,10 @@ export async function getCoCommittedFiles(
 const recentFilesCache = new Map<string, { timestamp: number; files: Set<string> }>();
 
 /**
- * Determines if a file has been modified within a certain time window (e.g., '7.days.ago').
+ * Determines if a file has been modified within a certain time window (e.g., '1.day.ago').
  * Useful for boosting recently active files in retrieval.
  */
-export async function isRecentlyModified(cwd: string, targetPath: string, since = "7.days.ago"): Promise<boolean> {
+export async function isRecentlyModified(cwd: string, targetPath: string, since = "1.day.ago"): Promise<boolean> {
   const gitRoot = await findGitRoot(cwd);
   if (!gitRoot) return false;
 

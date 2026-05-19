@@ -90,7 +90,7 @@ const RepoMapSchema = Type.Object({
 
 type RepoMapInput = Static<typeof RepoMapSchema>;
 
-function createRepoTool(): ToolDefinition {
+export function createRepoTool(): ToolDefinition {
   const repoMapInstances = new Map<string, RepoMap>();
 
   function getRepoMap(cwd: string): RepoMap {
