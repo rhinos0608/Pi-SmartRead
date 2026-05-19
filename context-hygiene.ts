@@ -433,3 +433,83 @@ export function resetContextHygieneTracker(options: { maxEvents?: number } = {})
 export function getContextHygieneTracker(): ContextHygieneTracker {
   return globalContextHygieneTracker;
 }
+
+// ─── Lint-on-write ────────────────────────────────────────────────────
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+export interface LintResult {
+  passed: boolean;
+  output: string;
+  lineErrors: number[];
+}
+
+export async function runLint(fullPath: string, cwd: string): Promise<LintResult | null> {
+  const ext = fullPath.split(".").pop()?.toLowerCase();
+  if (!ext) return null;
+
+  let command: string;
+  let args: string[];
+
+  if (ext === "ts" || ext === "tsx" || ext === "js" || ext === "jsx") {
+    command = "npx";
+    args = ["tsc", "--noEmit", fullPath];
+  } else if (ext === "py") {
+    command = "python";
+    args = ["-m", "py_compile", fullPath];
+  } else if (ext === "go") {
+    command = "go";
+    args = ["vet", fullPath];
+  } else {
+    return null;
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      cwd,
+      timeout: 30000,
+    });
+    const output = stdout + stderr;
+    const lineErrors: number[] = [];
+    const lineMatch = /:(\d+):/g;
+    let match;
+    while ((match = lineMatch.exec(output)) !== null) {
+      const num = match[1];
+      if (num) lineErrors.push(parseInt(num, 10));
+    }
+    return { passed: true, output, lineErrors };
+  } catch (error: unknown) {
+    const output = error instanceof Error ? (error.message ?? String(error)) : String(error);
+    const lineErrors: number[] = [];
+    const lineMatch = /:(\d+):/g;
+    let match;
+    while ((match = lineMatch.exec(output)) !== null) {
+      const num = match[1];
+      if (num) lineErrors.push(parseInt(num, 10));
+    }
+    return { passed: false, output, lineErrors };
+  }
+}
+
+export async function lintAfterMutation(
+  fullPath: string,
+  cwd: string,
+  tracker: ContextHygieneTracker,
+): Promise<void> {
+  const result = await runLint(fullPath, cwd);
+  if (!result || result.passed) return;
+
+  const lintMetadata = buildContextHygieneMetadata({
+    tool: "bash",
+    classification: "command-output",
+    resources: [
+      buildFileResource(fullPath),
+      buildCommandResource(`lint ${fullPath}`),
+    ],
+  });
+
+  tracker.record(lintMetadata);
+}

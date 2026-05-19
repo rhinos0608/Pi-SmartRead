@@ -244,3 +244,47 @@ export function applyBashContextGuard(options: {
     };
   }
 }
+
+export function suggestShellCommands(command: string, output: string, _exitCode?: number): string[] {
+  const suggestions: string[] = [];
+  const isMac = process.platform === "darwin";
+
+  if (/command not found|not found|': not found/.test(output)) {
+    suggestions.push(isMac ? "brew install <package>" : "sudo apt-get install <package>");
+  }
+
+  if (/\.ts[x]?: error:|: error:/.test(output) || /SyntaxError:|TypeError:/.test(output)) {
+    if (command.includes("tsc") || command.includes("tsx")) {
+      suggestions.push("npx tsc --noEmit");
+    } else {
+      suggestions.push("npm run build");
+    }
+  }
+
+  if (/FAIL|failed.*test|AssertionError|PASS[\s\d]|\d+ tests? failed/.test(output)) {
+    suggestions.push("npm test");
+    suggestions.push("Check test output for specific failures");
+  }
+
+  if (/CONFLICT|git conflict|<<<<<<</.test(output)) {
+    suggestions.push("git status");
+    suggestions.push("Resolve merge conflicts manually");
+  }
+
+  if (/Module not found|Cannot find module|import.*not found/.test(output)) {
+    suggestions.push("npm install");
+    suggestions.push("Check package.json dependencies");
+  }
+
+  if (/Permission denied|EACCES/.test(output)) {
+    suggestions.push("chmod +x <script>  # If script execution");
+    suggestions.push("sudo <command>  # If system access needed");
+  }
+
+  if (/EADDRINUSE|port.*in use|address already in use/.test(output)) {
+    suggestions.push("lsof -i :<port>  # Find process using port");
+    suggestions.push("kill -9 <PID>  # Kill the process");
+  }
+
+  return suggestions.slice(0, 3);
+}

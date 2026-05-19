@@ -34,6 +34,7 @@ import {
 import {
   applyBashContextGuard,
   resolveBashContextGuardConfig,
+  suggestShellCommands,
 } from "./bash-context-guard.js";
 
 // Fire-and-forget hashline init at module load time
@@ -185,6 +186,32 @@ export default function (pi: ExtensionAPI) {
               bashContextGuard: guarded.metadata,
             },
           };
+        }
+      }
+    }
+
+    if (toolName === "bash") {
+      const typedInput = event.input as Record<string, unknown> | undefined;
+      const cmd = typeof typedInput?.command === "string" ? typedInput.command : undefined;
+      const exit = typeof typedInput?.exitCode === "number" ? typedInput.exitCode : undefined;
+      const outputText = Array.isArray(event.content)
+        ? event.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+        : "";
+      if (cmd && exit !== undefined && exit !== 0) {
+        const suggestions = suggestShellCommands(cmd, outputText, exit);
+        if (suggestions.length > 0) {
+          const suggestionBlock = "\n\nCommand suggestions:\n" + suggestions.map(s => `  • ${s}`).join("\n");
+          const content = Array.isArray(event.content) ? [...event.content] : [];
+          let textIndex = -1;
+          for (let i = 0; i < content.length; i++) {
+            const item = content[i] as any;
+            if (item.type === "text" && typeof item.text === "string") { textIndex = i; break; }
+          }
+          if (textIndex >= 0) {
+            const item = content[textIndex] as { type: "text"; text: string };
+            content[textIndex] = { ...item, text: item.text + suggestionBlock };
+            return { ...event, content };
+          }
         }
       }
     }
