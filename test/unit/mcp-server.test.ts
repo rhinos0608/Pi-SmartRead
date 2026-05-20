@@ -123,6 +123,8 @@ describe("MCP stdio server", () => {
     // Check that known tools are registered
     const toolNames = result.tools.map((t: any) => t.name);
     expect(toolNames).toContain("read");
+    expect(toolNames).toContain("read_files");
+    expect(toolNames).toContain("intent_read");
     expect(toolNames).toContain("search");
     expect(toolNames).toContain("repo_map");
     expect(toolNames).toContain("find_symbol");

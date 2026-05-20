@@ -60,7 +60,7 @@ function makeCandidate(path: string, text: string, ok: boolean, index: number, b
 	};
 }
 
-describe("read_multiple_files: helper logic", () => {
+describe("read_files: helper logic", () => {
 	it("creates deterministic delimiter hashes", () => {
 		expect(createPathHash("/tmp/a.txt")).toBe(createPathHash("/tmp/a.txt"));
 		expect(createPathHash("/tmp/a.txt")).not.toBe(createPathHash("/tmp/b.txt"));
@@ -169,7 +169,7 @@ describe("read_multiple_files: helper logic", () => {
 	});
 });
 
-describe("read_multiple_files: execute behavior", () => {
+describe("read_files: execute behavior", () => {
 	it("switches to smallest-first only when successful full coverage improves, while rendering in original order", async () => {
 		const big = Array.from({ length: 3200 }, (_, i) => `line-${i}-${"x".repeat(20)}`).join("\n");
 		const tool = createToolWithMap({

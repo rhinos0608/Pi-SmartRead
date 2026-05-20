@@ -11,7 +11,7 @@
  */
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { registerFindSymbolTool } from "./find-symbol-tool.js";
-import { createUnifiedReadTool } from "./unified-read.js";
+import { createReadTool, createReadFilesTool, createIntentReadTool } from "./unified-read.js";
 import createSearchTool from "./search-tool.js";
 import { createRepoTool } from "./repomap-tool.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
@@ -32,7 +32,9 @@ function reg(name: string, factory: () => ToolDefinition, category: ToolCategory
   registry.register({ name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category, experimental });
 }
 
-reg("read", () => createUnifiedReadTool() as unknown as ToolDefinition, ToolCategory.READ);
+reg("read", () => createReadTool() as unknown as ToolDefinition, ToolCategory.READ);
+reg("read_files", () => createReadFilesTool() as unknown as ToolDefinition, ToolCategory.READ);
+reg("intent_read", () => createIntentReadTool() as unknown as ToolDefinition, ToolCategory.READ);
 reg("search", () => createSearchTool() as unknown as ToolDefinition, ToolCategory.SEARCH);
 reg("repo_map", () => createRepoTool() as unknown as ToolDefinition, ToolCategory.MAP);
 const experimental = loadExperimentalConfig();

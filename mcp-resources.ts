@@ -121,7 +121,7 @@ export type ContentItem = { type: "text"; text: string } | { type: "resource_lin
  * instead of embedding it inline. Otherwise, return the inline text item.
  *
  * Use this helper in tool result handlers for large-content tools like
- * `repo_map`, `deep_search`, and `search`.
+ * `repo_map`, `search` (mode=deep), and `search`.
  *
  * @param name  - Resource name used for the URI (`smartread://result/{name}`)
  * @param content - Raw content string

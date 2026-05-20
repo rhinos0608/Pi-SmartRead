@@ -6,11 +6,11 @@
  * over stdio transport.
  *
  * Tools exposed:
- *   - graph_mutate:  Record graph coupling feedback
+ *   - graph_mutate:  Record a single breakage or co-change edge
  *   - intent_read:  Hybrid RRF retrieval (BM25 + embeddings)
- *   - read_multiple_files:  Multi-file reader with packing
+ *   - read_files:  Multi-file reader with packing
  *   - repo_map:  Repository symbol map (PageRank + tree-sitter)
- *   - search:  Consolidated search (symbols, callers, resolve, code)
+ *   - search:  Consolidated search (grep, code, deep)
  *
  * Usage:
  *   node --import tsx mcp-server.ts    # Run as MCP stdio server

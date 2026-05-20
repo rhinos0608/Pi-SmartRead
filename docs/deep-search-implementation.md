@@ -51,7 +51,7 @@ The tests should not require a live embedding service. The semantic channel must
 
 1. Validate and normalize input.
 2. Discover candidate source files with `findSrcFiles()`.
-3. Filter candidates by `scope`, `filePattern`, and `focusFiles`.
+3. Filter candidates by `scope`.
 4. Run channels:
    - structural code search for every depth;
    - symbol search for every depth;
@@ -78,7 +78,7 @@ A degraded channel should not suppress useful results from other channels.
 
 The markdown output must include actionable follow-ups:
 
-- `read_multiple_files` with top file paths;
+- `read_files` with top file paths;
 - `search` `mode=resolve` for top symbols;
 - `search` `mode=callers` for top functions.
 

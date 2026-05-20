@@ -10,7 +10,9 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 
 | Tool | What it does |
 |---|---|
-| `read` | Unified reader: single-file with context enrichment (`file`), intent-based hybrid RRF retrieval (`intent`), multi-file batch with adaptive packing (`multiple`) |
+| `read` | Single-file read with contextual enrichment (imports, git, graphify) |
+| `read_files` | Multi-file batch read with adaptive output packing |
+| `intent_read` | Intent-based file discovery with hybrid RRF retrieval (BM25 + embeddings) |
 | `search` | Consolidated search: AST-aware definition grep (`grep`), BM25 + embedding code search with symbol enrichment (`code`), agentic multi-channel deep search (`deep`) |
 | `repo_map` | PageRank-ranked repository map from native tree-sitter AST tags |
 | `find_symbol` | Symbol-level exploration: name search, file outline, references, declaration, implementations, workspace-wide LSP search, hover info |
@@ -48,30 +50,46 @@ If Pi is already running:
 
 ## `read`
 
-Unified file reading with three modes.
-
-### Modes
-
-| Mode | Use when | Replaces |
-|---|---|---|
-| `file` (default) | Reading a single known file with contextual enrichment | Built-in `read` |
-| `intent` | You have a query but don't know which files are relevant | `intent_read` |
-| `multiple` | You know the exact files to open | `read_multiple_files` |
-
-### `mode: "file"`
-
-Single file read with contextual enrichment (import relationships, git recency, graphify knowledge). On the first read-like call in a repo, may return a compact repo map — simply re-issue the read.
+Single-file read with contextual enrichment. Appends import relationships, git recency, branch notes, and graphify knowledge to every read.
 
 ```json
 {
-  "mode": "file",
   "path": "src/auth.ts",
   "offset": 40,
   "limit": 120
 }
 ```
 
-### `mode: "intent"`
+On the first read-like call in a repo, may return a compact repo map — simply re-issue the read.
+
+---
+
+## `read_files`
+
+Read up to 20 files in one call with adaptive output packing.
+
+**Key behavior:**
+- Reads files in request order
+- Supports per-file `offset` and `limit`
+- Continues on errors by default (`stopOnError: false`)
+- Uses adaptive packing under pi output limits
+- Returns stable per-file heredoc blocks
+
+```json
+{
+  "files": [
+    { "path": "src/a.ts" },
+    { "path": "src/b.ts", "offset": 40, "limit": 120 }
+  ],
+  "stopOnError": false
+}
+```
+
+`details.packing` includes `strategy`, `switchedForCoverage`, `fullIncludedCount`, `fullIncludedSuccessCount`, `partialIncludedPath`, and `omittedPaths`.
+
+---
+
+## `intent_read`
 
 Find the most relevant files for a query using hybrid retrieval.
 
@@ -98,7 +116,6 @@ Find the most relevant files for a query using hybrid retrieval.
 
 ```json
 {
-  "mode": "intent",
   "query": "authentication middleware",
   "files": [
     { "path": "src/auth.ts" },
@@ -109,30 +126,6 @@ Find the most relevant files for a query using hybrid retrieval.
 ```
 
 The output includes framed heredoc blocks plus ranking metadata in `details.files` with path, relevance scores, and inclusion status.
-
-### `mode: "multiple"`
-
-Read up to 20 files in one call with adaptive output packing.
-
-**Key behavior:**
-- Reads files in request order
-- Supports per-file `offset` and `limit`
-- Continues on errors by default
-- Uses adaptive packing under Pi output limits
-- Returns stable per-file heredoc blocks
-
-```json
-{
-  "mode": "multiple",
-  "files": [
-    { "path": "src/a.ts" },
-    { "path": "src/b.ts", "offset": 40, "limit": 120 }
-  ],
-  "stopOnError": false
-}
-```
-
-`details.packing` includes `strategy`, `switchedForCoverage`, `fullIncludedCount`, `fullIncludedSuccessCount`, `partialIncludedPath`, and `omittedPaths`.
 
 ---
 
@@ -167,8 +160,7 @@ In `code` mode, results are enriched by default: top symbols are resolved and ca
 {
   "mode": "code",
   "query": "authentication middleware",
-  "directory": "src",
-  "filePattern": "*.ts"
+  "directory": "src"
 }
 ```
 
@@ -197,8 +189,6 @@ In `code` mode, results are enriched by default: top symbols are resolved and ca
 | `maxSnippetChars` | 400 | Max chars per snippet (100–1000) |
 | `outputBudget` | 4096 | Approximate output token budget (1k–16k) |
 | `includeRelationships` | false | Include caller/callee/import hints for top matches |
-| `filePattern` | — | Glob to restrict files, e.g. `*.ts` |
-| `focusFiles` | `[]` | Personalize ranking toward these files |
 
 ---
 
@@ -219,10 +209,7 @@ Generate a repository map using **native tree-sitter AST extraction** by default
 {
   "directory": ".",
   "mapTokens": 4096,
-  "focusFiles": ["repomap.ts"],
-  "priorityIdentifiers": ["RepoMap"],
-  "mentionedIdents": ["cache"],
-  "mentionedFnames": ["tags.ts"],
+  "focus": ["repomap.ts"],
   "compact": false
 }
 ```
@@ -232,14 +219,7 @@ Generate a repository map using **native tree-sitter AST extraction** by default
 | Option | Default | Meaning |
 |---|---|---|
 | `mapTokens` | 4096 | Token budget (256–32768) |
-| `focusFiles` | `[]` | Files to personalize PageRank toward |
-| `priorityIdentifiers` | `[]` | Identifiers to boost |
-| `mentionedIdents` | `[]` | Identifiers from user query for file-path matching |
-| `mentionedFnames` | `[]` | File paths from user query for personalization |
-| `excludeUnranked` | false | Exclude files with zero PageRank |
-| `forceRefresh` | false | Ignore cache and re-parse |
-| `useImportBased` | false | Force import-only ranking (faster, less precise) |
-| `autoFallback` | true | Fall back automatically if AST parsing fails |
+| `focus` | `[]` | Files or symbols to personalize PageRank toward |
 | `compact` | false | Terse single-line-per-file view |
 
 ---
@@ -272,7 +252,7 @@ Symbol-level code exploration with seven actions.
 ```json
 {
   "action": "overview",
-  "path": "src/services/auth.ts"
+  "relative_path": "src/services/auth.ts"
 }
 ```
 
@@ -280,16 +260,14 @@ Symbol-level code exploration with seven actions.
 {
   "action": "references",
   "query": "Authenticator",
-  "context": "src/middleware/auth.ts:15"
+  "relative_path": "src/middleware/auth.ts"
 }
 ```
 
 ```json
 {
   "action": "hover",
-  "path": "src/services/auth.ts",
-  "line": 42,
-  "column": 12
+  "relative_path": "src/services/auth.ts:42:12"
 }
 ```
 
@@ -297,7 +275,7 @@ Symbol-level code exploration with seven actions.
 
 ## `graph_mutate` [experimental]
 
-Records semantic coupling observations into the context graph. Edges are event-sourced to disk and survive session restarts. Disabled by default — enable via `pi-smartread.config.json`:
+Records a single semantic coupling observation (breakage or co-change) into the context graph. Edges are event-sourced to disk and survive session restarts. Disabled by default — enable via `pi-smartread.config.json`:
 
 ```json
 {
@@ -305,29 +283,33 @@ Records semantic coupling observations into the context graph. Edges are event-s
 }
 ```
 
-### Breakage edges
+### Breakage (default)
 
 When editing file A causes type-checking errors in file B:
 
 ```json
 {
-  "breakage": [
-    { "from": "src/types/user.ts", "to": "src/services/auth.ts", "context": "renamed User.id field", "confidence": 0.9 }
-  ]
+  "from": "src/types/user.ts",
+  "to": "src/services/auth.ts",
+  "relation": "breakage",
+  "context": "renamed User.id field",
+  "confidence": 0.9
 }
 ```
 
-The next `read mode="intent"` touching A will automatically include B as a candidate.
+The next `intent_read` touching A will automatically include B as a candidate.
 
-### Co-change edges
+### Co-change
 
 When files A and B consistently change together in git history:
 
 ```json
 {
-  "coChange": [
-    { "from": "src/api/routes.ts", "to": "src/api/validators.ts", "context": "commit: abc1234", "confidence": 0.7 }
-  ]
+  "from": "src/api/routes.ts",
+  "to": "src/api/validators.ts",
+  "relation": "co-change",
+  "context": "commit: abc1234",
+  "confidence": 0.7
 }
 ```
 
@@ -484,7 +466,7 @@ Pi-SmartRead includes a standalone **MCP (Model Context Protocol) stdio server**
 npm run mcp-server
 ```
 
-Exposes: `read`, `search`, `repo_map`, `find_symbol`, and (if experimental features are enabled) `graph_mutate` and git notes tools.
+Exposes: `read`, `read_files`, `intent_read`, `search`, `repo_map`, `find_symbol`, and (if experimental features are enabled) `graph_mutate` and git notes tools.
 
 See **[docs/mcp-quickstart.md](docs/mcp-quickstart.md)** for full setup instructions.
 

@@ -29,6 +29,8 @@ describe("index extension wiring", () => {
 
     const names = registered.map((t) => t.name);
     expect(names).toContain("read");
+    expect(names).toContain("read_files");
+    expect(names).toContain("intent_read");
     expect(names).toContain("search");
     expect(names).toContain("repo_map");
     expect(names).toContain("find_symbol");

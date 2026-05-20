@@ -32,9 +32,7 @@ A caller provides a question such as `how does auth middleware work?` and receiv
 | `maxSnippetChars` | number | `400` | 100-1000 | Maximum snippet length per match. |
 | `outputBudget` | number | `4096` | 1024-16384 | Approximate token budget for returned markdown. |
 | `includeRelationships` | boolean | `false` (`true` for `thorough`) | boolean | Include caller/relationship hints for top matches. |
-| `filePattern` | string | none | regex/glob-like | Restrict candidate paths. |
-| `focusFiles` | string[] | `[]` | max 20 | Boost matches from these files. |
-| `rerank` | boolean | `false` | boolean | Reserved for configured rerankers in a later phase. |
+| `rerank` | boolean | `false` | boolean | Reserved for configured rankers in a later phase. |
 
 ### Output
 
@@ -44,7 +42,7 @@ The tool returns markdown:
 2. `Matches` grouped by ranked item;
 3. optional `Relationships` section;
 4. `Summary` with channels used, files inspected, and elapsed time;
-5. `Follow-ups` with concrete calls to `read_multiple_files`, `search mode=resolve`, and `search mode=callers`.
+5. `Follow-ups` with concrete calls to `read_files`, `search mode=resolve`, and `search mode=callers`.
 
 The returned result also includes machine-readable `details` with matches, channel counts, files inspected, and degraded-mode notes.
 
