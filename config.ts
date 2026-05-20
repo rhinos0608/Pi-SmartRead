@@ -42,12 +42,6 @@ export interface SearchEnrichModeConfig {
 
 export interface SearchConfig {
   enrich?: {
-    /** Default enrichment for all modes (applied first, then per-mode override). */
-    default?: SearchEnrichModeConfig;
-    /** Enrichment behaviour for mode="resolve". */
-    resolve?: SearchEnrichModeConfig;
-    /** Enrichment behaviour for mode="symbols". */
-    symbols?: SearchEnrichModeConfig;
     /** Enrichment behaviour for mode="code". */
     code?: SearchEnrichModeConfig;
   };

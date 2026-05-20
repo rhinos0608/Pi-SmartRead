@@ -33,9 +33,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isMaskableStaleTool(tool: string): boolean {
   return (
     tool === "read" ||
-    tool === "read_multiple_files" ||
-    tool === "intent_read" ||
-    tool === "deep_search" ||
     tool === "search" ||
     tool === "grep" ||
     tool === "bash"

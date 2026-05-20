@@ -56,7 +56,7 @@ export type ContextHygieneResource =
   | ContextHygieneCommandResource;
 
 export interface ContextHygieneRehydrateDescriptor {
-  tool: "read" | "read_multiple_files" | "intent_read" | "deep_search" | "search";
+  tool: "read" | "search";
   input: Record<string, unknown>;
 }
 
@@ -275,7 +275,6 @@ export function renderStaleContextPlaceholder(record: ContextHygieneStaleRecord)
       return renderStaleReadPlaceholder();
     case "grep":
     case "search":
-    case "deep_search":
       return renderStaleGrepPlaceholder();
     case "bash":
       return renderStaleBashPlaceholder(record);

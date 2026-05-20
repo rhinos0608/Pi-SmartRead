@@ -16,7 +16,7 @@
  */
 import { existsSync, promises as fs } from "node:fs";
 import { relative, resolve } from "node:path";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import Parser from "tree-sitter";
 import { initParser, loadLanguage, getQueryPath } from "./tags.js";
@@ -32,63 +32,32 @@ import { expandToMonorepoRoots } from "./monorepo-detector.js";
 // ── Schema ─────────────────────────────────────────────────────────
 
 const FindSymbolSchema = Type.Object({
-  action: Type.Optional(
-    Type.Unsafe<"symbol" | "overview" | "references" | "declaration" | "implementations" | "workspace" | "hover">({
-      type: "string",
-      enum: ["symbol", "overview", "references", "declaration", "implementations", "workspace", "hover"],
-      description:
-        "Action to perform. 'symbol' (default): find symbols by name/pattern. 'overview': get file outline. " +
-        "'references': find all references to a symbol. 'declaration': find where a symbol is defined. " +
-        "'implementations': find types that implement or extend a given type. " +
-        "'workspace': workspace-wide symbol search via LSP. 'hover': type/signature info at a position via LSP.",
-      default: "symbol",
-    }),
-  ),
-  query: Type.Optional(
-    Type.String({
-      description:
-        "Symbol name or pattern to search for. Supports qualified paths like 'ClassName.methodName'. " +
-        "Required for actions: symbol, references, declaration, implementations, workspace.",
-      minLength: 1,
-    }),
-  ),
-  relative_path: Type.Optional(
-    Type.String({
-      description:
-        "File path relative to project root. For 'overview': the file to outline. " +
-        "For 'hover': the file to query. For other actions: the file containing the symbol (helps disambiguate).",
-    }),
-  ),
-  include_body: Type.Optional(
-    Type.Boolean({ description: "Include symbol source body in results (default: false)." }),
-  ),
-  depth: Type.Optional(
-    Type.Number({
-      description: "For 'overview': how many levels of children to include (0 = top-level only, default: 0).",
-      minimum: 0, maximum: 5,
-    }),
-  ),
-  max_results: Type.Optional(
-    Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000 }),
-  ),
-  line: Type.Optional(
-    Type.Number({
-      description: "Line number (0-based) for 'hover' action.",
-      minimum: 0,
-    }),
-  ),
-  character: Type.Optional(
-    Type.Number({
-      description: "Character offset (0-based) for 'hover' action.",
-      minimum: 0,
-    }),
-  ),
-  directory: Type.Optional(
-    Type.String({ description: "Root directory (default: extension working directory).", default: "." }),
-  ),
+  action: Type.Union([
+    Type.Literal("symbol"),
+    Type.Literal("overview"),
+    Type.Literal("references"),
+    Type.Literal("declaration"),
+    Type.Literal("implementations"),
+    Type.Literal("workspace"),
+    Type.Literal("hover"),
+  ], { description: "Action to perform. 'symbol' is the default. Use 'overview' for file outline, 'references' for cross-file refs, 'declaration' for definition lookup, 'implementations' for implementors, 'workspace' for LSP workspace search, 'hover' for type/signature info." }),
+  query: Type.Optional(Type.String({ description: "Symbol name or pattern to search for. Required for symbol/references/declaration/implementations/workspace actions. Supports qualified paths like 'ClassName.methodName'." })),
+  relative_path: Type.Optional(Type.String({ description: "File path relative to project root. Required for 'overview'. For 'hover', use format 'file.ts:line:character' (1-indexed). Helps disambiguate for references/declaration/implementations." })),
+  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body in results (default: false)." })),
+  childDepth: Type.Optional(Type.Number({ description: "Levels of children to include for 'overview' action (0 = top-level only, default: 0).", minimum: 0, maximum: 5 })),
+  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000 })),
+  directory: Type.Optional(Type.String({ description: "Root directory (default: extension working directory).", default: "." })),
 });
 
-type FindSymbolInput = Static<typeof FindSymbolSchema>;
+interface FindSymbolInput {
+  action?: string;
+  query?: string;
+  relative_path?: string;
+  include_body?: boolean;
+  childDepth?: number;
+  maxResults?: number;
+  directory?: string;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -523,10 +492,11 @@ async function handleOverview(
     return { symbols: [], relative_path: relativePath, total: 0 };
   }
 
-  // Filter by depth
-  const filtered = depth === 0
-    ? symbols.filter((s) => !s.namePath.includes("."))
-    : symbols;
+  // Filter by depth — include symbols whose namePath depth is <= requested childDepth
+  const filtered = symbols.filter((s) => {
+    const symbolDepth = s.namePath.split(".").length - 1;
+    return symbolDepth <= depth;
+  });
 
   return {
     symbols: filtered.slice(0, 200).map((s) => ({
@@ -1038,15 +1008,15 @@ export function createFindSymbolTool(): ToolDefinition {
       const root = resolveRoot(params, ctx.cwd);
       const cwd = ctx.cwd;
       const startTime = Date.now();
-      const maxResults = params.max_results ?? 30;
+      const maxResults = params.maxResults ?? 30;
 
       switch (action) {
         case "overview": {
           if (typeof params.relative_path !== "string" || !params.relative_path.trim()) {
             throw new Error('action "overview" requires a non-empty "relative_path"');
           }
-          const depth = params.depth ?? 0;
-          const data = await handleOverview(params.relative_path, depth, root);
+          const childDepth = params.childDepth ?? 0;
+          const data = await handleOverview(params.relative_path, childDepth, root);
           return {
             content: [{ type: "text" as const, text: formatOverviewResult(data, startTime) }],
             details: data,
@@ -1101,10 +1071,18 @@ export function createFindSymbolTool(): ToolDefinition {
           if (typeof params.relative_path !== "string" || !params.relative_path.trim()) {
             throw new Error('action "hover" requires a non-empty "relative_path"');
           }
-          if (params.line === undefined || params.character === undefined) {
-            throw new Error('action "hover" requires "line" and "character" parameters');
+          // Parse hover position from relative_path format: "file.ts:42:10"
+          const hoverMatch = params.relative_path.match(/^(.+?):(\d+):(\d+)$/);
+          if (!hoverMatch) {
+            throw new Error('action "hover" requires relative_path in format "file.ts:line:character" (1-indexed line/character)');
           }
-          const data = await handleHover(params.relative_path, params.line, params.character, root);
+          const hoverFile = hoverMatch[1]!;
+          const hoverLine = parseInt(hoverMatch[2]!, 10) - 1; // Convert to 0-based
+          const hoverChar = parseInt(hoverMatch[3]!, 10) - 1; // Convert to 0-based
+          if (!Number.isFinite(hoverLine) || !Number.isFinite(hoverChar) || hoverLine < 0 || hoverChar < 0) {
+            throw new Error('action "hover" requires relative_path in format "file.ts:line:character" (1-indexed line/character) with positive integers');
+          }
+          const data = await handleHover(hoverFile, hoverLine, hoverChar, root);
           return {
             content: [{ type: "text" as const, text: formatHoverResult(data, params.query ?? params.relative_path, startTime) }],
             details: data,

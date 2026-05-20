@@ -31,12 +31,10 @@ export const GUARD_HINT_RE = /💡 (To see specific sections|Use a more specific
 
 /** Tool-specific overrides for the bash context guard. */
 export const TOOL_GUARD_PROFILES: Record<string, Partial<BashContextGuardProfile>> = {
-  // Deep search returns large result sets
-  deep_search: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
   // Search can return substantial context
   search: { maxLines: 2500, maxBytes: 60 * 1024, headLines: 100, tailLines: 140 },
-  // Intent read produces graph-augmented content
-  intent_read: { maxLines: 2500, maxBytes: 60 * 1024, headLines: 100, tailLines: 140 },
+  // Read with intent/multiple mode can produce large output
+  read: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
   // Default profile (also used for bash)
   default: { maxLines: 2000, maxBytes: 50 * 1024, headLines: 80, tailLines: 120 },
 };
