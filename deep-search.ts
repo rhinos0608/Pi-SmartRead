@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { Type, type Static } from "@sinclair/typebox";
-import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { EdgeStore, findDirectImportNeighbours, isReadableWorkspaceFile } from "./context-graph.js";
 import { createIntentReadTool } from "./intent-read.js";
 import createSearchTool from "./search-tool.js";
+import { findCallers } from "./callgraph.js";
 import { findSrcFiles } from "./file-discovery.js";
 import { computeRanks, tokenize } from "./scoring.js";
 import { RepoMap } from "./repomap.js";
@@ -15,90 +15,18 @@ import {
 } from "./classifiers.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 
-const DeepSearchSchema = Type.Object({
-  query: Type.String({
-    description: "Natural language question or code symbol to search for",
-    minLength: 1,
-    maxLength: 500,
-  }),
-  depth: Type.Optional(
-    Type.Unsafe<DeepSearchDepth>({
-      type: "string",
-      enum: ["quick", "standard", "thorough"],
-      description:
-        "Search depth. quick=code+symbols; standard=+semantic file ranking+graph expansion; thorough=+caller relationship enrichment",
-      default: "standard",
-    }),
-  ),
-  scope: Type.Optional(
-    Type.Unsafe<DeepSearchScope>({
-      type: "string",
-      enum: ["code", "docs", "tests", "all"],
-      description: "Content type filter",
-      default: "all",
-    }),
-  ),
-  directory: Type.Optional(
-    Type.String({
-      description: "Root directory to search (default: extension working directory)",
-    }),
-  ),
-  folder: Type.Optional(
-    Type.String({
-      description: "Alias for directory. Root folder to search (default: extension working directory)",
-    }),
-  ),
-  limit: Type.Optional(
-    Type.Number({
-      description: "Maximum matches to return (1-50)",
-      minimum: 1,
-      maximum: 50,
-      default: 15,
-    }),
-  ),
-  maxSnippetChars: Type.Optional(
-    Type.Number({
-      description: "Max characters per code snippet (100-1000)",
-      minimum: 100,
-      maximum: 1000,
-      default: 400,
-    }),
-  ),
-  outputBudget: Type.Optional(
-    Type.Number({
-      description: "Approximate output token budget (1k-16k). Tool may truncate to fit.",
-      minimum: 1024,
-      maximum: 16384,
-      default: 4096,
-    }),
-  ),
-  includeRelationships: Type.Optional(
-    Type.Boolean({
-      description:
-        "Include caller/callee/import hints for top matches (default true for thorough, false otherwise)",
-      default: false,
-    }),
-  ),
-  filePattern: Type.Optional(
-    Type.String({
-      description: "Glob/regex to restrict files, e.g. '*.ts' or '^(src/|lib/)'",
-    }),
-  ),
-  focusFiles: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Personalize ranking toward these files (like repo_map focusFiles)",
-      maxItems: 20,
-    }),
-  ),
-  rerank: Type.Optional(
-    Type.Boolean({
-      description: "Run optional reranker on top candidates (reserved for configured V2 rerankers)",
-      default: false,
-    }),
-  ),
-});
+interface DeepSearchParams {
+  query: string;
+  depth?: "quick" | "standard" | "thorough";
+  scope?: "code" | "docs" | "tests" | "all";
+  directory?: string;
+  limit?: number;
+  maxSnippetChars?: number;
+  outputBudget?: number;
+  includeRelationships?: boolean;
+  focusFiles?: string[];
+}
 
-type DeepSearchInput = Static<typeof DeepSearchSchema>;
 type DeepSearchDepth = "quick" | "standard" | "thorough";
 type DeepSearchScope = "code" | "docs" | "tests" | "all";
 type ChannelName = "semantic" | "structural" | "symbol" | "graph" | "lsp";
@@ -303,9 +231,9 @@ function generateSearchGuidelines(notFoundTerms: string[]): string {
   lines.push("   - `repo_map(focusFiles: [\"file.ts\"])` → personalized ranking");
   lines.push("");
   lines.push("**4. Multi-channel search:**");
-  lines.push("   - `search mode=symbols query=term` → find symbol definitions");
+  lines.push("   - `find_symbol action=symbol query=term` → find symbol definitions");
   lines.push("   - `search mode=code query=term` → AST-aware code search");
-  lines.push("   - `search mode=resolve symbol=name` → resolve to definition");
+  lines.push("   - `find_symbol action=declaration query=name` → resolve symbol");
   lines.push("");
 
   return lines.join("\n");
@@ -316,24 +244,17 @@ function clampInteger(value: number | undefined, min: number, max: number, fallb
   return Math.max(min, Math.min(max, Math.trunc(value)));
 }
 
-function normalizeDepth(value: DeepSearchInput["depth"]): DeepSearchDepth {
+function normalizeDepth(value: DeepSearchParams["depth"]): DeepSearchDepth {
   return value === "quick" || value === "standard" || value === "thorough" ? value : "standard";
 }
 
-function normalizeScope(value: DeepSearchInput["scope"]): DeepSearchScope {
+function normalizeScope(value: DeepSearchParams["scope"]): DeepSearchScope {
   return value === "code" || value === "docs" || value === "tests" || value === "all" ? value : "all";
 }
 
-function resolveDeepSearchRoot(params: DeepSearchInput, defaultCwd: string): string {
+function resolveDeepSearchRoot(params: DeepSearchParams, defaultCwd: string): string {
   const directory = params.directory?.trim();
-  const folder = params.folder?.trim();
-
-  if (directory && folder && resolve(defaultCwd, directory) !== resolve(defaultCwd, folder)) {
-    throw new Error("Provide either directory or folder, not both");
-  }
-
-  const requested = directory ?? folder;
-  return requested ? resolve(defaultCwd, requested) : defaultCwd;
+  return directory ? resolve(defaultCwd, directory) : defaultCwd;
 }
 
 function toRelativePath(cwd: string, path: string): string {
@@ -381,22 +302,6 @@ function pathMatchesScope(path: string, scope: DeepSearchScope): boolean {
       return isTest;
     case "all":
       return true;
-  }
-}
-
-function compilePathFilter(pattern: string | undefined): ((path: string) => boolean) | undefined {
-  if (!pattern?.trim()) return undefined;
-  const raw = pattern.trim();
-  try {
-    const regex = new RegExp(raw);
-    return (path) => regex.test(path);
-  } catch {
-    const escaped = raw
-      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*/g, ".*")
-      .replace(/\*/g, "[^/]*");
-    const regex = new RegExp(`^${escaped}$`);
-    return (path) => regex.test(path);
   }
 }
 
@@ -483,10 +388,8 @@ async function discoverDocFiles(root: string, limit: number, signal?: AbortSigna
 async function discoverCandidateFiles(
   cwd: string,
   scope: DeepSearchScope,
-  filePattern: string | undefined,
   signal?: AbortSignal,
 ): Promise<string[]> {
-  const pathFilter = compilePathFilter(filePattern);
   const all = new Map<string, string>();
 
   if (scope !== "docs") {
@@ -505,7 +408,6 @@ async function discoverCandidateFiles(
 
   return [...all.entries()]
     .filter(([rel]) => pathMatchesScope(rel, scope))
-    .filter(([rel]) => (pathFilter ? pathFilter(rel) : true))
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([, abs]) => abs);
 }
@@ -557,22 +459,24 @@ function parseCodeCandidates(text: string, channel: ChannelName): DeepSearchCand
   return candidates;
 }
 
-function parseSymbolCandidates(text: string): DeepSearchCandidate[] {
+function parseGrepCandidates(text: string): DeepSearchCandidate[] {
   const candidates: DeepSearchCandidate[] = [];
-  for (const line of text.split("\n")) {
-    const match = /^\s{2}(.+?):(\d+)\s+\[(def|ref)]\s+\[[^\]]+]\s+([^\s]+)/.exec(line);
-    if (!match) continue;
-    candidates.push({
-      file: match[1]!,
-      line: Number(match[2]),
-      endLine: Number(match[2]),
-      kind: match[3] === "def" ? "symbol" : "reference",
-      name: match[4]!,
-      rawScore: match[3] === "def" ? 1 : 0.75,
-      rank: candidates.length + 1,
-      snippet: line.trim(),
-      channel: "symbol",
-    });
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const match = line.match(/^\s{2}(.+?):(\d+)-(\d+)\s+\[(\w+)\]\s+(\S+)/);
+    if (match) {
+      candidates.push({
+        file: match[1]!,
+        line: Number(match[2]),
+        endLine: Number(match[3]),
+        kind: match[4]!,
+        name: match[5]!,
+        channel: 'symbol',
+        snippet: line.trim(),
+        rawScore: 1.0,
+        rank: candidates.length + 1,
+      });
+    }
   }
   return candidates;
 }
@@ -746,10 +650,10 @@ function generateFollowUps(
   );
   for (const term of resolveTerms.slice(0, 3)) {
     lines.push(
-      `- Resolve symbol: \`search\` mode=resolve symbol=${term}`,
+      `- Resolve symbol: \`find_symbol\` action=declaration query=${term}`,
     );
     lines.push(
-      `- Find callers: \`search\` mode=callers function=${term}`,
+      `- Find callers: \`find_symbol\` action=references query=${term}`,
     );
   }
 
@@ -770,10 +674,10 @@ function generateFollowUps(
     const topSymbol = matches.find((m) => m.kind !== "file")?.name;
     if (topSymbol && /^[A-Za-z_$][\w$]*$/.test(topSymbol)) {
       lines.push(
-        `- Resolve symbol: \`search\` mode=resolve symbol=${topSymbol}`,
+        `- Resolve symbol: \`find_symbol\` action=declaration query=${topSymbol}`,
       );
       lines.push(
-        `- Find callers: \`search\` mode=callers function=${topSymbol}`,
+        `- Find callers: \`find_symbol\` action=references query=${topSymbol}`,
       );
     }
   }
@@ -957,8 +861,8 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
       lines.push(`- Read full files: \`read mode=multiple\` with files: [${topFiles.join(", ")}]`);
     }
     if (topSymbol) {
-      lines.push(`- Resolve symbol: \`search\` mode=resolve symbol=${topSymbol}`);
-      lines.push(`- Find callers: \`search\` mode=callers function=${topSymbol}`);
+      lines.push(`- Resolve symbol: \`find_symbol\` action=declaration query=${topSymbol}`);
+      lines.push(`- Find callers: \`find_symbol\` action=references query=${topSymbol}`);
     }
   }
 
@@ -988,37 +892,18 @@ function toPublicDeepSearchDetails(details: DeepSearchDetails): PublicDeepSearch
   };
 }
 
-function callerDetails(result: unknown): Array<{ file: string; name: string }> {
-  const details = (result as { details?: { callers?: unknown } }).details;
-  if (!Array.isArray(details?.callers)) return [];
-  return details.callers.flatMap((caller) => {
-    if (typeof caller !== "object" || caller === null) return [];
-    const item = caller as { file?: unknown; callerFunction?: unknown };
-    if (typeof item.file !== "string" || typeof item.callerFunction !== "string") return [];
-    return [{ file: item.file, name: item.callerFunction }];
-  });
-}
-
 async function enrichRelationships(
   matches: DeepSearchMatch[],
-  cwd: string,
   signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
+  discoveredFiles: string[],
 ): Promise<void> {
-  const searchTool = createSearchTool();
   const eligible = matches.filter((m) => /^[A-Za-z_$][\w$]*$/.test(m.name)).slice(0, 3);
 
   for (const match of eligible) {
     if (signal?.aborted) throw new Error("Operation aborted");
     try {
-      const result = await searchTool.execute(
-        "deep-search:callers",
-        { mode: "callers", function: match.name, maxResults: 10, directory: cwd },
-        signal,
-        undefined,
-        ctx,
-      );
-      match.callers = callerDetails(result);
+      const callers = await findCallers(discoveredFiles, match.name, signal);
+      match.callers = callers.map(c => ({ file: c.file, name: c.callerFunction }));
     } catch {
       match.callers = [];
     }
@@ -1028,7 +913,7 @@ async function enrichRelationships(
 async function runSearchChannel(
   query: string,
   cwd: string,
-  mode: "code" | "symbols",
+  mode: "code" | "grep",
   maxResults: number,
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
@@ -1036,13 +921,13 @@ async function runSearchChannel(
   const searchTool = createSearchTool();
   const result = await searchTool.execute(
     `deep-search:${mode}`,
-    { mode, query, maxResults, enrich: false, directory: cwd },
+    { mode, query, maxResults, directory: cwd },
     signal,
     undefined,
     ctx,
   );
   const text = extractText(result);
-  return mode === "code" ? parseCodeCandidates(text, "structural") : parseSymbolCandidates(text);
+  return mode === "code" ? parseCodeCandidates(text, "structural") : parseGrepCandidates(text);
 }
 
 async function runSemanticChannel(
@@ -1261,177 +1146,171 @@ async function runLSPChannel(
   return candidates;
 }
 
-export function createDeepSearchTool(): ToolDefinition {
+/**
+ * Execute deep search — internal function called by search-tool.ts.
+ * Orchestrates structural code search, symbol search, LSP workspace symbol search,
+ * optional intent_read semantic ranking, graph expansion, RRF fusion, provenance,
+ * and follow-up suggestions.
+ */
+export async function executeDeepSearch(
+  params: DeepSearchParams,
+  signal: AbortSignal | undefined,
+  ctx: ExtensionContext,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
+  const startedAt = Date.now();
+  const query = params.query.trim();
+  if (!query) throw new Error("query must not be empty or whitespace-only");
+
+  const depth = normalizeDepth(params.depth);
+  const scope = normalizeScope(params.scope);
+  const limit = clampInteger(params.limit, 1, 50, DEFAULT_LIMIT);
+  const maxSnippetChars = clampInteger(params.maxSnippetChars, 100, 1_000, DEFAULT_SNIPPET_CHARS);
+  const outputBudget = clampInteger(params.outputBudget, 1_024, 16_384, DEFAULT_OUTPUT_BUDGET);
+  const includeRelationships = params.includeRelationships ?? depth === "thorough";
+  const focusFiles = (params.focusFiles ?? []).map((file) => file.replace(/\\/g, "/"));
+  const cwd = resolveDeepSearchRoot(params, ctx.cwd);
+  const degraded: string[] = [];
+
+  const discoveredFiles = await discoverCandidateFiles(cwd, scope, signal);
+  const candidatePathFilter = new Set(discoveredFiles.map((path) => toRelativePath(cwd, path)));
+  const maxChannelResults = Math.min(100, Math.max(limit * 3, limit));
+
+  const channelResults: DeepSearchCandidate[] = [];
+
+  // Phase 1: code + symbol in parallel (they share no state)
+  const phase1Promise = (async () => {
+    if (scope !== "docs") {
+      const results = await Promise.allSettled([
+        runSearchChannel(query, cwd, "code", maxChannelResults, signal, ctx),
+        runSearchChannel(query, cwd, "grep", maxChannelResults, signal, ctx),
+      ]);
+      if (results[0].status === "fulfilled") {
+        channelResults.push(...results[0].value);
+      } else {
+        degraded.push(`structural channel failed: ${results[0].reason instanceof Error ? results[0].reason.message : String(results[0].reason)}`);
+      }
+      if (results[1].status === "fulfilled") {
+        channelResults.push(...results[1].value);
+      } else {
+        degraded.push(`symbol channel failed: ${results[1].reason instanceof Error ? results[1].reason.message : String(results[1].reason)}`);
+      }
+    }
+  })();
+
+  // Phase 2: semantic in parallel with phase 1 (it only needs discoveredFiles)
+  const phase2Promise = (async () => {
+    if (depth !== "quick" && discoveredFiles.length > 0) {
+      try {
+        channelResults.push(...await runSemanticChannel(query, cwd, discoveredFiles, limit, signal, ctx));
+      } catch (error) {
+        degraded.push(`semantic channel unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  })();
+
+  // LSP workspace/symbol channel in parallel — independent of file discovery
+  // Best-effort: wraps in try/catch internally
+  const lspPromise = (async () => {
+    if (query.length > 2) {
+      try {
+        channelResults.push(...await runLSPChannel(query, cwd, depth, maxChannelResults, signal));
+      } catch (error) {
+        degraded.push(`lsp channel failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  })();
+
+  // Wait for phases 1, 2, and LSP
+  await Promise.all([phase1Promise, phase2Promise, lspPromise]);
+
+  // Phase 3: graph channel (needs seeds from phase 1 results)
+  if (depth !== "quick" && scope !== "docs" && channelResults.length > 0) {
+    try {
+      const graphSeeds = selectGraphSeedFiles(cwd, channelResults, focusFiles);
+      channelResults.push(
+        ...await runGraphChannel(
+          cwd,
+          graphSeeds,
+          discoveredFiles,
+          Math.min(MAX_GRAPH_CANDIDATES, maxChannelResults),
+          signal,
+        ),
+      );
+    } catch (error) {
+      degraded.push(`graph channel failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const filteredCandidates = channelResults
+    .map((candidate) => ({
+      ...candidate,
+      file: toRelativePath(cwd, candidate.file),
+    }))
+    .filter((candidate) => candidatePathFilter.size === 0 || candidatePathFilter.has(candidate.file))
+    .filter((candidate) => pathMatchesScope(candidate.file, scope));
+
+  for (const channel of ["semantic", "structural", "symbol", "graph", "lsp"] as const) {
+    const candidates = filteredCandidates.filter((candidate) => candidate.channel === channel);
+    const ranks = computeRanks(candidates.map((candidate) => candidate.rawScore), candidates.map((candidate) => candidate.file));
+    candidates.forEach((candidate, index) => {
+      candidate.rank = ranks[index] ?? candidate.rank;
+    });
+  }
+
+  const matches = fuseCandidates(filteredCandidates, limit, focusFiles, maxSnippetChars);
+
+  // Post-fusion enrichment: provenance matchedTerms + per-term coverage
+  enrichMatchProvenance(matches, query);
+  const queryTerms = extractQueryTerms(query);
+  const coverage = queryTerms.length > 0
+    ? computeQueryTermCoverage(matches, queryTerms)
+    : undefined;
+
+  if (includeRelationships && matches.length > 0 && scope !== "docs") {
+    await enrichRelationships(matches, signal, discoveredFiles);
+  }
+
+  const details: DeepSearchDetails = {
+    query,
+    depth,
+    scope,
+    filesInspected: discoveredFiles.length,
+    matches,
+    channelsUsed: channelSet(matches),
+    degraded,
+    elapsedMs: Date.now() - startedAt,
+    rerankRequested: false,
+    ...(coverage && { coverage }),
+  };
+
+  // Escalation: prepend compact repo-map + guidelines when query had poor coverage
+  // and all structural matches came from test files (or there were no structural matches)
+  const escalate = shouldEscalateToRepoMap(coverage, matches);
+  let rendered = renderMarkdown(details, outputBudget * 4);
+
+  if (escalate) {
+    // Append repo-map summary
+    const repoSummary = await getCompactRepoSummary(cwd, signal);
+    if (repoSummary) {
+      rendered = rendered + "\n" + repoSummary;
+    }
+
+    // Append search guidelines
+    if (coverage) {
+      const notFoundTerms = coverage
+        .filter((c) => c.status === "not_found")
+        .map((c) => c.term);
+      if (notFoundTerms.length > 0) {
+        rendered = rendered + "\n" + generateSearchGuidelines(notFoundTerms) + "\n";
+      }
+    }
+
+    // Enforce outputBudget on the combined content
+    rendered = truncate(rendered, outputBudget);
+  }
+
   return {
-    name: "deep_search",
-    label: "deep_search",
-    description:
-      "Agentic deep repository search. Orchestrates structural code search, symbol search, LSP workspace symbol search, optional intent_read semantic ranking, graph expansion, RRF fusion, provenance, and follow-up suggestions in one call. Use directory/folder to search a specific root.",
-    parameters: DeepSearchSchema,
-
-    async execute(
-      _toolCallId: string,
-      params: DeepSearchInput,
-      signal: AbortSignal | undefined,
-      _onUpdate: unknown,
-      ctx: ExtensionContext,
-    ) {
-      const startedAt = Date.now();
-      const query = params.query.trim();
-      if (!query) throw new Error("query must not be empty or whitespace-only");
-
-      const depth = normalizeDepth(params.depth);
-      const scope = normalizeScope(params.scope);
-      const limit = clampInteger(params.limit, 1, 50, DEFAULT_LIMIT);
-      const maxSnippetChars = clampInteger(params.maxSnippetChars, 100, 1_000, DEFAULT_SNIPPET_CHARS);
-      const outputBudget = clampInteger(params.outputBudget, 1_024, 16_384, DEFAULT_OUTPUT_BUDGET);
-      const includeRelationships = params.includeRelationships ?? depth === "thorough";
-      const focusFiles = (params.focusFiles ?? []).map((file) => file.replace(/\\/g, "/"));
-      const cwd = resolveDeepSearchRoot(params, ctx.cwd);
-      const degraded: string[] = [];
-
-      const discoveredFiles = await discoverCandidateFiles(cwd, scope, params.filePattern, signal);
-      const candidatePathFilter = new Set(discoveredFiles.map((path) => toRelativePath(cwd, path)));
-      const maxChannelResults = Math.min(100, Math.max(limit * 3, limit));
-
-      const channelResults: DeepSearchCandidate[] = [];
-
-      // Phase 1: code + symbol in parallel (they share no state)
-      const phase1Promise = (async () => {
-        if (scope !== "docs") {
-          const results = await Promise.allSettled([
-            runSearchChannel(query, cwd, "code", maxChannelResults, signal, ctx),
-            runSearchChannel(query, cwd, "symbols", maxChannelResults, signal, ctx),
-          ]);
-          if (results[0].status === "fulfilled") {
-            channelResults.push(...results[0].value);
-          } else {
-            degraded.push(`structural channel failed: ${results[0].reason instanceof Error ? results[0].reason.message : String(results[0].reason)}`);
-          }
-          if (results[1].status === "fulfilled") {
-            channelResults.push(...results[1].value);
-          } else {
-            degraded.push(`symbol channel failed: ${results[1].reason instanceof Error ? results[1].reason.message : String(results[1].reason)}`);
-          }
-        }
-      })();
-
-      // Phase 2: semantic in parallel with phase 1 (it only needs discoveredFiles)
-      const phase2Promise = (async () => {
-        if (depth !== "quick" && discoveredFiles.length > 0) {
-          try {
-            channelResults.push(...await runSemanticChannel(query, cwd, discoveredFiles, limit, signal, ctx));
-          } catch (error) {
-            degraded.push(`semantic channel unavailable: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-      })();
-
-      // LSP workspace/symbol channel in parallel — independent of file discovery
-      // Best-effort: wraps in try/catch internally
-      const lspPromise = (async () => {
-        if (query.length > 2) {
-          try {
-            channelResults.push(...await runLSPChannel(query, cwd, depth, maxChannelResults, signal));
-          } catch (error) {
-            degraded.push(`lsp channel failed: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-      })();
-
-      // Wait for phases 1, 2, and LSP
-      await Promise.all([phase1Promise, phase2Promise, lspPromise]);
-
-      // Phase 3: graph channel (needs seeds from phase 1 results)
-      if (depth !== "quick" && scope !== "docs" && channelResults.length > 0) {
-        try {
-          const graphSeeds = selectGraphSeedFiles(cwd, channelResults, focusFiles);
-          channelResults.push(
-            ...await runGraphChannel(
-              cwd,
-              graphSeeds,
-              discoveredFiles,
-              Math.min(MAX_GRAPH_CANDIDATES, maxChannelResults),
-              signal,
-            ),
-          );
-        } catch (error) {
-          degraded.push(`graph channel failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-
-      const filteredCandidates = channelResults
-        .map((candidate) => ({
-          ...candidate,
-          file: toRelativePath(cwd, candidate.file),
-        }))
-        .filter((candidate) => candidatePathFilter.size === 0 || candidatePathFilter.has(candidate.file))
-        .filter((candidate) => pathMatchesScope(candidate.file, scope));
-
-      for (const channel of ["semantic", "structural", "symbol", "graph", "lsp"] as const) {
-        const candidates = filteredCandidates.filter((candidate) => candidate.channel === channel);
-        const ranks = computeRanks(candidates.map((candidate) => candidate.rawScore), candidates.map((candidate) => candidate.file));
-        candidates.forEach((candidate, index) => {
-          candidate.rank = ranks[index] ?? candidate.rank;
-        });
-      }
-
-      const matches = fuseCandidates(filteredCandidates, limit, focusFiles, maxSnippetChars);
-
-      // Post-fusion enrichment: provenance matchedTerms + per-term coverage
-      enrichMatchProvenance(matches, query);
-      const queryTerms = extractQueryTerms(query);
-      const coverage = queryTerms.length > 0
-        ? computeQueryTermCoverage(matches, queryTerms)
-        : undefined;
-
-      if (includeRelationships && matches.length > 0 && scope !== "docs") {
-        await enrichRelationships(matches, cwd, signal, ctx);
-      }
-
-      const details: DeepSearchDetails = {
-        query,
-        depth,
-        scope,
-        filesInspected: discoveredFiles.length,
-        matches,
-        channelsUsed: channelSet(matches),
-        degraded,
-        elapsedMs: Date.now() - startedAt,
-        rerankRequested: params.rerank === true,
-        ...(coverage && { coverage }),
-      };
-
-      // Escalation: prepend compact repo-map + guidelines when query had poor coverage
-      // and all structural matches came from test files (or there were no structural matches)
-      const escalate = shouldEscalateToRepoMap(coverage, matches);
-      let rendered = renderMarkdown(details, outputBudget * 4);
-
-      if (escalate) {
-        // Append repo-map summary
-        const repoSummary = await getCompactRepoSummary(cwd, signal);
-        if (repoSummary) {
-          rendered = rendered + "\n" + repoSummary;
-        }
-
-        // Append search guidelines
-        if (coverage) {
-          const notFoundTerms = coverage
-            .filter((c) => c.status === "not_found")
-            .map((c) => c.term);
-          if (notFoundTerms.length > 0) {
-            rendered = rendered + "\n" + generateSearchGuidelines(notFoundTerms) + "\n";
-          }
-        }
-
-        // Enforce outputBudget on the combined content
-        rendered = renderMarkdown({ ...details, matches: [], coverage: undefined }, outputBudget);
-      }
-
-      return {
-        content: [{ type: "text" as const, text: rendered }],
-        details: toPublicDeepSearchDetails(details),
-      };
-    },
-  } as unknown as ToolDefinition;
+    content: [{ type: "text" as const, text: rendered }],
+    details: toPublicDeepSearchDetails(details) as unknown as Record<string, unknown>,
+  };
 }

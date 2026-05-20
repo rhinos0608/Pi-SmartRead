@@ -12,11 +12,6 @@
 
 import { existsSync, promises as fs } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import { Type, type Static } from "@sinclair/typebox";
-import type {
-  ExtensionContext,
-  ToolDefinition,
-} from "@mariozechner/pi-coding-agent";
 import Parser, { Query } from "tree-sitter";
 import { getTagsBatch, initParser, loadLanguage } from "./tags.js";
 import { TagsCache } from "./cache.js";
@@ -57,33 +52,6 @@ export interface SymbolResolution {
   };
 }
 
-const SymbolResolutionSchema = Type.Object({
-  symbol: Type.String({
-    description: "The symbol name to resolve (e.g., 'User', 'createUser')",
-    minLength: 1,
-  }),
-  context: Type.Optional(
-    Type.String({
-      description:
-        "Context location in format 'file.ts:42'. Helps disambiguate which definition to pick when the symbol is defined in multiple files.",
-    }),
-  ),
-  directory: Type.Optional(
-    Type.String({
-      description:
-        "Root directory to search (default: extension working directory)",
-    }),
-  ),
-  maxResults: Type.Optional(
-    Type.Number({
-      description: "Maximum definition + reference results (default: 50)",
-      minimum: 1,
-      maximum: 200,
-    }),
-  ),
-});
-
-type SymbolResolutionInput = Static<typeof SymbolResolutionSchema>;
 
 // ── Import specifier extraction ───────────────────────────────────
 
@@ -343,121 +311,4 @@ export async function resolveSymbol(
       parseTimeMs,
     },
   };
-}
-
-// ── Tool definition ───────────────────────────────────────────────
-
-export function createSymbolResolverTool(): ToolDefinition {
-  return {
-    name: "resolve_symbol",
-    label: "resolve_symbol",
-    description:
-      "Resolve a symbol (function, class, variable) name across the repository. Given a symbol and optional context file:line, returns the definition location, all references, and enriched context snippets. Uses tree-sitter AST analysis for precise results.",
-    parameters: SymbolResolutionSchema,
-
-    async execute(
-      _toolCallId: string,
-      params: SymbolResolutionInput,
-      signal: AbortSignal | undefined,
-      _onUpdate: unknown,
-      ctx: ExtensionContext,
-    ) {
-      const cwd = params.directory ?? ctx.cwd;
-      const root = resolve(cwd);
-
-      // Parse context if provided
-      let contextFile: string | undefined;
-      let contextLine: number | undefined;
-      if (params.context) {
-        const lastColon = params.context.lastIndexOf(":");
-        if (lastColon !== -1 && lastColon < params.context.length - 1) {
-          const trailing = params.context.slice(lastColon + 1);
-          const parsed = parseInt(trailing, 10);
-          if (!isNaN(parsed)) {
-            contextFile = params.context.slice(0, lastColon);
-            contextLine = parsed;
-          } else {
-            contextFile = params.context;
-          }
-        } else {
-          contextFile = params.context;
-        }
-      }
-
-      if (signal?.aborted) throw new Error("Operation aborted");
-
-      const result = await resolveSymbol(
-        root,
-        params.symbol,
-        contextFile,
-        contextLine,
-        params.maxResults ?? 50,
-      );
-
-      // ── Format output ──
-      const lines: string[] = [
-        `Resolved symbol: "${result.symbol}"`,
-        result.contextFile !== "(none)"
-          ? `Context: ${result.contextFile}:${result.contextLine}`
-          : "Context: none provided",
-        `Strategy: ${result.strategy}`,
-        `Scanned ${result.stats.totalFilesScanned} files (${result.stats.parseTimeMs}ms)`,
-        "",
-      ];
-
-      if (result.definitions.length === 0) {
-        lines.push(`[No definitions found for "${result.symbol}"]`);
-        lines.push("");
-        if (result.references.length > 0) {
-          lines.push(`${result.references.length} reference(s) found (symbol may be from an external module):`);
-          lines.push("");
-          for (const r of result.references.slice(0, 20)) {
-            const ctxStr = r.context ? `\n${r.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-            lines.push(`  ${r.file}:${r.line}  [ref]${ctxStr}`);
-            lines.push("");
-          }
-        } else {
-          lines.push("[No references found]");
-        }
-      } else {
-        // Best definition first
-        if (result.bestDefinition) {
-          const bd = result.bestDefinition;
-          const ctxStr = bd.context ? `\n${bd.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-          lines.push(`Best definition → ${bd.file}:${bd.line}  [def]${ctxStr}`);
-          lines.push("");
-        }
-
-        lines.push(`${result.definitions.length} definition(s):`);
-        lines.push("");
-        for (const d of result.definitions) {
-          const ctxStr = d.context ? `\n${d.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-          lines.push(`  ${d.file}:${d.line}  [def]${ctxStr}`);
-          lines.push("");
-        }
-
-        if (result.references.length > 0) {
-          lines.push(`${result.references.length} reference(s):`);
-          lines.push("");
-          for (const r of result.references.slice(0, 30)) {
-            const ctxStr = r.context ? `\n${r.context.split("\n").map((l) => `  ${l}`).join("\n")}` : "";
-            lines.push(`  ${r.file}:${r.line}  [ref]${ctxStr}`);
-            lines.push("");
-          }
-          if (result.references.length > 30) {
-            lines.push(`  ... and ${result.references.length - 30} more references`);
-            lines.push("");
-          }
-        } else {
-          lines.push("[No references found]");
-          lines.push("");
-        }
-      }
-
-      return {
-        content: [{ type: "text" as const, text: lines.join("\n") }],
-        details: result,
-      };
-    },
-  } as unknown as ToolDefinition;
 }

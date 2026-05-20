@@ -30,7 +30,7 @@ import { fetchEmbeddings } from "./embedding.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
 import { expandToMonorepoRoots } from "./monorepo-detector.js";
-import { createDeepSearchTool } from "./deep-search.js";
+import { executeDeepSearch } from "./deep-search.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 
 // ── Schema ────────────────────────────────────────────────────────
@@ -51,20 +51,9 @@ const SearchSchema = Type.Object({
       minLength: 1,
     }),
   ),
-  enrich: Type.Optional(
-    Type.Boolean({
-      description: "Enrich code mode results with symbol resolution and caller info (default: true)",
-    }),
-  ),
   directory: Type.Optional(
     Type.String({
       description: "Root directory to search (default: extension working directory)",
-      default: ".",
-    }),
-  ),
-  folder: Type.Optional(
-    Type.String({
-      description: "Alias for directory. Root folder to search (default: extension working directory)",
       default: ".",
     }),
   ),
@@ -73,58 +62,6 @@ const SearchSchema = Type.Object({
       description: "Maximum results to return (1-10000)",
       minimum: 1,
       maximum: 10000,
-    }),
-  ),
-  filePattern: Type.Optional(
-    Type.String({
-      description: "Glob filter to restrict files (e.g. '*.ts'). Default: all supported source files.",
-    }),
-  ),
-  // ── deep mode params ──
-  depth: Type.Optional(
-    Type.Unsafe<"quick" | "standard" | "thorough">({
-      type: "string",
-      enum: ["quick", "standard", "thorough"],
-      description: "Search depth for mode=deep",
-      default: "standard",
-    }),
-  ),
-  scope: Type.Optional(
-    Type.Unsafe<"code" | "docs" | "tests" | "all">({
-      type: "string",
-      enum: ["code", "docs", "tests", "all"],
-      description: "Content type filter for mode=deep",
-      default: "all",
-    }),
-  ),
-  maxSnippetChars: Type.Optional(
-    Type.Number({
-      description: "Max characters per code snippet for mode=deep (100-1000)",
-      minimum: 100,
-      maximum: 1000,
-    }),
-  ),
-  outputBudget: Type.Optional(
-    Type.Number({
-      description: "Approximate output token budget for mode=deep (1k-16k)",
-      minimum: 1024,
-      maximum: 16384,
-    }),
-  ),
-  includeRelationships: Type.Optional(
-    Type.Boolean({
-      description: "Include caller/callee/import hints for top matches in mode=deep",
-    }),
-  ),
-  focusFiles: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Personalize ranking toward these files (like repo_map focusFiles)",
-      maxItems: 20,
-    }),
-  ),
-  rerank: Type.Optional(
-    Type.Boolean({
-      description: "Run optional reranker on top candidates in mode=deep",
     }),
   ),
 });
@@ -321,14 +258,7 @@ function lspSymbolKindToString(kind: number): string {
 
 function resolveSearchRoot(params: SearchInput, defaultCwd: string): string {
   const directory = params.directory?.trim();
-  const folder = params.folder?.trim();
-
-  if (directory && folder && resolve(defaultCwd, directory) !== resolve(defaultCwd, folder)) {
-    throw new Error("Provide either directory or folder, not both");
-  }
-
-  const requested = directory ?? folder;
-  return requested ? resolve(defaultCwd, requested) : defaultCwd;
+  return directory ? resolve(defaultCwd, directory) : defaultCwd;
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -339,24 +269,21 @@ async function handleDeep(
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
 ) {
-  const deepTool = createDeepSearchTool();
-  return deepTool.execute(
-    "search:deep",
+  const query = params.query ?? "";
+  if (!query.trim()) throw new Error('search mode "deep" requires a non-empty "query"');
+  return executeDeepSearch(
     {
-      query: params.query,
-      depth: params.depth ?? "standard",
-      scope: params.scope ?? "all",
-      directory: params.directory ?? params.folder ?? cwd,
+      query,
+      depth: "standard",
+      scope: "all",
+      directory: params.directory ?? cwd,
       limit: params.maxResults ?? 15,
-      maxSnippetChars: params.maxSnippetChars ?? 400,
-      outputBudget: params.outputBudget ?? 4096,
-      includeRelationships: params.includeRelationships,
-      filePattern: params.filePattern,
-      focusFiles: params.focusFiles,
-      rerank: params.rerank,
+      maxSnippetChars: 400,
+      outputBudget: 4096,
+      includeRelationships: undefined,
+      focusFiles: undefined,
     },
     signal,
-    undefined,
     ctx,
   );
 }
@@ -529,8 +456,8 @@ async function handleCode(
   let lspResultsCount = 0;
   try {
     const bridge = await getLSPBridge();
-    if (bridge?.isAvailable && query.length > 2) {
-      const root = params.directory ?? params.folder ?? cwd;
+    if (bridge?.isAvailable() && query.length > 2) {
+      const root = params.directory ? resolve(cwd, params.directory) : cwd;
       const wsSymbols = await bridge.workspaceSymbol(query, root);
       if (wsSymbols.length > 0) {
         const existingKeys = new Set(allResults.map((d) => `${d.relFile}:${d.name}`));
@@ -699,7 +626,7 @@ export default function createSearchTool(): ToolDefinition {
       'Search code by identifier or pattern. Default mode (grep): AST-aware definition search — fast, no embeddings. ' +
       'mode=code: BM25 + optional embedding re-rank with symbol resolution and caller enrichment. ' +
       'mode=deep: multi-channel orchestration (code + symbols + semantic + graph). ' +
-      'Use directory/folder to search a specific root.',
+      'Use directory to scope the search root.',
     parameters: SearchSchema,
 
     async execute(
@@ -725,7 +652,6 @@ export default function createSearchTool(): ToolDefinition {
         case "code": {
           const config = loadSearchConfig(cwd);
           const enrich =
-            params.enrich !== false &&
             (config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false);
           return handleCode(params, cwd, signal, enrich);
         }

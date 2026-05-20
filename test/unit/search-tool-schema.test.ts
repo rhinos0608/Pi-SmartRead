@@ -9,17 +9,18 @@ describe("search tool schema", () => {
   beforeEach(() => {
     resetSessionState();
   });
+
   it("exposes a top-level object schema for provider compatibility", () => {
     const tool = createSearchTool();
     const schema = tool.parameters as { type?: string; properties?: Record<string, unknown> };
 
     expect(schema.type).toBe("object");
     expect(schema.properties).toHaveProperty("directory");
-    expect(schema.properties).toHaveProperty("folder");
+    expect(schema.properties).not.toHaveProperty("folder");
   });
 
-  it("limits searching to the requested directory or folder alias", async () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-smartread-search-folder-"));
+  it("scopes search to the requested directory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-smartread-search-scoped-"));
     try {
       mkdirSync(join(root, "scoped"), { recursive: true });
       writeFileSync(
@@ -32,42 +33,26 @@ describe("search tool schema", () => {
       );
 
       const tool = createSearchTool();
-      for (const scopedRoot of [{ directory: "scoped" }, { folder: "scoped" }]) {
-        const result = await tool.execute(
-          "id",
-          { mode: "code", query: "outsideExclusiveIdentifier", enrich: false, ...scopedRoot },
-          undefined,
-          undefined,
-          { cwd: root } as any,
-        );
+      const result = await tool.execute(
+        "id",
+        { mode: "code", query: "outsideExclusiveIdentifier", directory: "scoped" },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
 
-        const text = (result.content[0] as any).text as string;
-        const details = result.details as any;
+      const text = (result.content[0] as any).text as string;
+      const details = result.details as any;
 
-        expect(details.total).toBe(1);
-        expect(details.filesScanned).toBe(1);
-        expect(text).toContain("target.ts");
-        expect(text).toContain("relevance=");
-        expect(text).not.toContain("score=");
-        expect(text).not.toContain("outside.ts");
-      }
+      expect(details.total).toBe(1);
+      expect(details.filesScanned).toBe(1);
+      expect(text).toContain("target.ts");
+      expect(text).toContain("relevance=");
+      expect(text).not.toContain("score=");
+      expect(text).not.toContain("outside.ts");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  it("rejects conflicting directory and folder roots", async () => {
-    const tool = createSearchTool();
-
-    await expect(
-      tool.execute(
-        "id",
-        { mode: "code", query: "anything", directory: "src", folder: "tests" },
-        undefined,
-        undefined,
-        { cwd: "/tmp" } as any,
-      ),
-    ).rejects.toThrow(/directory.*folder|folder.*directory/i);
   });
 
   it("shows the low-result hint only once per session", async () => {
