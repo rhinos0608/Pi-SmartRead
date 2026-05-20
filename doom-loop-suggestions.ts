@@ -35,7 +35,7 @@ export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
     { text: "try intent_read with a natural language query", toolHint: "intent_read" },
     { text: "use repo_map to discover related files", toolHint: "repo_map" },
   ],
-  read_multiple_files: [
+  read_files: [
     str("try reducing the number of files"),
     str("use offset/limit to narrow focus"),
     str("try intent_read for semantic search instead"),
@@ -45,8 +45,8 @@ export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
   intent_read: [
     str("try a more specific query"),
     str("increase topK to get more results"),
-    str("try deep_search for multi-phase exploration"),
-    { text: "try deep_search with depth 'thorough' for broader exploration", toolHint: "deep_search", toolInput: { depth: "thorough" } },
+    str("try search mode=deep for multi-phase exploration"),
+    { text: "try search mode=deep for broader exploration", toolHint: "search", toolInput: { mode: "deep" } },
     { text: "try repo_map first to understand the file layout", toolHint: "repo_map" },
     { text: "narrow the query with specific identifiers", toolHint: "search" },
   ],
@@ -60,14 +60,13 @@ export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
   search: [
     str("try a different mode (grep, code, deep)"),
     str("resolve specific symbols instead of searching broadly"),
-    str("try a narrower filePattern"),
-    { text: "try mode 'callers' to trace function callers", toolHint: "search", toolInput: { mode: "callers" } },
     { text: "try mode 'code' for AST-aware search", toolHint: "search", toolInput: { mode: "code" } },
+    { text: "try mode 'deep' for multi-channel exploration", toolHint: "search", toolInput: { mode: "deep" } },
   ],
   repo_map: [
     str("try compact: true for more token-efficient output"),
-    str("use focusFiles to personalize ranking"),
-    str("try priorityIdentifiers to boost relevant symbols"),
+    str("use focus to boost relevant symbols or files"),
+    str("use mapTokens to increase the token budget for larger repos"),
   ],
   graph_mutate: [
     str("verify the from/to paths exist"),
@@ -87,7 +86,7 @@ export const SUGGESTIONS_LEGACY: Record<string, readonly string[]> = {
     "if searching for a symbol, use search or repo_map",
     "if file keeps being read identically, the content may already be what you expect",
   ],
-  read_multiple_files: [
+  read_files: [
     "try reducing the number of files",
     "use offset/limit to narrow focus",
     "try intent_read for semantic search instead",
@@ -95,7 +94,7 @@ export const SUGGESTIONS_LEGACY: Record<string, readonly string[]> = {
   intent_read: [
     "try a more specific query",
     "increase topK to get more results",
-    "try deep_search for multi-phase exploration",
+    "try search mode=deep for multi-phase exploration",
   ],
   deep_search: [
     "try a more specific query",
@@ -105,12 +104,11 @@ export const SUGGESTIONS_LEGACY: Record<string, readonly string[]> = {
   search: [
     "try a different mode (grep, code, deep)",
     "resolve specific symbols instead of searching broadly",
-    "try a narrower filePattern",
+    "narrow the search with a more specific query",
   ],
   repo_map: [
     "try compact: true for more token-efficient output",
-    "use focusFiles to personalize ranking",
-    "try priorityIdentifiers to boost relevant symbols",
+    "use focus to boost relevant symbols or files",
   ],
   graph_mutate: [
     "verify the from/to paths exist",

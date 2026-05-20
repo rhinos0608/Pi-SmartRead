@@ -12,29 +12,23 @@ import { existsSync } from "node:fs";
 
 // ── Schema ──────────────────────────────────────────────────────────
 
-const BreakageEdgeSchema = Type.Object({
-  from: Type.String({ description: "Path to the file or symbol that was modified" }),
-  to: Type.String({ description: "Path to the file or symbol that broke" }),
-  context: Type.Optional(Type.String({ description: "Human-readable context" })),
-  confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: "Confidence (0-1)" })),
-});
-
-const CoChangeEdgeSchema = Type.Object({
-  from: Type.String({ description: "Path to the file that was edited" }),
-  to: Type.String({ description: "Path to the file that co-changed" }),
-  context: Type.Optional(Type.String({ description: "Commit hash or description" })),
-  confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: "Confidence (0-1)" })),
-});
-
 const GraphMutateInputSchema = Type.Object({
-  breakage: Type.Optional(Type.Array(BreakageEdgeSchema, { description: "Breakage edges from post-edit diagnostics" })),
-  coChange: Type.Optional(Type.Array(CoChangeEdgeSchema, { description: "Co-change edges from git history" })),
+  from: Type.String({ description: "Path to the file or symbol that was modified / edited" }),
+  to: Type.String({ description: "Path to the file or symbol that broke or co-changed" }),
+  relation: Type.Optional(
+    Type.Unsafe<"breakage" | "co-change">({
+      type: "string",
+      enum: ["breakage", "co-change"],
+      description: "'breakage' (default): editing 'from' causes errors in 'to'. 'co-change': 'from' and 'to' change together in git history.",
+      default: "breakage",
+    }),
+  ),
+  context: Type.Optional(Type.String({ description: "Human-readable context or commit hash description" })),
+  confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: "Confidence (0-1)" })),
   root: Type.Optional(Type.String({ description: "Project root directory" })),
 });
 
-interface BreakageEdge { from: string; to: string; context?: string; confidence?: number; }
-interface CoChangeEdge { from: string; to: string; context?: string; confidence?: number; }
-interface GraphMutateInput { breakage?: BreakageEdge[]; coChange?: CoChangeEdge[]; root?: string; }
+interface GraphMutateInput { from: string; to: string; relation?: "breakage" | "co-change"; context?: string; confidence?: number; root?: string; }
 
 // ── Tool Definition ─────────────────────────────────────────────────
 
@@ -43,13 +37,13 @@ export function createGraphMutateTool(): ToolDefinition {
   const def: any = {
     name: "graph_mutate",
     label: "graph_mutate",
-    description: `[EXPERIMENTAL] Record semantic coupling observations (breakage, co-change) into Pi-SmartRead's context graph.
+    description: `[EXPERIMENTAL] Record a semantic coupling observation (breakage or co-change) into Pi-SmartRead's context graph.
 
-Breakage edges: when editing file A causes type-checking errors in file B,
-call this tool to record the edge. The next intent_read touching A includes B.
+Breakage (default): when editing file A causes type-checking errors in file B,
+call this tool with relation="breakage". The next intent_read touching A includes B.
 
-Co-change edges: when files A and B consistently change together in git
-history, record temporal coupling. Edge weight decays with time.
+Co-change: when files A and B consistently change together in git history,
+call this tool with relation="co-change". Edge weight decays with time.
 
 Edges are event-sourced to disk and survive session restarts.`,
     parameters: GraphMutateInputSchema,
@@ -69,49 +63,28 @@ Edges are event-sourced to disk and survive session restarts.`,
         return { content: [{ type: "text", text: `❌ Root directory not found: ${resolvedRoot}` }] };
       }
 
-      const recorded: string[] = [];
-      const errors: string[] = [];
+      const fromPath = isAbsolute(input.from) ? input.from : resolve(resolvedRoot, input.from);
+      const toPath = isAbsolute(input.to) ? input.to : resolve(resolvedRoot, input.to);
 
-      if (input.breakage) {
-        for (const edge of input.breakage) {
-          try {
-            const fromPath = isAbsolute(edge.from) ? edge.from : resolve(resolvedRoot, edge.from);
-            const toPath = isAbsolute(edge.to) ? edge.to : resolve(resolvedRoot, edge.to);
-            if (!isPathInside(resolvedRoot, fromPath) || !isPathInside(resolvedRoot, toPath)) {
-              errors.push(`Paths must be inside project root: ${edge.from} → ${edge.to}`);
-              continue;
-            }
-            EdgeStore.recordBreakage(resolvedRoot, edge.from, edge.to, edge.context, edge.confidence);
-            recorded.push(`breakage: ${edge.from} → ${edge.to}${edge.context ? ` (${edge.context})` : ""}`);
-          } catch (err) {
-            errors.push(`Failed breakage ${edge.from} → ${edge.to}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
+      if (!isPathInside(resolvedRoot, fromPath) || !isPathInside(resolvedRoot, toPath)) {
+        return { content: [{ type: "text", text: `❌ Paths must be inside project root: ${input.from} → ${input.to}` }] };
       }
 
-      if (input.coChange) {
-        for (const edge of input.coChange) {
-          try {
-            const fromPath = isAbsolute(edge.from) ? edge.from : resolve(resolvedRoot, edge.from);
-            const toPath = isAbsolute(edge.to) ? edge.to : resolve(resolvedRoot, edge.to);
-            if (!isPathInside(resolvedRoot, fromPath) || !isPathInside(resolvedRoot, toPath)) {
-              errors.push(`Paths must be inside project root: ${edge.from} → ${edge.to}`);
-              continue;
-            }
-            EdgeStore.recordCoChange(resolvedRoot, edge.from, edge.to, edge.context, edge.confidence);
-            recorded.push(`co-change: ${edge.from} → ${edge.to}${edge.context ? ` (${edge.context})` : ""}`);
-          } catch (err) {
-            errors.push(`Failed co-change ${edge.from} → ${edge.to}: ${err instanceof Error ? err.message : String(err)}`);
-          }
+      try {
+        const relation = input.relation ?? "breakage";
+        if (relation === "breakage") {
+          EdgeStore.recordBreakage(resolvedRoot, fromPath, toPath, input.context, input.confidence);
+        } else {
+          EdgeStore.recordCoChange(resolvedRoot, fromPath, toPath, input.context, input.confidence);
         }
+        const label = relation === "breakage" ? "breakage" : "co-change";
+        return {
+          content: [{ type: "text", text: `✅ Recorded ${label}: ${input.from} → ${input.to}${input.context ? ` (${input.context})` : ""}` }],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `❌ Failed: ${message}` }] };
       }
-
-      const parts: string[] = [];
-      if (recorded.length > 0) parts.push(`✅ Recorded ${recorded.length} edge(s):\n${recorded.map((r) => `  • ${r}`).join("\n")}`);
-      if (errors.length > 0) parts.push(`⚠ ${errors.length} error(s):\n${errors.map((e) => `  • ${e}`).join("\n")}`);
-      if (recorded.length === 0 && errors.length === 0) parts.push("ℹ No edges provided.");
-
-      return { content: [{ type: "text", text: parts.join("\n\n") }] };
     },
   };
   return def as ToolDefinition;

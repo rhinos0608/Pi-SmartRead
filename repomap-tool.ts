@@ -33,52 +33,9 @@ const RepoMapSchema = Type.Object({
       maximum: 32768,
     }),
   ),
-  focusFiles: Type.Optional(
+  focus: Type.Optional(
     Type.Array(Type.String(), {
-      description:
-        "Files to personalize PageRank toward (these get higher relevance)",
-    }),
-  ),
-  priorityIdentifiers: Type.Optional(
-    Type.Array(Type.String(), {
-      description:
-        "Identifier names to boost in ranking (e.g., function/class names)",
-    }),
-  ),
-  mentionedIdents: Type.Optional(
-    Type.Array(Type.String(), {
-      description:
-        "Identifiers mentioned in user query — used for file-path matching and personalization",
-    }),
-  ),
-  mentionedFnames: Type.Optional(
-    Type.Array(Type.String(), {
-      description:
-        "File paths mentioned in user query — used for personalization",
-    }),
-  ),
-  excludeUnranked: Type.Optional(
-    Type.Boolean({
-      description:
-        "Exclude files with zero PageRank from output (default: false)",
-    }),
-  ),
-  forceRefresh: Type.Optional(
-    Type.Boolean({
-      description:
-        "Force re-parsing all files (default: false, uses cache)",
-    }),
-  ),
-  useImportBased: Type.Optional(
-    Type.Boolean({
-      description:
-        "Use import-based dependency mapping instead of tree-sitter + PageRank (default: false). Faster but less precise — ranks files by how many other files import them.",
-    }),
-  ),
-  autoFallback: Type.Optional(
-    Type.Boolean({
-      description:
-        "Auto-fallback to import-based mapping when tree-sitter parsing fails (default: true). Set false to surface parser errors.",
+      description: "Files or symbol names to boost in ranking. E.g. ['Database', 'src/models/user.ts']",
     }),
   ),
   compact: Type.Optional(
@@ -106,7 +63,7 @@ export function createRepoTool(): ToolDefinition {
   return {
     name: "repo_map",
     label: "repo_map",
-    description: `Map a repository using tree-sitter AST analysis (default) or import-based dependency mapping (fallback). Scans source files, extracts definitions and references, ranks files by PageRank importance (default) or import in-degree (fallback), and returns a token-budgeted map of the most important symbols with code context. Use the fallback when tree-sitter WASM isn't available or for faster mapping of very large repos.`,
+    description: `Map a repository using tree-sitter AST analysis (default) or import-based dependency mapping (fallback). Scans source files, extracts definitions and references, ranks files by PageRank importance (default) or import in-degree (fallback), and returns a token-budgeted map of the most important symbols with code context. Use 'focus' to boost specific files or symbols. Use the fallback when tree-sitter WASM isn't available or for faster mapping of very large repos.`,
     parameters: RepoMapSchema,
 
     async execute(
@@ -121,16 +78,20 @@ export function createRepoTool(): ToolDefinition {
 
       if (signal?.aborted) throw new Error("Operation aborted");
 
+      const focus = params.focus ?? [];
+      const focusIdents = focus.filter(f => !f.includes('/') && !f.includes('.'));
+      const focusPaths = focus.filter(f => f.includes('/') || f.includes('.'));
+
       const result = await rm.getRepoMap({
         mapTokens: params.mapTokens,
-        focusFiles: params.focusFiles ?? [],
-        priorityIdentifiers: params.priorityIdentifiers ?? [],
-        mentionedIdents: params.mentionedIdents ?? [],
-        mentionedFnames: params.mentionedFnames ?? [],
-        excludeUnranked: params.excludeUnranked ?? false,
-        forceRefresh: params.forceRefresh ?? false,
-        useImportBased: params.useImportBased ?? false,
-        autoFallback: params.autoFallback ?? true,
+        focusFiles: focusPaths,
+        priorityIdentifiers: focusIdents,
+        mentionedIdents: focusIdents,
+        mentionedFnames: focusPaths,
+        excludeUnranked: false,
+        forceRefresh: false,
+        useImportBased: false,
+        autoFallback: true,
         compact: params.compact ?? false,
         verbose: false,
       });
@@ -140,7 +101,7 @@ export function createRepoTool(): ToolDefinition {
           content: [
             {
               type: "text" as const,
-              text: "[No source files found to map, or all files focused. Try without focusFiles.]",
+              text: "[No source files found to map, or all files focused. Try without focus.]",
             },
           ],
           details: result.stats,

@@ -144,15 +144,4 @@ describe("search tool (consolidated)", () => {
     ).rejects.toThrow(/query/i);
   });
 
-  it("rejects conflicting directory and folder", async () => {
-    await expect(
-      tool.execute(
-        "call-5",
-        { query: "anything", directory: "src", folder: "tests" },
-        undefined,
-        undefined,
-        { cwd: "/tmp" } as any,
-      ),
-    ).rejects.toThrow(/directory.*folder|folder.*directory/i);
-  });
 });

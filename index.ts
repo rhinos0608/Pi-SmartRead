@@ -36,7 +36,6 @@ import {
   resolveBashContextGuardConfig,
   resolveGuardProfile,
   GUARD_HINT_GENERIC,
-  GUARD_HINT_DEEP_SEARCH,
   GUARD_HINT_RE,
   suggestShellCommands,
 } from "./bash-context-guard.js";
@@ -98,20 +97,8 @@ export default function (pi: ExtensionAPI) {
       // ── Auto-invalidation: record graph_mutate mutations for stale detection ──
       if (toolName === "graph_mutate") {
         const mutationResources: ContextHygieneResource[] = [];
-        const breakage = input.breakage as Array<{ from?: string; to?: string }> | undefined;
-        if (Array.isArray(breakage)) {
-          for (const edge of breakage) {
-            if (edge.from) mutationResources.push(buildFileResource(edge.from));
-            if (edge.to) mutationResources.push(buildFileResource(edge.to));
-          }
-        }
-        const coChange = input.coChange as Array<{ from?: string; to?: string }> | undefined;
-        if (Array.isArray(coChange)) {
-          for (const edge of coChange) {
-            if (edge.from) mutationResources.push(buildFileResource(edge.from));
-            if (edge.to) mutationResources.push(buildFileResource(edge.to));
-          }
-        }
+        if (typeof input.from === "string") mutationResources.push(buildFileResource(input.from));
+        if (typeof input.to === "string") mutationResources.push(buildFileResource(input.to));
         if (mutationResources.length > 0) {
           hygieneTracker.recordMutation(mutationResources, { resultId: toolCallId });
         }
@@ -136,20 +123,8 @@ export default function (pi: ExtensionAPI) {
       } else if (toolName === "graph_mutate") {
         // Close mutated files so LSP re-opens them with fresh content
         const closePaths: string[] = [];
-        const breakage = lspInput.breakage as Array<{ from?: string; to?: string }> | undefined;
-        if (Array.isArray(breakage)) {
-          for (const edge of breakage) {
-            if (edge.from) closePaths.push(edge.from);
-            if (edge.to) closePaths.push(edge.to);
-          }
-        }
-        const coChange = lspInput.coChange as Array<{ from?: string; to?: string }> | undefined;
-        if (Array.isArray(coChange)) {
-          for (const edge of coChange) {
-            if (edge.from) closePaths.push(edge.from);
-            if (edge.to) closePaths.push(edge.to);
-          }
-        }
+        if (typeof lspInput.from === "string") closePaths.push(lspInput.from);
+        if (typeof lspInput.to === "string") closePaths.push(lspInput.to);
         if (closePaths.length > 0) {
           getLSPBridge()
             .then((bridge) => {
@@ -187,7 +162,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ── Bash context guard: cap oversized output for SmartRead tools ──
-    const SMARTREAD_GUARD_TOOLS = new Set(["deep_search", "search", "intent_read", "read_multiple_files"]);
+    const SMARTREAD_GUARD_TOOLS = new Set(["search", "read"]);
     if (SMARTREAD_GUARD_TOOLS.has(toolName) && Array.isArray(event.content)) {
       const textContent = event.content
         .filter((c: any): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
@@ -220,7 +195,7 @@ export default function (pi: ExtensionAPI) {
               (c: any) => !(c.type === "text" && typeof c.text === "string"),
             );
             // Replace default hint with tool-specific hint
-            const toolHint = toolName === "deep_search" ? GUARD_HINT_DEEP_SEARCH : GUARD_HINT_GENERIC;
+            const toolHint = GUARD_HINT_GENERIC;
             const guardedText = result.text.replace(
               GUARD_HINT_RE,
               toolHint + "\n",
