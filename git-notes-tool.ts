@@ -1,52 +1,46 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { toToolDefinition, toToolDefinitions } from "./types.js";
 import { resolve } from "node:path";
 
 import { detectDefaultBranch, findBranchPoint, findGitRoot, getStructuredLog } from "./git-context.js";
 import { COMPAT_NOTES_REFS, PI_NOTES_REF, formatBranchNotes, readNote, scanBranchNotes, writeNote } from "./git-notes.js";
 
-const GitNotesSchema = Type.Object({
-  action: Type.Optional(
-    Type.Unsafe<"read" | "write">({
-      type: "string",
-      enum: ["read", "write"],
-      description: "'read' to retrieve notes (default), 'write' to attach a note",
-      default: "read",
-    }),
-  ),
+// ── Schemas ─────────────────────────────────────────────────────────
+
+const GitNotesReadSchema = Type.Object({
   commit: Type.Optional(
-    Type.String({ description: "Commit hash. For read: if omitted returns all branch commits. For write: defaults to HEAD." }),
-  ),
-  content: Type.Optional(
-    Type.String({ description: "Note content to attach (required for action=write)" }),
+    Type.String({ description: "Commit hash. If omitted, returns notes for all branch commits." }),
   ),
   directory: Type.Optional(Type.String({ description: "Repo root (default: cwd)" })),
-  confirm: Type.Optional(
-    Type.Boolean({ description: "Confirmation flag (write only)" }),
-  ),
 });
 
-type GitNotesInput = Static<typeof GitNotesSchema>;
+const GitNotesWriteSchema = Type.Object({
+  content: Type.String({ description: "Note content to attach. Use Lore-style trailers for machine-parseable decisions: Constraint:, Rejected:, Directive:, Confidence:" }),
+  commit: Type.Optional(
+    Type.String({ description: "Commit hash to attach the note to (default: HEAD)." }),
+  ),
+  directory: Type.Optional(Type.String({ description: "Repo root (default: cwd)" })),
+});
+
+type GitNotesReadInput = Static<typeof GitNotesReadSchema>;
+type GitNotesWriteInput = Static<typeof GitNotesWriteSchema>;
 
 interface ToolContext {
   cwd: string;
 }
 
-function createGitNotesTool(): ToolDefinition {
-  return {
-    name: "git_notes",
-    label: "git_notes",
+// ── Read tool ────────────────────────────────────────────────────────
+
+function createGitNotesReadTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "git_notes_read",
+    label: "git_notes_read",
     description:
-      "[EXPERIMENTAL] Read or write AI session context attached to git commits as notes. " +
-      "Read returns conversation context, decisions, and constraints from previous sessions. " +
-      "Write records decisions, rejected approaches, and forward-looking directives. " +
-      "Searches refs/notes/pi-smartread, refs/notes/lore, refs/notes/opencode, and refs/notes/commits.\n\n" +
-      "Tip for write: Use Lore-style trailers for machine-parseable decisions:\n" +
-      "  Constraint: <rule that shaped this decision>\n" +
-      "  Rejected: <alternative> | <reason>\n" +
-      "  Directive: <forward instruction for future modifier>\n" +
-      "  Confidence: high|medium|low",
-    parameters: GitNotesSchema,
+      "[EXPERIMENTAL] Read AI session context attached to git commits as notes. " +
+      "Returns conversation context, decisions, and constraints from previous sessions. " +
+      "Searches refs/notes/pi-smartread, refs/notes/lore, refs/notes/opencode, and refs/notes/commits.",
+    parameters: GitNotesReadSchema,
 
     async execute(
       _toolCallId: string,
@@ -55,15 +49,46 @@ function createGitNotesTool(): ToolDefinition {
       _onUpdate: unknown,
       ctx: ToolContext,
     ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
-      const input = params as GitNotesInput;
+      const input = params as GitNotesReadInput;
+      const startDir = input.directory ? resolve(ctx.cwd, input.directory) : ctx.cwd;
+      const gitRoot = await findGitRoot(startDir);
 
-      if (input.action === "write") {
-        if (input.confirm !== true) {
-          throw new Error('action "write" requires "confirm": true');
-        }
-        if (typeof input.content !== "string" || !input.content.trim()) {
-          throw new Error('action "write" requires a non-empty "content"');
-        }
+      if (!gitRoot) {
+        return { content: [{ type: "text", text: "No git repository found." }], details: {} };
+      }
+
+      return handleRead(gitRoot, input);
+    },
+  });
+}
+
+// ── Write tool ─────────────────────────────────────────────────────
+
+function createGitNotesWriteTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "git_notes_write",
+    label: "git_notes_write",
+    description:
+      "[EXPERIMENTAL] Write AI session context as a git note attached to a commit. " +
+      "Records decisions, rejected approaches, and forward-looking directives. " +
+      "Tip: Use Lore-style trailers for machine-parseable decisions:\n" +
+      "  Constraint: <rule that shaped this decision>\n" +
+      "  Rejected: <alternative> | <reason>\n" +
+      "  Directive: <forward instruction for future modifier>\n" +
+      "  Confidence: high|medium|low",
+    parameters: GitNotesWriteSchema,
+
+    async execute(
+      _toolCallId: string,
+      params: unknown,
+      _signal: unknown,
+      _onUpdate: unknown,
+      ctx: ToolContext,
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
+      const input = params as GitNotesWriteInput;
+
+      if (typeof input.content !== "string" || !input.content.trim()) {
+        throw new Error("content must be a non-empty string");
       }
 
       const startDir = input.directory ? resolve(ctx.cwd, input.directory) : ctx.cwd;
@@ -73,18 +98,16 @@ function createGitNotesTool(): ToolDefinition {
         return { content: [{ type: "text", text: "No git repository found." }], details: {} };
       }
 
-      if (input.action === "write") {
-        return handleWrite(gitRoot, input);
-      }
-
-      return handleRead(gitRoot, input);
+      return handleWrite(gitRoot, input);
     },
-  } as unknown as ToolDefinition;
+  });
 }
+
+// ── Handlers (shared) ──────────────────────────────────────────────
 
 async function handleRead(
   gitRoot: string,
-  input: GitNotesInput,
+  input: GitNotesReadInput,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
   if (input.commit) {
     const entries: string[] = [];
@@ -108,12 +131,8 @@ async function handleRead(
 
 async function handleWrite(
   gitRoot: string,
-  input: GitNotesInput,
+  input: GitNotesWriteInput,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
-  // Validate content (defense-in-depth; execute also checks)
-  if (typeof input.content !== "string" || !input.content.trim()) {
-    throw new Error('action "write" requires a non-empty "content"');
-  }
   const timestamp = new Date().toISOString();
   const content = `[pi-smartread session ${timestamp}]\n\n${input.content}`;
 
@@ -133,6 +152,8 @@ async function handleWrite(
   };
 }
 
+// ── Export ─────────────────────────────────────────────────────────
+
 export function createGitNotesTools(): ToolDefinition[] {
-  return [createGitNotesTool()];
+  return toToolDefinitions([createGitNotesReadTool(), createGitNotesWriteTool()]);
 }
