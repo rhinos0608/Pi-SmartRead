@@ -148,6 +148,7 @@ In `code` mode, results are enriched by default: top symbols are resolved and ca
 ### Examples
 
 **AST-aware definition grep:**
+
 ```json
 {
   "mode": "grep",
@@ -156,6 +157,7 @@ In `code` mode, results are enriched by default: top symbols are resolved and ca
 ```
 
 **Code search with enrichment:**
+
 ```json
 {
   "mode": "code",
@@ -165,6 +167,7 @@ In `code` mode, results are enriched by default: top symbols are resolved and ca
 ```
 
 **Deep search:**
+
 ```json
 {
   "mode": "deep",
@@ -522,6 +525,20 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 **I only want a quick structure overview** — Call `repo_map` with `compact: true`.
 
 **Doom-loop warning appears** — The LLM repeated identical tool calls 3+ times. Try a different search query or use `repo_map` to get oriented.
+
+---
+
+## Migration
+
+### `query` is now required (v2.0.0)
+
+The `query` parameter for the `search` tool is now required. Previously it was optional in some contexts.
+
+To migrate:
+
+1. Ensure all `search` tool calls include a non-empty `query` string.
+2. If you previously omitted `query`, add it explicitly.
+3. Missing or empty `query` now throws a descriptive error.
 
 ---
 

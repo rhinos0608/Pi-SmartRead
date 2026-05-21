@@ -176,6 +176,89 @@ describe("FsScanCache", () => {
 			expect(result.cacheAgeMs).toBe(0)
 		})
 	})
+
+	describe("TTL and expiry behavior", () => {
+		it("re-runs scan after emptyRecheckMs for empty results", async () => {
+			const cache = new FsScanCache<string[]>({ emptyRecheckMs: 100, ttlMs: 5000 })
+			let scanCount = 0
+			const scanFn = async () => {
+				scanCount++
+				return []
+			}
+
+			// First call — runs scan, caches empty result
+			const result1 = await cache.getOrScan(tmpDir, scanFn)
+			expect(result1.entries).toEqual([])
+			expect(scanCount).toBe(1)
+
+			// Second call — still within emptyRecheckMs (100ms), should return cached empty
+			const result2 = await cache.getOrScan(tmpDir, scanFn)
+			expect(result2.entries).toEqual([])
+			expect(scanCount).toBe(1)
+
+			// Wait past emptyRecheckMs
+			await new Promise((r) => setTimeout(r, 150))
+
+			// Third call — past emptyRecheckMs, scan should run again
+			const result3 = await cache.getOrScan(tmpDir, scanFn)
+			expect(result3.entries).toEqual([])
+			expect(scanCount).toBe(2)
+		})
+
+		it("runs a fresh scan after TTL expires", async () => {
+			const cache = new FsScanCache<string[]>({ ttlMs: 100, maxEntries: 10 })
+			let scanCount = 0
+			const scanFn = async () => {
+				scanCount++
+				return [`file${scanCount}.ts`]
+			}
+
+			// First call — caches result
+			const result1 = await cache.getOrScan(tmpDir, scanFn)
+			expect(result1.entries).toEqual(["file1.ts"])
+			expect(scanCount).toBe(1)
+
+			// Second call — within TTL, returns cached
+			const result2 = await cache.getOrScan(tmpDir, scanFn)
+			expect(result2.entries).toEqual(["file1.ts"])
+			expect(scanCount).toBe(1)
+
+			// Wait past TTL
+			await new Promise((r) => setTimeout(r, 150))
+
+			// Third call — TTL expired, fresh scan runs
+			const result3 = await cache.getOrScan(tmpDir, scanFn)
+			expect(result3.entries).toEqual(["file2.ts"])
+			expect(scanCount).toBe(2)
+		})
+
+		it("returns cached result for concurrent reads after initial scan", async () => {
+			const cache = new FsScanCache<string[]>({ ttlMs: 5000, maxEntries: 10 })
+			let scanCount = 0
+			const scanFn = async () => {
+				scanCount++
+				await new Promise((r) => setTimeout(r, 50))
+				return ["result.ts"]
+			}
+
+			// Prime the cache first
+			const prime = await cache.getOrScan(tmpDir, scanFn)
+			expect(prime.entries).toEqual(["result.ts"])
+			expect(scanCount).toBe(1)
+
+			// Concurrent reads should all hit the cache
+			const results = await Promise.all([
+				cache.getOrScan(tmpDir, scanFn),
+				cache.getOrScan(tmpDir, scanFn),
+				cache.getOrScan(tmpDir, scanFn),
+			])
+
+			expect(scanCount).toBe(1) // scan still only ran once
+			for (const r of results) {
+				expect(r.entries).toEqual(["result.ts"])
+			}
+		})
+	})
 })
 
 describe("global default instance", () => {

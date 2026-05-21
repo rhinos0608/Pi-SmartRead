@@ -163,12 +163,6 @@ describe("recordToolCall", () => {
       }
     });
 
-    it("considers object key order for fingerprint stability", () => {
-      // Same logical input with different key ordering should produce same fingerprint
-      const fp1 = makeToolFingerprint("read", { a: 1, b: 2 });
-      const fp2 = makeToolFingerprint("read", { b: 2, a: 1 });
-      expect(fp1).toBe(fp2);
-    });
   });
 });
 

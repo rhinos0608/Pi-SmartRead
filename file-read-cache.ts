@@ -190,14 +190,12 @@ export function getSnapshot(
 	* @param absPath     Absolute file path
 	*/
 	export function invalidate(sessionId: string, absPath: string): void {
-		const cache = _sessionCaches.get(sessionId);
-		if (!cache) return;
-		// Remove the single entry via LruCache.delete().
-		// Fall back to clearing the entire session if deletion fails.
-		if (!cache.snapshots.delete(absPath)) {
-			_sessionCaches.delete(sessionId);
-		}
-	}
+	const cache = _sessionCaches.get(sessionId);
+	if (!cache) return;
+	// Only remove the snapshot if it exists; don't treat a false return from
+	// delete() (key not present) as a signal to clear the whole session.
+	cache.snapshots.delete(absPath);
+}
 
 /**
  * Clear all cached snapshots for a session.

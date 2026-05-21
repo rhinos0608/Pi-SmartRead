@@ -128,11 +128,7 @@ export async function runLSPChannel(
         const absPath = resolve(cwd, candidate.file);
         const hoverResult = await bridge.hover(absPath, candidate.line - 1, 0, cwd);
         if (hoverResult) {
-          const hoverText = typeof hoverResult.contents === "string"
-            ? hoverResult.contents
-            : Array.isArray(hoverResult.contents)
-              ? hoverResult.contents.map((c) => typeof c === "string" ? c : c.value).join("\n")
-              : "value" in hoverResult.contents ? hoverResult.contents.value : "";
+          const hoverText = extractHoverText(hoverResult.contents);
           if (hoverText) {
             candidate.snippet = hoverText.slice(0, 200);
           }
@@ -142,6 +138,21 @@ export async function runLSPChannel(
   }
 
   return candidates;
+}
+
+/** Extract hover text from an LSP hover result contents (string, array, or MarkupContent). */
+function extractHoverText(contents: unknown): string {
+  if (typeof contents === "string") return contents;
+  if (Array.isArray(contents)) {
+    return contents
+      .map((c) => extractHoverText(c))
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (typeof contents === "object" && contents !== null && "value" in contents) {
+    return String((contents as { value: unknown }).value);
+  }
+  return "";
 }
 
 function toRelativePath(cwd: string, path: string): string {

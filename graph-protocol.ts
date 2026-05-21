@@ -10,6 +10,7 @@ import type { UrlHandler, UrlSourceInfo } from "./internal-url-router.js";
 
 // Lazily-created per-cwd graph instances (matches the pattern in hook.ts)
 const _graphCache = new Map<string, ContextGraph>();
+const MAX_CACHE_SIZE = 50;
 
 /** Get or create a shared ContextGraph for the given workspace. */
 function getSharedGraph(cwd: string): ContextGraph {
@@ -17,6 +18,11 @@ function getSharedGraph(cwd: string): ContextGraph {
 	if (!g) {
 		g = new ContextGraph(cwd);
 		_graphCache.set(cwd, g);
+		// Evict oldest entry when cache exceeds limit
+		if (_graphCache.size > MAX_CACHE_SIZE) {
+			const oldest = _graphCache.keys().next().value;
+			if (oldest !== undefined) _graphCache.delete(oldest);
+		}
 	}
 	return g;
 }
@@ -32,7 +38,7 @@ export async function resolveGraphUrl(
 		throw new Error(`Invalid graph URL: ${url}`);
 	}
 		const nodeType = match[1] ?? "";
-		const name = match[2] ?? "";
+	const name = match[2] ?? "";
 	const workspace = cwd ?? process.cwd();
 
 	let text = "";
@@ -40,7 +46,7 @@ export async function resolveGraphUrl(
 		const graph = getSharedGraph(workspace);
 
 		// Ensure graph is built (best-effort)
-		await graph.buildContextGraph({ forceRefresh: false, includeSymbols: true, includeCalls: false }).catch(() => {});
+		await graph.buildContextGraph({ forceRefresh: false, includeSymbols: true, includeCalls: false }).catch(err => { console.error(`ContextGraph build failed for ${workspace}: ${(err as Error)?.message ?? err}`); });
 
 		if (nodeType === "file") {
 			// Look up file neighbours (imports / imported-by)

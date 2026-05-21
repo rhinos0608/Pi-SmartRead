@@ -35,8 +35,8 @@ export function resolveWorkspaceFile(cwd: string, pathOrSymbol: string): string 
   return undefined;
 }
 
-function sameResolvedFile(a: string, b: string): boolean {
-  return resolve(a) === resolve(b);
+function sameResolvedFile(a: string, b: string, cwd = process.cwd()): boolean {
+  return resolve(cwd, a) === resolve(cwd, b);
 }
 
 function toDisplayName(path: string): string {

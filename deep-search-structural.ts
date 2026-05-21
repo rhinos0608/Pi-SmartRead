@@ -13,19 +13,7 @@ import type { DeepSearchCandidate } from "./deep-search.js";
 
 // ── Structural channel ───────────────────────────────────────────────────────
 
-function extractText(result: unknown): string {
-  const content = (result as { content?: unknown }).content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((item) => {
-      if (typeof item === "object" && item !== null && (item as { type?: unknown }).type === "text") {
-        return String((item as { text?: unknown }).text ?? "");
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
+import { extractTextFromToolResult } from "./deep-search-symbol.js";
 
 /**
  * Parse code search results (mode=code) into candidates.
@@ -84,6 +72,6 @@ export async function runSearchChannel(
     undefined,
     ctx,
   );
-  const text = extractText(result);
+  const text = extractTextFromToolResult(result);
   return mode === "code" ? parseCodeCandidates(text, "structural") : [];
 }

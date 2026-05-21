@@ -288,7 +288,7 @@ describe("applyBashContextGuard", () => {
       expect(result.metadata.preservedNoticeCount).toBeGreaterThan(0);
     });
 
-    it("captures error in metadata when write fails", () => {
+    it("sets trimmed flag when output exceeds limits", () => {
       const text = "test\n".repeat(3000);
       const config: BashContextGuardConfig = {
         enabled: true,
@@ -298,8 +298,8 @@ describe("applyBashContextGuard", () => {
         tailLines: 120,
       };
       const result = applyBashContextGuard({ text, config });
-      // Should fall back to original text on error or set writeError
-      expect(result.metadata.postRtkWriteError ?? result.metadata.trimmed).toBeTruthy();
+      // Output exceeds maxLines (2000), so trimmed should be true
+      expect(result.metadata.trimmed).toBe(true);
     });
   });
 

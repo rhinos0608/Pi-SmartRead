@@ -4,6 +4,7 @@ import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
 import { loadExperimentalConfig } from "./config.js";
 import { coerceText, ensureHashlineReady } from "./utils.js";
+import { initHandlers } from "./read-many.js";
 import { invalidateFsScanCache } from "./fs-scan-cache.js";
 import { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
 import { ToolRegistry } from "./tool-registry.js";
@@ -68,6 +69,9 @@ ensureHashlineReady().catch((err) =>
 );
 
 export default function (pi: ExtensionAPI) {
+  // ── Initialise internal URL handlers (skill://, memory://, graph://) ──
+  initHandlers();
+
   // ── Shared state ────────────────────────────────────────────────
   const hygieneTracker = resetContextHygieneTracker();
   const doomLoopState = createDoomLoopState();

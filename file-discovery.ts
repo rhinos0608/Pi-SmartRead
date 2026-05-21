@@ -238,6 +238,9 @@ export async function findSrcFiles(
  const { entries } = await cache.getOrScan(
   resolve(rootDir),
   async () => _findSrcFilesImpl(rootDir, maxFiles, signal),
+  undefined,
+  undefined,
+  maxFiles,
  )
  // Cap results to maxFiles even from cache
  if (entries.length > maxFiles) {
@@ -429,6 +432,9 @@ export async function findSrcFilesWithContextMode(
  const { entries } = await cache.getOrScan(
   resolve(rootDir),
   async () => _findSrcFilesWithContextModeImpl(rootDir, maxFiles, signal),
+  undefined,
+  undefined,
+  maxFiles,
  )
  if (entries.length > maxFiles) {
   return entries.slice(0, maxFiles)

@@ -6,7 +6,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import type { UrlHandler, UrlSourceInfo } from "./internal-url-router.js";
 
@@ -29,9 +29,16 @@ export async function resolveSkillUrl(
 	const basePath = base ?? defaultSkillBase();
 	const filePath = join(basePath, name, file);
 
+	// Prevent path traversal: reject any resolved path outside the skill base
+	const resolved = resolve(filePath);
+	const resolvedBase = resolve(basePath);
+	if (!resolved.startsWith(resolvedBase + sep)) {
+		throw new Error(`Invalid skill path: traversal detected in ${url}`);
+	}
+
 	let text: string;
 	try {
-		text = await readFile(filePath, "utf-8");
+		text = await readFile(resolved, "utf-8");
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		throw new Error(`skill://${name}/${file}: ${msg}`);

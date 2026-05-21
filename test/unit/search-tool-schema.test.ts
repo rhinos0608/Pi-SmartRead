@@ -55,6 +55,21 @@ describe("search tool schema", () => {
     }
   });
 
+  it("throws if query is missing", async () => {
+    const tool = createSearchTool();
+    // Missing query entirely
+    await expect(
+      tool.execute("id", {} as any, undefined, undefined, { cwd: "/tmp" } as any),
+    ).rejects.toThrow(/requires a non-empty "query"/);
+  });
+
+  it("throws if query is empty", async () => {
+    const tool = createSearchTool();
+    await expect(
+      tool.execute("id", { query: "" } as any, undefined, undefined, { cwd: "/tmp" } as any),
+    ).rejects.toThrow(/requires a non-empty "query"/);
+  });
+
   it("shows the low-result hint only once per session", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-smartread-search-hint-"));
     try {

@@ -288,45 +288,74 @@ async function handleDeep(
   );
 
   // Record deep search matches in the file-read cache for anchor-stale recovery.
- const sessionKey = resolveSessionKey(toolCallId);
- // Prefer structured match data from result.details.matches over text parsing.
- const deepMatches = (result.details as { matches?: Array<{ file: string; lines?: { start: number }; snippet: string }> } | undefined)?.matches;
- if (deepMatches && deepMatches.length > 0) {
-  const byFile = new Map<string, Array<{ line: number; text: string }>>();
-  for (const m of deepMatches) {
-   const absPath = resolve(cwd, m.file);
-   const lineNum = m.lines?.start ?? 1;
-   const entries = byFile.get(absPath) ?? [];
-   entries.push({ line: lineNum, text: m.snippet });
-   byFile.set(absPath, entries);
-  }
-  for (const [absPath, entries] of byFile) {
-   recordSparse(sessionKey, absPath, entries);
-  }
- } else {
-  // Fallback: parse "  file:line ..." lines from deep search output text.
-  const textContent = result.content
-   .filter((c): c is { type: "text"; text: string } => c.type === "text")
-   .map((c) => c.text)
-   .join("\n");
-  if (textContent) {
-   const matchRe = /^\s+([^\s:]+):(\d+)\s/;
-   const byFile = new Map<string, Array<{ line: number; text: string }>>();
-   for (const line of textContent.split("\n")) {
-    const m = matchRe.exec(line);
-    if (m) {
-     const absPath = resolve(cwd, m[1]!);
-     const lineNum = Number(m[2]);
-     const entries = byFile.get(absPath) ?? [];
-     entries.push({ line: lineNum, text: line });
-     byFile.set(absPath, entries);
+  const sessionKey = resolveSessionKey(toolCallId);
+
+  // Validate result.details structure before using deepMatches.
+  let validMatches: Array<{ file: string; lines?: { start: number }; snippet: string }> | undefined;
+  const rawDetails = result.details;
+  if (rawDetails && typeof rawDetails === "object" && !Array.isArray(rawDetails)) {
+    const rawMatches = (rawDetails as Record<string, unknown>).matches;
+    if (Array.isArray(rawMatches)) {
+      validMatches = rawMatches.filter(
+        (m): m is { file: string; lines?: { start: number }; snippet: string } => {
+          if (!m || typeof m !== "object") return false;
+          const entry = m as Record<string, unknown>;
+          if (typeof entry.file !== "string") return false;
+          if (typeof entry.snippet !== "string") return false;
+          if (entry.lines !== undefined) {
+            if (typeof entry.lines !== "object" || entry.lines === null) return false;
+            const ln = entry.lines as Record<string, unknown>;
+            if (ln.start !== undefined && typeof ln.start !== "number") return false;
+          }
+          return true;
+        },
+      );
+      if (validMatches.length === 0) {
+        validMatches = undefined;
+      } else if (validMatches.length < rawMatches.length) {
+        console.warn(
+          `[search-tool] ${rawMatches.length - validMatches.length} invalid deep match(es) skipped`,
+        );
+      }
     }
-   }
-   for (const [absPath, entries] of byFile) {
-    recordSparse(sessionKey, absPath, entries);
-   }
   }
- }
+
+  if (validMatches && validMatches.length > 0) {
+    const byFile = new Map<string, Array<{ line: number; text: string }>>();
+    for (const m of validMatches) {
+      const absPath = resolve(cwd, m.file);
+      const lineNum = m.lines?.start ?? 1;
+      const entries = byFile.get(absPath) ?? [];
+      entries.push({ line: lineNum, text: m.snippet });
+      byFile.set(absPath, entries);
+    }
+    for (const [absPath, entries] of byFile) {
+      recordSparse(sessionKey, absPath, entries);
+    }
+  } else {
+    // Fallback: parse "  file:line ..." lines from deep search output text.
+    const textContent = result.content
+      .filter((c): c is { type: "text"; text: string } => c.type === "text")
+      .map((c) => c.text)
+      .join("\n");
+    if (textContent) {
+      const matchRe = /^\s+([^\s:]+):(\d+)\s/;
+      const byFile = new Map<string, Array<{ line: number; text: string }>>();
+      for (const line of textContent.split("\n")) {
+        const m = matchRe.exec(line);
+        if (m) {
+          const absPath = resolve(cwd, m[1]!);
+          const lineNum = Number(m[2]);
+          const entries = byFile.get(absPath) ?? [];
+          entries.push({ line: lineNum, text: line });
+          byFile.set(absPath, entries);
+        }
+      }
+      for (const [absPath, entries] of byFile) {
+        recordSparse(sessionKey, absPath, entries);
+      }
+    }
+  }
 
 
   return result;

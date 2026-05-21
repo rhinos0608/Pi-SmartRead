@@ -94,8 +94,8 @@ interface ReadManyDetails {
 
 export function createReadManyTool(readToolFactory: typeof createReadTool = createReadTool): ToolDefinition {
 	return {
-		name: "read_multiple_files",
-		label: "read_multiple_files",
+		name: "read_files",
+		label: "read_files",
 		description: `Read multiple files in one call with per-file offset/limit. Combined output uses per-file heredoc blocks (DICT_N_HASH); image attachments are summarized in text. Under combined output limits (${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}), packing is adaptive: request-order by default, trying smallest-first then relevance-first when they fit more complete successful files. Rendered section order stays original.`,
 		parameters: ReadManySchema,
 
@@ -421,10 +421,12 @@ export const __test = {
 	buildPlan,
 };
 
-// Register all internal URL handlers at module load time.
-registerHandler(skillHandler);
-registerHandler(memoryHandler);
-registerHandler(graphHandler);
+// Initialisation: register internal URL handlers.
+export function initHandlers(): void {
+	registerHandler(skillHandler);
+	registerHandler(memoryHandler);
+	registerHandler(graphHandler);
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(createReadManyTool());

@@ -19,8 +19,10 @@ type McpGateway = {
 	call?: (server: string, tool: string, args: Record<string, unknown>) => Promise<unknown>;
 };
 
-function isTextChunk(x: unknown): x is { type: string; text?: string } {
-	return typeof x === "object" && x !== null && (x as { type?: unknown }).type === "text";
+function isTextChunk(x: unknown): x is { type: string; text: string } {
+	return typeof x === "object" && x !== null
+		&& (x as { type?: unknown }).type === "text"
+		&& typeof (x as { text?: unknown }).text === "string";
 }
 
 /** Attempt to call agentmemory/memory_search via the MCP gateway. */

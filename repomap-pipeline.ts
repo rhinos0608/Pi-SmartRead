@@ -629,6 +629,10 @@ export class RepoMap {
       useImportBased: options.useImportBased ?? false,
       compact: options.compact ?? false,
       excludeUnranked: options.excludeUnranked ?? false,
+      additionalFiles: options.additionalFiles ?? [],
+      priorityFiles: options.priorityFiles ?? [],
+      mentionedIdents: options.mentionedIdents ?? [],
+      mentionedFnames: options.mentionedFnames ?? [],
     });
   }
 

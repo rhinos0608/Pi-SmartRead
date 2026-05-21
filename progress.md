@@ -20,6 +20,7 @@ In Progress
 ## Implementation Details
 
 ### fs-scan-cache.ts
+
 - `FsScanCache<T>` class with configurable TTL, empty-recheck window, and max entries
 - `getOrScan(root, scanFn)` — returns cached results or runs scan
 - `forceRescan(root, scanFn)` — bypasses cache and re-caches
@@ -31,11 +32,13 @@ In Progress
 - Global default instance (`getFsScanCache()`) for cross-tool sharing
 
 ### file-discovery.ts integration
+
 - `findSrcFiles` and `findSrcFilesWithContextMode` now use `getOrScan` with the cache
 - Cache key is resolved root path (no gitignore hash in v1 — can be extended)
 - Results are capped to `maxFiles` after retrieval
 
 ### index.ts integration
+
 - On `tool_call` events for `write`, `edit`, `graph_mutate`, the cache is invalidated for the target path
 - Uses `invalidateFsScanCache(target)` from the global default instance
 

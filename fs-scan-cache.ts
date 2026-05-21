@@ -132,7 +132,11 @@ class TtlLruCache<T> {
 
 // ── FsScanCache ─────────────────────────────────────────────────────────────
 
-/** Runtime guard: confirm a value is a non-null array. */
+/**
+ * Runtime guard: confirm a value is a non-null array.
+ * Defends against runtime type-bypass/casting (T extends unknown[] is a compile-time
+ * constraint only — objects passed through `as` casts or from JS callers bypass it).
+ */
 function isArrayResult<T>(value: T): value is T & unknown[] {
 	return Array.isArray(value);
 }
@@ -152,15 +156,17 @@ export class FsScanCache<T extends unknown[]> {
 	 * Build a cache key from scan options.
 	 * Combines resolved root + gitignore rules hash + type filter.
 	 */
-	private buildKey(
+		private buildKey(
 		root: string,
 		gitignoreRules?: string[],
 		typeFilter?: string,
+		maxFiles?: number,
 	): string {
 		const resolvedRoot = resolve(root)
 		const gitignoreHash = (gitignoreRules ?? []).join("|")
 		const filter = typeFilter ?? ""
-		return `${resolvedRoot}|${gitignoreHash}|${filter}`
+		const mf = maxFiles !== undefined ? String(maxFiles) : ""
+		return `${resolvedRoot}|${gitignoreHash}|${filter}|${mf}`
 	}
 
 	/**
@@ -175,24 +181,23 @@ export class FsScanCache<T extends unknown[]> {
 	async getOrScan(
 		root: string,
 		scanFn: () => Promise<T>,
+		gitignoreRules?: string[],
+		typeFilter?: string,
+		maxFiles?: number,
 	): Promise<{ entries: T; cacheAgeMs: number }> {
-		const key = this.buildKey(root)
+		const key = this.buildKey(root, gitignoreRules, typeFilter, maxFiles)
 
-		// Fast path: check cache without resolving gitignore rules
+		// Check cache: .get() bumps LRU access count, cacheGetWithAge retrieves metadata
 		const cached = this.cache.get(key)
-		if (cached !== undefined) {
-			// Retrieve entry metadata for age calculation
-			// The LRU cache doesn't expose metadata, so we track it separately
+		const entryData = this.cacheGetWithAge(key)
+		if (cached !== undefined && entryData !== undefined) {
 			const now = Date.now()
-			const entryData = this.cacheGetWithAge(key)
-			if (entryData !== undefined) {
-				const age = now - entryData.createdAt
+			const age = now - entryData.createdAt
 			const ttl = isArrayResult(entryData.data) && entryData.data.length === 0
 				? this.emptyRecheckMs
 				: this.ttlMs
-				if (age < ttl) {
-					return { entries: cached, cacheAgeMs: age }
-				}
+			if (age < ttl) {
+				return { entries: cached, cacheAgeMs: age }
 			}
 		}
 
@@ -202,12 +207,10 @@ export class FsScanCache<T extends unknown[]> {
 		// Re-check: if result is empty and a stale entry exists, skip caching to
 		// allow rapid re-scanning for newly created files
 		if (isArrayResult(result) && result.length === 0) {
-			const existingKey = this.buildKey(root)
-			const existingEntry = this.cacheGetWithAge(existingKey)
+			const existingEntry = this.cacheGetWithAge(key)
 			if (existingEntry !== undefined) {
 				const age = Date.now() - existingEntry.createdAt
 				if (age < this.emptyRecheckMs) {
-					// Keep the stale entry so subsequent non-empty results get cached properly
 					return { entries: result, cacheAgeMs: age }
 				}
 			}
@@ -236,8 +239,11 @@ export class FsScanCache<T extends unknown[]> {
 	async forceRescan(
 		root: string,
 		scanFn: () => Promise<T>,
+		gitignoreRules?: string[],
+		typeFilter?: string,
+		maxFiles?: number,
 	): Promise<{ entries: T; cacheAgeMs: number }> {
-		const key = this.buildKey(root)
+		const key = this.buildKey(root, gitignoreRules, typeFilter, maxFiles)
 		this.cache.delete(key)
 		const result = await scanFn()
 		this.cache.set(key, result)
@@ -245,7 +251,9 @@ export class FsScanCache<T extends unknown[]> {
 	}
 
 	/**
-	 * Invalidate cache entries whose resolved path is at or under targetPath.
+	 * Invalidate cache entries whose cached root is equal to or an ancestor of the
+	 * provided target path. Any cached scan whose root directory would contain
+	 * the mutated path is invalidated.
 	 *
 	 * Call this on write/edit tool calls so subsequent scans pick up mutations.
 	 *
@@ -286,8 +294,8 @@ const _defaultInstance = new FsScanCache<string[]>()
  * Suitable for use by search, find, read_files tools.
  */
 export function getFsScanCache(): FsScanCache<string[]> {
-	return _defaultInstance as unknown as FsScanCache<string[]>
-}
+		return _defaultInstance
+	}
 
 /**
  * Invalidate the shared cache for a mutated path.

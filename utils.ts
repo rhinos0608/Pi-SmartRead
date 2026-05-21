@@ -226,7 +226,7 @@ export function tryCurlyQuoteVariant(filePath: string): string {
  */
 export function tryMacOSScreenshotPath(filePath: string): string {
 	// Match space followed by AM or PM at end of string or followed by .png/.jpg/etc
-	return filePath.replace(/ (AM|PM)(?=\.)/g, `${NARROW_NO_BREAK_SPACE}$1`).replace(/ (AM|PM)(?=[^\w]|$)/g, `${NARROW_NO_BREAK_SPACE}$1`);
+	return filePath.replace(/ (AM|PM)(?=[^\w]|$)/g, `${NARROW_NO_BREAK_SPACE}$1`);
 }
 
 /**
@@ -536,6 +536,16 @@ export function resolveMultiRangeContent(fullText: string, selector: ParsedSelec
 		} else if (rangeStart > totalLines) {
 			// Range starts beyond file - no lines to add, just update currentLine
 			currentLine = rangeStart;
+		}
+	}
+
+	// Add trailing elision marker for lines after the last processed range
+	if (currentLine <= totalLines) {
+		const omittedCount = totalLines - currentLine + 1;
+		if (omittedCount === 1) {
+			result.push("... (1 line omitted)");
+		} else {
+			result.push(`... (${omittedCount} lines omitted)`);
 		}
 	}
 

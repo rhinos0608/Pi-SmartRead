@@ -323,7 +323,7 @@ function generateFollowUps(
 ): string[] {
   const lines: string[] = [];
 
-  // Top files for read_multiple_files
+  // Top files for read_files
   const topFiles = [...new Set(matches.map((m) => m.file))].slice(0, 5);
   if (topFiles.length > 0) {
     lines.push(

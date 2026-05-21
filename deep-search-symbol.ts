@@ -9,7 +9,7 @@ import type { DeepSearchCandidate } from "./deep-search.js";
 
 // ── Symbol channel ───────────────────────────────────────────────────────────
 
-function extractText(result: unknown): string {
+export function extractTextFromToolResult(result: unknown): string {
   const content = (result as { content?: unknown }).content;
   if (!Array.isArray(content)) return "";
   return content
@@ -94,7 +94,7 @@ export async function runSymbolChannel(
     undefined,
     ctx,
   );
-  const text = extractText(result);
+  const text = extractTextFromToolResult(result);
   return parseGrepCandidates(text);
 }
 

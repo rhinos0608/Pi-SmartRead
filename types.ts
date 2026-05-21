@@ -58,23 +58,6 @@ export function toToolDefinitions<T extends object>(tools: T[]): ToolDefinition[
   return tools as unknown as ToolDefinition[];
 }
 
-/**
- * Convert an internal tool registration to the canonical ToolDefinition type.
- *
- * Used in ToolRegistry when building the ToolDefinition[] array for MCP
- * or when registering tools with the pi ExtensionAPI.
- *
- * @example
- * ```ts
- * const reg = ToolRegistry.getInstance();
- * for (const tool of reg.getAll()) {
- *   pi.registerTool(toRegistrationTool(tool));
- * }
- * ```
- */
-export function toRegistrationTool<T extends object>(registration: T): ToolDefinition {
-  return registration as unknown as ToolDefinition;
-}
 
 /**
  * Create a minimal ExtensionContext for use cases that only require cwd.
@@ -154,7 +137,7 @@ export function createMinimalContext(cwd: string): ExtensionContext {
     signal: undefined,
     abort: () => {},
     hasPendingMessages: () => false,
-    shutdown: () => { throw new Error("shutdown called in stub"); },
+    shutdown: () => {}, // no-op: shutdown is handled externally in MCP contexts
     getContextUsage: () => undefined,
     compact: () => {},
     getSystemPrompt: () => "",

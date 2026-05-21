@@ -270,7 +270,7 @@ export function renderRetiredContextPlaceholder(record: ContextHygieneRetiredRec
 export function renderStaleContextPlaceholder(record: ContextHygieneStaleRecord): string {
   switch (record.originalTool) {
     case "read":
-    case "read_multiple_files":
+    case "read_files":
     case "intent_read":
       return renderStaleReadPlaceholder();
     case "grep":
