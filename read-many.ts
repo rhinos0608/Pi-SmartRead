@@ -15,20 +15,34 @@ import {
 	truncateHead,
 } from "@mariozechner/pi-coding-agent";
 import {
-	type FileCandidate,
-	type PackingStrategy,
-	buildPlan,
-	buildPartialSection,
-	createPathHash,
-	ensureHashlineReady,
-	formatContentBlock,
-	measureText,
-	pickDelimiter,
-	stripHashlineAnchors,
-	selectorToOffsetLimit,
-	splitPathAndSelector,
-	validatePath,
-} from "./utils.js";
+		type FileCandidate,
+		type PackingStrategy,
+		buildPlan,
+		buildPartialSection,
+		createPathHash,
+		ensureHashlineReady,
+		formatContentBlock,
+		measureText,
+		pickDelimiter,
+		stripHashlineAnchors,
+		selectorToOffsetLimit,
+			splitPathAndSelector,
+			resolveReadPath,
+			formatRecoveryHint,
+			WRAPPER_LINES,
+	} from "./utils.js";
+import { registerHandler, resolveUrl, isInternalUrl } from "./internal-url-router.js";
+import { skillHandler } from "./skill-protocol.js";
+import { memoryHandler } from "./memory-protocol.js";
+import { graphHandler } from "./graph-protocol.js";
+import {
+	recordContiguous,
+	resolveSessionKey,
+} from "./file-read-cache.js";
+import { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
+
+const CHUNK_SIZE = 500;
+const LARGE_REQUEST_THRESHOLD = 500;
 
 const ReadManySchema = Type.Object({
 	files: Type.Array(
@@ -60,6 +74,7 @@ interface ReadManyDetails {
 	processedCount: number;
 	successCount: number;
 	errorCount: number;
+	largeRequestWarning?: string;
 	files: ReadManyFileDetail[];
 	packing: {
 		strategy: PackingStrategy;
@@ -95,21 +110,61 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 			await ensureHashlineReady();
 
 			const readTool = readToolFactory(ctx.cwd);
-			const fileDetails: ReadManyFileDetail[] = [];
-			const candidates: FileCandidate[] = [];
+	const fileDetails: ReadManyFileDetail[] = [];
+	const candidates: FileCandidate[] = [];
+	const largeRequest = params.files.length > LARGE_REQUEST_THRESHOLD;
 
-			for (let i = 0; i < params.files.length; i++) {
+	// Process files in chunks to avoid blocking the event loop on very large requests.
+	for (let chunkStart = 0; chunkStart < params.files.length; chunkStart += CHUNK_SIZE) {
+		const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, params.files.length);
+		for (let i = chunkStart; i < chunkEnd; i++) {
 				if (signal?.aborted) {
 					throw new Error("Operation aborted");
 				}
 
 				const request = params.files[i]!;
 				const { path: targetPath, selector } = splitPathAndSelector(request.path);
-				validatePath(targetPath);
+				// Internal URL routing: skill://, memory://, graph:// bypass disk reads.
+				if (isInternalUrl(targetPath)) {
+					const selArgs = selectorToOffsetLimit(selector);
+					const startLine = selArgs.offset ?? request.offset ?? 1;
+					let body: string;
+					let ok = false;
+					let err = "";
+					try {
+						const result = await resolveUrl(targetPath);
+						body = result.text;
+						ok = true;
+					} catch (e) {
+						err = e instanceof Error ? e.message : String(e);
+						body = `[Error: ${err}]`;
+					}
+					const fullText = formatContentBlock(request.path, body, i + 1, {
+						anchorBody: true,
+						startLine,
+					});
+					candidates.push({
+						index: i,
+						path: targetPath,
+						ok,
+						fullText,
+						fullMetrics: measureText(fullText),
+						body,
+						startLine,
+					});
+					fileDetails.push({
+						path: targetPath,
+						ok,
+						error: ok ? undefined : err,
+					});
+					if (params.stopOnError && !ok) break;
+					continue;
+				}
+				const resolvedPath = resolveReadPath(targetPath);
 				const selectorArgs = selectorToOffsetLimit(selector);
 				const rawMode = selectorArgs.raw === true;
 				const input: ReadToolInput = {
-					path: targetPath,
+					path: resolvedPath,
 					offset: selectorArgs.offset ?? request.offset,
 					limit: selectorArgs.limit ?? request.limit,
 				};
@@ -138,6 +193,20 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 						body += `\n[${imageCount} image attachment(s) omitted; use read on this file for image payload.]`;
 					}
 
+					// Try structural summarization for large full-file reads without a line selector
+					if (!selector && !rawMode && body && body.length > 8192) {
+						const bodyLines = body.split("\n").length;
+						if (canSummarize(resolvedPath, body.length, bodyLines)) {
+							try {
+								const summary = await summarizeCode({ code: body, path: resolvedPath });
+								if (summary.parsed && summary.elided) {
+									const rendered = renderSummary(summary, resolvedPath);
+									body = rendered.text;
+								}
+							} catch { /* fall through to raw body */ }
+						}
+					}
+
 					const startLine = displayContent?.startLine ?? selectorArgs.offset ?? request.offset ?? 1;
 					const rawBody = alreadyAnchored ? stripHashlineAnchors(body) : body;
 					const fullText = formatContentBlock(request.path, body, i + 1, {
@@ -146,7 +215,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 					});
 					candidates.push({
 						index: i,
-						path: targetPath,
+						path: resolvedPath,
 						ok: true,
 						fullText,
 						fullMetrics: measureText(fullText),
@@ -155,24 +224,28 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 					});
 
 					fileDetails.push({
-						path: targetPath,
+						path: resolvedPath,
 						ok: true,
 						imageCount,
 						truncation: details?.truncation,
 					});
+					// Record raw lines in the file-read cache for anchor-stale recovery.
+					const sessionKey = resolveSessionKey(toolCallId);
+					const rawLines = rawBody.split("\n");
+					recordContiguous(sessionKey, resolvedPath, startLine, rawLines);
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					const fullText = formatContentBlock(request.path, `[Error: ${message}]`, i + 1);
 					candidates.push({
 						index: i,
-						path: targetPath,
+						path: resolvedPath,
 						ok: false,
 						fullText,
 						fullMetrics: measureText(fullText),
 					});
 
 					fileDetails.push({
-						path: targetPath,
+						path: resolvedPath,
 						ok: false,
 						error: message,
 					});
@@ -182,8 +255,13 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 					}
 				}
 			}
+			// Yield to event loop between chunks to avoid starving I/O on large requests.
+			if (largeRequest && chunkStart + CHUNK_SIZE < params.files.length) {
+				await new Promise((r) => setImmediate(r));
+			}
+		}
 
-			// Phase 5: compute structural relevance for each candidate file
+		// Phase 5: compute structural relevance for each candidate file
 			// Used when output exceeds limits — prefers core source files over peripheral ones.
 			function computeFileRelevance(index: number): number {
 				const c = candidates[index]!;
@@ -254,7 +332,48 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 				maxLines: DEFAULT_MAX_LINES,
 				maxBytes: DEFAULT_MAX_BYTES,
 			});
-			const outputText = outputTruncation.content;
+			let outputText = outputTruncation.content;
+
+			// Build recovery hints for truncated/elided/omitted content
+			const recoveryHints: string[] = [];
+
+			// Hint for files omitted due to packing limits
+			if (plan.omittedIndexes.length > 0) {
+				recoveryHints.push(formatRecoveryHint("file", "", { type: "omitted", count: plan.omittedIndexes.length }));
+			}
+
+			// Hint for partial file content
+			if (plan.partialSection !== undefined) {
+				const partialCandidate = candidates[plan.partialSection.index];
+				if (partialCandidate && partialCandidate.body) {
+					const totalLines = partialCandidate.body.split("\n").length;
+					const displayedLines = plan.partialSection.text.split("\n").length - WRAPPER_LINES;
+					if (totalLines > displayedLines) {
+						recoveryHints.push(
+							formatRecoveryHint("file", partialCandidate.path, {
+								type: "truncated",
+								totalLines,
+								displayedLines,
+							}),
+						);
+					}
+				}
+			}
+
+			// Hint for combined output truncation
+			if (outputTruncation.truncated) {
+				recoveryHints.push(
+					formatRecoveryHint("output", "", {
+						type: "truncated",
+						totalLines: outputTruncation.totalLines,
+						displayedLines: outputTruncation.outputLines,
+					}),
+				);
+			}
+
+			if (recoveryHints.length > 0) {
+				outputText = outputText + "\n\n" + recoveryHints.join("\n");
+			}
 
 			let partialIncludedPath: string | undefined;
 			if (plan.partialSection !== undefined) {
@@ -271,6 +390,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 				processedCount: fileDetails.length,
 				successCount: fileDetails.filter((f) => f.ok).length,
 				errorCount: fileDetails.filter((f) => !f.ok).length,
+				...(largeRequest && { largeRequestWarning: `Large request (${params.files.length} files) processed in chunks of ${CHUNK_SIZE}.` }),
 				files: fileDetails,
 				packing: {
 					strategy: plan.strategy,
@@ -300,6 +420,11 @@ export const __test = {
 	buildPartialSection,
 	buildPlan,
 };
+
+// Register all internal URL handlers at module load time.
+registerHandler(skillHandler);
+registerHandler(memoryHandler);
+registerHandler(graphHandler);
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool(createReadManyTool());

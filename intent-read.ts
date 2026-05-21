@@ -54,9 +54,10 @@ const IntentReadSchema = Type.Object({
       { minItems: 1, maxItems: 500 },
     ),
   ),
-  directory: Type.Optional(Type.String({ description: "Directory to scan (non-recursive, max 20 files)", default: "." })),
+  directory: Type.Optional(Type.String({ description: "Directory to scan (non-recursive, max 20 files) — schema default is doc-only; runtime default applied in handler" })),
   topK: Type.Optional(Type.Number({ minimum: 1, maximum: 10000, description: "Max results to return (default 20)" })),
   stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first read error (default false)" })),
+  defaultToCwd: Type.Optional(Type.Boolean({ description: "If true, scan current directory when neither files nor directory is provided (default false)" })),
 });
 
 type IntentReadInput = Static<typeof IntentReadSchema>;
@@ -223,13 +224,20 @@ export function createIntentReadTool(
       if (!query) throw new Error("query must not be empty or whitespace-only");
 
       const hasFiles = Array.isArray(params.files) && params.files.length > 0;
-      const hasDirectory = typeof params.directory === "string" && params.directory.length > 0;
+      let hasDirectory = typeof params.directory === "string" && params.directory.length > 0;
 
       if (hasFiles && hasDirectory) {
         throw new Error("Provide either files or directory, not both");
       }
+
+      // Default to cwd when neither files nor directory is provided (defaultToCwd option)
       if (!hasFiles && !hasDirectory) {
-        throw new Error("Provide either files or directory");
+        if (params.defaultToCwd) {
+          params.directory = ".";
+          hasDirectory = true;
+        } else {
+          throw new Error("Provide either files or directory, or set defaultToCwd to scan current directory");
+        }
       }
 
       const topK = params.topK ?? 20;
