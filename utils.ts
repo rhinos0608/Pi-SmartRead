@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -66,6 +67,19 @@ export interface PackingPlan {
 	sectionCount: number;
 	fullCount: number;
 	fullSuccessCount: number;
+}
+
+export function coerceText(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (value === null || value === undefined) return "";
+	if (typeof value === "object") {
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return String(value);
+		}
+	}
+	return String(value);
 }
 
 export function measureText(text: string): TextMetrics {
@@ -149,6 +163,10 @@ export class LruCache<T> {
 		}
 	}
 
+	delete(key: string): boolean {
+		return this.values.delete(key);
+	}
+
 	get size(): number {
 		return this.values.size;
 	}
@@ -180,6 +198,91 @@ export function pickDelimiter(path: string, index: number, content: string): str
 	return `${base}_${randomSuffix}`;
 }
 
+// ─── macOS Path Variant Resolution ──────────────────────────────────────
+
+const NARROW_NO_BREAK_SPACE = "\u202F";
+const CURLY_APOSTROPHE = "\u2019";
+
+/**
+ * Convert a path to NFD (decomposed) Unicode form.
+ * macOS uses NFD for filenames, while many tools use NFC.
+ */
+export function tryNFDVariant(filePath: string): string {
+	return filePath.normalize("NFD");
+}
+
+/**
+ * Replace straight apostrophe with curly apostrophe (U+2019).
+ * Some applications use curly quotes in filenames.
+ */
+export function tryCurlyQuoteVariant(filePath: string): string {
+	return filePath.replace(/'/g, CURLY_APOSTROPHE);
+}
+
+/**
+ * Replace the space before AM/PM with a narrow no-break space (U+202F).
+ * macOS screenshots use this pattern: "Screenshot YYYY-MM-DD at HH.MM AM/PM"
+ * where the space before AM/PM is a narrow no-break space.
+ */
+export function tryMacOSScreenshotPath(filePath: string): string {
+	// Match space followed by AM or PM at end of string or followed by .png/.jpg/etc
+	return filePath.replace(/ (AM|PM)(?=\.)/g, `${NARROW_NO_BREAK_SPACE}$1`).replace(/ (AM|PM)(?=[^\w]|$)/g, `${NARROW_NO_BREAK_SPACE}$1`);
+}
+
+/**
+ * Check if a path exists on disk (file or directory).
+ */
+function pathExists(filePath: string): boolean {
+	try {
+		fs.accessSync(filePath, fs.constants.F_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Try multiple path variants and return the first one that exists on disk.
+ * Order: original, NFD variant, curly quote variant, macOS screenshot variant.
+ */
+export function resolvePathWithFallbacks(filePath: string): string {
+	// Original path
+	if (pathExists(filePath)) {
+		return filePath;
+	}
+
+	// NFD variant (for macOS decomposed Unicode)
+	const nfdPath = tryNFDVariant(filePath);
+	if (nfdPath !== filePath && pathExists(nfdPath)) {
+		return nfdPath;
+	}
+
+	// Curly quote variant
+	const curlyPath = tryCurlyQuoteVariant(filePath);
+	if (curlyPath !== filePath && pathExists(curlyPath)) {
+		return curlyPath;
+	}
+
+	// macOS screenshot variant (narrow no-break space before AM/PM)
+	const screenshotPath = tryMacOSScreenshotPath(filePath);
+	if (screenshotPath !== filePath && pathExists(screenshotPath)) {
+		return screenshotPath;
+	}
+
+	// Fallback to original
+	return filePath;
+}
+
+/**
+ * Validate and resolve a path with macOS fallbacks.
+ * Throws on empty path or path traversal attempts.
+ * Returns the resolved path (first variant that exists on disk).
+ */
+export function resolveReadPath(path: string): string {
+	validatePath(path);
+	return resolvePathWithFallbacks(path);
+}
+
 export function validatePath(path: string): void {
 	if (!path || !path.trim()) {
 		throw new Error("File path must not be empty");
@@ -191,7 +294,7 @@ export function validatePath(path: string): void {
 	}
 }
 
-const FILE_LINE_RANGE_RE = /^(.*?)(?::(raw|\d+(?:-\d+)?))$/;
+const FILE_LINE_RANGE_RE = /^(.*?)(?::(.+))$/;
 const URL_LIKE_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//;
 
 export function isUrlLikePath(rawPath: string): boolean {
@@ -213,30 +316,230 @@ export function splitPathAndSelector(rawPath: string): { path: string; selector?
 }
 
 export function selectorToOffsetLimit(selector?: string): { offset?: number; limit?: number; raw?: boolean } {
-	if (!selector) {
+	const parsed = parseMultiRangeSelector(selector);
+	if (parsed.ranges.length === 0 && !parsed.raw) {
 		return {};
 	}
-	if (selector === "raw") {
+	if (parsed.raw && parsed.ranges.length === 0) {
 		return { raw: true };
 	}
-	const rangeMatch = /^(\d+)(?:-(\d+))?$/.exec(selector);
-	if (!rangeMatch) {
-		return {};
-	}
-	const start = Number(rangeMatch[1]);
-	const end = rangeMatch[2] ? Number(rangeMatch[2]) : start;
-	if (!Number.isFinite(start) || start < 1 || !Number.isFinite(end) || end < start) {
+	// Use the first range for backward compatibility
+	const range = parsed.ranges[0];
+	if (!range) {
 		return {};
 	}
 	return {
-		offset: start,
-		limit: end - start + 1,
+		offset: range.start,
+		limit: range.end - range.start + 1,
+		raw: parsed.raw,
 	};
 }
 
 export function selectorToStartLine(selector?: string, fallback = 1): number {
 	const { offset } = selectorToOffsetLimit(selector);
 	return offset ?? fallback;
+}
+
+// ─── Multi-range Selector Parsing ───────────────────────────────────────
+
+/**
+ * A single line range with inclusive start and end.
+ */
+export interface LineRange {
+	start: number;
+	end: number; // inclusive
+}
+
+/**
+ * Parsed selector with merged ranges and optional raw mode.
+ */
+export interface ParsedSelector {
+	ranges: LineRange[];
+	raw?: boolean;
+}
+
+/**
+ * Parse a multi-range selector string into structured ranges.
+ *
+ * Supported formats:
+ *   - `1-50` → single range
+ *   - `1-50,960-973` → multiple ranges (comma-separated)
+ *   - `1-` → start to EOF
+ *   - `1+10` → start + count (equivalent to 1-10)
+ *   - `raw` → raw mode, no ranges
+ *   - `1-50:raw` or `raw:1-50` → range + raw mode combined
+ *
+ * Ranges are sorted by start line and overlapping/adjacent ranges are merged.
+ */
+export function parseMultiRangeSelector(selector?: string): ParsedSelector {
+	if (!selector || selector.trim() === "") {
+		return { ranges: [] };
+	}
+
+	let raw = false;
+	let rangePart = selector;
+
+	// Handle compound selectors: raw:X or X:raw or raw:X:Y
+	const parts = selector.split(":");
+	for (const part of parts) {
+		const trimmed = part.trim().toLowerCase();
+		if (trimmed === "raw") {
+			raw = true;
+		} else if (trimmed) {
+			rangePart = part;
+		}
+	}
+
+	// Handle bare "raw" case
+	if (rangePart.trim() === "" || rangePart.trim() === "raw") {
+		return { ranges: [], raw };
+	}
+
+	// Split by comma to get individual range specs
+	const rangeSpecs = rangePart.split(",");
+	const parsedRanges: LineRange[] = [];
+
+	for (const spec of rangeSpecs) {
+		const trimmed = spec.trim();
+		if (!trimmed) continue;
+
+		// Try N-M format (start-end)
+		const dashMatch = /^(\d+)-(\d+)$/.exec(trimmed);
+		if (dashMatch) {
+			const start = Number(dashMatch[1]);
+			const end = Number(dashMatch[2]);
+			if (start >= 1 && end >= start) {
+				parsedRanges.push({ start, end });
+			}
+			continue;
+		}
+
+		// Try N- format (start to EOF)
+		const openEndedMatch = /^(\d+)-$/.exec(trimmed);
+		if (openEndedMatch) {
+			const start = Number(openEndedMatch[1]);
+			if (start >= 1) {
+				// EOF is represented as end: Infinity (will be resolved when applying)
+				parsedRanges.push({ start, end: Infinity });
+			}
+			continue;
+		}
+
+		// Try N+M format (start + count)
+		const countMatch = /^(\d+)\+(\d+)$/.exec(trimmed);
+		if (countMatch) {
+			const start = Number(countMatch[1]);
+			const count = Number(countMatch[2]);
+			if (start >= 1 && count >= 1) {
+				parsedRanges.push({ start, end: start + count - 1 });
+			}
+			continue;
+		}
+
+		// Try N format (single line)
+		const singleMatch = /^(\d+)$/.exec(trimmed);
+		if (singleMatch) {
+			const start = Number(singleMatch[1]);
+			if (start >= 1) {
+				parsedRanges.push({ start, end: start });
+			}
+			continue;
+		}
+	}
+
+	// Sort and merge overlapping/adjacent ranges
+	const merged = mergeRanges(parsedRanges);
+
+	return { ranges: merged, raw };
+}
+
+/**
+ * Merge overlapping and adjacent ranges.
+ */
+function mergeRanges(ranges: LineRange[]): LineRange[] {
+	if (ranges.length <= 1) {
+		return ranges;
+	}
+
+	// Sort by start position
+	const sorted = [...ranges].sort((a, b) => a.start - b.start);
+	const merged: LineRange[] = [];
+
+	let current: LineRange = { start: sorted[0]!.start, end: sorted[0]!.end };
+	for (let i = 1; i < sorted.length; i++) {
+		const next = sorted[i]!;
+		// Merge if overlapping or adjacent (end >= start - 1)
+		if (current.end >= next.start - 1) {
+			current.end = Math.max(current.end, next.end);
+		} else {
+			merged.push(current);
+			current = { start: next.start, end: next.end };
+		}
+	}
+	merged.push(current);
+
+	return merged;
+}
+
+/**
+ * Resolve multi-range content from full text.
+ *
+ * Extracts content from specified ranges and joins them with elision markers.
+ * Lines outside the specified ranges are replaced with elision markers.
+ *
+ * @param fullText - The complete file content
+ * @param selector - Parsed selector with ranges and raw flag
+ * @returns Content with elision markers for omitted sections
+ */
+export function resolveMultiRangeContent(fullText: string, selector: ParsedSelector): string {
+	if (selector.ranges.length === 0) {
+		return fullText;
+	}
+
+	const lines = fullText.split("\n");
+	const totalLines = lines.length;
+	const result: string[] = [];
+
+	// Normalize ranges: replace Infinity with actual line count
+	const normalizedRanges = selector.ranges.map((r) => ({
+		start: r.start,
+		end: r.end === Infinity ? totalLines : r.end,
+	}));
+
+	// Sort ranges for sequential processing
+	const sortedRanges = [...normalizedRanges].sort((a, b) => a.start - b.start);
+
+	let currentLine = 1;
+
+	for (const range of sortedRanges) {
+		const rangeStart = Math.max(1, range.start);
+		const rangeEnd = Math.min(totalLines, range.end);
+
+		// Add elision marker if there's a gap before this range
+		if (currentLine < rangeStart && currentLine <= totalLines) {
+			const omittedCount = rangeStart - currentLine;
+			if (omittedCount === 1) {
+				result.push("... (1 line omitted)");
+			} else {
+				result.push(`... (${omittedCount} lines omitted)`);
+			}
+		}
+
+		// Add lines within range (only if range is valid)
+		if (rangeStart <= rangeEnd && rangeStart <= totalLines) {
+			const startIdx = Math.max(0, rangeStart - 1);
+			const endIdx = Math.min(totalLines, rangeEnd);
+			for (let i = startIdx; i < endIdx; i++) {
+				result.push(lines[i] ?? "");
+			}
+			currentLine = rangeEnd + 1;
+		} else if (rangeStart > totalLines) {
+			// Range starts beyond file - no lines to add, just update currentLine
+			currentLine = rangeStart;
+		}
+	}
+
+	return result.join("\n");
 }
 
 /**
@@ -270,6 +573,10 @@ export function stripHashlineAnchors(body: string): string {
  * Each line is prefixed with "LINE+ID|" so the model can reference specific
  * lines via hashline-anchored edits. Requires ensureHashlineReady() first.
  */
+// formatContentBlock wraps body with @path line, <<'DELIM' header, and DELIM footer = 3 wrapper lines
+// Keep WRAPPER_LINES in sync with this format.
+export const WRAPPER_LINES = 3;
+
 export function formatContentBlock(
 	path: string,
 	body: string,
@@ -305,13 +612,65 @@ export function addSection(
 	state.sectionCount += 1;
 }
 
+export interface ElidedSpans {
+	count: number;
+	lines: number;
+}
+
+/**
+ * Format a recovery hint for truncated/elided content.
+ *
+ * @param entityLabel - Label for the entity (e.g., "file", "files")
+ * @param path - Path to the file/entity
+ * @param options - Either truncatedLines or elidedSpans, not both
+ */
+export function formatRecoveryHint(
+	entityLabel: string,
+	path: string,
+	options:
+		| { type: "truncated"; totalLines: number; displayedLines: number }
+		| { type: "elided"; spans: ElidedSpans }
+		| { type: "omitted"; count: number },
+): string {
+	if (options.type === "truncated") {
+		const { totalLines, displayedLines } = options;
+		if (totalLines <= displayedLines) {
+			return `[${entityLabel} complete]`;
+		}
+		const truncatedLines = totalLines - displayedLines;
+		const nextOffset = displayedLines + 1;
+		if (truncatedLines === 1) {
+			return `[1 more line in ${entityLabel} ${path}; read ${path}:${nextOffset} to continue]`;
+		}
+		return `[${truncatedLines} more lines in ${entityLabel} ${path}; read ${path}:${nextOffset} to continue]`;
+	}
+
+	if (options.type === "elided") {
+		const { count, lines } = options.spans;
+		const regionWord = count === 1 ? "region" : "regions";
+		const lineWord = lines === 1 ? "line" : "lines";
+		if (count === 0) {
+			return `[${entityLabel} complete]`;
+		}
+		return `[${count} elided ${regionWord} across ${lines} ${lineWord}; read ${path}:raw or a line range like ${path}:1-9999 for verbatim content]`;
+	}
+
+	// options.type === "omitted"
+	const { count } = options;
+	if (count === 0) {
+		return "";
+	}
+	const fileWord = count === 1 ? "file" : "files";
+	return `[${count} ${fileWord} omitted; use smaller limits or read files individually]`;
+}
+
 export function buildPartialSection(candidate: FileCandidate, remainingLines: number, remainingBytes: number): string | undefined {
 	if (!candidate.body) {
 		return undefined;
 	}
 
-	// Wrapper adds 3 structural lines around body in `formatContentBlock`.
-	let maxBodyLines = remainingLines - 3;
+	// Wrapper adds WRAPPER_LINES structural lines around body in `formatContentBlock`.
+	let maxBodyLines = remainingLines - WRAPPER_LINES;
 	if (maxBodyLines < 1 || remainingBytes < 32) {
 		return undefined;
 	}
