@@ -279,7 +279,7 @@ The aggregate summary table is printed to stdout during the test run. Use these 
 
 ### What changed
 
-The call graph extraction now supports **Python, Go, and Rust** in addition to TypeScript, JavaScript, and TSX. This enables `find_callers` and call-graph-based candidate expansion for polyglot repositories.
+The call graph extraction now supports **Python, Go, and Rust** in addition to TypeScript, JavaScript, and TSX. This enables call-graph-based candidate expansion via `search mode="code"` enrichment and graph-aware retrieval phases in `intent_read`.
 
 ### New dependencies
 

@@ -1,6 +1,6 @@
 # Advanced Repository Retrieval Spec
 
-**Status:** Proposed
+**Status:** Implemented (with refinements). Most features shipped; see notes below for exceptions.
 **Related research:** `docs/advanced-retrieval-research.md`
 **Target:** Pi-SmartRead TypeScript extension, with optional future MCP adapter.
 
@@ -18,11 +18,11 @@ The system should answer repository-context questions by combining:
 
 ## Non-goals
 
-- Replace `intent_read`, `repo_map`, `search_symbols`, `resolve_symbol`, or `find_callers`.
+- Replace `intent_read`, `repo_map`, or `search`. (Note: `search_symbols`, `resolve_symbol`, and `find_callers` were removed during consolidation — their functionality is absorbed into `search mode="code"` and `find_symbol`.)
 - Convert the project into an MCP-only server.
-- Require a vector database.
+- Require a vector database. (Note: `sqlite-vec` and `@orama/orama` were added as optional complements to the file-based cache, not replacements.)
 - Require token logprobs for default use.
-- Build full TypeScript dataflow analysis in the first phase.
+- Build full TypeScript dataflow analysis in the first phase. (Not yet implemented.)
 - Claim GraphRAG or CodeRAG parity before local evaluation proves it.
 
 ## Current integration boundary

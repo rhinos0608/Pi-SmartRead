@@ -530,7 +530,7 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 - `docs/research-deep-dive.md` — Design research, ecosystem analysis, and roadmap (some sections predate consolidation)
 - `docs/advanced-retrieval-spec.md` — Proposed architecture for graph-aware retrieval
 - `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan
-- `docs/advancec-retrieval-research.md` — Academic and industry research survey
+- `docs/advanced-retrieval-research.md` — Academic and industry research survey
 - `docs/pi-hashline-readmap-research.md` — Cross-extension integration analysis
 - `docs/deep-search-spec.md` — Deep search specification (predates consolidation into `search mode="deep"`)
 - `docs/deep-search-implementation.md` — Deep search implementation plan

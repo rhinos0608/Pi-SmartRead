@@ -1,5 +1,7 @@
 # Meta-Prompt: Implement GraphRAG and Query Probing Expansion
 
+> **Status (2026-05-21):** All features described below are now implemented. GraphRAG (import/symbol/call graph expansion), query probing (`query-probe.ts`), and structural/external reranking (`rerank.ts`) are all shipped. See `context.md` for the current architecture.
+
 ## Goal
 Enhance the `intent_read` tool with **GraphRAG** (using the existing call graph and reference graph) and **Query Probing** (expanding seed files via symbol discovery). Introduce a **Reranking** pass for high-precision results.
 

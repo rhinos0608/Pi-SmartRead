@@ -79,8 +79,8 @@ A degraded channel should not suppress useful results from other channels.
 The markdown output must include actionable follow-ups:
 
 - `read_files` with top file paths;
-- `search` `mode=resolve` for top symbols;
-- `search` `mode=callers` for top functions.
+- `search` `mode="code"` for top symbols with enrichment (auto-resolves + shows callers);
+- `find_symbol` for isolated symbol lookups.
 
 This keeps the MCP response compact while giving agents exact next steps.
 

@@ -139,10 +139,10 @@ no duplication at the filesystem level.
 
 **Smart-edit's `read-cache.ts`** tracks file snapshots with hashline anchors for stale-file
 detection and range-coverage validation. **Pi-SmartRead's reads** (via `intent_read`,
-`read_multiple_files`) are already tracked by smart-edit via its `tool_result` hook in `index.ts`.
+`read_files`) are already tracked by smart-edit via its `tool_result` hook in `index.ts`.
 
 **Status**: Already wired — smart-edit's `tool_result` handler captures all read/intent_read/
-read_multiple_files results and populates its read cache with hashline anchors.
+read_files results and populates its read cache with hashline anchors.
 
 ### B. LSP-Aware Context Graph
 

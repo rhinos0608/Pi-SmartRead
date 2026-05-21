@@ -5,48 +5,42 @@ In Progress
 
 ## Tasks
 
+- [x] P3a: Create `fs-scan-cache.ts` with TTL-based LRU cache
+- [x] P3a: Integrate cache into `file-discovery.ts`
+- [x] P3a: Export from `index.ts` (cache invalidation on write/edit)
+- [x] P3a: Add unit tests in `test/unit/fs-scan-cache.test.ts`
+
 ## Files Changed
+
+- `fs-scan-cache.ts` (new) — TTL-based LRU cache for cross-tool FS scan sharing
+- `file-discovery.ts` (modified) — wrapped `findSrcFiles` and `findSrcFilesWithContextMode` with cache
+- `index.ts` (modified) — added `invalidateFsScanCache` import and cache invalidation on write/edit/graph_mutate tool calls
+- `test/unit/fs-scan-cache.test.ts` (new) — 10 tests covering cache operations, LRU eviction, invalidation, cache key uniqueness, cacheAgeMs, and global instance
+
+## Implementation Details
+
+### fs-scan-cache.ts
+- `FsScanCache<T>` class with configurable TTL, empty-recheck window, and max entries
+- `getOrScan(root, scanFn)` — returns cached results or runs scan
+- `forceRescan(root, scanFn)` — bypasses cache and re-caches
+- `invalidatePath(target)` — removes cache entries covering the target path
+- `invalidateAll()` — clears entire cache
+- LRU eviction: tracks access count, evicts lowest-score entry when capacity exceeded
+- Default config: TTL=1000ms, emptyRecheck=200ms, maxEntries=16
+- Configurable via env vars: `FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`
+- Global default instance (`getFsScanCache()`) for cross-tool sharing
+
+### file-discovery.ts integration
+- `findSrcFiles` and `findSrcFilesWithContextMode` now use `getOrScan` with the cache
+- Cache key is resolved root path (no gitignore hash in v1 — can be extended)
+- Results are capped to `maxFiles` after retrieval
+
+### index.ts integration
+- On `tool_call` events for `write`, `edit`, `graph_mutate`, the cache is invalidated for the target path
+- Uses `invalidateFsScanCache(target)` from the global default instance
 
 ## Notes
 
-Researched Orama (@orama/orama) integration for code intelligence hybrid search:
-- Package: @orama/orama v3.1.18 (0 deps, Apache 2.0)
-- Schema with vector[N] properties, hybrid search with HybridWeights config
-- Built-in save()/load() for persistence — critical for extension restart
-- Custom Tokenizer interface supports camelCase splitting
-- BM25 defaults: k=1.2, b=0.75, d=0.5, configurable per-query
-- ~2 KB gzipped, search in μs for small datasets
-
-See research/orama-brief.md
-
-Researched sqlite-vec integration:
-- Package: sqlite-vec v0.1.9 (MIT OR Apache), prebuilt binaries, no native compilation
-- vec0 virtual tables: float[N], int8[N], bit[N]; metadata columns, partition keys, auxiliary columns
-- KNN search with SQL WHERE filters on metadata + partition keys
-- Works with better-sqlite3, bun:sqlite, node:sqlite via load()
-- Persist in .smartread/vectordb/vectors.db with _schema_version migration
-- Bulk insert via transactions; partition keys critical for 10k+ file perf
-- Distance metrics: L2 (default), cosine; max 16 metadata + 16 auxiliary + 4 partition columns
-
-See research/sqlite-vec-brief.md
-
-Researched MCP SDK v1.29.0 advanced features:
-- Prompts (ListPromptsRequestSchema / GetPromptRequestSchema)
-- Resources (ListResourcesRequestSchema / ReadResourceRequestSchema)
-- ResourceLink content type for tool results
-- completable() for prompt argument autocompletion
-- Capabilities object changes needed
-- Full integration example with code
-
-See research/mcp-advanced-brief.md
-
-Researched @huggingface/transformers.js for local embedding provider:
-- Package: @huggingface/transformers v4.2.0 (successor to @xenova/transformers v2.17.2)
-- Feature extraction pipeline with built-in pooling/normalization → float[][]
-- Offline mode via env.allowRemoteModels=false, env.localModelPath
-- Model: Xenova/all-MiniLM-L6-v2 (384-dim, q8=22MB, fp16=43MB, fp32=86MB)
-- ~1-4s cold start, 10-50ms/batch inference after warm
-- Bun support present but known issues on 1.3.13+ (shutdown crash #30431)
-- Adapter layer can be drop-in via existing fetchEmbeddingsImpl injection point
-
-See research/transformersjs-brief.md
+- Empty-result fast recheck: 200ms (allows rapid re-scanning when empty to catch newly created files)
+- Cache key uniqueness based on resolved paths (normalizes `dir/../dir` → `dir`)
+- All 10 new tests pass; all 8 existing file-discovery tests still pass

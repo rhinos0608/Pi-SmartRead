@@ -1,5 +1,9 @@
 # Research: MCP SDK v1.29.0 Advanced Features Integration Brief
 
+> **Status (2026-05-21):** All features described below are now implemented in `mcp-server.ts`. The server exposes tools, prompts (`mcp-prompts.ts`), and resources (`mcp-resources.ts`) via the low-level `Server` class with `{ tools: {}, prompts: {}, resources: {} }` capabilities. This research brief served as the implementation reference.
+>
+> See `mcp-server.ts`, `mcp-prompts.ts`, and `mcp-resources.ts` for the current implementation.
+
 ## Summary
 
 The `@modelcontextprotocol/sdk` v1.29.0 supports prompts, resources, resource_link, and completions alongside tools. The project's current low-level `Server` setup (with `ListToolsRequestSchema` / `CallToolRequestSchema` handlers) can be extended to add these capabilities via the same `setRequestHandler` pattern, or upgraded to the high-level `McpServer` class which auto-wires all handlers. Each capability requires declaring it in the `capabilities` constructor object. Prompt arguments can use `completable()` for IDE-style autocompletion without additional handler code.
