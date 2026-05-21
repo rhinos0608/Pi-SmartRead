@@ -32,6 +32,7 @@ import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
 import { expandToMonorepoRoots } from "./monorepo-detector.js";
 import { executeDeepSearch } from "./deep-search.js";
 import { getLSPBridge } from "./lsp-bridge.js";
+import { recordSparse, resolveSessionKey } from "./file-read-cache.js";
 
 // ── Schema ────────────────────────────────────────────────────────
 
@@ -45,12 +46,10 @@ const SearchSchema = Type.Object({
       default: "grep",
     }),
   ),
-  query: Type.Optional(
-    Type.String({
-      description: "Identifier name, code pattern, or search query",
-      minLength: 1,
-    }),
-  ),
+  query: Type.String({
+  description: "Identifier name, code pattern, or search query",
+  minLength: 1,
+ }),
   directory: Type.Optional(
     Type.String({
       description: "Root directory to search (default: extension working directory)",
@@ -264,6 +263,7 @@ function resolveSearchRoot(params: SearchInput, defaultCwd: string): string {
 // ── Handlers ──────────────────────────────────────────────────────
 
 async function handleDeep(
+  toolCallId: string,
   params: SearchInput,
   cwd: string,
   signal: AbortSignal | undefined,
@@ -271,7 +271,7 @@ async function handleDeep(
 ) {
   const query = params.query ?? "";
   if (!query.trim()) throw new Error('search mode "deep" requires a non-empty "query"');
-  return executeDeepSearch(
+  const result = await executeDeepSearch(
     {
       query,
       depth: "standard",
@@ -286,9 +286,54 @@ async function handleDeep(
     signal,
     ctx,
   );
+
+  // Record deep search matches in the file-read cache for anchor-stale recovery.
+ const sessionKey = resolveSessionKey(toolCallId);
+ // Prefer structured match data from result.details.matches over text parsing.
+ const deepMatches = (result.details as { matches?: Array<{ file: string; lines?: { start: number }; snippet: string }> } | undefined)?.matches;
+ if (deepMatches && deepMatches.length > 0) {
+  const byFile = new Map<string, Array<{ line: number; text: string }>>();
+  for (const m of deepMatches) {
+   const absPath = resolve(cwd, m.file);
+   const lineNum = m.lines?.start ?? 1;
+   const entries = byFile.get(absPath) ?? [];
+   entries.push({ line: lineNum, text: m.snippet });
+   byFile.set(absPath, entries);
+  }
+  for (const [absPath, entries] of byFile) {
+   recordSparse(sessionKey, absPath, entries);
+  }
+ } else {
+  // Fallback: parse "  file:line ..." lines from deep search output text.
+  const textContent = result.content
+   .filter((c): c is { type: "text"; text: string } => c.type === "text")
+   .map((c) => c.text)
+   .join("\n");
+  if (textContent) {
+   const matchRe = /^\s+([^\s:]+):(\d+)\s/;
+   const byFile = new Map<string, Array<{ line: number; text: string }>>();
+   for (const line of textContent.split("\n")) {
+    const m = matchRe.exec(line);
+    if (m) {
+     const absPath = resolve(cwd, m[1]!);
+     const lineNum = Number(m[2]);
+     const entries = byFile.get(absPath) ?? [];
+     entries.push({ line: lineNum, text: line });
+     byFile.set(absPath, entries);
+    }
+   }
+   for (const [absPath, entries] of byFile) {
+    recordSparse(sessionKey, absPath, entries);
+   }
+  }
+ }
+
+
+  return result;
 }
 
 async function handleGrep(
+  toolCallId: string,
   params: SearchInput,
   cwd: string,
   signal: AbortSignal | undefined,
@@ -373,6 +418,20 @@ async function handleGrep(
     lines.push("");
   }
 
+  // Record search matches in the file-read cache for anchor-stale recovery.
+  {
+    const sessionKey = resolveSessionKey(toolCallId);
+    const byFile = new Map<string, Array<{ line: number; text: string }>>();
+    for (const d of matches) {
+      const entries = byFile.get(d.file) ?? [];
+      entries.push({ line: d.startLine, text: d.body });
+      byFile.set(d.file, entries);
+    }
+    for (const [absPath, entries] of byFile) {
+      recordSparse(sessionKey, absPath, entries);
+    }
+  }
+
   return {
     content: [{ type: "text" as const, text: lines.join("\n") }],
     details: {
@@ -385,6 +444,7 @@ async function handleGrep(
 }
 
 async function handleCode(
+  toolCallId: string,
   params: SearchInput,
   cwd: string,
   signal: AbortSignal | undefined,
@@ -604,6 +664,20 @@ async function handleCode(
     } catch { /* enrichment is best-effort */ }
   }
 
+  // Record search matches in the file-read cache for anchor-stale recovery.
+  {
+    const sessionKey = resolveSessionKey(toolCallId);
+    const byFile = new Map<string, Array<{ line: number; text: string }>>();
+    for (const d of top) {
+      const entries = byFile.get(d.file) ?? [];
+      entries.push({ line: d.startLine, text: d.body });
+      byFile.set(d.file, entries);
+    }
+    for (const [absPath, entries] of byFile) {
+      recordSparse(sessionKey, absPath, entries);
+    }
+  }
+
   return {
     content: [{ type: "text" as const, text: lines.join("\n") }],
     details: {
@@ -630,7 +704,7 @@ export default function createSearchTool(): ToolDefinition {
     parameters: SearchSchema,
 
     async execute(
-      _toolCallId: string,
+      toolCallId: string,
       params: SearchInput,
       signal: AbortSignal | undefined,
       _onUpdate: unknown,
@@ -647,17 +721,17 @@ export default function createSearchTool(): ToolDefinition {
 
       switch (mode) {
         case "grep":
-          return handleGrep(params, cwd, signal);
+          return handleGrep(toolCallId, params, cwd, signal);
 
         case "code": {
           const config = loadSearchConfig(cwd);
           const enrich =
             (config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false);
-          return handleCode(params, cwd, signal, enrich);
+          return handleCode(toolCallId, params, cwd, signal, enrich);
         }
 
         case "deep":
-          return handleDeep(params, cwd, signal, ctx);
+          return handleDeep(toolCallId, params, cwd, signal, ctx);
       }
     },
   } as unknown as ToolDefinition;

@@ -2,10 +2,8 @@ import * as fs from "fs";
 
 export class RelativeIndenter {
   private marker: string;
-  private usedMarkers: string[];
 
   constructor(usedMarkers: string[] = []) {
-    this.usedMarkers = usedMarkers;
     this.marker = this.findUnusedMarker(usedMarkers);
   }
 

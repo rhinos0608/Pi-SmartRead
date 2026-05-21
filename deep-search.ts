@@ -1,21 +1,25 @@
+// deep-search.ts
+// Main orchestrator for deep search with multi-channel fusion
+//
+// Module responsibilities:
+//   - deep-search-semantic.ts: BM25 + embedding re-rank, intent-read integration
+//   - deep-search-structural.ts: Tree-sitter AST parsing, code structure analysis
+//   - deep-search-symbol.ts: Symbol resolution, caller graph, declaration finding
+//   - deep-search-graph.ts: Context-graph traversal, EdgeStore queries
+//   - deep-search-lsp.ts: LSP workspace symbols, document symbols, hover type
+
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { promises as fs } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { EdgeStore, findDirectImportNeighbours, isReadableWorkspaceFile } from "./context-graph.js";
-import { createIntentReadTool } from "./intent-read.js";
-import createSearchTool from "./search-tool.js";
-import { findCallers } from "./callgraph.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { computeRanks, tokenize } from "./scoring.js";
-import { RepoMap } from "./repomap.js";
-import {
-  classifyRelevance,
-  type RelevanceClass,
-  relevanceClassWeight,
-} from "./classifiers.js";
-import { getLSPBridge } from "./lsp-bridge.js";
 
-interface DeepSearchParams {
+import { classifyRelevance } from "./classifiers.js";
+import { computeRanks } from "./scoring.js";
+import { findSrcFiles } from "./file-discovery.js";
+import { RepoMap } from "./repomap.js";
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+export interface DeepSearchParams {
   query: string;
   depth?: "quick" | "standard" | "thorough";
   scope?: "code" | "docs" | "tests" | "all";
@@ -27,11 +31,11 @@ interface DeepSearchParams {
   focusFiles?: string[];
 }
 
-type DeepSearchDepth = "quick" | "standard" | "thorough";
-type DeepSearchScope = "code" | "docs" | "tests" | "all";
-type ChannelName = "semantic" | "structural" | "symbol" | "graph" | "lsp";
+export type DeepSearchDepth = "quick" | "standard" | "thorough";
+export type DeepSearchScope = "code" | "docs" | "tests" | "all";
+export type ChannelName = "semantic" | "structural" | "symbol" | "graph" | "lsp";
 
-interface ProvenanceSignal {
+export interface ProvenanceSignal {
   channel: ChannelName;
   signal: string;
   /** Internal numeric signal used only for ranking; public tool output uses strength. */
@@ -41,15 +45,15 @@ interface ProvenanceSignal {
   matchedTerms?: string[];
 }
 
-interface PublicProvenanceSignal {
+export interface PublicProvenanceSignal {
   channel: ChannelName;
   signal: string;
-  strength: RelevanceClass;
+  strength: import("./classifiers.js").RelevanceClass;
   rank: number;
   matchedTerms?: string[];
 }
 
-interface DeepSearchCandidate {
+export interface DeepSearchCandidate {
   file: string;
   line?: number;
   endLine?: number;
@@ -61,7 +65,7 @@ interface DeepSearchCandidate {
   rank: number;
 }
 
-interface DeepSearchMatch {
+export interface DeepSearchMatch {
   handle: string;
   file: string;
   lines?: { start: number; end: number };
@@ -74,28 +78,28 @@ interface DeepSearchMatch {
   callers?: Array<{ file: string; name: string }>;
 }
 
-interface PublicDeepSearchMatch {
+export interface PublicDeepSearchMatch {
   handle: string;
   file: string;
   lines?: { start: number; end: number };
   name: string;
   kind: string;
   snippet: string;
-  relevance: RelevanceClass;
+  relevance: import("./classifiers.js").RelevanceClass;
   provenance: PublicProvenanceSignal[];
   callers?: Array<{ file: string; name: string }>;
 }
 
-type TermStatus = "found" | "partial" | "not_found";
+export type TermStatus = "found" | "partial" | "not_found";
 
-interface QueryTermCoverage {
+export interface QueryTermCoverage {
   term: string;
   status: TermStatus;
   /** One example match file/name where this term was found. */
   example?: string;
 }
 
-interface DeepSearchDetails {
+export interface DeepSearchDetails {
   query: string;
   depth: DeepSearchDepth;
   scope: DeepSearchScope;
@@ -109,18 +113,27 @@ interface DeepSearchDetails {
   coverage?: QueryTermCoverage[];
 }
 
-interface PublicDeepSearchDetails extends Omit<DeepSearchDetails, "matches"> {
+export interface PublicDeepSearchDetails extends Omit<DeepSearchDetails, "matches"> {
   matches: PublicDeepSearchMatch[];
 }
 
-const RRF_K = 60;
+// ── Channel imports (used by orchestrator) ────────────────────────────────────
+
+import { RRF_K } from "./deep-search-constants.js";
+import { extractQueryTerms, enrichMatchProvenance, runSemanticChannel } from "./deep-search-semantic.js";
+import { runSearchChannel } from "./deep-search-structural.js";
+import { runSymbolChannel, enrichRelationships } from "./deep-search-symbol.js";
+import { runGraphChannel, selectGraphSeedFiles } from "./deep-search-graph.js";
+import { runLSPChannel } from "./deep-search-lsp.js";
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
 const DEFAULT_LIMIT = 15;
 const DEFAULT_SNIPPET_CHARS = 400;
 const DEFAULT_OUTPUT_BUDGET = 4096;
 const MAX_DISCOVERY_FILES = 2_000;
-const MAX_GRAPH_SEEDS = 10;
 const MAX_GRAPH_CANDIDATES = 30;
-const MAX_GRAPH_REVERSE_IMPORT_SCAN = 500;
+
 const DOC_EXTENSIONS = new Set([".md", ".mdx", ".txt", ".rst", ".adoc"]);
 const IGNORED_DIRS = new Set([
   ".git",
@@ -135,109 +148,7 @@ const IGNORED_DIRS = new Set([
   ".pi-smartread.embeddings.cache",
 ]);
 
-// ── LSP channel constants ────────────────────────────────────
-
-const LSP_SCORE_BOOST = 0.15;
-const MAX_LSP_RESULTS = 30;
-const MAX_HOVER_RESULTS = 3;
-
-// ── Escalation helpers ─────────────────────────────────────────
-
-const TEST_PATH_RE = /(^|\/|\\)(test|tests|__tests__|spec)(\/|$|\\)/;
-
-/**
- * Check if deep_search should escalate to a compact repo_map.
- * Triggers when 3+ query terms were not found AND (no structural matches
- * exist OR all structural/symbol matches come from test files).
- */
-function shouldEscalateToRepoMap(
-  coverage: QueryTermCoverage[] | undefined,
-  matches: DeepSearchMatch[],
-): boolean {
-  if (!coverage || coverage.length === 0) return false;
-
-  const notFoundCount = coverage.filter((c) => c.status === "not_found").length;
-  if (notFoundCount < 3) return false;
-
-  const structuralMatches = matches.filter((m) =>
-    m.provenance.some((p) => p.channel === "structural" || p.channel === "symbol" || p.channel === "lsp"),
-  );
-
-  return structuralMatches.length === 0 || structuralMatches.every((m) => TEST_PATH_RE.test(m.file));
-}
-
-/**
- * Generate a compact repo-map summary for escalation fallback.
- * Returns a short markdown snippet (~600 chars) summarizing the repo.
- */
-async function getCompactRepoSummary(
-  cwd: string,
-  signal: AbortSignal | undefined,
-): Promise<string> {
-  if (signal?.aborted) return "";
-
-  try {
-    const rm = new RepoMap(cwd);
-    const result = await rm.getRepoMap({
-      mapTokens: 1200,
-      focusFiles: [],
-      priorityIdentifiers: [],
-      mentionedIdents: [],
-      mentionedFnames: [],
-      excludeUnranked: false,
-      forceRefresh: false,
-      useImportBased: false,
-      autoFallback: true,
-      compact: true,
-      verbose: false,
-    });
-
-    if (!result.map) return "";
-
-    const summary = result.map.length > 800
-      ? result.map.slice(0, 600).trimEnd() + "\n…"
-      : result.map;
-
-    return `\n## 🗺️ Repo Context (auto-escalated)\n${summary}\n`;
-  } catch {
-    return "";
-  }
-}
-
-/**
- * Generate search guidelines for agents when escalation triggers.
- * Based on context-mode's "think in code" and "search technical terms" principles.
- */
-function generateSearchGuidelines(notFoundTerms: string[]): string {
-  const lines: string[] = [];
-
-  lines.push("### 🔍 Search Guidelines (auto-generated)");
-  lines.push("");
-  lines.push("Your query had limited matches. For better results:");
-  lines.push("");
-  lines.push("**1. Use specific technical terms, not concepts:**");
-  lines.push(`   - ❌ "${notFoundTerms.slice(0, 2).join('" or "') || 'entry point'}" (concept)`);
-  lines.push("   - ✅ `createDeepSearchTool` (exact symbol name)");
-  lines.push("   - ✅ `parseCodeCandidates` (function name)");
-  lines.push("   - ✅ `QueryTermCoverage` (interface/type name)");
-  lines.push("");
-  lines.push("**2. Think in code:**");
-  lines.push("   - Analyze/count/filter data → write code via `ctx_execute(language, code)`");
-  lines.push("   - Process files → `ctx_execute_file(path, language, code)`");
-  lines.push("   - Program the analysis, don't compute it mentally");
-  lines.push("");
-  lines.push("**3. Use repo_map for broad context:**");
-  lines.push("   - `repo_map(compact: true)` → single-line file summaries");
-  lines.push("   - `repo_map(focusFiles: [\"file.ts\"])` → personalized ranking");
-  lines.push("");
-  lines.push("**4. Multi-channel search:**");
-  lines.push("   - `find_symbol action=symbol query=term` → find symbol definitions");
-  lines.push("   - `search mode=code query=term` → AST-aware code search");
-  lines.push("   - `find_symbol action=declaration query=name` → resolve symbol");
-  lines.push("");
-
-  return lines.join("\n");
-}
+// ── Internal helpers ────────────────────────────────────────────────────────
 
 function clampInteger(value: number | undefined, min: number, max: number, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
@@ -262,32 +173,6 @@ function toRelativePath(cwd: string, path: string): string {
   return rel && !rel.startsWith("..") ? rel.replace(/\\/g, "/") : path.replace(/\\/g, "/");
 }
 
-function toDisplayName(path: string): string {
-  return path.split("/").pop() ?? path;
-}
-
-function resolveWorkspaceFile(cwd: string, pathOrSymbol: string): string | undefined {
-  const resolved = resolve(cwd, pathOrSymbol);
-  if (isReadableWorkspaceFile(cwd, resolved)) return resolved;
-
-  // graph_mutate accepts "file.ts:symbol" handles. EdgeStore stores them as
-  // supplied, so strip a trailing symbol suffix when resolving graph edges.
-  const normalized = pathOrSymbol.replace(/\\/g, "/");
-  const colonIndex = normalized.lastIndexOf(":");
-  const slashIndex = normalized.lastIndexOf("/");
-  if (colonIndex > slashIndex) {
-    const withoutSymbol = pathOrSymbol.slice(0, colonIndex);
-    const resolvedWithoutSymbol = resolve(cwd, withoutSymbol);
-    if (isReadableWorkspaceFile(cwd, resolvedWithoutSymbol)) return resolvedWithoutSymbol;
-  }
-
-  return undefined;
-}
-
-function sameResolvedFile(a: string, b: string): boolean {
-  return resolve(a) === resolve(b);
-}
-
 function pathMatchesScope(path: string, scope: DeepSearchScope): boolean {
   const normalized = path.replace(/\\/g, "/").toLowerCase();
   const isTest = /(^|\/)(test|tests|__tests__|spec)(\/|$)/.test(normalized) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(normalized);
@@ -308,51 +193,6 @@ function pathMatchesScope(path: string, scope: DeepSearchScope): boolean {
 function extensionOf(path: string): string {
   const match = /\.[^.\/]+$/.exec(path.toLowerCase());
   return match?.[0] ?? "";
-}
-
-// ── LSP helpers ─────────────────────────────────────────────
-
-/** LSP SymbolKind values (matching VS Code SymbolKind convention). */
-const LSP_SYMBOL_KINDS: Record<number, string> = {
-  1: "file",
-  2: "module",
-  3: "namespace",
-  4: "package",
-  5: "class",
-  6: "method",
-  7: "property",
-  8: "field",
-  9: "constructor",
-  10: "enum",
-  11: "interface",
-  12: "function",
-  13: "variable",
-  14: "constant",
-  15: "string",
-  16: "number",
-  17: "boolean",
-  18: "array",
-  19: "object",
-  20: "key",
-  21: "null",
-  22: "enumMember",
-  23: "struct",
-  24: "event",
-  25: "operator",
-  26: "typeParameter",
-};
-
-function lspKindToString(kind: number): string {
-  return LSP_SYMBOL_KINDS[kind] ?? "symbol";
-}
-
-/** Convert a file:// URI to an absolute filesystem path. */
-function uriToPath(uri: string): string {
-  const decoded = decodeURIComponent(uri);
-  if (decoded.startsWith("file://")) {
-    return decoded.slice(7); // strip "file://" prefix
-  }
-  return decoded;
 }
 
 async function discoverDocFiles(root: string, limit: number, signal?: AbortSignal): Promise<string[]> {
@@ -412,118 +252,6 @@ async function discoverCandidateFiles(
     .map(([, abs]) => abs);
 }
 
-function extractText(result: unknown): string {
-  const content = (result as { content?: unknown }).content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((item) => {
-      if (typeof item === "object" && item !== null && (item as { type?: unknown }).type === "text") {
-        return String((item as { text?: unknown }).text ?? "");
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function parseCodeCandidates(text: string, channel: ChannelName): DeepSearchCandidate[] {
-  const lines = text.split("\n");
-  const candidates: DeepSearchCandidate[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    const match = /^\s{2}(.+?):(\d+)-(\d+)\s+\[([^\]]+)]\s+(.+?)\s+relevance=(exact|strong|related|weak|none)\s+rank=(\d+)/.exec(line);
-    if (!match) continue;
-
-    const snippetLines: string[] = [];
-    for (let j = i + 2; j < lines.length && snippetLines.length < 6; j++) {
-      const snippetLine = lines[j] ?? "";
-      if (!snippetLine.trim()) break;
-      snippetLines.push(snippetLine.replace(/^\s{4}/, ""));
-    }
-
-    const rank = Number(match[7]) || candidates.length + 1;
-    candidates.push({
-      file: match[1]!,
-      line: Number(match[2]),
-      endLine: Number(match[3]),
-      kind: match[4]!,
-      name: match[5]!.trim(),
-      rawScore: relevanceClassWeight(match[6] as RelevanceClass) + 1 / (RRF_K + rank),
-      rank,
-      snippet: snippetLines.join("\n"),
-      channel,
-    });
-  }
-
-  return candidates;
-}
-
-function parseGrepCandidates(text: string): DeepSearchCandidate[] {
-  const candidates: DeepSearchCandidate[] = [];
-  const lines = text.split('\n');
-  for (const line of lines) {
-    const match = line.match(/^\s{2}(.+?):(\d+)-(\d+)\s+\[(\w+)\]\s+(\S+)/);
-    if (match) {
-      candidates.push({
-        file: match[1]!,
-        line: Number(match[2]),
-        endLine: Number(match[3]),
-        kind: match[4]!,
-        name: match[5]!,
-        channel: 'symbol',
-        snippet: line.trim(),
-        rawScore: 1.0,
-        rank: candidates.length + 1,
-      });
-    }
-  }
-  return candidates;
-}
-
-function parseSemanticCandidates(cwd: string, result: unknown): DeepSearchCandidate[] {
-  const details = (result as { details?: { files?: unknown } }).details;
-  const files = details?.files;
-  if (!Array.isArray(files)) return [];
-
-  const candidates: DeepSearchCandidate[] = [];
-  for (const file of files) {
-    if (typeof file !== "object" || file === null) continue;
-    const item = file as {
-      path?: unknown;
-      ok?: unknown;
-      included?: unknown;
-      fusedRelevance?: unknown;
-      keywordRelevance?: unknown;
-      semanticRelevance?: unknown;
-      chunkRelevance?: unknown;
-      chunkIndex?: unknown;
-    };
-    if (item.ok !== true || item.included !== true || typeof item.path !== "string") continue;
-    const relevance = typeof item.fusedRelevance === "string"
-      ? item.fusedRelevance as RelevanceClass
-      : "related";
-    const rel = toRelativePath(cwd, item.path);
-    candidates.push({
-      file: rel,
-      kind: "file",
-      name: rel.split("/").pop() ?? rel,
-      rawScore: relevanceClassWeight(relevance),
-      rank: candidates.length + 1,
-      snippet: [
-        typeof item.semanticRelevance === "string" ? `semantic=${item.semanticRelevance}` : undefined,
-        typeof item.keywordRelevance === "string" ? `keyword=${item.keywordRelevance}` : undefined,
-        typeof item.chunkRelevance === "string" ? `chunk=${item.chunkRelevance}` : undefined,
-        typeof item.chunkIndex === "number" ? `best chunk #${item.chunkIndex}` : undefined,
-      ]
-        .filter(Boolean)
-        .join("; "),
-      channel: "semantic",
-    });
-  }
-  return candidates;
-}
-
 function candidateKey(candidate: DeepSearchCandidate): string {
   return `${candidate.file}:${candidate.line ?? 0}:${candidate.name.toLowerCase()}`;
 }
@@ -533,35 +261,20 @@ function makeHandle(match: DeepSearchMatch): string {
   return `file://${match.file}`;
 }
 
-// ── Query-term extraction and coverage ─────────────────────────────
-
-/** Common English filler words to exclude from query-term extraction. */
-const FILLER_WORDS = new Set([
-  "the", "this", "that", "these", "those", "with", "from", "file", "code",
-  "what", "where", "how", "which", "find", "show", "get", "set", "list",
-  "all", "any", "has", "not", "and", "for", "are", "its", "into",
-]);
-
-/**
- * Extract code-identifier-like terms from a user query.
- * Uses tokenize() for camelCase/PascalCase/snake_case splitting,
- * then filters out common filler words and short tokens.
- */
-function extractQueryTerms(query: string): string[] {
-  const tokens = tokenize(query);
-  const terms: string[] = [];
-  const seen = new Set<string>();
-  for (const token of tokens) {
-    if (token.length < 3) continue;
-    if (FILLER_WORDS.has(token)) continue;
-    if (/^\d+$/.test(token)) continue;
-    if (seen.has(token)) continue;
-    seen.add(token);
-    terms.push(token);
-  }
-  return terms;
+function truncate(text: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  if (maxChars === 1) return text[0] ?? "";
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
+function channelSet(matches: DeepSearchMatch[]): ChannelName[] {
+  return [...new Set(matches.flatMap((m) => m.provenance.map((p) => p.channel)))];
+}
+
+// ── Query-term extraction and coverage ──────────────────────────────────────
+
+/** Common English filler words to exclude from query-term extraction. */
 /**
  * Compute per-term coverage against fused matches.
  * - "found": term appears in a match's name (case-insensitive substring).
@@ -579,7 +292,7 @@ function computeQueryTermCoverage(
       if (match.name.toLowerCase().includes(lowerTerm)) {
         return {
           term,
-          status: "found" as TermStatus,
+          status: "found" as const,
           example: `${match.file}:${match.name}`,
         };
       }
@@ -589,39 +302,16 @@ function computeQueryTermCoverage(
       if (match.snippet.toLowerCase().includes(lowerTerm)) {
         return {
           term,
-          status: "partial" as TermStatus,
+          status: "partial" as const,
           example: `${match.file}:${match.name}`,
         };
       }
     }
-    return { term, status: "not_found" as TermStatus };
+    return { term, status: "not_found" as const };
   });
 }
 
-/**
- * Enrich semantic provenance entries with which query terms matched.
- * For each match, tokenizes name+snippet and checks which query terms
- * appear. This gives agents a "why this matched" signal.
- */
-function enrichMatchProvenance(
-  matches: DeepSearchMatch[],
-  query: string,
-): void {
-  const queryTerms = extractQueryTerms(query);
-  if (queryTerms.length === 0) return;
-
-  for (const match of matches) {
-    const text = `${match.name} ${match.snippet}`.toLowerCase();
-    const matched = queryTerms.filter((term) => text.includes(term.toLowerCase()));
-    if (matched.length === 0) continue;
-
-    for (const prov of match.provenance) {
-      if (prov.channel === "semantic") {
-        prov.matchedTerms = matched;
-      }
-    }
-  }
-}
+// ── Follow-up generation ─────────────────────────────────────────────────────
 
 /**
  * Generate follow-up suggestions based on the user's query terms
@@ -685,6 +375,242 @@ function generateFollowUps(
   return lines;
 }
 
+// ── Markdown rendering ───────────────────────────────────────────────────────
+
+function formatMatch(match: DeepSearchMatch): string[] {
+  const matchLines = match.lines ? `L${match.lines.start}-${match.lines.end}` : "file";
+  const signals = [...new Set(match.provenance.map((p) => p.channel))].join(" + ");
+
+  // Collect matched terms from semantic provenance for "why this matched"
+  const semanticProv = match.provenance.filter((p) => p.channel === "semantic");
+  const matchedTerms = [...new Set(semanticProv.flatMap((p) => p.matchedTerms ?? []))];
+
+  const output = [
+    `### ${match.file}`,
+    `- **${match.name}** (${matchLines}) — \`relevance: ${classifyRelevance(match.score)}\` — ${signals}`,
+  ];
+  if (matchedTerms.length > 0) {
+    output.push(`  matched: ${matchedTerms.join(", ")}`);
+  }
+  if (match.snippet.trim()) {
+    output.push("  ```");
+    output.push(...match.snippet.split("\n").map((line) => `  ${line}`));
+    output.push("  ```");
+  }
+  return output;
+}
+
+function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): string {
+  const files = new Set(details.matches.map((m) => m.file));
+  const lines: string[] = [
+    `# Deep Search: "${details.query}"`,
+    `**Depth:** ${details.depth} | **Matches:** ${details.matches.length} | **Files:** ${files.size} | **Time:** ${(details.elapsedMs / 1000).toFixed(1)}s`,
+    "",
+  ];
+
+  // Split matches: exact have structural or symbol provenance, semantic-only don't
+  const exactMatches = details.matches.filter((m) =>
+    m.provenance.some((p) => p.channel === "structural" || p.channel === "symbol" || p.channel === "lsp"),
+  );
+  const semanticOnlyMatches = details.matches.filter(
+    (m) => !exactMatches.includes(m),
+  );
+
+  // ── Exact Matches ─────────────────────────────────────────────────────
+  if (exactMatches.length > 0) {
+    lines.push("## 🎯 Exact Matches (Code)", "");
+    for (const match of exactMatches) {
+      lines.push(...formatMatch(match), "");
+    }
+  }
+
+  // ── Related Matches (Semantic) ───────────────────────────────────────
+  if (semanticOnlyMatches.length > 0) {
+    lines.push("## 📄 Related Matches (Semantic)", "");
+    for (const match of semanticOnlyMatches) {
+      lines.push(...formatMatch(match), "");
+    }
+  } else if (details.matches.length === 0) {
+    lines.push("No matches found.", "");
+  }
+
+  // ── Query Coverage ────────────────────────────────────────────────────
+  if (details.coverage && details.coverage.length > 0) {
+    lines.push("## 📊 Query Coverage", "");
+    lines.push("| Term | Status | Example |");
+    lines.push("|------|--------|---------|");
+    for (const c of details.coverage) {
+      const icon = c.status === "found" ? "✅" : c.status === "partial" ? "⚠️" : "❌";
+      const statusLabel = c.status === "found" ? "found" : c.status === "partial" ? "partial" : "not found";
+      const example = c.example ? c.example.split("/").pop() ?? c.example : "—";
+      lines.push(`| \`${c.term}\` | ${icon} ${statusLabel} | ${example} |`);
+    }
+    lines.push("");
+
+    // Explicit "not found" callout
+    const notFound = details.coverage.filter((c) => c.status === "not_found").map((c) => c.term);
+    if (notFound.length > 0) {
+      lines.push(
+        `> ⚠️ **Note:** ${notFound.map((t) => `\`${t}\``).join(", ")} not found in top ${details.matches.length} results. ` +
+        `Consider using \`search\` mode=code for these terms.`,
+        "",
+      );
+    }
+  }
+
+  // ── Relationships ─────────────────────────────────────────────────────
+  const relationshipMatches = details.matches.filter((m) => m.callers && m.callers.length > 0);
+  if (relationshipMatches.length > 0) {
+    lines.push("## 🔗 Relationships", "");
+    for (const match of relationshipMatches) {
+      const callers = match.callers!.slice(0, 5).map((c) => `${c.name} in ${c.file}`).join(", ");
+      lines.push(`- **${match.name}** called by ${callers}`);
+    }
+    lines.push("");
+  }
+
+  // ── Summary ──────────────────────────────────────────────────────────
+  lines.push("## 📊 Summary", "");
+  lines.push(`- Channels: ${details.channelsUsed.length > 0 ? details.channelsUsed.join(", ") : "none"}`);
+  lines.push(`- Files inspected: ${details.filesInspected}`);
+  if (details.rerankRequested) lines.push("- Rerank: requested, reserved for configured V2 rerankers");
+  if (details.degraded.length > 0) {
+    lines.push(`- Degraded: ${details.degraded.join("; ")}`);
+  }
+  lines.push("");
+
+  // ── Follow-ups (query-aware) ───────────────────────────────────────────
+  lines.push("## ➡️ Follow-ups", "");
+  if (details.coverage && details.coverage.length > 0) {
+    lines.push(...generateFollowUps(details.matches, details.coverage));
+  } else {
+    // Fallback: old heuristic
+    const topFiles = [...new Set(details.matches.map((m) => m.file))].slice(0, 5);
+    const topSymbol = details.matches.find((m) => m.kind !== "file")?.name;
+    if (topFiles.length > 0) {
+      lines.push(`- Read full files: \`read mode=multiple\` with files: [${topFiles.join(", ")}]`);
+    }
+    if (topSymbol) {
+      lines.push(`- Resolve symbol: \`find_symbol\` action=declaration query=${topSymbol}`);
+      lines.push(`- Find callers: \`find_symbol\` action=references query=${topSymbol}`);
+    }
+  }
+
+  return truncate(lines.join("\n"), maxOutputChars);
+}
+
+// ── Escalation helpers ───────────────────────────────────────────────────────
+
+const TEST_PATH_RE = /(^|\/|\\)(test|tests|__tests__|spec)(\/|$|\\)/;
+
+function shouldEscalateToRepoMap(
+  coverage: QueryTermCoverage[] | undefined,
+  matches: DeepSearchMatch[],
+): boolean {
+  if (!coverage || coverage.length === 0) return false;
+
+  const notFoundCount = coverage.filter((c) => c.status === "not_found").length;
+  if (notFoundCount < 3) return false;
+
+  const structuralMatches = matches.filter((m) =>
+    m.provenance.some((p) => p.channel === "structural" || p.channel === "symbol" || p.channel === "lsp"),
+  );
+
+  return structuralMatches.length === 0 || structuralMatches.every((m) => TEST_PATH_RE.test(m.file));
+}
+
+async function getCompactRepoSummary(
+  cwd: string,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  if (signal?.aborted) return "";
+
+  try {
+    const rm = new RepoMap(cwd);
+    const result = await rm.getRepoMap({
+      mapTokens: 1200,
+      focusFiles: [],
+      priorityIdentifiers: [],
+      mentionedIdents: [],
+      mentionedFnames: [],
+      excludeUnranked: false,
+      forceRefresh: false,
+      useImportBased: false,
+      autoFallback: true,
+      compact: true,
+      verbose: false,
+    });
+
+    if (!result.map) return "";
+
+    const summary = result.map.length > 800
+      ? result.map.slice(0, 600).trimEnd() + "\n…"
+      : result.map;
+
+    return `\n## 🗺️ Repo Context (auto-escalated)\n${summary}\n`;
+  } catch {
+    return "";
+  }
+}
+
+function generateSearchGuidelines(notFoundTerms: string[]): string {
+  const lines: string[] = [];
+
+  lines.push("### 🔍 Search Guidelines (auto-generated)");
+  lines.push("");
+  lines.push("Your query had limited matches. For better results:");
+  lines.push("");
+  lines.push("**1. Use specific technical terms, not concepts:**");
+  lines.push(`   - ❌ "${notFoundTerms.slice(0, 2).join('" or "') || 'entry point'}" (concept)`);
+  lines.push("   - ✅ `createDeepSearchTool` (exact symbol name)");
+  lines.push("   - ✅ `parseCodeCandidates` (function name)");
+  lines.push("   - ✅ `QueryTermCoverage` (interface/type name)");
+  lines.push("");
+  lines.push("**2. Think in code:**");
+  lines.push("   - Analyze/count/filter data → write code via `ctx_execute(language, code)`");
+  lines.push("   - Process files → `ctx_execute_file(path, language, code)`");
+  lines.push("   - Program the analysis, don't compute it mentally");
+  lines.push("");
+  lines.push("**3. Use repo_map for broad context:**");
+  lines.push("   - `repo_map(compact: true)` → single-line file summaries");
+  lines.push("   - `repo_map(focusFiles: [\"file.ts\"])` → personalized ranking");
+  lines.push("");
+  lines.push("**4. Multi-channel search:**");
+  lines.push("   - `find_symbol action=symbol query=term` → find symbol definitions");
+  lines.push("   - `search mode=code query=term` → AST-aware code search");
+  lines.push("   - `find_symbol action=declaration query=name` → resolve symbol");
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+// ── Public types conversion ─────────────────────────────────────────────────
+
+function toPublicDeepSearchDetails(details: DeepSearchDetails): PublicDeepSearchDetails {
+  return {
+    ...details,
+    matches: details.matches.map((match) => ({
+      handle: match.handle,
+      file: match.file,
+      ...(match.lines && { lines: match.lines }),
+      name: match.name,
+      kind: match.kind,
+      snippet: match.snippet,
+      relevance: classifyRelevance(match.score),
+      provenance: match.provenance.map((signal) => ({
+        channel: signal.channel,
+        signal: signal.signal,
+        strength: classifyRelevance(Math.min(1, Math.max(0, signal.rawScore))),
+        rank: signal.rank,
+        ...(signal.matchedTerms && { matchedTerms: signal.matchedTerms }),
+      })),
+      ...(match.callers && { callers: match.callers }),
+    })),
+  };
+}
+
+// ── Fusion ──────────────────────────────────────────────────────────────────
+
 function fuseCandidates(
   candidates: DeepSearchCandidate[],
   limit: number,
@@ -735,416 +661,7 @@ function fuseCandidates(
   }));
 }
 
-function truncate(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
-}
-
-function channelSet(matches: DeepSearchMatch[]): ChannelName[] {
-  return [...new Set(matches.flatMap((m) => m.provenance.map((p) => p.channel)))];
-}
-
-function formatMatch(match: DeepSearchMatch): string[] {
-  const matchLines = match.lines ? `L${match.lines.start}-${match.lines.end}` : "file";
-  const signals = [...new Set(match.provenance.map((p) => p.channel))].join(" + ");
-
-  // Collect matched terms from semantic provenance for "why this matched"
-  const semanticProv = match.provenance.filter((p) => p.channel === "semantic");
-  const matchedTerms = [...new Set(semanticProv.flatMap((p) => p.matchedTerms ?? []))];
-
-  const output = [
-    `### ${match.file}`,
-    `- **${match.name}** (${matchLines}) — \`relevance: ${classifyRelevance(match.score)}\` — ${signals}`,
-  ];
-  if (matchedTerms.length > 0) {
-    output.push(`  matched: ${matchedTerms.join(", ")}`);
-  }
-  if (match.snippet.trim()) {
-    output.push("  ```");
-    output.push(...match.snippet.split("\n").map((line) => `  ${line}`));
-    output.push("  ```");
-  }
-  return output;
-}
-
-function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): string {
-  const files = new Set(details.matches.map((m) => m.file));
-  const lines: string[] = [
-    `# Deep Search: "${details.query}"`,
-    `**Depth:** ${details.depth} | **Matches:** ${details.matches.length} | **Files:** ${files.size} | **Time:** ${(details.elapsedMs / 1000).toFixed(1)}s`,
-    "",
-  ];
-
-  // Split matches: exact have structural or symbol provenance, semantic-only don't
-  const exactMatches = details.matches.filter((m) =>
-    m.provenance.some((p) => p.channel === "structural" || p.channel === "symbol" || p.channel === "lsp"),
-  );
-  const semanticOnlyMatches = details.matches.filter(
-    (m) => !exactMatches.includes(m),
-  );
-
-  // ── Exact Matches ────────────────────────────────────────────────
-  if (exactMatches.length > 0) {
-    lines.push("## 🎯 Exact Matches (Code)", "");
-    for (const match of exactMatches) {
-      lines.push(...formatMatch(match), "");
-    }
-  }
-
-  // ── Related Matches (Semantic) ───────────────────────────────────
-  if (semanticOnlyMatches.length > 0) {
-    lines.push("## 📄 Related Matches (Semantic)", "");
-    if (exactMatches.length === 0 && semanticOnlyMatches.length === 0) {
-      // Already covered above, but for completeness
-    }
-    for (const match of semanticOnlyMatches) {
-      lines.push(...formatMatch(match), "");
-    }
-  } else if (details.matches.length === 0) {
-    lines.push("No matches found.", "");
-  }
-
-  // ── Query Coverage ───────────────────────────────────────────────
-  if (details.coverage && details.coverage.length > 0) {
-    lines.push("## 📊 Query Coverage", "");
-    lines.push("| Term | Status | Example |");
-    lines.push("|------|--------|---------|");
-    for (const c of details.coverage) {
-      const icon = c.status === "found" ? "✅" : c.status === "partial" ? "⚠️" : "❌";
-      const statusLabel = c.status === "found" ? "found" : c.status === "partial" ? "partial" : "not found";
-      const example = c.example ? c.example.split("/").pop() ?? c.example : "—";
-      lines.push(`| \`${c.term}\` | ${icon} ${statusLabel} | ${example} |`);
-    }
-    lines.push("");
-
-    // Explicit "not found" callout
-    const notFound = details.coverage.filter((c) => c.status === "not_found").map((c) => c.term);
-    if (notFound.length > 0) {
-      lines.push(
-        `> ⚠️ **Note:** ${notFound.map((t) => `\`${t}\``).join(", ")} not found in top ${details.matches.length} results. ` +
-        `Consider using \`search\` mode=code for these terms.`,
-        "",
-      );
-    }
-  }
-
-  // ── Relationships ────────────────────────────────────────────────
-  const relationshipMatches = details.matches.filter((m) => m.callers && m.callers.length > 0);
-  if (relationshipMatches.length > 0) {
-    lines.push("## 🔗 Relationships", "");
-    for (const match of relationshipMatches) {
-      const callers = match.callers!.slice(0, 5).map((c) => `${c.name} in ${c.file}`).join(", ");
-      lines.push(`- **${match.name}** called by ${callers}`);
-    }
-    lines.push("");
-  }
-
-  // ── Summary ──────────────────────────────────────────────────────
-  lines.push("## 📊 Summary", "");
-  lines.push(`- Channels: ${details.channelsUsed.length > 0 ? details.channelsUsed.join(", ") : "none"}`);
-  lines.push(`- Files inspected: ${details.filesInspected}`);
-  if (details.rerankRequested) lines.push("- Rerank: requested, reserved for configured V2 rerankers");
-  if (details.degraded.length > 0) {
-    lines.push(`- Degraded: ${details.degraded.join("; ")}`);
-  }
-  lines.push("");
-
-  // ── Follow-ups (query-aware) ─────────────────────────────────────
-  lines.push("## ➡️ Follow-ups", "");
-  if (details.coverage && details.coverage.length > 0) {
-    lines.push(...generateFollowUps(details.matches, details.coverage));
-  } else {
-    // Fallback: old heuristic
-    const topFiles = [...new Set(details.matches.map((m) => m.file))].slice(0, 5);
-    const topSymbol = details.matches.find((m) => m.kind !== "file")?.name;
-    if (topFiles.length > 0) {
-      lines.push(`- Read full files: \`read mode=multiple\` with files: [${topFiles.join(", ")}]`);
-    }
-    if (topSymbol) {
-      lines.push(`- Resolve symbol: \`find_symbol\` action=declaration query=${topSymbol}`);
-      lines.push(`- Find callers: \`find_symbol\` action=references query=${topSymbol}`);
-    }
-  }
-
-  return truncate(lines.join("\n"), maxOutputChars);
-}
-
-function toPublicDeepSearchDetails(details: DeepSearchDetails): PublicDeepSearchDetails {
-  return {
-    ...details,
-    matches: details.matches.map((match) => ({
-      handle: match.handle,
-      file: match.file,
-      ...(match.lines && { lines: match.lines }),
-      name: match.name,
-      kind: match.kind,
-      snippet: match.snippet,
-      relevance: classifyRelevance(match.score),
-      provenance: match.provenance.map((signal) => ({
-        channel: signal.channel,
-        signal: signal.signal,
-        strength: classifyRelevance(Math.min(1, Math.max(0, signal.rawScore))),
-        rank: signal.rank,
-        ...(signal.matchedTerms && { matchedTerms: signal.matchedTerms }),
-      })),
-      ...(match.callers && { callers: match.callers }),
-    })),
-  };
-}
-
-async function enrichRelationships(
-  matches: DeepSearchMatch[],
-  signal: AbortSignal | undefined,
-  discoveredFiles: string[],
-): Promise<void> {
-  const eligible = matches.filter((m) => /^[A-Za-z_$][\w$]*$/.test(m.name)).slice(0, 3);
-
-  for (const match of eligible) {
-    if (signal?.aborted) throw new Error("Operation aborted");
-    try {
-      const callers = await findCallers(discoveredFiles, match.name, signal);
-      match.callers = callers.map(c => ({ file: c.file, name: c.callerFunction }));
-    } catch {
-      match.callers = [];
-    }
-  }
-}
-
-async function runSearchChannel(
-  query: string,
-  cwd: string,
-  mode: "code" | "grep",
-  maxResults: number,
-  signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
-): Promise<DeepSearchCandidate[]> {
-  const searchTool = createSearchTool();
-  const result = await searchTool.execute(
-    `deep-search:${mode}`,
-    { mode, query, maxResults, directory: cwd },
-    signal,
-    undefined,
-    ctx,
-  );
-  const text = extractText(result);
-  return mode === "code" ? parseCodeCandidates(text, "structural") : parseGrepCandidates(text);
-}
-
-async function runSemanticChannel(
-  query: string,
-  cwd: string,
-  files: string[],
-  limit: number,
-  signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
-): Promise<DeepSearchCandidate[]> {
-  const intentReadTool = createIntentReadTool();
-  const rankedFiles = files.slice(0, Math.max(limit * 2, limit));
-  const result = await intentReadTool.execute(
-    "deep-search:semantic",
-    {
-      query,
-      files: rankedFiles.map((path) => ({ path })),
-      topK: Math.min(20, Math.max(limit, 1)),
-      stopOnError: false,
-    },
-    signal,
-    undefined,
-    ctx,
-  );
-  return parseSemanticCandidates(cwd, result);
-}
-
-function graphCandidate(
-  cwd: string,
-  file: string,
-  kind: string,
-  from: string,
-  rawScore: number,
-  rank: number,
-): DeepSearchCandidate | undefined {
-  const resolved = resolveWorkspaceFile(cwd, file);
-  if (!resolved || sameResolvedFile(resolve(cwd, from), resolved)) return undefined;
-
-  const rel = toRelativePath(cwd, resolved);
-  const fromRel = toRelativePath(cwd, from);
-  return {
-    file: rel,
-    kind,
-    name: toDisplayName(rel),
-    rawScore,
-    rank,
-    snippet: `${kind}: ${fromRel} → ${rel}`,
-    channel: "graph",
-  };
-}
-
-function selectGraphSeedFiles(cwd: string, candidates: DeepSearchCandidate[], focusFiles: string[]): string[] {
-  const seeds = new Map<string, number>();
-  for (const focusFile of focusFiles) {
-    const resolved = resolveWorkspaceFile(cwd, focusFile);
-    if (resolved) seeds.set(resolved, Number.POSITIVE_INFINITY);
-  }
-
-  for (const candidate of candidates) {
-    const resolved = resolveWorkspaceFile(cwd, candidate.file);
-    if (!resolved) continue;
-    const score = candidate.rawScore + 1 / (RRF_K + candidate.rank);
-    seeds.set(resolved, Math.max(seeds.get(resolved) ?? 0, score));
-  }
-
-  return [...seeds.entries()]
-    .sort((a, b) => b[1] - a[1] || toRelativePath(cwd, a[0]).localeCompare(toRelativePath(cwd, b[0])))
-    .slice(0, MAX_GRAPH_SEEDS)
-    .map(([file]) => file);
-}
-
-function addGraphCandidate(
-  candidates: DeepSearchCandidate[],
-  seen: Set<string>,
-  cwd: string,
-  file: string,
-  kind: string,
-  from: string,
-  rawScore: number,
-  maxCandidates: number,
-): void {
-  if (candidates.length >= maxCandidates) return;
-  const candidate = graphCandidate(cwd, file, kind, from, rawScore, candidates.length + 1);
-  if (!candidate) return;
-  const key = `${candidate.file}:${candidate.kind}:${toRelativePath(cwd, from)}`;
-  if (seen.has(key)) return;
-  seen.add(key);
-  candidates.push(candidate);
-}
-
-async function runGraphChannel(
-  cwd: string,
-  seedFiles: string[],
-  discoveredFiles: string[],
-  maxCandidates: number,
-  signal: AbortSignal | undefined,
-): Promise<DeepSearchCandidate[]> {
-  if (seedFiles.length === 0 || maxCandidates <= 0) return [];
-
-  const candidates: DeepSearchCandidate[] = [];
-  const seen = new Set<string>();
-  const resolvedSeeds = seedFiles.map((file) => resolve(cwd, file));
-  const seedSet = new Set(resolvedSeeds);
-
-  for (const seedFile of resolvedSeeds) {
-    if (signal?.aborted) throw new Error("Operation aborted");
-    const importNeighbours = findDirectImportNeighbours(cwd, [seedFile], maxCandidates);
-    for (const neighbour of importNeighbours) {
-      addGraphCandidate(candidates, seen, cwd, neighbour, "imports", seedFile, 0.9, maxCandidates);
-    }
-  }
-
-  // Reverse import adjacency lets a definition file pull in its importers.
-  // This is the common "auth.ts is relevant; show api.ts too" graph case.
-  for (const file of discoveredFiles.slice(0, MAX_GRAPH_REVERSE_IMPORT_SCAN)) {
-    if (signal?.aborted) throw new Error("Operation aborted");
-    if (candidates.length >= maxCandidates) break;
-    const importer = resolve(cwd, file);
-    const importedFiles = findDirectImportNeighbours(cwd, [importer], maxCandidates);
-    for (const imported of importedFiles) {
-      const importedResolved = resolve(cwd, imported);
-      if (!seedSet.has(importedResolved)) continue;
-      addGraphCandidate(candidates, seen, cwd, importer, "imported_by", importedResolved, 0.85, maxCandidates);
-    }
-  }
-
-  for (const event of EdgeStore.readEdges(cwd)) {
-    if (signal?.aborted) throw new Error("Operation aborted");
-    if (candidates.length >= maxCandidates) break;
-    const fromFile = resolveWorkspaceFile(cwd, event.data.from);
-    const toFile = resolveWorkspaceFile(cwd, event.data.to);
-    if (!fromFile || !toFile || !seedSet.has(fromFile)) continue;
-    const confidence = event.data.confidence ?? (event.type === "breakage" ? 1.0 : 0.7);
-    addGraphCandidate(candidates, seen, cwd, toFile, event.type, fromFile, confidence, maxCandidates);
-  }
-
-  return candidates;
-}
-
-/**
- * Run the LSP workspace/symbol retrieval channel.
- * Best-effort: returns empty array on any failure.
- */
-async function runLSPChannel(
-  query: string,
-  cwd: string,
-  depth: DeepSearchDepth,
-  maxResults: number,
-  signal: AbortSignal | undefined,
-): Promise<DeepSearchCandidate[]> {
-  if (signal?.aborted) return [];
-  if (query.length <= 2) return [];
-
-  const bridge = await getLSPBridge();
-  if (signal?.aborted) return [];
-  if (!bridge?.isAvailable()) return [];
-
-  let symbols: import("./lsp-bridge.js").LSPWorkspaceSymbol[];
-  try {
-    symbols = await bridge.workspaceSymbol(query, cwd);
-  } catch {
-    return [];
-  }
-
-  if (signal?.aborted || !Array.isArray(symbols) || symbols.length === 0) return [];
-
-  const limit = depth === "thorough" ? Math.min(maxResults * 2, MAX_LSP_RESULTS) : maxResults;
-  const candidates: DeepSearchCandidate[] = [];
-
-  for (let i = 0; i < Math.min(symbols.length, limit); i++) {
-    const sym = symbols[i]!;
-    if (!sym?.name || !sym?.location?.uri) continue;
-
-    const filePath = uriToPath(sym.location.uri);
-    const rel = toRelativePath(cwd, filePath);
-    if (!rel) continue;
-
-    candidates.push({
-      file: rel,
-      line: sym.location.range.start.line + 1,
-      endLine: sym.location.range.end.line + 1,
-      name: sym.name,
-      kind: lspKindToString(sym.kind),
-      rawScore: 1 + LSP_SCORE_BOOST,
-      rank: candidates.length + 1,
-      snippet: "",
-      channel: "lsp",
-    });
-  }
-
-  // For thorough depth, fetch hover info for the first few results
-  // to enrich snippets with type/signature information.
-  if (depth === "thorough" && candidates.length > 0) {
-    const hoverLimit = Math.min(MAX_HOVER_RESULTS, candidates.length);
-    for (let i = 0; i < hoverLimit; i++) {
-      if (signal?.aborted) break;
-      const candidate = candidates[i];
-      if (!candidate || candidate.line === undefined) continue;
-      try {
-        const absPath = resolve(cwd, candidate.file);
-        const hoverResult = await bridge.hover(absPath, candidate.line - 1, 0, cwd);
-        if (hoverResult) {
-          const hoverText = typeof hoverResult.contents === "string"
-            ? hoverResult.contents
-            : Array.isArray(hoverResult.contents)
-              ? hoverResult.contents.map((c) => typeof c === "string" ? c : c.value).join("\n")
-              : "value" in hoverResult.contents ? hoverResult.contents.value : "";
-          if (hoverText) {
-            candidate.snippet = hoverText.slice(0, 200);
-          }
-        }
-      } catch { /* best effort */ }
-    }
-  }
-
-  return candidates;
-}
+// ── Main orchestrator ────────────────────────────────────────────────────────
 
 /**
  * Execute deep search — internal function called by search-tool.ts.
@@ -1182,7 +699,7 @@ export async function executeDeepSearch(
     if (scope !== "docs") {
       const results = await Promise.allSettled([
         runSearchChannel(query, cwd, "code", maxChannelResults, signal, ctx),
-        runSearchChannel(query, cwd, "grep", maxChannelResults, signal, ctx),
+        runSymbolChannel(query, cwd, maxChannelResults, signal, ctx),
       ]);
       if (results[0].status === "fulfilled") {
         channelResults.push(...results[0].value);
