@@ -6,6 +6,8 @@
 import { promises as fs, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { isSupportedFile, getSupportedExtensions } from "./languages.js";
+import { getFsScanCache } from "./fs-scan-cache.js"
+export { getFsScanCache, invalidateFsScanCache } from "./fs-scan-cache.js";
 
 const IGNORE_DIRS = new Set([
   "node_modules",
@@ -228,13 +230,30 @@ function isGitignored(
 // ── Public API ────────────────────────────────────────────────────
 
 export async function findSrcFiles(
-  rootDir: string,
-  maxFiles = 10_000,
-  signal?: AbortSignal,
+ rootDir: string,
+ maxFiles = 10_000,
+ signal?: AbortSignal,
 ): Promise<string[]> {
-  const results: string[] = [];
-  const gitignoreCache = new Map<string, GitignoreRule[]>();
-  const resolvedRoot = resolve(rootDir);
+ const cache = getFsScanCache()
+ const { entries } = await cache.getOrScan(
+  resolve(rootDir),
+  async () => _findSrcFilesImpl(rootDir, maxFiles, signal),
+ )
+ // Cap results to maxFiles even from cache
+ if (entries.length > maxFiles) {
+  return entries.slice(0, maxFiles)
+ }
+ return entries
+}
+
+async function _findSrcFilesImpl(
+ rootDir: string,
+ maxFiles = 10_000,
+ signal?: AbortSignal,
+): Promise<string[]> {
+ const results: string[] = [];
+ const gitignoreCache = new Map<string, GitignoreRule[]>();
+ const resolvedRoot = resolve(rootDir);
 
   async function walk(dir: string): Promise<void> {
     if (signal?.aborted || results.length >= maxFiles) return;
@@ -402,15 +421,31 @@ function isMatchedByRules(relPath: string, rules: ContextModeRule[]): boolean {
  * These files are looked up from scan root to VCS root (ceiling at .git).
  */
 export async function findSrcFilesWithContextMode(
-  rootDir: string,
-  maxFiles = 10_000,
-  signal?: AbortSignal,
+ rootDir: string,
+ maxFiles = 10_000,
+ signal?: AbortSignal,
 ): Promise<string[]> {
-  const ignoreRules = loadContextModeRules(rootDir, "ignore");
-  const includeRules = loadContextModeRules(rootDir, "include");
-  const resolvedRoot = resolve(rootDir);
+ const cache = getFsScanCache()
+ const { entries } = await cache.getOrScan(
+  resolve(rootDir),
+  async () => _findSrcFilesWithContextModeImpl(rootDir, maxFiles, signal),
+ )
+ if (entries.length > maxFiles) {
+  return entries.slice(0, maxFiles)
+ }
+ return entries
+}
 
-  const results: string[] = [];
+async function _findSrcFilesWithContextModeImpl(
+	rootDir: string,
+	maxFiles = 10_000,
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const ignoreRules = loadContextModeRules(rootDir, "ignore");
+	const includeRules = loadContextModeRules(rootDir, "include");
+	const resolvedRoot = resolve(rootDir);
+
+	const results: string[] = [];
 
   async function walk(dir: string): Promise<void> {
     if (signal?.aborted || results.length >= maxFiles) return;

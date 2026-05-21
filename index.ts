@@ -3,11 +3,33 @@ import { registerSessionHooks } from "./hook.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
 import { loadExperimentalConfig } from "./config.js";
-import { ensureHashlineReady } from "./utils.js";
+import { coerceText, ensureHashlineReady } from "./utils.js";
+import { invalidateFsScanCache } from "./fs-scan-cache.js";
+import { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
 import { ToolRegistry } from "./tool-registry.js";
+import { toToolDefinition } from "./types.js";
 import { registerFindSymbolTool } from "./find-symbol-tool.js";
 import "./mcp-registry.js"; // registers read, search, repo_map with ToolRegistry
 import { getLSPBridge } from "./lsp-bridge.js";
+// Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
+export {
+	isInternalUrl,
+	resolveUrl,
+	parseInternalUrl,
+	registerHandler,
+	getHandler,
+} from "./internal-url-router.js";
+export { resolveSkillUrl, resolveMemoryUrl, resolveGraphUrl } from "./internal-url-router.js";
+import {
+  recordContiguous,
+  recordSparse,
+  getSnapshot,
+  invalidate,
+  clearSession,
+  resolveSessionKey,
+  type FileSnapshot,
+  type SearchMatchEntry,
+} from "./file-read-cache.js";
 
 // Ensure all tools are registered with the central registry
 registerFindSymbolTool();
@@ -70,9 +92,21 @@ export default function (pi: ExtensionAPI) {
 
   // 1. tool_call: feed doom-loop detector
   pi.on("tool_call", (event: any) => {
+    const toolName = event.toolName as string;
+    // Invalidate FS scan cache for write/edit mutations so subsequent scans see fresh state
+    if (toolName === "write" || toolName === "edit" || toolName === "graph_mutate") {
+      const input = (event.input ?? {}) as Record<string, unknown>;
+      const target = typeof input.path === "string" ? input.path :
+        typeof input.filePath === "string" ? input.filePath :
+        typeof input.relative_path === "string" ? input.relative_path : undefined;
+      if (target) {
+        invalidateFsScanCache(target);
+      }
+    }
+
     recordToolCall(
       doomLoopState,
-      event.toolName,
+      toolName,
       event.toolCallId,
       (event.input ?? {}) as Record<string, unknown>,
     );
@@ -147,14 +181,14 @@ export default function (pi: ExtensionAPI) {
       let textIndex = -1;
       for (let i = 0; i < content.length; i++) {
         const item = content[i] as { type?: unknown; text?: unknown };
-        if (item.type === "text" && typeof item.text === "string") {
+        if (item.type === "text") {
           textIndex = i;
           break;
         }
       }
       if (textIndex >= 0) {
-        const item = content[textIndex] as { type: "text"; text: string };
-        content[textIndex] = { ...item, text: `${prefix}${item.text}` };
+        const item = content[textIndex] as { type: "text"; text?: unknown };
+        content[textIndex] = { ...item, text: `${prefix}${coerceText(item.text)}` };
       } else {
         content.unshift({ type: "text" as const, text: prefix });
       }
@@ -165,8 +199,8 @@ export default function (pi: ExtensionAPI) {
     const SMARTREAD_GUARD_TOOLS = new Set(["search", "read"]);
     if (SMARTREAD_GUARD_TOOLS.has(toolName) && Array.isArray(event.content)) {
       const textContent = event.content
-        .filter((c: any): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
-        .map((c: any) => c.text)
+        .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
+        .map((c: any) => coerceText(c.text))
         .join("\n");
 
       if (textContent) {
@@ -192,7 +226,7 @@ export default function (pi: ExtensionAPI) {
 
           if (result.text !== textContent) {
             const nonTextContent = event.content.filter(
-              (c: any) => !(c.type === "text" && typeof c.text === "string"),
+              (c: any) => c.type !== "text",
             );
             // Replace default hint with tool-specific hint
             const toolHint = GUARD_HINT_GENERIC;
@@ -216,8 +250,8 @@ export default function (pi: ExtensionAPI) {
     // ── Bash context guard: cap oversized bash output ──
     if (toolName === "bash" && bashContextGuardConfig.enabled && Array.isArray(event.content)) {
       const textContent = event.content
-        .filter((c: any): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string")
-        .map((c: any) => c.text)
+        .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
+        .map((c: any) => coerceText(c.text))
         .join("\n");
 
       if (textContent) {
@@ -229,7 +263,7 @@ export default function (pi: ExtensionAPI) {
 
         if (guarded.text !== textContent) {
           const nonTextContent = event.content.filter(
-            (c: any) => !(c.type === "text" && typeof c.text === "string"),
+            (c: any) => c.type !== "text",
           );
           return {
             ...event,
@@ -248,7 +282,7 @@ export default function (pi: ExtensionAPI) {
       const cmd = typeof typedInput?.command === "string" ? typedInput.command : undefined;
       const exit = typeof typedInput?.exitCode === "number" ? typedInput.exitCode : undefined;
       const outputText = Array.isArray(event.content)
-        ? event.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+        ? event.content.filter((c: any) => c.type === "text").map((c: any) => coerceText(c.text)).join("\n")
         : "";
       if (cmd && exit !== undefined && exit !== 0) {
         const suggestions = suggestShellCommands(cmd, outputText, exit);
@@ -258,11 +292,11 @@ export default function (pi: ExtensionAPI) {
           let textIndex = -1;
           for (let i = 0; i < content.length; i++) {
             const item = content[i] as any;
-            if (item.type === "text" && typeof item.text === "string") { textIndex = i; break; }
+            if (item.type === "text") { textIndex = i; break; }
           }
           if (textIndex >= 0) {
-            const item = content[textIndex] as { type: "text"; text: string };
-            content[textIndex] = { ...item, text: item.text + suggestionBlock };
+            const item = content[textIndex] as { type: "text"; text?: unknown };
+            content[textIndex] = { ...item, text: coerceText(item.text) + suggestionBlock };
             return { ...event, content };
           }
         }
@@ -295,24 +329,24 @@ export default function (pi: ExtensionAPI) {
   //    find_symbol, and any other registered tools).
   const reg = ToolRegistry.getInstance();
   for (const tool of reg.getAll()) {
-    pi.registerTool({
+    pi.registerTool(toToolDefinition({
       name: tool.name,
       label: tool.name,
       description: tool.description,
       parameters: tool.inputSchema,
       execute: tool.execute,
-    } as never);
+    }));
   }
 
   // 6. Graph mutation tool [EXPERIMENTAL] — receives breakage/co-change edges from Smart-Edit
   if (experimental.graphMutate) {
-    pi.registerTool(createGraphMutateTool() as never);
+    pi.registerTool(toToolDefinition(createGraphMutateTool()));
   }
 
   // 7. Git notes tool [EXPERIMENTAL] — read/write annotations on git objects
   if (experimental.gitNotes) {
     for (const tool of createGitNotesTools()) {
-      pi.registerTool(tool as never);
+      pi.registerTool(toToolDefinition(tool));
     }
   }
 
@@ -320,3 +354,19 @@ export default function (pi: ExtensionAPI) {
   //    hook.ts's contextual enrichment, and search-tool.ts's centrality boosting.
   //    No separate tools needed.
 }
+
+// ── File-read cache API (re-exported for external use) ───────────────────
+export {
+  recordContiguous,
+  recordSparse,
+  getSnapshot,
+  invalidate,
+  clearSession,
+  resolveSessionKey,
+};
+export type { FileSnapshot, SearchMatchEntry };
+
+// ── Code summary API ───────────────────────────────────────────────
+export { summarizeCode, renderSummary, canSummarize };
+export type { SummaryOptions, SummarySegment, SummaryResult } from "./code-summary.js";
+

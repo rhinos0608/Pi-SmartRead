@@ -34,9 +34,16 @@ describe("index extension wiring", () => {
     expect(names).toContain("search");
     expect(names).toContain("repo_map");
     expect(names).toContain("find_symbol");
+    expect(names).toContain("file_outline");
+    expect(names).toContain("find_references");
+    expect(names).toContain("find_declaration");
+    expect(names).toContain("find_implementations");
+    expect(names).toContain("workspace_symbol");
+    expect(names).toContain("hover_type");
     // graph_mutate and git_notes are experimental — disabled by default
     expect(names).not.toContain("graph_mutate");
-    expect(names).not.toContain("git_notes");
+    expect(names).not.toContain("git_notes_read");
+    expect(names).not.toContain("git_notes_write");
     expect(registered.every((t) => typeof t.execute === "function")).toBe(true);
 
     // Should also register session hooks
