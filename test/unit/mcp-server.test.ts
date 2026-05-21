@@ -128,9 +128,16 @@ describe("MCP stdio server", () => {
     expect(toolNames).toContain("search");
     expect(toolNames).toContain("repo_map");
     expect(toolNames).toContain("find_symbol");
+    expect(toolNames).toContain("file_outline");
+    expect(toolNames).toContain("find_references");
+    expect(toolNames).toContain("find_declaration");
+    expect(toolNames).toContain("find_implementations");
+    expect(toolNames).toContain("workspace_symbol");
+    expect(toolNames).toContain("hover_type");
     // graph_mutate and git_notes are experimental — disabled by default
     expect(toolNames).not.toContain("graph_mutate");
-    expect(toolNames).not.toContain("git_notes");
+    expect(toolNames).not.toContain("git_notes_read");
+    expect(toolNames).not.toContain("git_notes_write");
 
     // Each tool should have required fields
     for (const tool of result.tools) {

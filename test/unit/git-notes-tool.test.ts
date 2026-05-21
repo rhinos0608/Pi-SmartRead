@@ -2,35 +2,42 @@ import { describe, expect, it } from "vitest";
 import { tmpdir } from "node:os";
 import { createGitNotesTools } from "../../git-notes-tool.js";
 
-describe("git notes tool", () => {
-  it("creates a single git_notes tool with action parameter", () => {
+describe("git notes tools", () => {
+  it("creates two tools: git_notes_read and git_notes_write", () => {
     const tools = createGitNotesTools();
-    expect(tools.length).toBe(1);
-    expect(tools[0]!.name).toBe("git_notes");
+    expect(tools.length).toBe(2);
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("git_notes_read");
+    expect(names).toContain("git_notes_write");
     expect(typeof tools[0]!.execute).toBe("function");
+    expect(typeof tools[1]!.execute).toBe("function");
   });
 
-  it("defines schema with action, commit, content, and directory", () => {
-    const tool = createGitNotesTools()[0]!;
-    const params = tool.parameters as Record<string, unknown>;
+  it("read tool schema has commit and directory (no required)", () => {
+    const readTool = createGitNotesTools().find((t) => t.name === "git_notes_read")!;
+    const params = readTool.parameters as Record<string, unknown>;
     const properties = params.properties as Record<string, unknown>;
-
-    expect(properties.action).toBeDefined();
     expect(properties.commit).toBeDefined();
-    expect(properties.content).toBeDefined();
     expect(properties.directory).toBeDefined();
-
-    // content is required for write but not for read
-    // TypeBox doesn't express conditional required, so required is undefined
+    expect(properties.content).toBeUndefined();
     expect(params.required).toBeUndefined();
   });
 
-  it("read action works without content", async () => {
-    const tool = createGitNotesTools()[0]!;
-    // In a non-git directory, should gracefully report no repo found
-    const result = await tool.execute(
+  it("write tool schema has content as required", () => {
+    const writeTool = createGitNotesTools().find((t) => t.name === "git_notes_write")!;
+    const params = writeTool.parameters as Record<string, unknown>;
+    const properties = params.properties as Record<string, unknown>;
+    expect(properties.content).toBeDefined();
+    expect(properties.commit).toBeDefined();
+    expect(properties.directory).toBeDefined();
+    expect(params.required).toContain("content");
+  });
+
+  it("read works without content", async () => {
+    const readTool = createGitNotesTools().find((t) => t.name === "git_notes_read")!;
+    const result = await readTool.execute(
       "id",
-      { action: "read" },
+      {},
       undefined, undefined,
       { cwd: tmpdir() } as any,
     );
@@ -38,12 +45,12 @@ describe("git notes tool", () => {
     expect(text).toContain("No git repository");
   });
 
-  it("write action requires content", async () => {
-    const tool = createGitNotesTools()[0]!;
+  it("write requires content", async () => {
+    const writeTool = createGitNotesTools().find((t) => t.name === "git_notes_write")!;
     await expect(
-      tool.execute(
+      writeTool.execute(
         "id",
-        { action: "write" },
+        {},
         undefined, undefined,
         { cwd: tmpdir() } as any,
       ),

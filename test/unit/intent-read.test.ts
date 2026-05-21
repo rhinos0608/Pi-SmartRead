@@ -55,11 +55,11 @@ describe("intent_read: input validation", () => {
     ).rejects.toThrow(/files.*directory|directory.*files/i);
   });
 
-  it("throws when neither files nor directory is provided", async () => {
+  it("defaults to directory '.' when neither files nor directory is provided", async () => {
     const tool = createIntentReadTool(() => makeReadTool({}) as any, makeEmbedder([]));
-    await expect(
-      tool.execute("id", { query: "auth" } as any, undefined, undefined, { cwd: "/" } as any),
-    ).rejects.toThrow(/files.*directory|directory.*files/i);
+    // Should not throw "Provide either files or directory" — defaults to cwd scan
+    const result = await tool.execute("id", { query: "auth", defaultToCwd: true } as any, undefined, undefined, { cwd: "/tmp" } as any);
+    expect(result).toBeDefined();
   });
 
   it("throws when query is empty after trimming", async () => {
