@@ -29,7 +29,9 @@ import {
 import { buildToolRegistry } from "./mcp-registry.js";
 import { MCP_PROMPTS } from "./mcp-prompts.js";
 import { MCP_RESOURCES, resolveResource } from "./mcp-resources.js";
-import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { coerceText } from "./utils.js";
+import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { toExtensionContext } from "./types.js";
 
 // ── Build Registry ─────────────────────────────────────────────────
 
@@ -69,15 +71,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     const toolCallId = `mcp-${++toolCallCounter}`;
-    const extensionCwd = cwd();
-    const ctx = { cwd: extensionCwd } as unknown as ExtensionContext;
+    const ctx = toExtensionContext(cwd());
 
     const result = await tool.execute(toolCallId, args ?? {}, undefined, undefined, ctx);
 
     // Convert tool result to MCP content format
     const content: Array<{ type: "text"; text: string }> = (result.content ?? []).map((item: any) => {
       if (item.type === "text") {
-        return { type: "text" as const, text: String(item.text) };
+        return { type: "text" as const, text: coerceText(item.text) };
       }
       return { type: "text" as const, text: JSON.stringify(item) };
     });

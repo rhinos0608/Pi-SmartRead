@@ -6,6 +6,7 @@
  * consistent ToolDefinition arrays for both the pi extension API and the MCP server.
  */
 import type { ExtensionAPI, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { toToolDefinition, toToolDefinitions } from "./types.js";
 
 // ── Categories ─────────────────────────────────────────────────────
 
@@ -69,24 +70,24 @@ export class ToolRegistry {
 
   /** Build ToolDefinition[] suitable for mcp-registry / server. */
   getToolDefinitions(): ToolDefinition[] {
-    return [...this.tools.values()].map((t) => ({
+    return toToolDefinitions([...this.tools.values()].map((t) => ({
       name: t.name,
       description: t.description,
       parameters: t.inputSchema,
       execute: t.execute,
-    })) as unknown as ToolDefinition[];
+    })));
   }
 
   /** Register all non-experimental tools with pi's ExtensionAPI. */
   registerAllWithPi(pi: ExtensionAPI): void {
     for (const tool of this.tools.values()) {
       if (tool.experimental) continue;
-      pi.registerTool({
+      pi.registerTool(toToolDefinition({
         name: tool.name,
         description: tool.description,
         parameters: tool.inputSchema,
         execute: tool.execute,
-      } as unknown as ToolDefinition);
+      }));
     }
   }
 }

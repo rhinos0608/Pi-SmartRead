@@ -25,10 +25,10 @@ const GraphMutateInputSchema = Type.Object({
   ),
   context: Type.Optional(Type.String({ description: "Human-readable context or commit hash description" })),
   confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: "Confidence (0-1)" })),
-  root: Type.Optional(Type.String({ description: "Project root directory" })),
+  directory: Type.Optional(Type.String({ description: "Project root directory (default: cwd)" })),
 });
 
-interface GraphMutateInput { from: string; to: string; relation?: "breakage" | "co-change"; context?: string; confidence?: number; root?: string; }
+interface GraphMutateInput { from: string; to: string; relation?: "breakage" | "co-change"; context?: string; confidence?: number; directory?: string; }
 
 // ── Tool Definition ─────────────────────────────────────────────────
 
@@ -56,8 +56,8 @@ Edges are event-sourced to disk and survive session restarts.`,
       _ctx: unknown,
     ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
       const input = params as GraphMutateInput;
-      const root = input.root ?? process.cwd();
-      const resolvedRoot = isAbsolute(root) ? root : resolve(process.cwd(), root);
+      const directory = input.directory ?? process.cwd();
+      const resolvedRoot = isAbsolute(directory) ? directory : resolve(process.cwd(), directory);
 
       if (!existsSync(resolvedRoot)) {
         return { content: [{ type: "text", text: `❌ Root directory not found: ${resolvedRoot}` }] };

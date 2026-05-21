@@ -14,6 +14,12 @@ export default tseslint.config(
     ],
   },
   {
+    files: ["test/**/*.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
+  {
     files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parser: tsParser,
@@ -31,7 +37,7 @@ export default tseslint.config(
       "no-unused-vars": "off",
 
       // Additional quality rules
-      "no-console": "warn",
+      "no-console": ["warn", { "allow": ["warn", "error"] }],
       "prefer-const": "error",
       "no-var": "error",
       "eqeqeq": ["error", "smart"],

@@ -1,23 +1,8 @@
-/**
- * Unified find_symbol tool — symbol-level code exploration.
- *
- * Actions:
- *   symbol       — Find symbols by name/pattern. Uses tree-sitter definition tags.
- *                  Supports qualified paths ("ClassName.methodName").
- *   overview     — File outline via AST analysis. Returns all top-level symbols
- *                  with types, line ranges, and child symbol counts.
- *   references   — All reference locations for a symbol across the codebase.
- *   declaration  — Find the definition/declaration of a symbol given its
- *                  name and optional context file.
- *   implementations — Find types that implement an interface or extend a class
- *                  (heuristic: uses tag matching + graph).
- *   workspace    — Workspace-wide symbol search via LSP.
- *   hover        — Type/signature/quick-info at a file position via LSP.
- */
 import { existsSync, promises as fs } from "node:fs";
 import { relative, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { toToolDefinition } from "./types.js";
 import Parser from "tree-sitter";
 import { initParser, loadLanguage, getQueryPath } from "./tags.js";
 import { filenameToLang } from "./languages.js";
@@ -29,41 +14,57 @@ import { ToolCategory, ToolRegistry } from "./tool-registry.js";
 import { getLSPBridge, type LSPBridge, type LSPDocumentSymbol, type LSPWorkspaceSymbol } from "./lsp-bridge.js";
 import { expandToMonorepoRoots } from "./monorepo-detector.js";
 
-// ── Schema ─────────────────────────────────────────────────────────
+// ── Schemas ─────────────────────────────────────────────────────────
 
 const FindSymbolSchema = Type.Object({
-  action: Type.Union([
-    Type.Literal("symbol"),
-    Type.Literal("overview"),
-    Type.Literal("references"),
-    Type.Literal("declaration"),
-    Type.Literal("implementations"),
-    Type.Literal("workspace"),
-    Type.Literal("hover"),
-  ], { description: "Action to perform. 'symbol' is the default. Use 'overview' for file outline, 'references' for cross-file refs, 'declaration' for definition lookup, 'implementations' for implementors, 'workspace' for LSP workspace search, 'hover' for type/signature info." }),
-  query: Type.Optional(Type.String({ description: "Symbol name or pattern to search for. Required for symbol/references/declaration/implementations/workspace actions. Supports qualified paths like 'ClassName.methodName'." })),
-  relative_path: Type.Optional(Type.String({ description: "File path relative to project root. Required for 'overview'. For 'hover', use format 'file.ts:line:character' (1-indexed). Helps disambiguate for references/declaration/implementations." })),
+  query: Type.String({ description: "Symbol name or pattern to search for. Supports qualified paths like 'ClassName.methodName'." }),
   include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body in results (default: false)." })),
-  childDepth: Type.Optional(Type.Number({ description: "Levels of children to include for 'overview' action (0 = top-level only, default: 0).", minimum: 0, maximum: 5 })),
-  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000 })),
-  directory: Type.Optional(Type.String({ description: "Root directory (default: extension working directory).", default: "." })),
+  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
+  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
 });
 
-interface FindSymbolInput {
-  action?: string;
-  query?: string;
-  relative_path?: string;
-  include_body?: boolean;
-  childDepth?: number;
-  maxResults?: number;
-  directory?: string;
-}
+const FileOutlineSchema = Type.Object({
+  path: Type.String({ description: "File path relative to project root." }),
+  childDepth: Type.Optional(Type.Number({ description: "Levels of children to include (0 = top-level only, default: 0).", minimum: 0, maximum: 5, default: 0 })),
+  directory: Type.Optional(Type.String({ description: "Root directory to resolve path against (default: extension working directory).", default: "." })),
+});
+
+const FindReferencesSchema = Type.Object({
+  query: Type.String({ description: "Symbol name to find references for." }),
+  path: Type.Optional(Type.String({ description: "Optional context file to narrow the search." })),
+  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
+  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
+});
+
+const FindDeclarationSchema = Type.Object({
+  query: Type.String({ description: "Symbol name to find the declaration/definition for." }),
+  path: Type.Optional(Type.String({ description: "Optional context file to narrow the search." })),
+  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body in results (default: false)." })),
+  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
+});
+
+const FindImplementationsSchema = Type.Object({
+  query: Type.String({ description: "Interface or class name to find implementors of." }),
+  path: Type.Optional(Type.String({ description: "Optional context file to narrow the search." })),
+  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body in results (default: false)." })),
+  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
+  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
+});
+
+const WorkspaceSymbolSchema = Type.Object({
+  query: Type.String({ description: "Symbol name or pattern to search for across the workspace." }),
+  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
+  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
+});
+
+const HoverTypeSchema = Type.Object({
+  path: Type.String({ description: "File path relative to project root." }),
+  line: Type.Number({ description: "Line number (1-indexed).", minimum: 1 }),
+  character: Type.Number({ description: "Character position on the line (1-indexed).", minimum: 1 }),
+  directory: Type.Optional(Type.String({ description: "Root directory to resolve path against (default: extension working directory).", default: "." })),
+});
 
 // ── Helpers ────────────────────────────────────────────────────────
-
-function resolveRoot(params: FindSymbolInput, defaultCwd: string): string {
-  return params.directory ? resolve(defaultCwd, params.directory) : defaultCwd;
-}
 
 interface SymbolEntry {
   name: string;
@@ -76,7 +77,9 @@ interface SymbolEntry {
   body?: string;
 }
 
-// ── AST symbol extraction (reuses patterns from search-tool.ts) ─────
+function resolveDirectory(directory: string | undefined, defaultCwd: string): string {
+  return directory ? resolve(defaultCwd, directory) : defaultCwd;
+}
 
 function extractSymbolName(node: { childForFieldName: (n: string) => { text: string } | null; namedChildren: ReadonlyArray<{ type: string; text: string; isNamed: boolean }> }): string | null {
   const nameField = node.childForFieldName?.("name");
@@ -189,7 +192,7 @@ function buildNamePath(defNode: Parser.SyntaxNode, name: string): string {
   return parts.join(".");
 }
 
-// ── Action: symbol ─────────────────────────────────────────────────
+// ── Handlers ───────────────────────────────────────────────────────
 
 async function handleSymbol(
   query: string,
@@ -264,7 +267,6 @@ async function handleSymbol(
       const namePathLower = namePath.toLowerCase();
       const nameLower = name.toLowerCase();
 
-      // Match: qualified parts, or simple substring on name or path
       const isMatch = namePathLower.includes(queryLower) ||
         nameLower.includes(queryLower) ||
         queryParts.every((part) => namePathLower.includes(part));
@@ -315,10 +317,6 @@ function flattenDocumentSymbols(symbols: LSPDocumentSymbol[], parentNamePath = "
 }
 
 function symbolKindToString(kind: number): string {
-  // LSP SymbolKind enum: 1=File,2=Module,3=Namespace,4=Package,5=Class,
-  // 6=Method,7=Property,8=Field,9=Constructor,10=Enum,11=Interface,
-  // 12=Function,13=Variable,14=Constant,15=String,16=Number,17=Boolean,18=Array,
-  // 19=Object,20=Key,21=Null,22=EnumMember,23=Struct,24=Event,25=Operator,26=TypeParameter
   switch (kind) {
     case 5: return "class";
     case 6: return "method";
@@ -388,7 +386,6 @@ async function handleHover(
   const hover = await bridge.hover(fullPath, line, character, root);
   if (!hover) return { symbol: relativePath, result: null };
 
-  // Extract string contents from the LSPHoverResult
   let contents: string;
   let kind: "markdown" | "plaintext" | null = null;
 
@@ -399,7 +396,6 @@ async function handleHover(
       .map((c) => (typeof c === "string" ? c : c.value))
       .join("\n");
   } else {
-    // LSPMarkupContent
     contents = hover.contents.value;
     kind = hover.contents.kind;
   }
@@ -442,7 +438,6 @@ async function handleOverview(
 
   let symbols: SimpleSymbol[] = [];
 
-  // Try LSP getDocumentSymbols (most accurate, supports all LSP languages)
   try {
     const bridge = await lsp();
     if (bridge) {
@@ -453,8 +448,6 @@ async function handleOverview(
     }
   } catch { /* LSP unavailable — fall through */ }
 
-  // Try web-tree-sitter WASM (no LSP server needed, multi-language)
-  // Only run if LSP didn't produce results
   if (symbols.length === 0) {
     try {
       const grammarInfo = await loadGrammar(fullPath);
@@ -472,7 +465,6 @@ async function handleOverview(
     } catch { /* WASM unavailable — fall through */ }
   }
 
-  // Fallback: native tree-sitter (JS/TS/Python/Go/Rust)
   if (symbols.length === 0) {
     try {
       const nativeGrammar = loadLanguage(lang);
@@ -492,7 +484,6 @@ async function handleOverview(
     return { symbols: [], relative_path: relativePath, total: 0 };
   }
 
-  // Filter by depth — include symbols whose namePath depth is <= requested childDepth
   const filtered = symbols.filter((s) => {
     const symbolDepth = s.namePath.split(".").length - 1;
     return symbolDepth <= depth;
@@ -551,12 +542,9 @@ async function handleDeclaration(
   root: string,
   cwd: string,
 ) {
-  // Try LSP goToDefinition first (more precise, handles re-exports, type aliases)
   if (relativePath) {
     const bridge = await lsp();
     if (bridge) {
-      // For LSP, we need a file:line location. Use the relative path directly
-      // and search for the query in the file to find its position.
       const fullPath = resolve(root, relativePath);
       if (existsSync(fullPath)) {
         try {
@@ -599,7 +587,6 @@ async function handleDeclaration(
     }
   }
 
-  // Fallback: tree-sitter symbol resolution
   const result = await resolveSymbol(
     root,
     query,
@@ -633,6 +620,21 @@ async function handleDeclaration(
 
 // ── Action: implementations ────────────────────────────────────────
 
+/** Extract body text from a tree-sitter match for implementor entries. */
+function getBodyTextForMatch(match: {
+  captures: Array<{ node: { parent: { childForFieldName?: (name: string) => { text: string } | null; children: Array<{ type: string; text: string }>; text: string } | null } }>;
+}): string | undefined {
+  for (const cap of match.captures) {
+    const parent = cap.node.parent;
+    if (parent) {
+      const bodyNode = parent.childForFieldName?.("body")
+        ?? parent.children.find((c) => /body|block|declaration_list|field_declaration_list/.test(c.type));
+      return (bodyNode ?? parent).text;
+    }
+  }
+  return undefined;
+}
+
 async function handleImplementations(
   query: string,
   relativePath: string | undefined,
@@ -644,7 +646,6 @@ async function handleImplementations(
 ) {
   const implementors: Array<{ file: string; line: number; name: string; kind: string; body?: string }> = [];
 
-  // Try LSP goToImplementation first (most precise, supports all LSP languages)
   if (relativePath) {
     const bridge = await lsp();
     if (bridge) {
@@ -679,7 +680,6 @@ async function handleImplementations(
     }
   }
 
-  // Fallback: resolve the interface/type via tree-sitter
   if (implementors.length === 0) {
     const result = await resolveSymbol(
       root, query,
@@ -687,7 +687,6 @@ async function handleImplementations(
       undefined, 5,
     );
     const defFiles = new Set(result.definitions.map((d) => d.file));
-    // Also try LSP on the resolved definition file
     if (defFiles.size > 0 && implementors.length === 0) {
       const bridge = await lsp();
       if (bridge) {
@@ -724,7 +723,6 @@ async function handleImplementations(
       }
     }
 
-    // Tree-sitter heuristic fallback
     if (implementors.length === 0) {
       const implSearchRoots = expandToMonorepoRoots(root);
       let implAllFiles: string[] = [];
@@ -733,65 +731,63 @@ async function handleImplementations(
       }
       implAllFiles = [...new Set(implAllFiles)];
       for (const filePath of implAllFiles) {
-    if (signal?.aborted) break;
-    if (implementors.length >= maxResults) break;
+        if (signal?.aborted) break;
+        if (implementors.length >= maxResults) break;
 
-    const relFile = relative(cwd, filePath);
-    const lang = filenameToLang(filePath);
-    if (!lang) continue;
+        const relFile = relative(cwd, filePath);
+        const lang = filenameToLang(filePath);
+        if (!lang) continue;
 
-    const grammar = loadLanguage(lang);
-    if (!grammar) continue;
+        const grammar = loadLanguage(lang);
+        if (!grammar) continue;
 
-    let code: string;
-    try { code = await fs.readFile(filePath, "utf-8"); } catch { continue; }
+        let code: string;
+        try { code = await fs.readFile(filePath, "utf-8"); } catch { continue; }
 
-    const parser = new Parser();
-    parser.setLanguage(grammar);
-    const tree = parser.parse((offset) => code.slice(offset, offset + 1024));
-    if (!tree?.rootNode) continue;
+        const parser = new Parser();
+        parser.setLanguage(grammar);
+        const tree = parser.parse((offset) => code.slice(offset, offset + 1024));
+        if (!tree?.rootNode) continue;
 
-    // Search for class/struct definitions
-    const classQueryStr = `[(class_declaration (name) @name) (class_definition (name) @name) (struct_item (name) @name) (trait_item (name) @name) (impl_item (trait (identifier) @impl_trait)) (impl_item (type (identifier) @impl_type))]`;
-    let classQuery: Parser.Query;
-    try { classQuery = new Parser.Query(grammar, classQueryStr); } catch { continue; }
+        const classQueryStr = `[(class_declaration (name) @name) (class_definition (name) @name) (struct_item (name) @name) (trait_item (name) @name) (impl_item (trait (identifier) @impl_trait)) (impl_item (type (identifier) @impl_type))]`;
+        let classQuery: Parser.Query;
+        try { classQuery = new Parser.Query(grammar, classQueryStr); } catch { continue; }
 
-    const classMatches = classQuery.matches(tree.rootNode);
-    for (const match of classMatches) {
-      let name: string | undefined;
-      let isImpl = false;
+        const classMatches = classQuery.matches(tree.rootNode);
+        for (const match of classMatches) {
+          let name: string | undefined;
+          let isImpl = false;
 
-      for (const capture of match.captures) {
-        if (capture.name === "name") {
-          name = capture.node.text;
-        }
-        if (capture.name === "impl_trait" || capture.name === "impl_type") {
-          if (capture.node.text.toLowerCase() === query.toLowerCase()) {
-            isImpl = true;
+          for (const capture of match.captures) {
+            if (capture.name === "name") {
+              name = capture.node.text;
+            }
+            if (capture.name === "impl_trait" || capture.name === "impl_type") {
+              if (capture.node.text.toLowerCase() === query.toLowerCase()) {
+                isImpl = true;
+              }
+            }
           }
+          if (!name) continue;
+
+          const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const extendsRe = new RegExp(`\\bextends\\s+${escapedQuery}\\b`, "i");
+          const implementsRe = new RegExp(`\\bimplements\\s+[^;{]{0,200}\\b${escapedQuery}\\b`, "i");
+          if (!isImpl && !extendsRe.test(code) && !implementsRe.test(code)) continue;
+
+          let line = 1;
+          for (const cap of match.captures) {
+            if (cap.name === "name") { line = cap.node.startPosition.row + 1; break; }
+          }
+          implementors.push({
+            file: relFile, line, name, kind: "class",
+            body: includeBody ? getBodyTextForMatch(match) : undefined,
+          });
         }
       }
-      if (!name) continue;
-
-      // Check extends/implements keywords
-      const extendsRe = new RegExp(`\\bextends\\s+${query}\\b`, "i");
-      const implementsRe = new RegExp(`\\bimplements\\s+[^;{]*\\b${query}\\b`, "i");
-      if (!isImpl && !extendsRe.test(code) && !implementsRe.test(code)) continue;
-
-      let line = 1;
-      for (const cap of match.captures) {
-        if (cap.name === "name") { line = cap.node.startPosition.row + 1; break; }
-      }
-      implementors.push({
-        file: relFile, line, name, kind: "class",
-        body: includeBody ? match.captures[0]?.node.text : undefined,
-      });
     }
-  }  // end for (filePath)
-    }  // end tree-sitter fallback
-  }  // end outer fallback
+  }
 
-  // Check graphify for implementation relationships
   try {
     const enricher = getGraphifyEnricher(cwd);
     if (enricher.isAvailable) {
@@ -815,7 +811,6 @@ async function handleImplementations(
     }
   } catch { /* best-effort */ }
 
-  // Deduplicate
   const seen = new Set<string>();
   const unique = implementors.filter((i) => {
     const key = `${i.file}:${i.name}`;
@@ -828,7 +823,6 @@ async function handleImplementations(
 }
 
 // ── Output formatting ──────────────────────────────────────────────
-
 
 function formatSymbolResult(data: { matches: SymbolEntry[]; totalDefs: number; filesScanned: number }, query: string, startTime: number): string {
   const { matches } = data;
@@ -942,8 +936,6 @@ function formatImplementationsResult(data: any, _query: string, startTime: numbe
   return lines.join("\n");
 }
 
-// ── Format: workspace ───────────────────────────────────────────────
-
 function formatWorkspaceResult(data: { symbol: string; results: WorkspaceSymbolEntry[]; total: number }, _query: string, startTime: number): string {
   const lines: string[] = [
     `Workspace symbols for "${data.symbol}" (${data.total} found, ${Date.now() - startTime}ms):`,
@@ -978,144 +970,169 @@ function formatHoverResult(data: { symbol: string; result: HoverResult | null },
   ].join("\n");
 }
 
-// ── Tool definition ────────────────────────────────────────────────
+// ── Tool definitions ───────────────────────────────────────────────
 
-export function createFindSymbolTool(): ToolDefinition {
-  return {
+function createFindSymbolSearchTool(): ToolDefinition {
+  return toToolDefinition({
     name: "find_symbol",
     label: "find_symbol",
-    description:
-      "Explore codebase symbols with action-based dispatch. 'symbol' (default): find symbols by name/pattern using tree-sitter AST analysis. " +
-      "'overview': get file outline with all symbol types and line ranges. " +
-      "'references': find all cross-file references to a symbol. " +
-      "'declaration': find where a symbol is defined. " +
-      "'implementations': find types that implement, extend, or subclass a given type. " +
-      "'workspace': workspace-wide symbol search via LSP. " +
-      "'hover': type/signature/quick-info at a file position via LSP. " +
-      "Supports qualified name paths like 'ClassName.methodName' for precise matching.",
+    description: "Find symbols by name or pattern using tree-sitter AST analysis. Supports qualified paths like 'ClassName.methodName' for precise matching.",
     parameters: FindSymbolSchema,
 
-    async execute(
-      _toolCallId: string,
-      params: FindSymbolInput,
-      signal: AbortSignal | undefined,
-      _onUpdate: unknown,
-      ctx: ExtensionContext,
-    ) {
+    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
       if (signal?.aborted) throw new Error("Operation aborted");
-
-      const action = params.action ?? "symbol";
-      const root = resolveRoot(params, ctx.cwd);
-      const cwd = ctx.cwd;
       const startTime = Date.now();
-      const maxResults = params.maxResults ?? 30;
-
-      switch (action) {
-        case "overview": {
-          if (typeof params.relative_path !== "string" || !params.relative_path.trim()) {
-            throw new Error('action "overview" requires a non-empty "relative_path"');
-          }
-          const childDepth = params.childDepth ?? 0;
-          const data = await handleOverview(params.relative_path, childDepth, root);
-          return {
-            content: [{ type: "text" as const, text: formatOverviewResult(data, startTime) }],
-            details: data,
-          };
-        }
-
-        case "references": {
-          if (typeof params.query !== "string" || !params.query.trim()) {
-            throw new Error('action "references" requires a non-empty "query"');
-          }
-          const data = await handleReferences(params.query, params.relative_path, maxResults, root, cwd);
-          return {
-            content: [{ type: "text" as const, text: formatReferencesResult(data, params.query, startTime) }],
-            details: data,
-          };
-        }
-
-        case "declaration": {
-          if (typeof params.query !== "string" || !params.query.trim()) {
-            throw new Error('action "declaration" requires a non-empty "query"');
-          }
-          const data = await handleDeclaration(params.query, params.relative_path, params.include_body ?? false, root, cwd);
-          return {
-            content: [{ type: "text" as const, text: formatDeclarationResult(data, params.query, startTime) }],
-            details: data,
-          };
-        }
-
-        case "implementations": {
-          if (typeof params.query !== "string" || !params.query.trim()) {
-            throw new Error('action "implementations" requires a non-empty "query"');
-          }
-          const data = await handleImplementations(params.query, params.relative_path, params.include_body ?? false, maxResults, root, cwd, signal);
-          return {
-            content: [{ type: "text" as const, text: formatImplementationsResult(data, params.query, startTime) }],
-            details: data,
-          };
-        }
-
-        case "workspace": {
-          if (typeof params.query !== "string" || !params.query.trim()) {
-            throw new Error('action "workspace" requires a non-empty "query"');
-          }
-          const data = await handleWorkspace(params.query, maxResults, root);
-          return {
-            content: [{ type: "text" as const, text: formatWorkspaceResult(data, params.query, startTime) }],
-            details: data,
-          };
-        }
-
-        case "hover": {
-          if (typeof params.relative_path !== "string" || !params.relative_path.trim()) {
-            throw new Error('action "hover" requires a non-empty "relative_path"');
-          }
-          // Parse hover position from relative_path format: "file.ts:42:10"
-          const hoverMatch = params.relative_path.match(/^(.+?):(\d+):(\d+)$/);
-          if (!hoverMatch) {
-            throw new Error('action "hover" requires relative_path in format "file.ts:line:character" (1-indexed line/character)');
-          }
-          const hoverFile = hoverMatch[1]!;
-          const hoverLine = parseInt(hoverMatch[2]!, 10) - 1; // Convert to 0-based
-          const hoverChar = parseInt(hoverMatch[3]!, 10) - 1; // Convert to 0-based
-          if (!Number.isFinite(hoverLine) || !Number.isFinite(hoverChar) || hoverLine < 0 || hoverChar < 0) {
-            throw new Error('action "hover" requires relative_path in format "file.ts:line:character" (1-indexed line/character) with positive integers');
-          }
-          const data = await handleHover(hoverFile, hoverLine, hoverChar, root);
-          return {
-            content: [{ type: "text" as const, text: formatHoverResult(data, params.query ?? params.relative_path, startTime) }],
-            details: data,
-          };
-        }
-
-        default:
-        case "symbol": {
-          if (typeof params.query !== "string" || !params.query.trim()) {
-            throw new Error('action "symbol" (default) requires a non-empty "query"');
-          }
-          const data = await handleSymbol(params.query, maxResults, params.include_body ?? false, root, cwd, signal);
-          return {
-            content: [{ type: "text" as const, text: formatSymbolResult(data, params.query, startTime) }],
-            details: data,
-          };
-        }
-      }
+      const root = resolveDirectory(params.directory, ctx.cwd);
+      const data = await handleSymbol(params.query, params.maxResults ?? 30, params.include_body ?? false, root, ctx.cwd, signal);
+      return {
+        content: [{ type: "text" as const, text: formatSymbolResult(data, params.query, startTime) }],
+        details: data,
+      };
     },
-  } as unknown as ToolDefinition;
+  });
 }
 
-// ── Registration helper ────────────────────────────────────────────
+function createFileOutlineTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "file_outline",
+    label: "file_outline",
+    description: "Get a file outline via AST analysis. Returns all top-level symbols with types, line ranges, and child symbol counts.",
+    parameters: FileOutlineSchema,
+
+    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      const startTime = Date.now();
+      const root = resolveDirectory(params.directory, ctx.cwd);
+      const data = await handleOverview(params.path, params.childDepth ?? 0, root);
+      return {
+        content: [{ type: "text" as const, text: formatOverviewResult(data, startTime) }],
+        details: data,
+      };
+    },
+  });
+}
+
+function createFindReferencesTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "find_references",
+    label: "find_references",
+    description: "Find all cross-file references to a symbol.",
+    parameters: FindReferencesSchema,
+
+    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      const startTime = Date.now();
+      const root = resolveDirectory(params.directory, ctx.cwd);
+      const data = await handleReferences(params.query, params.path, params.maxResults ?? 30, root, ctx.cwd);
+      return {
+        content: [{ type: "text" as const, text: formatReferencesResult(data, params.query, startTime) }],
+        details: data,
+      };
+    },
+  });
+}
+
+function createFindDeclarationTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "find_declaration",
+    label: "find_declaration",
+    description: "Find the definition/declaration of a symbol. Optionally narrow the search with a context file.",
+    parameters: FindDeclarationSchema,
+
+    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      const startTime = Date.now();
+      const root = resolveDirectory(params.directory, ctx.cwd);
+      const data = await handleDeclaration(params.query, params.path, params.include_body ?? false, root, ctx.cwd);
+      return {
+        content: [{ type: "text" as const, text: formatDeclarationResult(data, params.query, startTime) }],
+        details: data,
+      };
+    },
+  });
+}
+
+function createFindImplementationsTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "find_implementations",
+    label: "find_implementations",
+    description: "Find types that implement, extend, or subclass a given interface or class.",
+    parameters: FindImplementationsSchema,
+
+    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      const startTime = Date.now();
+      const root = resolveDirectory(params.directory, ctx.cwd);
+      const data = await handleImplementations(params.query, params.path, params.include_body ?? false, params.maxResults ?? 30, root, ctx.cwd, signal);
+      return {
+        content: [{ type: "text" as const, text: formatImplementationsResult(data, params.query, startTime) }],
+        details: data,
+      };
+    },
+  });
+}
+
+function createWorkspaceSymbolTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "workspace_symbol",
+    label: "workspace_symbol",
+    description: "Workspace-wide symbol search via LSP.",
+    parameters: WorkspaceSymbolSchema,
+
+    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      const startTime = Date.now();
+      const root = resolveDirectory(params.directory, ctx.cwd);
+      const data = await handleWorkspace(params.query, params.maxResults ?? 30, root);
+      return {
+        content: [{ type: "text" as const, text: formatWorkspaceResult(data, params.query, startTime) }],
+        details: data,
+      };
+    },
+  });
+}
+
+function createHoverTypeTool(): ToolDefinition {
+  return toToolDefinition({
+    name: "hover_type",
+    label: "hover_type",
+    description: "Get type/signature/quick-info at a file position via LSP.",
+    parameters: HoverTypeSchema,
+
+    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      const startTime = Date.now();
+      const root = resolveDirectory(params.directory, ctx.cwd);
+      const data = await handleHover(params.path, params.line - 1, params.character - 1, root);
+      return {
+        content: [{ type: "text" as const, text: formatHoverResult(data, `${params.path}:${params.line}:${params.character}`, startTime) }],
+        details: data,
+      };
+    },
+  });
+}
+
+// ── Registration ───────────────────────────────────────────────────
 
 export function registerFindSymbolTool(): void {
   const registry = ToolRegistry.getInstance();
-  if (registry.get("find_symbol")) return;
-  const toolDef = createFindSymbolTool();
-  registry.register({
-    name: "find_symbol",
-    description: toolDef.description,
-    inputSchema: FindSymbolSchema,
-    execute: toolDef.execute,
-    category: ToolCategory.SYMBOL,
-  });
+  const tools = [
+    createFindSymbolSearchTool(),
+    createFileOutlineTool(),
+    createFindReferencesTool(),
+    createFindDeclarationTool(),
+    createFindImplementationsTool(),
+    createWorkspaceSymbolTool(),
+    createHoverTypeTool(),
+  ];
+  for (const tool of tools) {
+    if (registry.get(tool.name)) continue;
+    registry.register({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.parameters as Record<string, unknown>,
+      execute: tool.execute,
+      category: ToolCategory.SYMBOL,
+    });
+  }
 }

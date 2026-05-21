@@ -313,11 +313,18 @@ export class SqliteVecStore {
         // Only insert if the chunk_id is not already present.
         // vec0 tables don't support INSERT OR IGNORE or ON CONFLICT DO NOTHING,
         // so we use a pre-check to achieve idempotent insert behavior.
-        const existing = checkStmt.get(chunk.id);
+        //
+        // vec0 requires BigInt for integer primary key columns.
+        // Using Number directly fails with "Only integers are allowed for primary key values".
+        if (!Number.isSafeInteger(chunk.id) || chunk.id < 0) {
+          throw new Error(`chunk.id must be a non-negative safe integer, got ${chunk.id}`);
+        }
+        const pkId = BigInt(chunk.id);
+        const existing = checkStmt.get(pkId);
         if (existing) continue;
 
         insertStmt.run(
-          chunk.id,
+          pkId,
           // vec0 path: store Float32Array directly (sqlite-vec handles the format).
           // Fallback path: store only the Float32Array bytes, not the whole buffer.
           this.vec0Available
@@ -328,7 +335,10 @@ export class SqliteVecStore {
               ),
           chunk.filePath, chunk.symbolKind,
           chunk.language, chunk.codeSnippet,
-          chunk.lineStart, chunk.lineEnd
+          // vec0 requires BigInt for all integer columns (primary key and metadata).
+          // Fallback uses regular integer binding.
+          this.vec0Available ? BigInt(chunk.lineStart) : chunk.lineStart,
+          this.vec0Available ? BigInt(chunk.lineEnd) : chunk.lineEnd
         );
       }
       db.exec("COMMIT");

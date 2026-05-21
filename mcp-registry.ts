@@ -18,6 +18,7 @@ import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
 import { loadExperimentalConfig } from "./config.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { toToolDefinition, toToolDefinitions } from "./types.js";
 
 // ── Register all tools with the central registry ───────────────────
 
@@ -32,17 +33,17 @@ function reg(name: string, factory: () => ToolDefinition, category: ToolCategory
   registry.register({ name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category, experimental });
 }
 
-reg("read", () => createReadTool() as unknown as ToolDefinition, ToolCategory.READ);
-reg("read_files", () => createReadFilesTool() as unknown as ToolDefinition, ToolCategory.READ);
-reg("intent_read", () => createIntentReadTool() as unknown as ToolDefinition, ToolCategory.READ);
-reg("search", () => createSearchTool() as unknown as ToolDefinition, ToolCategory.SEARCH);
-reg("repo_map", () => createRepoTool() as unknown as ToolDefinition, ToolCategory.MAP);
+reg("read", () => toToolDefinition(createReadTool()), ToolCategory.READ);
+reg("read_files", () => toToolDefinition(createReadFilesTool()), ToolCategory.READ);
+reg("intent_read", () => toToolDefinition(createIntentReadTool()), ToolCategory.READ);
+reg("search", () => toToolDefinition(createSearchTool()), ToolCategory.SEARCH);
+reg("repo_map", () => toToolDefinition(createRepoTool()), ToolCategory.MAP);
 const experimental = loadExperimentalConfig();
 if (experimental.graphMutate) {
-  reg("graph_mutate", () => createGraphMutateTool() as unknown as ToolDefinition, ToolCategory.MUTATE, true);
+  reg("graph_mutate", () => toToolDefinition(createGraphMutateTool()), ToolCategory.MUTATE, true);
 }
 if (experimental.gitNotes) {
-  const notesTools = createGitNotesTools() as unknown as ToolDefinition[];
+  const notesTools = toToolDefinitions(createGitNotesTools());
   for (const def of notesTools) {
     registry.register({ name: def.name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category: ToolCategory.NOTES, experimental: true });
   }

@@ -22,6 +22,16 @@
     "repomap-tool.ts", "hook.ts", "special.ts", "mcp-server.ts", "mcp-registry.ts", "mcp-prompts.ts", "mcp-resources.ts", "deep-search.ts",
     "orama-search.ts", "sqlite-vec-store.ts", "local-embedding-provider.ts",
     "git-context.ts", "git-notes.ts", "git-notes-tool.ts", "git-history.ts",
+    "monorepo-detector.ts", "find-symbol-tool.ts", "tool-registry.ts", "types.ts",
+    "unified-read.ts", "microagents.ts", "grammar-loader.ts", "search-replace.ts",
+    "lsp-bridge.ts",
+    "context-hygiene.ts", "context-application.ts", "doom-loop.ts",
+    "bash-context-guard.ts", "ast-chunker.ts",
+    "code-summary.ts", "file-read-cache.ts", "fs-scan-cache.ts",
+    "internal-url-router.ts", "skill-protocol.ts", "memory-protocol.ts", "graph-protocol.ts",
+    "deep-search-semantic.ts", "deep-search-structural.ts", "deep-search-symbol.ts",
+    "deep-search-graph.ts", "deep-search-lsp.ts",
+    "repomap-pipeline.ts", "repomap-ranking.ts", "repomap-render.ts",
     "test/**/*.ts"
   ]
 }
