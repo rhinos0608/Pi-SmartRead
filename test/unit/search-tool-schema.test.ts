@@ -16,6 +16,9 @@ describe("search tool schema", () => {
 
     expect(schema.type).toBe("object");
     expect(schema.properties).toHaveProperty("directory");
+    expect(schema.properties).toHaveProperty("matchMode");
+    expect(schema.properties).toHaveProperty("caseSensitive");
+    expect(schema.properties).toHaveProperty("contextLines");
     expect(schema.properties).not.toHaveProperty("folder");
   });
 

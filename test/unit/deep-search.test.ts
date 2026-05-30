@@ -132,6 +132,18 @@ describe("executeDeepSearch", () => {
     expect(docsResult.content[0]!.text).toContain("Deep Search");
   });
 
+  it("returns config/text hits when the only match is outside code definitions", async () => {
+    writeProjectFile("config/feature-flags.json", `{"flag":"FEATURE_FLAG_TEXT_ONLY"}`);
+
+    const result = await executeDeepSearch(
+      { query: "FEATURE_FLAG_TEXT_ONLY", scope: "all" },
+      undefined,
+      mockContext(),
+    );
+
+    expect(result.content[0]!.text).toContain("config/feature-flags.json");
+  });
+
   it("respects limit parameter", async () => {
     // Create multiple files
     for (let i = 0; i < 10; i++) {

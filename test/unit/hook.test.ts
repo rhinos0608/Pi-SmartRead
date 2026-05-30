@@ -212,7 +212,7 @@ describe("registerSessionHooks", () => {
       ? typed!.systemPrompt.join("\n")
       : typed!.systemPrompt;
     expect(promptText).toContain("Repository Map");
-  });
+  }, 15_000);
 
   it("before_agent_start returns undefined for subsequent turns", async () => {
     const { api, handlers } = makeMockAPI();

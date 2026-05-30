@@ -1,9 +1,22 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-// Mock findSrcFiles
+// Mock discovery helpers
 vi.mock("../../file-discovery.js", () => ({
   findSrcFiles: vi.fn().mockResolvedValue(["/fake/repo/test.ts"]),
+  discoverFiles: vi.fn().mockResolvedValue({
+    files: ["/fake/repo/test.ts"],
+    diagnostics: {
+      profile: "code",
+      root: "/fake/repo",
+      directoriesVisited: 1,
+      filesConsidered: 1,
+      filesMatched: 1,
+      filesSkippedIgnored: 0,
+      filesSkippedBinary: 0,
+      filesSkippedUnsupported: 0,
+    },
+  }),
 }));
 
 // Mock resolveSymbol
@@ -87,8 +100,20 @@ describe("search tool (consolidated)", () => {
   // ── Execution: default mode (grep) ──
 
   it("default mode returns no-defs message when no files match", async () => {
-    const { findSrcFiles } = await import("../../file-discovery.js");
-    vi.mocked(findSrcFiles).mockResolvedValue([]);
+    const { discoverFiles } = await import("../../file-discovery.js");
+    vi.mocked(discoverFiles).mockResolvedValue({
+      files: [],
+      diagnostics: {
+        profile: "text",
+        root: "/fake/repo",
+        directoriesVisited: 1,
+        filesConsidered: 0,
+        filesMatched: 0,
+        filesSkippedIgnored: 0,
+        filesSkippedBinary: 0,
+        filesSkippedUnsupported: 0,
+      },
+    });
 
     const result = await tool.execute(
       "call-1",
@@ -99,7 +124,7 @@ describe("search tool (consolidated)", () => {
     );
 
     const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain("No definitions matching");
+    expect(text).toContain("No text matches");
   });
 
   it("rejects empty query", async () => {
@@ -117,8 +142,20 @@ describe("search tool (consolidated)", () => {
   // ── Execution: mode="code" ──
 
   it('mode="code" returns no-defs message when no files match', async () => {
-    const { findSrcFiles } = await import("../../file-discovery.js");
-    vi.mocked(findSrcFiles).mockResolvedValue([]);
+    const { discoverFiles } = await import("../../file-discovery.js");
+    vi.mocked(discoverFiles).mockResolvedValue({
+      files: [],
+      diagnostics: {
+        profile: "code",
+        root: "/fake/repo",
+        directoriesVisited: 1,
+        filesConsidered: 0,
+        filesMatched: 0,
+        filesSkippedIgnored: 0,
+        filesSkippedBinary: 0,
+        filesSkippedUnsupported: 0,
+      },
+    });
 
     const result = await tool.execute(
       "call-3",

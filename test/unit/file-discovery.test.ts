@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { findSrcFiles } from "../../file-discovery.js";
+import { discoverFiles, findSearchableTextFiles, findSrcFiles } from "../../file-discovery.js";
 
 describe("findSrcFiles", () => {
   let tmpDir: string;
@@ -95,6 +95,37 @@ describe("findSrcFiles", () => {
     for (const ext of exts) {
       expect(files).toContain(join(tmpDir, `file${ext}`));
     }
+  });
+
+  it("discovers searchable text files beyond supported code extensions", async () => {
+    writeFileSync(join(tmpDir, "README.md"), "# Readme");
+    writeFileSync(join(tmpDir, "config.yaml"), "name: test");
+    writeFileSync(join(tmpDir, "Procfile"), "web: node server.js");
+    writeFileSync(join(tmpDir, "main.ts"), "export const value = 1;");
+
+    const files = await findSearchableTextFiles(tmpDir);
+    expect(files).toContain(join(tmpDir, "README.md"));
+    expect(files).toContain(join(tmpDir, "config.yaml"));
+    expect(files).toContain(join(tmpDir, "Procfile"));
+    expect(files).toContain(join(tmpDir, "main.ts"));
+  });
+
+  it("keeps searchable hidden paths unless denied by ignore rules", async () => {
+    mkdirSync(join(tmpDir, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(tmpDir, ".github", "workflows", "ci.yml"), "name: ci");
+
+    const files = await findSearchableTextFiles(tmpDir);
+    expect(files).toContain(join(tmpDir, ".github", "workflows", "ci.yml"));
+  });
+
+  it("tracks binary files separately in text discovery diagnostics", async () => {
+    writeFileSync(join(tmpDir, "notes.txt"), "plain text");
+    writeFileSync(join(tmpDir, "blob.bin"), Buffer.from([0, 1, 2, 3, 4]));
+
+    const result = await discoverFiles(tmpDir, "text");
+    expect(result.files).toContain(join(tmpDir, "notes.txt"));
+    expect(result.files).not.toContain(join(tmpDir, "blob.bin"));
+    expect(result.diagnostics.filesSkippedBinary).toBe(1);
   });
 
 });
