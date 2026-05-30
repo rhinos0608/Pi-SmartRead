@@ -58,9 +58,13 @@ export class TagsCache {
 
   /** File → set of files that import from this file (reverse dependency graph) */
   dependents: Map<string, Set<string>> = new Map();
+  private readonly maxDependentsEntries = 50_000;
+  private dependentsFull = false;
+  private dependentsEdgeCount = 0;
 
   /** Per-file parse timing (ms) */
   parseTimings: Map<string, number> = new Map();
+  private readonly maxParseTimingsEntries = 20_000;
 
   /** Total parse time across all files in this session */
   totalParseTimeMs = 0;
@@ -237,6 +241,12 @@ export class TagsCache {
   /** Clear memory cache only. Disk cache persists. */
   clear(): void {
     this.memoryCache.clear();
+    this.dependentsFull = false;
+    this.dependentsEdgeCount = 0;
+    this.dependents.clear();
+    this.parseTimings.clear();
+    this.totalParseTimeMs = 0;
+    this.parseCount = 0;
   }
 
   /**
@@ -250,6 +260,12 @@ export class TagsCache {
       await fs.mkdir(this.cacheDir, { recursive: true });
       this.memoryCache.clear();
       this.corruptionCount = 0;
+      this.dependentsFull = false;
+      this.dependentsEdgeCount = 0;
+      this.dependents.clear();
+      this.parseTimings.clear();
+      this.totalParseTimeMs = 0;
+      this.parseCount = 0;
     } catch {
       this.useFilePersistence = false;
     }
@@ -321,6 +337,17 @@ export class TagsCache {
     this.parseTimings.set(fname, ms);
     this.totalParseTimeMs += ms;
     this.parseCount++;
+
+    // Evict oldest entries when parseTimings exceeds hard cap
+    if (this.parseTimings.size > this.maxParseTimingsEntries) {
+      const toEvict = this.parseTimings.size - this.maxParseTimingsEntries;
+      let evicted = 0;
+      for (const key of this.parseTimings.keys()) {
+        if (evicted >= toEvict) break;
+        this.parseTimings.delete(key);
+        evicted++;
+      }
+    }
   }
 
   /** Get parse performance stats. */
@@ -355,11 +382,20 @@ export class TagsCache {
    */
   addDependency(importee: string, importer: string): void {
     if (!this.trackDependencies) return;
+
     let deps = this.dependents.get(importee);
+    const isNewEdge = !deps || !deps.has(importer);
+
+    if (isNewEdge && this.dependentsEdgeCount >= this.maxDependentsEntries) {
+      if (!this.dependentsFull) this.dependentsFull = true;
+      return;
+    }
+
     if (!deps) {
       deps = new Set();
       this.dependents.set(importee, deps);
     }
+    if (isNewEdge) this.dependentsEdgeCount++;
     deps.add(importer);
   }
 
@@ -401,13 +437,22 @@ export class TagsCache {
     return invalidated;
   }
 
-  /** Get number of tracked dependency edges */
+  /** Get number of tracked dependency edges (uses cached counter for O(1)). */
   get dependencyEdgeCount(): number {
-    let count = 0;
-    for (const deps of this.dependents.values()) {
-      count += deps.size;
-    }
-    return count;
+    return this.dependentsEdgeCount;
+  }
+
+  /** Return capacity stats for monitoring memory caps. */
+  getCapacityStats(): {
+    memoryCache: { size: number; max: number };
+    dependents: { edges: number; max: number; full: boolean };
+    parseTimings: { entries: number; max: number };
+  } {
+    return {
+      memoryCache: { size: this.memoryCache.size, max: this.maxMemoryEntries },
+      dependents: { edges: this.dependentsEdgeCount, max: this.maxDependentsEntries, full: this.dependentsFull },
+      parseTimings: { entries: this.parseTimings.size, max: this.maxParseTimingsEntries },
+    };
   }
 
   /** Export dependency graph as plain object (for diagnostics) */

@@ -618,7 +618,21 @@ class LSPManager {
   }
 }
 
-// ── Bridge implementation ──────────────────────────────────────────
+// ── Manager cache with bounded size ──────────────────────────────────
+
+const MAX_MANAGER_CACHE_SIZE = 5;
+
+/** Tracks insertion order for LRU eviction */
+const managerAccessOrder: string[] = [];
+
+/** Shuts down and removes all managers from the cache */
+export async function shutdownAllManagers(): Promise<void> {
+  for (const mgr of managerCache.values()) {
+    await mgr.shutdown();
+  }
+  managerCache.clear();
+  managerAccessOrder.length = 0;
+}
 
 const managerCache = new Map<string, LSPManager>();
 
@@ -780,10 +794,27 @@ async function serverGoToDefinition(
 function cachedManager(root: string): LSPManager {
   let mgr = managerCache.get(root);
   if (!mgr) {
+    // Synchronous eviction before adding a new manager
+    if (managerCache.size >= MAX_MANAGER_CACHE_SIZE) {
+      const oldest = managerAccessOrder.shift();
+      if (oldest) {
+        const oldMgr = managerCache.get(oldest);
+        if (oldMgr) {
+          oldMgr.shutdown().catch(() => {});
+        }
+        managerCache.delete(oldest);
+      }
+    }
     mgr = new LSPManager(root);
     managerCache.set(root, mgr);
+    managerAccessOrder.push(root);
     // Eagerly start all available servers, but don't block the return
     mgr.startAll().catch(() => {});
+  } else {
+    // Move to end of access order (most-recently-used)
+    const idx = managerAccessOrder.indexOf(root);
+    if (idx !== -1) managerAccessOrder.splice(idx, 1);
+    managerAccessOrder.push(root);
   }
   return mgr;
 }

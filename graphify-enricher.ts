@@ -76,22 +76,37 @@ export interface EnricherStats {
   fileCount: number;
 }
 
-// ── Module-level cache ────────────────────────────────────────────
+// ── Module-level cache (LRU-style, max 10 instances) ──
 
+const MAX_ENRICHER_INSTANCES = 10;
 const enricherInstances = new Map<string, GraphifyEnricher>();
 
 /**
  * Get or create a GraphifyEnricher for a working directory.
  * Cached per resolved path to avoid re-parsing graph.json on every call.
+ * Uses LRU-style eviction: removes oldest entry when at capacity.
  */
 export function getGraphifyEnricher(cwd: string): GraphifyEnricher {
   const resolved = resolve(cwd);
-  let instance = enricherInstances.get(resolved);
-  if (!instance) {
-    instance = new GraphifyEnricher(resolved);
+  const instance = enricherInstances.get(resolved);
+  if (instance) {
+    // Promote to most-recently-used by re-inserting
+    enricherInstances.delete(resolved);
     enricherInstances.set(resolved, instance);
+    return instance;
   }
-  return instance;
+
+  // Evict oldest (first key = least recently used) if at capacity
+  if (enricherInstances.size >= MAX_ENRICHER_INSTANCES) {
+    const firstKey = enricherInstances.keys().next().value;
+    if (firstKey !== undefined) {
+      enricherInstances.delete(firstKey);
+    }
+  }
+
+  const newInstance = new GraphifyEnricher(resolved);
+  enricherInstances.set(resolved, newInstance);
+  return newInstance;
 }
 
 /** Clear the enricher cache (for testing). */

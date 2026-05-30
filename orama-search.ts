@@ -59,6 +59,9 @@ export interface SearchResult {
 // Replicates the splitToken logic from scoring.ts
 // ---------------------------------------------------------------------------
 
+// Cache cap — recomputation is cheap, so we simply stop caching when full
+const MAX_NORMALIZATION_CACHE = 20000;
+
 function createCodeTokenizer() {
   const cache = new Map<string, string[]>();
 
@@ -116,11 +119,17 @@ function createCodeTokenizer() {
       // Always include the full token (lowercased) first
       const full = raw.toLowerCase();
       if (!seen.has(full)) {
-        cache.set(raw, [full, ...tokens]);
+        // Only cache if under the cap
+        if (cache.size < MAX_NORMALIZATION_CACHE) {
+          cache.set(raw, [full, ...tokens]);
+        }
         return [full, ...tokens];
       }
 
-      cache.set(raw, tokens);
+      // Only cache if under the cap
+      if (cache.size < MAX_NORMALIZATION_CACHE) {
+        cache.set(raw, tokens);
+      }
       return tokens;
     },
   };

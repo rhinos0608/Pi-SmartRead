@@ -102,6 +102,8 @@ export function resolveImportSpecifier(cwd: string, importerPath: string, specif
 export class ContextGraph {
   private tagsCache: TagsCache;
   private provenances = new Map<string, Provenance>();
+  private _provenancesCapReached = false;
+  private static readonly PROVENANCES_MAX = 50_000;
   /**
    * Pre-built symbol index: symbol name → tags across all files.
    * Built lazily by buildContextGraph(). Cleared on forceRefresh.
@@ -122,6 +124,7 @@ export class ContextGraph {
    * Indexed by originating path for O(1) neighbor lookups.
    */
   private mutationEdges: Map<string, Provenance[]> = new Map();
+  private static readonly MUTATION_EDGES_MAX = 10_000;
 
   constructor(private root: string) {
     this.tagsCache = new TagsCache(root);
@@ -141,6 +144,8 @@ export class ContextGraph {
       this.symbolIndex = null;
       this.fileIndex = null;
       this.callGraph = null;
+      this.provenances.clear();
+      this._provenancesCapReached = false;
       this.mutationEdges.clear();
       await this.tagsCache.clearDiskCache();
     }
@@ -188,8 +193,8 @@ export class ContextGraph {
     );
 
     // Build symbol → tags index with memory caps
-    const index = new LruCache<Tag[]>(50_000);
-    const fileIdx = new LruCache<Tag[]>(10_000);
+    const index = new LruCache<Tag[]>(20_000);
+    const fileIdx = new LruCache<Tag[]>(5_000);
     for (const tag of allTags) {
       // Symbol index
       let list = index.get(tag.name);
@@ -357,8 +362,13 @@ export class ContextGraph {
   }
 
   private recordProvenance(p: Provenance): void {
+    if (this._provenancesCapReached) return;
     const target = resolve(p.to);
     if (!this.provenances.has(target)) {
+      if (this.provenances.size >= ContextGraph.PROVENANCES_MAX) {
+        this._provenancesCapReached = true;
+        return;
+      }
       this.provenances.set(target, p);
     }
   }
@@ -509,8 +519,11 @@ export class ContextGraph {
       const events = EdgeStore.readEdges(this.root);
       if (events.length === 0) return;
 
+      if (this.mutationEdges.size >= ContextGraph.MUTATION_EDGES_MAX) return;
+
       const provenances = EdgeStore.toProvenances(events, this.root);
       for (const prov of provenances) {
+        if (this.mutationEdges.size >= ContextGraph.MUTATION_EDGES_MAX) break;
         const fromPath = prov.from;
         let list = this.mutationEdges.get(fromPath);
         if (!list) {
@@ -542,6 +555,21 @@ export class ContextGraph {
     }
 
     return neighbours;
+  }
+
+  /** Return capacity stats for monitoring memory caps. */
+  getCapacityStats(): {
+    symbolIndex: { entries: number; max: number };
+    fileIndex: { entries: number; max: number };
+    provenances: { size: number; max: number; capReached: boolean };
+    mutationEdges: { size: number; max: number };
+  } {
+    return {
+      symbolIndex: { entries: this.symbolIndex?.size ?? 0, max: 20_000 },
+      fileIndex: { entries: this.fileIndex?.size ?? 0, max: 5_000 },
+      provenances: { size: this.provenances.size, max: ContextGraph.PROVENANCES_MAX, capReached: this._provenancesCapReached },
+      mutationEdges: { size: this.mutationEdges.size, max: ContextGraph.MUTATION_EDGES_MAX },
+    };
   }
 }
 
