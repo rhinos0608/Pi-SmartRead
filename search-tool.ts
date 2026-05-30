@@ -2,15 +2,10 @@
  * Consolidated search tool.
  *
  * Modes:
- *   - (default)   AST-aware grep — finds definitions whose names match the query.
- *                  No embeddings, no BM25. Fast, simple, based on tree-sitter.
+ *   - (default)   grep-style repository text search with definition-aware ranking.
  *   - code        AST-aware search + BM25 scoring + optional embedding re-rank
- *                  + symbol resolution enrichment. Supersedes old symbols/callers/resolve.
+ *                  + symbol resolution enrichment.
  *   - deep        Full multi-channel orchestration: code + symbols + semantic + graph.
- *
- * Modes "symbols", "callers", and "resolve" are removed. Their functionality is
- * available through the default grep mode (symbol search) and code mode (enrichment
- * auto-resolves top symbols and shows callers).
  */
 import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
@@ -21,7 +16,11 @@ import Parser, { Query } from "tree-sitter";
 import { resolveSymbol } from "./symbol-resolver.js";
 import { findCallers } from "./callgraph.js";
 import { loadLanguage, getQueryPath } from "./tags.js";
-import { findSrcFiles } from "./file-discovery.js";
+import {
+  discoverFiles,
+  type DiscoveryProfile,
+  type FileDiscoveryDiagnostics,
+} from "./file-discovery.js";
 import { shouldShowLowResultHint } from "./hook.js";
 import { filenameToLang } from "./languages.js";
 import { loadSearchConfig } from "./config.js";
@@ -34,22 +33,25 @@ import { executeDeepSearch } from "./deep-search.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { recordSparse, resolveSessionKey } from "./file-read-cache.js";
 
+type SearchMode = "grep" | "code" | "deep";
+type SearchMatchMode = "literal" | "regex";
+
 // ── Schema ────────────────────────────────────────────────────────
 
 const SearchSchema = Type.Object({
   mode: Type.Optional(
-    Type.Unsafe<"grep" | "code" | "deep">({
+    Type.Unsafe<SearchMode>({
       type: "string",
       enum: ["grep", "code", "deep"],
       description:
-        "Search mode. Default 'grep': AST-aware definition search (fast, no embeddings). 'code': BM25 + optional embedding re-rank with symbol resolution. 'deep': multi-channel orchestration.",
+        "Search mode. Default 'grep': grep-style line search across repository text files with definition-aware ranking. 'code': BM25 + optional embedding re-rank with symbol resolution. 'deep': multi-channel orchestration.",
       default: "grep",
     }),
   ),
   query: Type.String({
-  description: "Identifier name, code pattern, or search query",
-  minLength: 1,
- }),
+    description: "Identifier name, code pattern, or search query",
+    minLength: 1,
+  }),
   directory: Type.Optional(
     Type.String({
       description: "Root directory to search (default: extension working directory)",
@@ -61,6 +63,28 @@ const SearchSchema = Type.Object({
       description: "Maximum results to return (1-10000)",
       minimum: 1,
       maximum: 10000,
+    }),
+  ),
+  matchMode: Type.Optional(
+    Type.Unsafe<SearchMatchMode>({
+      type: "string",
+      enum: ["literal", "regex"],
+      description: "How grep mode matches the query. Default: literal substring search.",
+      default: "literal",
+    }),
+  ),
+  caseSensitive: Type.Optional(
+    Type.Boolean({
+      description:
+        "Whether grep mode is case-sensitive. Default: auto-detect (case-sensitive only for mixed-case queries).",
+    }),
+  ),
+  contextLines: Type.Optional(
+    Type.Number({
+      description: "Number of surrounding context lines to include for grep hits (0-2).",
+      minimum: 0,
+      maximum: 2,
+      default: 0,
     }),
   ),
 });
@@ -79,6 +103,22 @@ interface CodeDefinition {
   body: string;
   score: number;
   similarity?: number;
+}
+
+interface GrepSearchMatch {
+  group: "definition" | "text";
+  file: string;
+  relFile: string;
+  line: number;
+  endLine: number;
+  kind: string;
+  name: string;
+  lineText: string;
+  snippet: string;
+}
+
+interface DiscoverySummary extends FileDiscoveryDiagnostics {
+  workspaceRootsSearched: string[];
 }
 
 async function extractCodeDefinitions(
@@ -100,8 +140,8 @@ async function extractCodeDefinitions(
 
   const parser = new Parser();
   parser.setLanguage(grammar);
-  const CHUNK_SIZE = 1024;
-  const tree = parser.parse((offset) => code.slice(offset, offset + CHUNK_SIZE));
+  const chunkSize = 1024;
+  const tree = parser.parse((offset) => code.slice(offset, offset + chunkSize));
   if (!tree?.rootNode) return [];
 
   const queryPath = getQueryPath(lang);
@@ -198,7 +238,9 @@ async function scoreDefinitions(
       const queryVec = vectors[0]!;
       for (let i = 0; i < defs.length; i++) {
         const docVec = vectors[i + 1]!;
-        let dot = 0, qMag = 0, dMag = 0;
+        let dot = 0;
+        let qMag = 0;
+        let dMag = 0;
         for (let j = 0; j < queryVec.length; j++) {
           const qv = queryVec[j] ?? 0;
           const dv = docVec[j] ?? 0;
@@ -206,10 +248,12 @@ async function scoreDefinitions(
           qMag += qv * qv;
           dMag += dv * dv;
         }
-        defs[i]!.similarity = qMag > 0 && dMag > 0 ? dot / (Math.sqrt(qMag) * Math.sqrt(dMag)) : 0;
+        defs[i]!.similarity =
+          qMag > 0 && dMag > 0 ? dot / (Math.sqrt(qMag) * Math.sqrt(dMag)) : 0;
       }
 
-      const withBm25 = defs.map((d, i) => ({ i, score: d.score }))
+      const withBm25 = defs
+        .map((d, i) => ({ i, score: d.score }))
         .sort((a, b) => b.score - a.score);
       const bm25Ranks: number[] = [];
       for (let i = 0; i < defs.length; i++) bm25Ranks[withBm25[i]!.i] = i + 1;
@@ -235,29 +279,200 @@ async function scoreDefinitions(
 // ── Helpers ───────────────────────────────────────────────────────
 
 function lspSymbolKindToString(kind: number): string {
-  // LSP SymbolKind enum: 1=File,2=Module,3=Namespace,4=Package,5=Class,
-  // 6=Method,7=Property,8=Field,9=Constructor,10=Enum,11=Interface,
-  // 12=Function,13=Variable,14=Constant,15=String,16=Number,17=Boolean,18=Array,
-  // 19=Object,20=Key,21=Null,22=EnumMember,23=Struct,24=Event,25=Operator,26=TypeParameter
   switch (kind) {
-    case 5: return "class";
-    case 6: return "method";
-    case 7: case 8: return "property";
-    case 9: return "constructor";
-    case 10: return "enum";
-    case 11: return "interface";
-    case 12: return "function";
-    case 13: case 14: return "variable";
-    case 22: return "enum-member";
-    case 23: return "struct";
-    case 24: return "event";
-    default: return "symbol";
+    case 5:
+      return "class";
+    case 6:
+      return "method";
+    case 7:
+    case 8:
+      return "property";
+    case 9:
+      return "constructor";
+    case 10:
+      return "enum";
+    case 11:
+      return "interface";
+    case 12:
+      return "function";
+    case 13:
+    case 14:
+      return "variable";
+    case 22:
+      return "enum-member";
+    case 23:
+      return "struct";
+    case 24:
+      return "event";
+    default:
+      return "symbol";
   }
 }
 
 function resolveSearchRoot(params: SearchInput, defaultCwd: string): string {
   const directory = params.directory?.trim();
   return directory ? resolve(defaultCwd, directory) : defaultCwd;
+}
+
+function defaultCaseSensitive(query: string): boolean {
+  return /[a-z]/.test(query) && /[A-Z]/.test(query);
+}
+
+function clampContextLines(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(2, Math.trunc(value)));
+}
+
+function collapseSearchRoots(roots: string[]): string[] {
+  const unique = [...new Set(roots.map((root) => resolve(root)))].sort((a, b) => a.length - b.length);
+  const kept: string[] = [];
+  for (const root of unique) {
+    const covered = kept.some((candidate) => {
+      const rel = relative(candidate, root);
+      return rel === "" || (!rel.startsWith("..") && rel !== "");
+    });
+    if (!covered) kept.push(root);
+  }
+  return kept;
+}
+
+async function discoverAcrossRoots(
+  roots: string[],
+  profile: DiscoveryProfile,
+  signal: AbortSignal | undefined,
+): Promise<{ files: string[]; summary: DiscoverySummary }> {
+  const collapsedRoots = collapseSearchRoots(roots);
+  const seen = new Set<string>();
+  const files: string[] = [];
+  const summary: DiscoverySummary = {
+    profile,
+    root: collapsedRoots[0] ?? "",
+    directoriesVisited: 0,
+    filesConsidered: 0,
+    filesMatched: 0,
+    filesSkippedIgnored: 0,
+    filesSkippedBinary: 0,
+    filesSkippedUnsupported: 0,
+    workspaceRootsSearched: collapsedRoots,
+  };
+
+  for (const root of collapsedRoots) {
+    const result = await discoverFiles(root, profile, 50_000, signal);
+    summary.directoriesVisited += result.diagnostics.directoriesVisited;
+    summary.filesConsidered += result.diagnostics.filesConsidered;
+    summary.filesMatched += result.diagnostics.filesMatched;
+    summary.filesSkippedIgnored += result.diagnostics.filesSkippedIgnored;
+    summary.filesSkippedBinary += result.diagnostics.filesSkippedBinary;
+    summary.filesSkippedUnsupported += result.diagnostics.filesSkippedUnsupported;
+
+    for (const file of result.files) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      files.push(file);
+    }
+  }
+
+  return { files, summary };
+}
+
+function buildLineMatcher(
+  query: string,
+  matchMode: SearchMatchMode,
+  caseSensitive: boolean,
+): (line: string) => boolean {
+  if (matchMode === "literal") {
+    if (caseSensitive) {
+      return (line) => line.includes(query);
+    }
+    const lowered = query.toLowerCase();
+    return (line) => line.toLowerCase().includes(lowered);
+  }
+
+  const flags = caseSensitive ? "" : "i";
+  let regex: RegExp;
+  try {
+    regex = new RegExp(query, flags);
+  } catch {
+    // Invalid regex — fall back to literal matching
+    if (caseSensitive) {
+      return (line) => line.includes(query);
+    }
+    const lowered = query.toLowerCase();
+    return (line) => line.toLowerCase().includes(lowered);
+  }
+  return (line) => regex.test(line);
+}
+
+function formatSnippet(lines: string[], lineNumber: number, contextLines: number): { snippet: string; endLine: number } {
+  const startIndex = Math.max(0, lineNumber - 1 - contextLines);
+  const endIndex = Math.min(lines.length - 1, lineNumber - 1 + contextLines);
+  const snippetLines: string[] = [];
+
+  for (let index = startIndex; index <= endIndex; index++) {
+    const displayLine = String(index + 1).padStart(4, " ");
+    snippetLines.push(`    ${displayLine} | ${lines[index] ?? ""}`);
+  }
+
+  return {
+    snippet: snippetLines.join("\n"),
+    endLine: endIndex + 1,
+  };
+}
+
+function findOwningDefinition(
+  definitions: CodeDefinition[],
+  line: number,
+): CodeDefinition | undefined {
+  return definitions.find((definition) => definition.startLine <= line && definition.endLine >= line);
+}
+
+function formatGrepResults(
+  query: string,
+  matches: GrepSearchMatch[],
+  summary: DiscoverySummary,
+  elapsedMs: number,
+  matchMode: SearchMatchMode,
+  caseSensitive: boolean,
+): string {
+  const definitionHits = matches.filter((match) => match.group === "definition");
+  const textHits = matches.filter((match) => match.group === "text");
+  const lines: string[] = [
+    `Found ${matches.length} match(es) for "${query}" (${matchMode}, ${caseSensitive ? "case-sensitive" : "case-insensitive"}, ${elapsedMs}ms):`,
+    "",
+  ];
+
+  if (definitionHits.length > 0) {
+    lines.push("Definition hits:", "");
+    for (const match of definitionHits) {
+      lines.push(`  ${match.relFile}:${match.line}-${match.endLine} [${match.kind}] ${match.name}`);
+      lines.push(match.snippet);
+      lines.push("");
+    }
+  }
+
+  if (textHits.length > 0) {
+    lines.push("Text hits:", "");
+    for (const match of textHits) {
+      lines.push(`  ${match.relFile}:${match.line}-${match.endLine} [text] ${match.name}`);
+      lines.push(match.snippet);
+      lines.push("");
+    }
+  }
+
+  if (matches.length === 0) {
+    lines.push(
+      `[No text matches for "${query}" across ${summary.filesMatched} searchable files (${summary.filesSkippedBinary} binary skipped, ${summary.filesSkippedIgnored} ignored, ${summary.filesSkippedUnsupported} unsupported).]`,
+    );
+  } else if (matches.length < 3) {
+    lines.push(
+      `> 💡 Only ${matches.length} result(s) found. Try ` +
+        `\`search mode=code query="${query}"\` for structural ranking, or ` +
+        `\`search mode=deep query="${query}"\` for multi-channel exploration.`,
+    );
+    lines.push("");
+  }
+
+  return lines.join("\n");
 }
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -287,76 +502,46 @@ async function handleDeep(
     ctx,
   );
 
-  // Record deep search matches in the file-read cache for anchor-stale recovery.
   const sessionKey = resolveSessionKey(toolCallId);
 
-  // Validate result.details structure before using deepMatches.
   let validMatches: Array<{ file: string; lines?: { start: number }; snippet: string }> | undefined;
   const rawDetails = result.details;
   if (rawDetails && typeof rawDetails === "object" && !Array.isArray(rawDetails)) {
     const rawMatches = (rawDetails as Record<string, unknown>).matches;
     if (Array.isArray(rawMatches)) {
       validMatches = rawMatches.filter(
-        (m): m is { file: string; lines?: { start: number }; snippet: string } => {
-          if (!m || typeof m !== "object") return false;
-          const entry = m as Record<string, unknown>;
+        (match): match is { file: string; lines?: { start: number }; snippet: string } => {
+          if (!match || typeof match !== "object") return false;
+          const entry = match as Record<string, unknown>;
           if (typeof entry.file !== "string") return false;
           if (typeof entry.snippet !== "string") return false;
           if (entry.lines !== undefined) {
             if (typeof entry.lines !== "object" || entry.lines === null) return false;
-            const ln = entry.lines as Record<string, unknown>;
-            if (ln.start !== undefined && typeof ln.start !== "number") return false;
+            const lines = entry.lines as Record<string, unknown>;
+            if (lines.start !== undefined && typeof lines.start !== "number") return false;
           }
           return true;
         },
       );
       if (validMatches.length === 0) {
         validMatches = undefined;
-      } else if (validMatches.length < rawMatches.length) {
-        console.warn(
-          `[search-tool] ${rawMatches.length - validMatches.length} invalid deep match(es) skipped`,
-        );
       }
     }
   }
 
   if (validMatches && validMatches.length > 0) {
     const byFile = new Map<string, Array<{ line: number; text: string }>>();
-    for (const m of validMatches) {
-      const absPath = resolve(cwd, m.file);
-      const lineNum = m.lines?.start ?? 1;
+    for (const match of validMatches) {
+      const absPath = resolve(cwd, match.file);
+      const lineNum = match.lines?.start ?? 1;
       const entries = byFile.get(absPath) ?? [];
-      entries.push({ line: lineNum, text: m.snippet });
+      entries.push({ line: lineNum, text: match.snippet });
       byFile.set(absPath, entries);
     }
     for (const [absPath, entries] of byFile) {
       recordSparse(sessionKey, absPath, entries);
     }
-  } else {
-    // Fallback: parse "  file:line ..." lines from deep search output text.
-    const textContent = result.content
-      .filter((c): c is { type: "text"; text: string } => c.type === "text")
-      .map((c) => c.text)
-      .join("\n");
-    if (textContent) {
-      const matchRe = /^\s+([^\s:]+):(\d+)\s/;
-      const byFile = new Map<string, Array<{ line: number; text: string }>>();
-      for (const line of textContent.split("\n")) {
-        const m = matchRe.exec(line);
-        if (m) {
-          const absPath = resolve(cwd, m[1]!);
-          const lineNum = Number(m[2]);
-          const entries = byFile.get(absPath) ?? [];
-          entries.push({ line: lineNum, text: line });
-          byFile.set(absPath, entries);
-        }
-      }
-      for (const [absPath, entries] of byFile) {
-        recordSparse(sessionKey, absPath, entries);
-      }
-    }
   }
-
 
   return result;
 }
@@ -369,105 +554,106 @@ async function handleGrep(
 ) {
   const query = params.query!.trim();
   const maxResults = params.maxResults ?? 30;
+  const matchMode = params.matchMode ?? "literal";
+  const caseSensitive = params.caseSensitive ?? defaultCaseSensitive(query);
+  const contextLines = clampContextLines(params.contextLines);
   const startTime = Date.now();
+  const matchLine = buildLineMatcher(query, matchMode, caseSensitive);
 
   const searchRoots = expandToMonorepoRoots(cwd);
-  let allFiles: string[] = [];
-  for (const root of searchRoots) {
-    const files = await findSrcFiles(root, 50_000, signal);
-    allFiles.push(...files);
-  }
-  allFiles = [...new Set(allFiles)];
-  const matches: CodeDefinition[] = [];
-  let totalDefs = 0;
-  const maxChars = 3_000_000;
-  let totalChars = 0;
+  const { files: allFiles, summary } = await discoverAcrossRoots(searchRoots, "text", signal);
+  const definitionCache = new Map<string, CodeDefinition[]>();
+  const matches: GrepSearchMatch[] = [];
 
   for (const filePath of allFiles) {
     if (signal?.aborted) throw new Error("Operation aborted");
-    if (matches.length >= maxResults || totalChars > maxChars) break;
+    if (matches.length >= maxResults) break;
 
-    const relFile = relative(cwd, filePath);
-    const defs = await extractCodeDefinitions(filePath, relFile);
-    totalDefs += defs.length;
+    let content: string;
+    try {
+      content = await fs.readFile(filePath, "utf-8");
+    } catch {
+      continue;
+    }
 
-    for (const d of defs) {
-      totalChars += d.body.length;
-      // Simple case-insensitive substring match on definition name
-      if (d.name.toLowerCase().includes(query.toLowerCase())) {
-        matches.push(d);
-        if (matches.length >= maxResults) break;
-      }
+    const relFile = relative(cwd, filePath).replace(/\\/g, "/");
+    const lines = content.split(/\r?\n/g);
+    let definitions = definitionCache.get(filePath);
+    if (!definitions) {
+      definitions = await extractCodeDefinitions(filePath, relFile);
+      definitionCache.set(filePath, definitions);
+    }
+
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index] ?? "";
+      if (!matchLine(line)) continue;
+
+      const lineNumber = index + 1;
+      const owner = findOwningDefinition(definitions, lineNumber);
+      const snippet = formatSnippet(lines, lineNumber, contextLines);
+      matches.push({
+        group: owner ? "definition" : "text",
+        file: filePath,
+        relFile,
+        line: lineNumber,
+        endLine: snippet.endLine,
+        kind: owner?.kind ?? "text",
+        name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
+        lineText: line,
+        snippet: snippet.snippet,
+      });
+
+      if (matches.length >= maxResults) break;
     }
   }
 
-  if (matches.length === 0) {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `[No definitions matching "${query}" across ${allFiles.length} source files (${totalDefs} definitions scanned).]`,
-        },
-      ],
-      details: {
-        total: 0,
-        query,
-        filesScanned: allFiles.length,
-        definitionsScanned: totalDefs,
-        timeMs: Date.now() - startTime,
-      },
-    };
+  matches.sort((a, b) => {
+    if (a.group !== b.group) return a.group === "definition" ? -1 : 1;
+    return a.relFile.localeCompare(b.relFile) || a.line - b.line;
+  });
+
+  const sessionKey = resolveSessionKey(toolCallId);
+  const byFile = new Map<string, Array<{ line: number; text: string }>>();
+  for (const match of matches) {
+    const entries = byFile.get(match.file) ?? [];
+    entries.push({ line: match.line, text: match.snippet });
+    byFile.set(match.file, entries);
   }
-
-  const lines: string[] = [
-    `Found ${matches.length} definition(s) matching "${query}" (${totalDefs} definitions scanned across ${allFiles.length} files, ${Date.now() - startTime}ms):`,
-    "",
-  ];
-
-  for (let i = 0; i < matches.length; i++) {
-    const d = matches[i]!;
-    lines.push(`  ${d.relFile}:${d.startLine}-${d.endLine}  [${d.kind}]  ${d.name}`);
-    const bodyLines = d.body.split("\n");
-    const previewLines = bodyLines.slice(0, Math.min(bodyLines.length, 4));
-    for (const bl of previewLines) {
-      lines.push(`    ${bl}`);
-    }
-    if (bodyLines.length > 4) {
-      lines.push(`    ... (${bodyLines.length - 4} more lines)`);
-    }
-    lines.push("");
-  }
-
-  if (matches.length < 3) {
-    lines.push(
-      `> 💡 Only ${matches.length} result(s) found. Try ` +
-        `\`search mode=code query="${query}"\` for ranked BM25 search, or ` +
-        `\`search mode=deep query="${query}"\` for multi-channel semantic search.`,
-    );
-    lines.push("");
-  }
-
-  // Record search matches in the file-read cache for anchor-stale recovery.
-  {
-    const sessionKey = resolveSessionKey(toolCallId);
-    const byFile = new Map<string, Array<{ line: number; text: string }>>();
-    for (const d of matches) {
-      const entries = byFile.get(d.file) ?? [];
-      entries.push({ line: d.startLine, text: d.body });
-      byFile.set(d.file, entries);
-    }
-    for (const [absPath, entries] of byFile) {
-      recordSparse(sessionKey, absPath, entries);
-    }
+  for (const [absPath, entries] of byFile) {
+    recordSparse(sessionKey, absPath, entries);
   }
 
   return {
-    content: [{ type: "text" as const, text: lines.join("\n") }],
+    content: [
+      {
+        type: "text" as const,
+        text: formatGrepResults(
+          query,
+          matches,
+          summary,
+          Date.now() - startTime,
+          matchMode,
+          caseSensitive,
+        ),
+      },
+    ],
     details: {
+      mode: "grep",
       total: matches.length,
+      query,
+      matchMode,
+      caseSensitive,
+      contextLines,
+      definitionHits: matches.filter((match) => match.group === "definition").length,
+      textHits: matches.filter((match) => match.group === "text").length,
       filesScanned: allFiles.length,
-      definitionsScanned: totalDefs,
+      filesConsidered: summary.filesConsidered,
+      filesSkippedIgnored: summary.filesSkippedIgnored,
+      filesSkippedBinary: summary.filesSkippedBinary,
+      filesSkippedUnsupported: summary.filesSkippedUnsupported,
+      workspaceRootsSearched: summary.workspaceRootsSearched,
       timeMs: Date.now() - startTime,
+      matches,
     },
   };
 }
@@ -483,17 +669,10 @@ async function handleCode(
   const startTime = Date.now();
   const query = params.query!.trim();
 
-  // 1. Discover source files (with monorepo workspace expansion)
   const searchRoots = expandToMonorepoRoots(cwd);
-  let allFiles: string[] = [];
-  for (const root of searchRoots) {
-    const files = await findSrcFiles(root, 50_000, signal);
-    allFiles.push(...files);
-  }
-  allFiles = [...new Set(allFiles)];
+  const { files: allFiles, summary } = await discoverAcrossRoots(searchRoots, "code", signal);
   const maxChars = 3_000_000;
 
-  // 2. Extract AST definitions from all files
   const allDefs: CodeDefinition[] = [];
   let totalChars = 0;
 
@@ -501,15 +680,14 @@ async function handleCode(
     if (signal?.aborted) throw new Error("Operation aborted");
     if (totalChars > maxChars) break;
 
-    const relFile = relative(cwd, filePath);
+    const relFile = relative(cwd, filePath).replace(/\\/g, "/");
     const defs = await extractCodeDefinitions(filePath, relFile);
-    for (const d of defs) {
-      totalChars += d.body.length;
-      allDefs.push(d);
+    for (const definition of defs) {
+      totalChars += definition.body.length;
+      allDefs.push(definition);
     }
   }
 
-  // 3. BM25 pre-filter
   const preFilterN = Math.min(maxResults * 5, 200);
   const bm25All = bm25Scores(query, allDefs.map((d) => d.body));
   for (let i = 0; i < allDefs.length; i++) {
@@ -520,28 +698,27 @@ async function handleCode(
   const topForEmbedding = allDefs.slice(0, preFilterN);
   const bm25Only = allDefs.slice(preFilterN);
 
-  // 4. Score top definitions (BM25 + optional embedding re-rank)
   const scored = topForEmbedding.length > 0
     ? await scoreDefinitions(topForEmbedding, query, cwd, signal)
     : [];
 
-  // Graph centrality boost
   try {
     const enricher = getGraphifyEnricher(cwd);
     if (enricher.isAvailable) {
-      for (const def of scored) {
-        const centrality = enricher.getFileCentrality(def.file);
+      for (const definition of scored) {
+        const centrality = enricher.getFileCentrality(definition.file);
         if (centrality > 0) {
-          def.score *= 1 + Math.min(centrality, 20) * 0.01;
+          definition.score *= 1 + Math.min(centrality, 20) * 0.01;
         }
       }
       scored.sort((a, b) => b.score - a.score);
     }
-  } catch { /* best-effort */ }
+  } catch {
+    // best-effort only
+  }
 
   const allResults = [...scored, ...bm25Only.sort((a, b) => b.score - a.score)];
 
-  // 5. LSP workspace/symbol — additional retrieval channel
   let lspResultsCount = 0;
   try {
     const bridge = await getLSPBridge();
@@ -550,21 +727,21 @@ async function handleCode(
       const wsSymbols = await bridge.workspaceSymbol(query, root);
       if (wsSymbols.length > 0) {
         const existingKeys = new Set(allResults.map((d) => `${d.relFile}:${d.name}`));
-        for (const sym of wsSymbols) {
-          const uri = sym.location.uri;
+        for (const symbol of wsSymbols) {
+          const uri = symbol.location.uri;
           const filePath = uri.startsWith("file://") ? uri.slice(7) : uri;
-          const relFile = relative(cwd, filePath);
-          const key = `${relFile}:${sym.name}`;
+          const relFile = relative(cwd, filePath).replace(/\\/g, "/");
+          const key = `${relFile}:${symbol.name}`;
           if (existingKeys.has(key)) continue;
           existingKeys.add(key);
           lspResultsCount++;
           allResults.push({
             file: filePath,
             relFile,
-            startLine: sym.location.range.start.line + 1,
-            endLine: sym.location.range.end.line + 1,
-            name: sym.name,
-            kind: lspSymbolKindToString(sym.kind),
+            startLine: symbol.location.range.start.line + 1,
+            endLine: symbol.location.range.end.line + 1,
+            name: symbol.name,
+            kind: lspSymbolKindToString(symbol.kind),
             body: "",
             score: 1.0,
             similarity: undefined,
@@ -572,9 +749,10 @@ async function handleCode(
         }
       }
     }
-  } catch { /* LSP workspace/symbol is best-effort */ }
+  } catch {
+    // best-effort only
+  }
 
-  // Re-sort since LSP entries were pushed with score 1.0
   if (lspResultsCount > 0) {
     allResults.sort((a, b) => b.score - a.score);
   }
@@ -590,9 +768,14 @@ async function handleCode(
         },
       ],
       details: {
+        mode: "code",
         total: 0,
         query,
         filesScanned: allFiles.length,
+        filesConsidered: summary.filesConsidered,
+        filesSkippedIgnored: summary.filesSkippedIgnored,
+        filesSkippedUnsupported: summary.filesSkippedUnsupported,
+        workspaceRootsSearched: summary.workspaceRootsSearched,
         definitionsExtracted: allDefs.length,
         timeMs: Date.now() - startTime,
         lspResults: lspResultsCount,
@@ -607,19 +790,19 @@ async function handleCode(
   const maxTopScore = Math.max(...top.map((d) => d.score), 0);
 
   for (let index = 0; index < top.length; index++) {
-    const d = top[index]!;
+    const definition = top[index]!;
     const embeddingStr =
-      d.similarity !== undefined ? `  embedding=${classifySimilarity(d.similarity)}` : "";
+      definition.similarity !== undefined ? `  embedding=${classifySimilarity(definition.similarity)}` : "";
     lines.push(
-      `  ${d.relFile}:${d.startLine}-${d.endLine}  [${d.kind}]  ${d.name}  ` +
-        `relevance=${classifyRelevanceByScore(d.score, maxTopScore)}  rank=${index + 1}${embeddingStr}`,
+      `  ${definition.relFile}:${definition.startLine}-${definition.endLine} [${definition.kind}] ${definition.name} ` +
+        `relevance=${classifyRelevanceByScore(definition.score, maxTopScore)} rank=${index + 1}${embeddingStr}`,
     );
     lines.push("");
 
-    const bodyLines = d.body.split("\n");
+    const bodyLines = definition.body.split("\n");
     const previewLines = bodyLines.slice(0, Math.min(bodyLines.length, 5));
-    for (const bl of previewLines) {
-      lines.push(`    ${bl}`);
+    for (const bodyLine of previewLines) {
+      lines.push(`    ${bodyLine}`);
     }
     if (bodyLines.length > 5) {
       lines.push(`    ... (${bodyLines.length - 5} more lines)`);
@@ -627,7 +810,6 @@ async function handleCode(
     lines.push("");
   }
 
-  // Auto-escalation hint
   if (top.length < 3 && enrich !== false && shouldShowLowResultHint()) {
     lines.push(
       `> 💡 Only ${top.length} result(s) found. Try ` +
@@ -636,10 +818,8 @@ async function handleCode(
     lines.push("");
   }
 
-  // Enrich: symbol resolution + callers for top matches
   if (enrich !== false && top.length > 0) {
     try {
-      // Build a name->first-entry map for correct context per symbol
       const nameToEntry = new Map<string, typeof top[0]>();
       for (const entry of top) {
         if (!nameToEntry.has(entry.name)) {
@@ -654,66 +834,69 @@ async function handleCode(
         try {
           const entry = nameToEntry.get(name)!;
           const resolution = await resolveSymbol(cwd, name, entry.relFile, entry.startLine, 3);
-          let defLine = `  ${name} → `;
+          let defLine = `  ${name} -> `;
           if (resolution.bestDefinition) {
             defLine += `def: ${resolution.bestDefinition.file}:${resolution.bestDefinition.line}`;
           } else {
-            defLine += `(no definition found)`;
+            defLine += "(no definition found)";
           }
           if (resolution.references.length > 0) {
-            defLine += `  (${resolution.references.length} refs)`;
+            defLine += ` (${resolution.references.length} refs)`;
           }
           resolvedLines.push(defLine);
         } catch {
-          resolvedLines.push(`  ${name} → (resolution failed)`);
+          resolvedLines.push(`  ${name} -> (resolution failed)`);
         }
       }
 
-      // Also find callers for the top result names
       if (topNames.length > 0 && !signal?.aborted) {
-        try {
-          for (const name of topNames.slice(0, 3)) {
-            try {
-              const callers = await findCallers(allFiles, name, signal);
-              if (callers.length > 0) {
-                resolvedLines.push(
-                  `  ${name} callers: ${callers.slice(0, 5).map((c) => `${c.callerFunction} in ${c.file}`).join(", ")}` +
-                    (callers.length > 5 ? ` (+${callers.length - 5} more)` : ""),
-                );
-              }
-            } catch { /* skip */ }
+        for (const name of topNames.slice(0, 3)) {
+          try {
+            const callers = await findCallers(allFiles, name, signal);
+            if (callers.length > 0) {
+              resolvedLines.push(
+                `  ${name} callers: ${callers.slice(0, 5).map((caller) => `${caller.callerFunction} in ${caller.file}`).join(", ")}` +
+                  (callers.length > 5 ? ` (+${callers.length - 5} more)` : ""),
+              );
+            }
+          } catch {
+            // skip caller enrichment failures
           }
-        } catch { /* skip */ }
+        }
       }
 
       if (resolvedLines.length > 1) {
         lines.push(...resolvedLines);
         lines.push("");
       }
-    } catch { /* enrichment is best-effort */ }
+    } catch {
+      // enrichment is best-effort
+    }
   }
 
-  // Record search matches in the file-read cache for anchor-stale recovery.
-  {
-    const sessionKey = resolveSessionKey(toolCallId);
-    const byFile = new Map<string, Array<{ line: number; text: string }>>();
-    for (const d of top) {
-      const entries = byFile.get(d.file) ?? [];
-      entries.push({ line: d.startLine, text: d.body });
-      byFile.set(d.file, entries);
-    }
-    for (const [absPath, entries] of byFile) {
-      recordSparse(sessionKey, absPath, entries);
-    }
+  const sessionKey = resolveSessionKey(toolCallId);
+  const byFile = new Map<string, Array<{ line: number; text: string }>>();
+  for (const definition of top) {
+    const entries = byFile.get(definition.file) ?? [];
+    entries.push({ line: definition.startLine, text: definition.body });
+    byFile.set(definition.file, entries);
+  }
+  for (const [absPath, entries] of byFile) {
+    recordSparse(sessionKey, absPath, entries);
   }
 
   return {
     content: [{ type: "text" as const, text: lines.join("\n") }],
     details: {
+      mode: "code",
       total: top.length,
       totalScored: allDefs.length,
       lspResults: lspResultsCount,
       filesScanned: allFiles.length,
+      filesConsidered: summary.filesConsidered,
+      filesSkippedIgnored: summary.filesSkippedIgnored,
+      filesSkippedUnsupported: summary.filesSkippedUnsupported,
+      workspaceRootsSearched: summary.workspaceRootsSearched,
       timeMs: Date.now() - startTime,
     },
   };
@@ -726,7 +909,7 @@ export default function createSearchTool(): ToolDefinition {
     name: "search",
     label: "search",
     description:
-      'Search code by identifier or pattern. Default mode (grep): AST-aware definition search — fast, no embeddings. ' +
+      'Search repository text and code. Default mode (grep): line-oriented text search with definition-aware ranking. ' +
       'mode=code: BM25 + optional embedding re-rank with symbol resolution and caller enrichment. ' +
       'mode=deep: multi-channel orchestration (code + symbols + semantic + graph). ' +
       'Use directory to scope the search root.',
@@ -751,14 +934,12 @@ export default function createSearchTool(): ToolDefinition {
       switch (mode) {
         case "grep":
           return handleGrep(toolCallId, params, cwd, signal);
-
         case "code": {
           const config = loadSearchConfig(cwd);
           const enrich =
-            (config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false);
+            config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false;
           return handleCode(toolCallId, params, cwd, signal, enrich);
         }
-
         case "deep":
           return handleDeep(toolCallId, params, cwd, signal, ctx);
       }

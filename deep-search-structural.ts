@@ -52,6 +52,40 @@ function parseCodeCandidates(text: string, channel: "structural"): DeepSearchCan
   return candidates;
 }
 
+function parseGrepCandidates(result: unknown, channel: "structural"): DeepSearchCandidate[] {
+  const details = (result as { details?: unknown }).details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return [];
+
+  const matches = (details as { matches?: unknown }).matches;
+  if (!Array.isArray(matches)) return [];
+
+  const candidates: DeepSearchCandidate[] = [];
+  for (const rawMatch of matches) {
+    if (!rawMatch || typeof rawMatch !== "object") continue;
+    const match = rawMatch as Record<string, unknown>;
+    if (typeof match.file !== "string" || typeof match.line !== "number") continue;
+
+    const kind = typeof match.kind === "string" ? match.kind : "text";
+    const name = typeof match.name === "string" ? match.name : kind;
+    const rank = candidates.length + 1;
+    const group = match.group === "definition" ? "definition" : "text";
+
+    candidates.push({
+      file: match.file,
+      line: match.line,
+      endLine: typeof match.endLine === "number" ? match.endLine : match.line,
+      kind,
+      name,
+      rawScore: group === "definition" ? 1.0 : 0.8,
+      rank,
+      snippet: typeof match.snippet === "string" ? match.snippet : name,
+      channel,
+    });
+  }
+
+  return candidates;
+}
+
 
 /**
  * Run the structural code search channel using tree-sitter-based search.
@@ -72,6 +106,10 @@ export async function runSearchChannel(
     undefined,
     ctx,
   );
+  if (mode === "grep") {
+    return parseGrepCandidates(result, "structural");
+  }
+
   const text = extractTextFromToolResult(result);
-  return mode === "code" ? parseCodeCandidates(text, "structural") : [];
+  return parseCodeCandidates(text, "structural");
 }

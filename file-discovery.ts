@@ -1,378 +1,230 @@
 /**
- * File discovery — finds source files in a directory,
- * filtering by supported extensions for tree-sitter analysis,
- * and respecting .gitignore patterns.
+ * File discovery helpers for code-aware and grep-style search.
+ *
+ * The search tool needs two different discovery profiles:
+ * - code: tree-sitter supported source files only
+ * - text: all searchable text files, including configs/docs and extensionless text
+ *
+ * Both profiles respect repo-local ignore files and Pi-SmartRead's
+ * .context-mode-ignore / .context-mode-include rules.
  */
 import { promises as fs, existsSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
-import { isSupportedFile, getSupportedExtensions } from "./languages.js";
-import { getFsScanCache } from "./fs-scan-cache.js"
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import ignoreDefault, { type Ignore } from "ignore";
+import { getSupportedExtensions, isSupportedFile } from "./languages.js";
+import { getFsScanCache } from "./fs-scan-cache.js";
 export { getFsScanCache, invalidateFsScanCache } from "./fs-scan-cache.js";
 
-const IGNORE_DIRS = new Set([
-  "node_modules",
-  ".git",
-  ".svn",
-  ".hg",
-  "target",
-  "build",
-  "dist",
-  ".next",
-  ".nuxt",
-  ".output",
-  ".cache",
-  "__pycache__",
-  ".pycache",
-  "venv",
-  ".venv",
-  "env",
-  ".env",
-  "vendor",
-  "bower_components",
-  ".bundle",
-  ".gem",
-  ".tox",
-  "coverage",
-  ".nyc_output",
-  ".serverless",
-  ".terraform",
-  ".pytest_cache",
-  ".mypy_cache",
-  ".dart_tool",
-  ".pub-cache",
-  ".gradle",
-  "Pods",
-  ".build",
-  "bin",
-  "obj",
-  "out",
-  ".yarn",
-  ".pnp",
-  ".pnp.js",
-  ".turbo",
-  ".vercel",
-]);
+const createIgnore = ignoreDefault as unknown as (options?: {
+  allowRelativePaths?: boolean;
+}) => Ignore;
 
-// ── Gitignore parsing ─────────────────────────────────────────────
+export type DiscoveryProfile = "code" | "text";
 
-interface GitignoreRule {
-  /** The raw pattern text (e.g. "*.log") */
-  pattern: string;
-  /** Whether the pattern is negated (!pattern) */
-  negated: boolean;
-  /** Whether the pattern is anchored to root (/pattern) */
-  anchored: boolean;
-  /** Whether the pattern only applies to directories (trailing /) */
-  dirOnly: boolean;
-  /** Compiled regex for matching relative paths */
-  regex: RegExp;
+export interface FileDiscoveryDiagnostics {
+  profile: DiscoveryProfile;
+  root: string;
+  directoriesVisited: number;
+  filesConsidered: number;
+  filesMatched: number;
+  filesSkippedIgnored: number;
+  filesSkippedBinary: number;
+  filesSkippedUnsupported: number;
 }
 
-/**
- * Escape special regex characters except for gitignore wildcards.
- * * → [^/]*
- * ** → .*
- * ? → [^/]
- */
-function gitignoreGlobToRegex(pattern: string): string {
-  let result = "";
-  let i = 0;
-
-  while (i < pattern.length) {
-    const ch = pattern[i];
-
-    if (ch === "*" && pattern[i + 1] === "*" && pattern[i + 2] === "/") {
-      // **/ — matches zero or more directory levels
-      result += "(?:.+/)?";
-      i += 3;
-    } else if (ch === "*" && pattern[i + 1] === "*" && i + 2 === pattern.length) {
-      // Trailing ** — matches everything
-      result += ".*";
-      i += 2;
-    } else if (ch === "*" && pattern[i + 1] === "*" && pattern[i + 2] !== undefined) {
-      // ** in middle — currently just match .* but this isn't perfect
-      result += ".*";
-      i += 2;
-    } else if (ch === "*") {
-      // Single * — matches anything except /
-      result += "[^/]*";
-      i += 1;
-    } else if (ch === "?") {
-      result += "[^/]";
-      i += 1;
-    } else if (ch === "." || ch === "+" || ch === "^" || ch === "$" || ch === "{" || ch === "}" || ch === "(" || ch === ")" || ch === "|" || ch === "[" || ch === "]" || ch === "\\") {
-      result += "\\" + ch;
-      i += 1;
-    } else {
-      result += ch;
-      i += 1;
-    }
-  }
-
-  return result;
+export interface FileDiscoveryResult {
+  files: string[];
+  diagnostics: FileDiscoveryDiagnostics;
 }
 
-function parseGitignoreLine(line: string): GitignoreRule | null {
-  const trimmed = line.trim();
-
-  // Empty lines and comments
-  if (!trimmed || trimmed.startsWith("#")) return null;
-
-  let pattern = trimmed;
-  let negated = false;
-
-  // Negation
-  if (pattern.startsWith("!")) {
-    negated = true;
-    pattern = pattern.slice(1);
-  }
-
-  // Strip leading slash for anchored detection
-  let anchored = false;
-  if (pattern.startsWith("/")) {
-    anchored = true;
-    pattern = pattern.slice(1);
-  }
-
-  // Trailing slash — dir only
-  let dirOnly = false;
-  if (pattern.endsWith("/")) {
-    dirOnly = true;
-    pattern = pattern.slice(0, -1);
-  }
-
-  // If not anchored and doesn't contain a slash, it matches at any depth
-  const regexSource = anchored
-    ? `^${gitignoreGlobToRegex(pattern)}$`
-    : pattern.includes("/")
-      ? `^${gitignoreGlobToRegex(pattern)}$`
-      : `(?:^|/)${gitignoreGlobToRegex(pattern)}$`;
-
-  try {
-    return {
-      pattern: trimmed,
-      negated,
-      anchored,
-      dirOnly,
-      regex: new RegExp(regexSource),
-    };
-  } catch {
-    return null;
-  }
+interface IgnoreSource {
+  baseDir: string;
+  matcher: Ignore;
 }
 
-/**
- * Load .gitignore rules from a directory, cascading upward.
- * Parent rules are loaded first (prepended) so child rules take precedence
- * (last-match-wins semantics). Stops at the repository root (.git directory).
- */
-async function loadGitignoreRules(
-  dir: string,
-  gitignoreCache: Map<string, GitignoreRule[]>,
-): Promise<GitignoreRule[]> {
-  const cached = gitignoreCache.get(dir);
-  if (cached !== undefined) return cached;
-
-  // Collect parent rules first (bottom-up: grandparent → parent → current)
-  let parentRules: GitignoreRule[] = [];
-  const parent = resolve(dir, "..");
-  if (parent !== dir) {
-    // Stop at repository root
-    if (existsSync(join(parent, ".git"))) {
-      parentRules = [];
-    } else {
-      parentRules = await loadGitignoreRules(parent, gitignoreCache);
-    }
-  }
-
-  const rules: GitignoreRule[] = [...parentRules];
-
-  // Collect .gitignore rules from this directory
-  const gitignorePath = join(dir, ".gitignore");
-  try {
-    const stat = await fs.stat(gitignorePath);
-    if (stat.isFile()) {
-      const content = await fs.readFile(gitignorePath, "utf-8");
-      for (const line of content.split("\n")) {
-        const rule = parseGitignoreLine(line);
-        if (rule) rules.push(rule);
-      }
-    }
-  } catch {
-    // Can't read .gitignore or doesn't exist — skip
-  }
-
-  gitignoreCache.set(dir, rules);
-  return rules;
-}
-
-function isGitignored(
-  relPath: string,
-  isDir: boolean,
-  rules: GitignoreRule[],
-): boolean {
-  // Normalize to forward slashes so regexes work cross-platform
-  const normalized = relPath.replace(/\\/g, "/");
-  let ignored = false;
-
-  for (const rule of rules) {
-    if (rule.dirOnly && !isDir) continue;
-
-    const matches = rule.regex.test(normalized);
-    if (matches) {
-      ignored = !rule.negated;
-    }
-  }
-
-  return ignored;
-}
-
-// ── Public API ────────────────────────────────────────────────────
-
-export async function findSrcFiles(
- rootDir: string,
- maxFiles = 10_000,
- signal?: AbortSignal,
-): Promise<string[]> {
- const cache = getFsScanCache()
- const { entries } = await cache.getOrScan(
-  resolve(rootDir),
-  async () => _findSrcFilesImpl(rootDir, maxFiles, signal),
-  undefined,
-  undefined,
-  maxFiles,
- )
- // Cap results to maxFiles even from cache
- if (entries.length > maxFiles) {
-  return entries.slice(0, maxFiles)
- }
- return entries
-}
-
-async function _findSrcFilesImpl(
- rootDir: string,
- maxFiles = 10_000,
- signal?: AbortSignal,
-): Promise<string[]> {
- const results: string[] = [];
- const gitignoreCache = new Map<string, GitignoreRule[]>();
- const resolvedRoot = resolve(rootDir);
-
-  async function walk(dir: string): Promise<void> {
-    if (signal?.aborted || results.length >= maxFiles) return;
-
-    let dirHandle: Awaited<ReturnType<typeof fs.opendir>>;
-    try {
-      dirHandle = await fs.opendir(dir);
-    } catch {
-      return;
-    }
-
-    // Load .gitignore rules for this directory
-    const gitignoreRules = await loadGitignoreRules(dir, gitignoreCache);
-
-    try {
-      for await (const entry of dirHandle) {
-        if (signal?.aborted || results.length >= maxFiles) return;
-
-        const fullPath = join(dir, entry.name);
-        const relPath = relative(resolvedRoot, fullPath);
-        const isDir = entry.isDirectory();
-
-        if (isDir) {
-          if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
-          if (gitignoreRules.length > 0 && isGitignored(relPath, true, gitignoreRules)) continue;
-          await walk(fullPath);
-        } else if (entry.isFile() && isSupportedFile(fullPath)) {
-          // Check gitignore
-          if (gitignoreRules.length > 0 && isGitignored(relPath, false, gitignoreRules)) continue;
-          results.push(fullPath);
-        }
-      }
-    } catch {
-      // Ignore errors during iteration
-    } finally {
-      // dirHandle is closed automatically by for-await loop
-    }
-  }
-
-  await walk(resolvedRoot);
-  return results;
-}
-
-// ── Context-mode ignore/include support (port of graphify's .graphifyignore / .graphifyinclude) ──
-
-interface ContextModeRule {
-  pattern: string;
-  negated: boolean;
-  anchored: boolean;
-  regex: RegExp;
+interface ContextState {
+  standard: IgnoreSource[];
+  contextIgnore: IgnoreSource[];
+  contextInclude: IgnoreSource[];
 }
 
 const VCS_MARKERS = [".git", ".hg", ".svn", "_darcs"] as const;
+const STANDARD_IGNORE_FILES = [".gitignore", ".ignore", ".rgignore"] as const;
+const TEXT_SNIFF_BYTES = 8_192;
 
-/** Walk upward from start; return the first directory containing a VCS marker. */
+const HARD_DENY_DIRS = new Set([
+  ".git",
+  ".svn",
+  ".hg",
+  "_darcs",
+  "node_modules",
+  ".pnpm-store",
+  ".pi",
+  ".pi-smartread",
+  ".yarn",
+  ".pnp",
+  ".pnp.js",
+  ".smart-edit-undo",
+  ".subagent-work",
+  ".turbo",
+  ".understand-anything",
+  ".cache",
+  ".next",
+  ".nuxt",
+  ".output",
+  ".vercel",
+  ".parcel-cache",
+  ".svelte-kit",
+  ".angular",
+  "dist",
+  "build",
+  "coverage",
+  ".nyc_output",
+  "target",
+  ".gradle",
+  ".terraform",
+  ".serverless",
+  ".dart_tool",
+  ".pub-cache",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".tox",
+  ".venv",
+  "venv",
+  "env",
+  "vendor",
+  "Pods",
+  ".bundle",
+  ".gem",
+  ".build",
+  ".pi-smartread.tags.cache",
+  ".pi-smartread.embeddings.cache",
+  "graphify-out",
+]);
+
+const SEARCHABLE_TEXT_EXTENSIONS = new Set([
+  ...getSupportedExtensions(),
+  ".adoc",
+  ".conf",
+  ".csv",
+  ".env",
+  ".gql",
+  ".graphql",
+  ".ini",
+  ".json",
+  ".jsonc",
+  ".log",
+  ".md",
+  ".mdx",
+  ".properties",
+  ".rst",
+  ".sql",
+  ".toml",
+  ".txt",
+  ".yaml",
+  ".yml",
+]);
+
+const SEARCHABLE_TEXT_BASENAMES = new Set([
+  ".context-mode-ignore",
+  ".context-mode-include",
+  ".editorconfig",
+  ".env",
+  ".env.example",
+  ".eslintrc",
+  ".gitignore",
+  ".ignore",
+  ".npmrc",
+  ".prettierrc",
+  ".rgignore",
+  ".tool-versions",
+  ".nvmrc",
+  ".node-version",
+  "Dockerfile",
+  "Gemfile",
+  "Jenkinsfile",
+  "Makefile",
+  "Procfile",
+  "README",
+]);
+
+function normalizeForMatch(path: string): string {
+  return path.replace(/\\/g, "/");
+}
+
+function isSubpath(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function filenameHasKnownTextHint(filePath: string): boolean {
+  const name = basename(filePath);
+  if (SEARCHABLE_TEXT_BASENAMES.has(name)) return true;
+
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex === -1) return false;
+  return SEARCHABLE_TEXT_EXTENSIONS.has(name.slice(dotIndex).toLowerCase());
+}
+
+async function sniffTextFile(filePath: string): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(filePath, "r");
+    const buffer = Buffer.alloc(TEXT_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead === 0) return true;
+
+    let suspicious = 0;
+    for (let i = 0; i < bytesRead; i++) {
+      const byte = buffer[i]!;
+      if (byte === 0) return false;
+      if (byte < 7 || (byte > 13 && byte < 32)) suspicious++;
+    }
+    return suspicious / bytesRead < 0.1;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function readIgnorePatterns(filePath: string): Promise<string[]> {
+  try {
+    const content = await fs.readFile(filePath, "utf-8");
+    return content
+      .split(/\r?\n/g)
+      .map((line) => line.replace(/\r$/, ""))
+      .filter((line) => {
+        const trimmed = line.trim();
+        return trimmed.length > 0 && !trimmed.startsWith("#");
+      });
+  } catch {
+    return [];
+  }
+}
+
+function createIgnoreSource(baseDir: string, patterns: string[]): IgnoreSource | null {
+  if (patterns.length === 0) return null;
+  return {
+    baseDir,
+    matcher: createIgnore({ allowRelativePaths: true }).add(patterns),
+  };
+}
+
 function findVcsRoot(start: string): string | null {
   let current = resolve(start);
-  const osModule = require("os");
-  const home = osModule.homedir();
   while (true) {
-    if (VCS_MARKERS.some((m) => existsSync(join(current, m)))) return current;
+    if (VCS_MARKERS.some((marker) => existsSync(join(current, marker)))) return current;
     const parent = resolve(current, "..");
-    if (parent === current || current === home) return null;
+    if (parent === current) return null;
     current = parent;
   }
 }
 
-/** Parse a single line from a .context-mode-ignore file (gitignore-like). */
-function parseContextModeLine(line: string): ContextModeRule | null {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith("#")) return null;
-
-  let pattern = trimmed;
-  let negated = false;
-  if (pattern.startsWith("!")) {
-    negated = true;
-    pattern = pattern.slice(1);
-  }
-  let anchored = false;
-  if (pattern.startsWith("/")) {
-    anchored = true;
-    pattern = pattern.slice(1);
-  }
-  if (pattern.endsWith("/")) {
-    pattern = pattern.slice(0, -1);
-  }
-
-  // Convert glob to regex (~gitignore semantics)
-  const escaped = pattern
-    .replace(/\\/g, "\\\\")
-    .replace(/\./g, "\\.")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]");
-
-  const regexSource = anchored
-    ? `^${escaped}$`
-    : pattern.includes("/")
-      ? `^${escaped}$`
-      : `(?:^|/)${escaped}$`;
-
-  try {
-    return { pattern: trimmed, negated, anchored, regex: new RegExp(regexSource) };
-  } catch {
-    return null;
-  }
-}
-
-/** Load patterns from .context-mode-ignore/.context-mode-include files upward to VCS root. */
-function loadContextModeRules(rootDir: string, type: "ignore" | "include"): ContextModeRule[] {
-  const filename = type === "ignore" ? ".context-mode-ignore" : ".context-mode-include";
-  const root = resolve(rootDir);
-  const ceiling = findVcsRoot(root) ?? root;
-
-  // Collect dirs from ceiling down to root
+function getPathChain(ceiling: string, leaf: string): string[] {
   const dirs: string[] = [];
-  let current = root;
+  let current = resolve(leaf);
   while (true) {
     dirs.push(current);
     if (current === ceiling) break;
@@ -380,131 +232,225 @@ function loadContextModeRules(rootDir: string, type: "ignore" | "include"): Cont
     if (parent === current) break;
     current = parent;
   }
-  dirs.reverse(); // ceiling first, root last for last-match-wins
+  return dirs.reverse();
+}
 
-  const rules: ContextModeRule[] = [];
-  const seen = new Set<string>();
-  const fsMod = require("fs");
+async function extendContext(
+  parent: ContextState,
+  dir: string,
+  vcsRoot: string | null,
+): Promise<ContextState> {
+  const standard = [...parent.standard];
+  const contextIgnore = [...parent.contextIgnore];
+  const contextInclude = [...parent.contextInclude];
 
-  for (const d of dirs) {
-    const filePath = join(d, filename);
-    if (!existsSync(filePath)) continue;
-    try {
-      const raw = fsMod.readFileSync(filePath, "utf-8");
-      for (const line of raw.split("\n")) {
-        const rule = parseContextModeLine(line);
-        if (rule && !seen.has(rule.pattern)) {
-          seen.add(rule.pattern);
-          rules.push(rule);
-        }
-      }
-    } catch {
-      // skip unreadable
-    }
+  if (vcsRoot && dir === vcsRoot) {
+    const infoExclude = createIgnoreSource(
+      dir,
+      await readIgnorePatterns(join(dir, ".git", "info", "exclude")),
+    );
+    if (infoExclude) standard.push(infoExclude);
   }
-  return rules;
-}
 
-/** Check if a relative path matches any rule using last-match-wins semantics. */
-function isMatchedByRules(relPath: string, rules: ContextModeRule[]): boolean {
-  const normalized = relPath.replace(/\\/g, "/");
-  let matched = false;
-  for (const rule of rules) {
-    if (rule.regex.test(normalized)) {
-      matched = !rule.negated;
-    }
+  for (const filename of STANDARD_IGNORE_FILES) {
+    const source = createIgnoreSource(
+      dir,
+      await readIgnorePatterns(join(dir, filename)),
+    );
+    if (source) standard.push(source);
   }
-  return matched;
+
+  const contextIgnoreSource = createIgnoreSource(
+    dir,
+    await readIgnorePatterns(join(dir, ".context-mode-ignore")),
+  );
+  if (contextIgnoreSource) contextIgnore.push(contextIgnoreSource);
+
+  const contextIncludeSource = createIgnoreSource(
+    dir,
+    await readIgnorePatterns(join(dir, ".context-mode-include")),
+  );
+  if (contextIncludeSource) contextInclude.push(contextIncludeSource);
+
+  return { standard, contextIgnore, contextInclude };
 }
 
-/**
- * File discovery augmented with .context-mode-ignore and .context-mode-include support.
- * - Ignore rules work like .gitignore: paths matching the final pattern are excluded.
- * - Include rules opt hidden files/dirs back into the scan.
- * These files are looked up from scan root to VCS root (ceiling at .git).
- */
-export async function findSrcFilesWithContextMode(
- rootDir: string,
- maxFiles = 10_000,
- signal?: AbortSignal,
-): Promise<string[]> {
- const cache = getFsScanCache()
- const { entries } = await cache.getOrScan(
-  resolve(rootDir),
-  async () => _findSrcFilesWithContextModeImpl(rootDir, maxFiles, signal),
-  undefined,
-  undefined,
-  maxFiles,
- )
- if (entries.length > maxFiles) {
-  return entries.slice(0, maxFiles)
- }
- return entries
+function testSources(
+  sources: IgnoreSource[],
+  targetPath: string,
+): boolean | undefined {
+  let state: boolean | undefined;
+  for (const source of sources) {
+    if (!isSubpath(source.baseDir, targetPath)) continue;
+    const rel = normalizeForMatch(relative(source.baseDir, targetPath));
+    if (!rel || rel.startsWith("../")) continue;
+    const result = source.matcher.test(rel);
+    if (result.ignored) state = true;
+    if (result.unignored) state = false;
+  }
+  return state;
 }
 
-async function _findSrcFilesWithContextModeImpl(
-	rootDir: string,
-	maxFiles = 10_000,
-	signal?: AbortSignal,
-): Promise<string[]> {
-	const ignoreRules = loadContextModeRules(rootDir, "ignore");
-	const includeRules = loadContextModeRules(rootDir, "include");
-	const resolvedRoot = resolve(rootDir);
+function shouldIncludePath(fullPath: string, context: ContextState): boolean {
+  return testSources(context.contextInclude, fullPath) === true;
+}
 
-	const results: string[] = [];
+function isIgnored(fullPath: string, context: ContextState): boolean {
+  if (shouldIncludePath(fullPath, context)) return false;
+  if (testSources(context.contextIgnore, fullPath) === true) return true;
+  return testSources(context.standard, fullPath) === true;
+}
 
-  async function walk(dir: string): Promise<void> {
+async function matchesProfile(filePath: string, profile: DiscoveryProfile): Promise<"match" | "binary" | "unsupported"> {
+  if (profile === "code") {
+    return isSupportedFile(filePath) ? "match" : "unsupported";
+  }
+
+  if (filenameHasKnownTextHint(filePath)) {
+    return "match";
+  }
+
+  return (await sniffTextFile(filePath)) ? "match" : "binary";
+}
+
+export async function discoverFiles(
+  rootDir: string,
+  profile: DiscoveryProfile,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): Promise<FileDiscoveryResult> {
+  const resolvedRoot = resolve(rootDir);
+  const diagnostics: FileDiscoveryDiagnostics = {
+    profile,
+    root: resolvedRoot,
+    directoriesVisited: 0,
+    filesConsidered: 0,
+    filesMatched: 0,
+    filesSkippedIgnored: 0,
+    filesSkippedBinary: 0,
+    filesSkippedUnsupported: 0,
+  };
+
+  try {
+    const stat = await fs.stat(resolvedRoot);
+    if (!stat.isDirectory()) {
+      return { files: [], diagnostics };
+    }
+  } catch {
+    return { files: [], diagnostics };
+  }
+
+  const vcsRoot = findVcsRoot(resolvedRoot);
+  let context: ContextState = { standard: [], contextIgnore: [], contextInclude: [] };
+  const chain = vcsRoot && isSubpath(vcsRoot, resolvedRoot)
+    ? getPathChain(vcsRoot, resolvedRoot)
+    : [resolvedRoot];
+  for (const dir of chain) {
+    context = await extendContext(context, dir, vcsRoot);
+  }
+
+  const results: string[] = [];
+
+  async function walk(dir: string, dirContext: ContextState): Promise<void> {
     if (signal?.aborted || results.length >= maxFiles) return;
+    diagnostics.directoriesVisited++;
 
-    let dirHandle: Awaited<ReturnType<typeof fs.opendir>>;
+    let entries;
     try {
-      dirHandle = await fs.opendir(dir);
+      entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
 
-    try {
-      for await (const entry of dirHandle) {
-        if (signal?.aborted || results.length >= maxFiles) return;
+    for (const entry of entries) {
+      if (signal?.aborted || results.length >= maxFiles) return;
 
-        const fullPath = join(dir, entry.name);
-        const relPath = relative(resolvedRoot, fullPath);
-        const isDir = entry.isDirectory();
-
-        // Check context-mode ignore rules first
-        if (ignoreRules.length > 0 && isMatchedByRules(relPath, ignoreRules)) {
-          continue;
-        }
-
-        if (isDir) {
-          const isHidden = entry.name.startsWith(".");
-          if (isHidden) {
-            // Check include rules for hidden dirs
-            if (!isMatchedByRules(relPath, includeRules)) {
-              // Could a child path match an include pattern?
-              const couldContain = includeRules.some((r) =>
-                r.pattern.startsWith(relPath + "/"),
-              );
-              if (!couldContain) continue;
-            }
-          }
-          if (IGNORE_DIRS.has(entry.name)) continue;
-          await walk(fullPath);
-        } else if (entry.isFile() && isSupportedFile(fullPath)) {
-          // Hidden files need include rule
-          if (entry.name.startsWith(".") && !isMatchedByRules(relPath, includeRules)) {
-            continue;
-          }
-          results.push(fullPath);
-        }
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (HARD_DENY_DIRS.has(entry.name)) continue;
+        const childContext = await extendContext(dirContext, fullPath, vcsRoot);
+        await walk(fullPath, childContext);
+        continue;
       }
-    } catch {
-      // Ignore errors during iteration
+
+      if (!entry.isFile()) continue;
+
+      diagnostics.filesConsidered++;
+      if (isIgnored(fullPath, dirContext)) {
+        diagnostics.filesSkippedIgnored++;
+        continue;
+      }
+
+      const matchState = await matchesProfile(fullPath, profile);
+      if (matchState === "match") {
+        results.push(fullPath);
+        diagnostics.filesMatched++;
+      } else if (matchState === "binary") {
+        diagnostics.filesSkippedBinary++;
+      } else {
+        diagnostics.filesSkippedUnsupported++;
+      }
     }
   }
 
-  await walk(resolvedRoot);
-  return results;
+  await walk(resolvedRoot, context);
+  return { files: results, diagnostics };
+}
+
+async function getCachedDiscoveryFiles(
+  rootDir: string,
+  profile: DiscoveryProfile,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const cache = getFsScanCache();
+  const { entries } = await cache.getOrScan(
+    resolve(rootDir),
+    async () => (await discoverFiles(rootDir, profile, maxFiles, signal)).files,
+    undefined,
+    profile,
+    maxFiles,
+  );
+
+  return entries.length > maxFiles ? entries.slice(0, maxFiles) : entries;
+}
+
+export async function findCodeFiles(
+  rootDir: string,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return getCachedDiscoveryFiles(rootDir, "code", maxFiles, signal);
+}
+
+export async function findSearchableTextFiles(
+  rootDir: string,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return getCachedDiscoveryFiles(rootDir, "text", maxFiles, signal);
+}
+
+/**
+ * Backward-compatible alias used throughout the codebase for AST-capable files.
+ */
+export async function findSrcFiles(
+  rootDir: string,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return findCodeFiles(rootDir, maxFiles, signal);
+}
+
+/**
+ * Context-mode behavior is now merged into the default discovery path.
+ */
+export async function findSrcFilesWithContextMode(
+  rootDir: string,
+  maxFiles = 10_000,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  return findCodeFiles(rootDir, maxFiles, signal);
 }
 
 /**
@@ -515,59 +461,22 @@ export async function findFilesMatching(
   identifiers: Set<string>,
   maxFiles = 500,
 ): Promise<string[]> {
-  const results: string[] = [];
-  const supportedExts = getSupportedExtensions();
-  const gitignoreCache = new Map<string, GitignoreRule[]>();
-  const resolvedRoot = resolve(rootDir);
+  const files = await findCodeFiles(rootDir, 10_000);
+  const supportedExts = new Set(getSupportedExtensions());
 
-  async function walk(dir: string): Promise<void> {
-    if (results.length >= maxFiles) return;
+  return files.filter((fullPath) => {
+    if (!supportedExts.has(fullPath.slice(fullPath.lastIndexOf(".")))) return false;
 
-    let dirHandle: Awaited<ReturnType<typeof fs.opendir>>;
-    try {
-      dirHandle = await fs.opendir(dir);
-    } catch {
-      return;
-    }
+    const name = basename(fullPath);
+    const extIdx = name.lastIndexOf(".");
+    if (extIdx === -1) return false;
+    const stem = name.slice(0, extIdx);
 
-    const gitignoreRules = await loadGitignoreRules(dir, gitignoreCache);
-
-    try {
-      for await (const entry of dirHandle) {
-        if (results.length >= maxFiles) return;
-
-        const fullPath = join(dir, entry.name);
-        const relPath = relative(resolvedRoot, fullPath);
-        const isDir = entry.isDirectory();
-
-        if (isDir) {
-          if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
-          if (gitignoreRules.length > 0 && isGitignored(relPath, true, gitignoreRules)) continue;
-          await walk(fullPath);
-        } else if (entry.isFile()) {
-          if (gitignoreRules.length > 0 && isGitignored(relPath, false, gitignoreRules)) continue;
-
-          const extIdx = entry.name.lastIndexOf(".");
-          if (extIdx === -1) continue;
-          const ext = entry.name.slice(extIdx);
-          if (!supportedExts.includes(ext)) continue;
-
-          // Check if any path component matches an identifier
-          const basename = entry.name.slice(0, extIdx);
-          for (const ident of identifiers) {
-            if (basename.includes(ident) || fullPath.includes(ident)) {
-              results.push(fullPath);
-              break;
-            }
-          }
-        }
+    for (const ident of identifiers) {
+      if (stem.includes(ident) || normalizeForMatch(fullPath).includes(ident)) {
+        return true;
       }
-    } catch {
-      // Ignore errors during iteration
     }
-  }
-
-  await walk(resolvedRoot);
-  return results;
-
+    return false;
+  }).slice(0, maxFiles);
 }

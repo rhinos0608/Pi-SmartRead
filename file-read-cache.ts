@@ -12,6 +12,9 @@
 import { LruCache } from "./utils.js";
 
 const MAX_PATHS_PER_SESSION = 30;
+const MAX_SESSIONS = 50;
+const DEFAULT_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+const CLEANUP_THROTTLE_MS = 10_000; // max frequency of TTL cleanup
 
 /**
  * A single cached file snapshot: Map<1-based line number, line content>.
@@ -28,17 +31,36 @@ export interface SearchMatchEntry {
 
 interface SessionCache {
 	snapshots: LruCache<FileSnapshot>;
+	lastActivity: number; // timestamp of most recent snapshot activity
 }
 
 /**
  * Get or create the per-session cache for a given session ID.
  */
+let _lastCleanupTime = 0;
+
 function getSessionCache(sessionId: string): SessionCache {
+	// Throttle TTL cleanup to avoid O(n) on every call
+	const now = Date.now();
+	if (now - _lastCleanupTime > CLEANUP_THROTTLE_MS) {
+		_lastCleanupTime = now;
+		cleanupStaleSessions(DEFAULT_SESSION_MAX_AGE_MS);
+	}
+
 	const map = _sessionCaches.get(sessionId);
-	if (map) return map;
+	if (map) {
+		map.lastActivity = Date.now();
+		return map;
+	}
+
+	// Evict least-active session if at capacity.
+	if (_sessionCaches.size >= MAX_SESSIONS) {
+		evictLeastActiveSession();
+	}
 
 	const cache: SessionCache = {
 		snapshots: new LruCache<FileSnapshot>(MAX_PATHS_PER_SESSION),
+		lastActivity: Date.now(),
 	};
 	_sessionCaches.set(sessionId, cache);
 	return cache;
@@ -47,6 +69,44 @@ function getSessionCache(sessionId: string): SessionCache {
 // ── Module-level session map ──────────────────────────────────────────────────
 
 const _sessionCaches = new Map<string, SessionCache>();
+
+/**
+ * Evict the session with the fewest snapshots (least active).
+ */
+function evictLeastActiveSession(): void {
+	let oldestSessionId: string | null = null;
+	let minSnapshots = Infinity;
+
+	for (const [sessionId, cache] of _sessionCaches) {
+		const count = cache.snapshots.size;
+		if (count < minSnapshots) {
+			minSnapshots = count;
+			oldestSessionId = sessionId;
+		}
+	}
+
+	if (oldestSessionId !== null) {
+		_sessionCaches.delete(oldestSessionId);
+	}
+}
+
+/**
+ * Remove sessions that have had no activity for longer than maxAgeMs.
+ * Calls this automatically in getSessionCache() with a default of 30 minutes.
+ *
+ * @param maxAgeMs  Maximum age in milliseconds; sessions with lastActivity
+ *                  older than this are removed.
+ */
+export function cleanupStaleSessions(maxAgeMs: number): void {
+	const now = Date.now();
+	const cutoff = now - maxAgeMs;
+
+	for (const [sessionId, cache] of _sessionCaches) {
+		if (cache.lastActivity < cutoff) {
+			_sessionCaches.delete(sessionId);
+		}
+	}
+}
 
 /**
  * Resolve a session key from a toolCallId or similar unique identifier.
@@ -80,6 +140,7 @@ export function recordContiguous(
 	lines: string[],
 ): void {
 	const cache = getSessionCache(sessionId);
+	cache.lastActivity = Date.now();
 	const existing = cache.snapshots.get(absPath);
 
 	if (existing) {
@@ -133,6 +194,7 @@ export function recordSparse(
 	if (entries.length === 0) return;
 
 	const cache = getSessionCache(sessionId);
+	cache.lastActivity = Date.now();
 	const existing = cache.snapshots.get(absPath);
 
 	if (existing) {

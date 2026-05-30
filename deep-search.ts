@@ -9,13 +9,13 @@
 //   - deep-search-lsp.ts: LSP workspace symbols, document symbols, hover type
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { promises as fs } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 
 import { classifyRelevance } from "./classifiers.js";
 import { computeRanks } from "./scoring.js";
-import { findSrcFiles } from "./file-discovery.js";
+import { discoverFiles, type DiscoveryProfile } from "./file-discovery.js";
 import { RepoMap } from "./repomap.js";
+import { expandToMonorepoRoots } from "./monorepo-detector.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -134,20 +134,6 @@ const DEFAULT_OUTPUT_BUDGET = 4096;
 const MAX_DISCOVERY_FILES = 2_000;
 const MAX_GRAPH_CANDIDATES = 30;
 
-const DOC_EXTENSIONS = new Set([".md", ".mdx", ".txt", ".rst", ".adoc"]);
-const IGNORED_DIRS = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  ".next",
-  ".nuxt",
-  "coverage",
-  ".cache",
-  ".pi-smartread.tags.cache",
-  ".pi-smartread.embeddings.cache",
-]);
-
 // ── Internal helpers ────────────────────────────────────────────────────────
 
 function clampInteger(value: number | undefined, min: number, max: number, fallback: number): number {
@@ -190,57 +176,18 @@ function pathMatchesScope(path: string, scope: DeepSearchScope): boolean {
   }
 }
 
-function extensionOf(path: string): string {
-  const match = /\.[^.\/]+$/.exec(path.toLowerCase());
-  return match?.[0] ?? "";
-}
-
-async function discoverDocFiles(root: string, limit: number, signal?: AbortSignal): Promise<string[]> {
-  const results: string[] = [];
-
-  async function walk(dir: string): Promise<void> {
-    if (results.length >= limit || signal?.aborted) return;
-    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      if (results.length >= limit || signal?.aborted) return;
-      if (entry.name.startsWith(".") && entry.name !== ".github") {
-        if (IGNORED_DIRS.has(entry.name)) continue;
-      }
-      const fullPath = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name)) await walk(fullPath);
-      } else if (entry.isFile() && DOC_EXTENSIONS.has(extensionOf(entry.name))) {
-        results.push(fullPath);
-      }
-    }
-  }
-
-  await walk(root);
-  return results;
-}
-
 async function discoverCandidateFiles(
   cwd: string,
   scope: DeepSearchScope,
   signal?: AbortSignal,
 ): Promise<string[]> {
   const all = new Map<string, string>();
+  const profile: DiscoveryProfile = scope === "code" ? "code" : "text";
+  const searchRoots = [...new Set(expandToMonorepoRoots(cwd).map((root) => resolve(root)))];
 
-  if (scope !== "docs") {
-    for (const file of await findSrcFiles(cwd, MAX_DISCOVERY_FILES, signal)) {
-      const rel = toRelativePath(cwd, file);
-      all.set(rel, file);
-    }
-  }
-
-  if (scope === "docs" || scope === "all") {
-    for (const file of await discoverDocFiles(cwd, MAX_DISCOVERY_FILES, signal)) {
+  for (const root of searchRoots) {
+    const discovered = await discoverFiles(root, profile, MAX_DISCOVERY_FILES, signal);
+    for (const file of discovered.files) {
       const rel = toRelativePath(cwd, file);
       all.set(rel, file);
     }
@@ -694,11 +641,12 @@ export async function executeDeepSearch(
 
   const channelResults: DeepSearchCandidate[] = [];
 
-  // Phase 1: code + symbol in parallel (they share no state)
+  // Phase 1: code + grep + symbol in parallel (they share no state)
   const phase1Promise = (async () => {
     if (scope !== "docs") {
       const results = await Promise.allSettled([
         runSearchChannel(query, cwd, "code", maxChannelResults, signal, ctx),
+        runSearchChannel(query, cwd, "grep", maxChannelResults, signal, ctx),
         runSymbolChannel(query, cwd, maxChannelResults, signal, ctx),
       ]);
       if (results[0].status === "fulfilled") {
@@ -709,7 +657,12 @@ export async function executeDeepSearch(
       if (results[1].status === "fulfilled") {
         channelResults.push(...results[1].value);
       } else {
-        degraded.push(`symbol channel failed: ${results[1].reason instanceof Error ? results[1].reason.message : String(results[1].reason)}`);
+        degraded.push(`grep channel failed: ${results[1].reason instanceof Error ? results[1].reason.message : String(results[1].reason)}`);
+      }
+      if (results[2].status === "fulfilled") {
+        channelResults.push(...results[2].value);
+      } else {
+        degraded.push(`symbol channel failed: ${results[2].reason instanceof Error ? results[2].reason.message : String(results[2].reason)}`);
       }
     }
   })();

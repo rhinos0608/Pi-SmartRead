@@ -27,8 +27,36 @@ export function extractTextFromToolResult(result: unknown): string {
  * Parse grep search results into candidates.
  * Format: "  file.ts:line-endline [kind] name"
  */
-function parseGrepCandidates(text: string): DeepSearchCandidate[] {
+function parseGrepCandidates(result: unknown): DeepSearchCandidate[] {
+  const details = (result as { details?: unknown }).details;
+  if (details && typeof details === "object" && !Array.isArray(details)) {
+    const matches = (details as { matches?: unknown }).matches;
+    if (Array.isArray(matches)) {
+      const candidates: DeepSearchCandidate[] = [];
+      for (const rawMatch of matches) {
+        if (!rawMatch || typeof rawMatch !== "object") continue;
+        const match = rawMatch as Record<string, unknown>;
+        if (match.group !== "definition") continue;
+        if (typeof match.file !== "string" || typeof match.line !== "number") continue;
+
+        candidates.push({
+          file: match.file,
+          line: match.line,
+          endLine: typeof match.endLine === "number" ? match.endLine : match.line,
+          kind: typeof match.kind === "string" ? match.kind : "symbol",
+          name: typeof match.name === "string" ? match.name : "symbol",
+          channel: "symbol",
+          snippet: typeof match.snippet === "string" ? match.snippet : String(match.name ?? "symbol"),
+          rawScore: 1.0,
+          rank: candidates.length + 1,
+        });
+      }
+      return candidates;
+    }
+  }
+
   const candidates: DeepSearchCandidate[] = [];
+  const text = extractTextFromToolResult(result);
   const lines = text.split('\n');
   for (const line of lines) {
     const match = line.match(/^\s{2}(.+?):(\d+)-(\d+)\s+\[(\w+)\]\s+(\S+)/);
@@ -94,8 +122,7 @@ export async function runSymbolChannel(
     undefined,
     ctx,
   );
-  const text = extractTextFromToolResult(result);
-  return parseGrepCandidates(text);
+  return parseGrepCandidates(result);
 }
 
 /**
