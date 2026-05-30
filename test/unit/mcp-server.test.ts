@@ -1,10 +1,9 @@
 /**
  * Tests for the MCP stdio server.
  *
- * Integration-style tests that spawn a subprocess via
- * `spawn("npx", ["tsx", MCP_SERVER_PATH])` and exercise JSON-RPC 2.0
- * protocol handling over stdio. Each test sends requests to stdin
- * and validates responses from stdout.
+ * Integration-style tests that spawn a subprocess via `node --import tsx`
+ * and exercise JSON-RPC 2.0 protocol handling over stdio. Each test sends
+ * requests to stdin and validates responses from stdout.
  */
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
@@ -36,52 +35,89 @@ function mcpInitialized(): Record<string, unknown> {
 }
 
 /**
- * Helper: send one or more JSON-RPC messages to the MCP server and get the last response.
+ * Send one or more JSON-RPC messages to the MCP server and return the last response.
+ *
+ * Parses stdout line-by-line; collects all responses and returns the last one
+ * when the process closes. This avoids a race where the `close` event fires
+ * before the promise is settled — Node.js delivers the callback even to an
+ * already-resolved promise.
+ *
+ * Waits for the server's stderr startup signal before sending any messages,
+ * to avoid races during tsx/esbuild cold boot.
  */
 function callMcpServer(
   messageOrMessages: Record<string, unknown> | Array<Record<string, unknown>>,
-  timeoutMs = 10_000,
+  timeoutMs = 30_000,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
+    // Per-test timeout kills the subprocess and rejects
     const timeout = setTimeout(() => {
+      clearInterval(pollStartup);
       child.kill();
       reject(new Error("MCP server timeout"));
     }, timeoutMs);
 
-    const child = spawn("npx", ["tsx", MCP_SERVER_PATH], {
+    const child = spawn("node", ["--import", "tsx", MCP_SERVER_PATH], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: join(__dirname, "../.."),
     });
 
-    let stdout = "";
-    child.stdout.on("data", (data: Buffer) => {
-      stdout += data.toString();
+    let stderr = "";
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
     });
 
-    child.on("close", () => {
-      clearTimeout(timeout);
-      const lines = stdout.trim().split("\n").filter(Boolean);
-      if (lines.length === 0) {
-        reject(new Error("No response from MCP server"));
-        return;
-      }
-      try {
-        resolve(JSON.parse(lines[lines.length - 1]!));
-      } catch {
-        reject(new Error(`Invalid JSON response: ${stdout}`));
+    // Collect all JSON-RPC responses; return the last one when close fires.
+    // This handles the race where `close` can fire before the promise is resolved
+    // (the Node.js event loop delivers the callback even to a settled promise).
+    const responses: Array<Record<string, unknown>> = [];
+
+    child.stdout.on("data", (data: Buffer) => {
+      for (const raw of data.toString().split("\n")) {
+        const line = raw.trim();
+        if (!line) continue;
+        try {
+          responses.push(JSON.parse(line) as Record<string, unknown>);
+        } catch {
+          // Skip non-JSON lines (e.g. debug output)
+        }
       }
     });
 
     child.on("error", (err) => {
       clearTimeout(timeout);
+      clearInterval(pollStartup);
       reject(err);
     });
 
+    // `close` fires after stdin closes AND the process exits.
+    // Collect responses as they arrive; return the last one on close.
+    // This avoids the race where close fires before the promise is settled —
+    // Node.js delivers the callback even to already-resolved/rejected promises.
+    child.on("close", () => {
+      clearTimeout(timeout);
+      clearInterval(pollStartup);
+      if (responses.length === 0) {
+        reject(new Error("No JSON-RPC response from MCP server"));
+        return;
+      }
+      resolve(responses[responses.length - 1]!);
+    });
+
     const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
-    for (const message of messages) {
-      child.stdin.write(JSON.stringify(message) + "\n");
-    }
-    child.stdin.end();
+
+    // Wait for server startup signal before sending.
+    // tsx cold-boots esbuild; the server signals readiness via stderr.
+    const pollStartup = setInterval(() => {
+      if (stderr.includes("[pi-smartread] MCP server running on")) {
+        clearInterval(pollStartup);
+        for (const message of messages) {
+          child.stdin.write(JSON.stringify(message) + "\n");
+        }
+        child.stdin.end();
+      }
+    }, 100);
   });
 }
 
@@ -98,7 +134,7 @@ describe("MCP stdio server", () => {
     expect(result.capabilities).toBeDefined();
     expect(result.serverInfo.name).toBe("pi-smartread");
     expect(result.serverInfo.version).toBe("0.1.0");
-  });
+  }, 60_000);
 
   it("responds to tools/list with registered tools", async () => {
     const response = await callMcpServer([
@@ -147,7 +183,7 @@ describe("MCP stdio server", () => {
       expect(typeof tool.description).toBe("string");
       expect(tool.inputSchema).toBeDefined();
     }
-  });
+  }, 60_000);
 
   it("responds to ping", async () => {
     const response = await callMcpServer([
@@ -163,7 +199,7 @@ describe("MCP stdio server", () => {
     expect(response.jsonrpc).toBe("2.0");
     expect(response.id).toBe(3);
     expect(response.result).toEqual({});
-  });
+  }, 60_000);
 
   it("returns error for unknown method", async () => {
     const response = await callMcpServer({
@@ -176,7 +212,7 @@ describe("MCP stdio server", () => {
     expect(response.id).toBe(4);
     expect(response.error).toBeDefined();
     expect((response.error as any).code).toBe(-32601); // METHOD_NOT_FOUND
-  });
+  }, 60_000);
 
   it("returns error for unknown tool call", async () => {
     const response = await callMcpServer([
@@ -200,7 +236,7 @@ describe("MCP stdio server", () => {
     expect(result).toBeDefined();
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Unknown tool");
-  });
+  }, 60_000);
 
   it("returns tool list entries have valid JSON Schema for inputSchema", async () => {
     const response = await callMcpServer([
@@ -232,5 +268,5 @@ describe("MCP stdio server", () => {
         Array.isArray(schema.anyOf);
       expect(hasContent).toBe(true);
     }
-  });
+  }, 60_000);
 });

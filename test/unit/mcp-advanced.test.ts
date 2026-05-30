@@ -36,63 +36,86 @@ function mcpInitialized(): Record<string, unknown> {
 
 /**
  * Send JSON-RPC messages to the MCP server and return the last response.
+ *
+ * Parses stdout line-by-line; collects all responses and returns the last one
+ * when the process closes. This avoids a race where the `close` event fires
+ * before the promise is settled — Node.js delivers the callback even to an
+ * already-resolved promise.
+ *
+ * Waits for the server's stderr startup signal before sending any messages,
+ * to avoid races during tsx/esbuild cold boot.
  */
 function callMcpServer(
   messageOrMessages: Record<string, unknown> | Array<Record<string, unknown>>,
   timeoutMs = 30_000,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
+    // Per-test timeout kills the subprocess and rejects
     const timeout = setTimeout(() => {
+      clearInterval(pollStartup);
       child.kill();
       reject(new Error("MCP server timeout"));
     }, timeoutMs);
 
-    const child = spawn("npx", ["tsx", MCP_SERVER_PATH], {
+    const child = spawn("node", ["--import", "tsx", MCP_SERVER_PATH], {
       stdio: ["pipe", "pipe", "pipe"],
-      // Use the same cwd as mcp-server.test.ts — the repo root, so that
-      // __dirname = "." + "../.." correctly resolves to the repo root.
       cwd: join(__dirname, "../.."),
     });
 
-    let stdout = "";
-    child.stdout.on("data", (data: Buffer) => {
-      stdout += data.toString();
+    let stderr = "";
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
     });
 
-    child.on("close", () => {
-      // Wait briefly for stdout to flush after the process exits.
-      // The MCP server writes responses to stdout and closes stdin,
-      // so the last response should arrive before the process exits.
-      let remaining = 500;
-      const drain = setInterval(() => {
-        remaining -= 50;
-        const lines = stdout.trim().split("\n").filter(Boolean);
-        if (lines.length > 0 || remaining <= 0) {
-          clearInterval(drain);
-          clearTimeout(timeout);
-          if (lines.length === 0) {
-            reject(new Error("No response from MCP server"));
-            return;
-          }
-          try {
-            resolve(JSON.parse(lines[lines.length - 1]!));
-          } catch {
-            reject(new Error(`Invalid JSON response: ${stdout}`));
-          }
+    // Collect all JSON-RPC responses; return the last one when close fires.
+    const responses: Array<Record<string, unknown>> = [];
+
+    child.stdout.on("data", (data: Buffer) => {
+      for (const raw of data.toString().split("\n")) {
+        const line = raw.trim();
+        if (!line) continue;
+        try {
+          responses.push(JSON.parse(line) as Record<string, unknown>);
+        } catch {
+          // Skip non-JSON lines (e.g. debug output)
         }
-      }, 50);
+      }
     });
 
     child.on("error", (err) => {
       clearTimeout(timeout);
+      clearInterval(pollStartup);
       reject(err);
     });
 
+    // `close` fires after stdin closes AND the process exits.
+    // Collect responses as they arrive; return the last one on close.
+    // This avoids the race where close fires before the promise is settled —
+    // Node.js delivers the callback even to already-resolved/rejected promises.
+    child.on("close", () => {
+      clearTimeout(timeout);
+      clearInterval(pollStartup);
+      if (responses.length === 0) {
+        reject(new Error("No JSON-RPC response from MCP server"));
+        return;
+      }
+      resolve(responses[responses.length - 1]!);
+    });
+
     const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
-    for (const message of messages) {
-      child.stdin.write(JSON.stringify(message) + "\n");
-    }
-    child.stdin.end();
+
+    // Wait for server startup signal before sending.
+    // tsx cold-boots esbuild; the server signals readiness via stderr.
+    const pollStartup = setInterval(() => {
+      if (stderr.includes("[pi-smartread] MCP server running on")) {
+        clearInterval(pollStartup);
+        for (const message of messages) {
+          child.stdin.write(JSON.stringify(message) + "\n");
+        }
+        child.stdin.end();
+      }
+    }, 100);
   });
 }
 
@@ -124,7 +147,7 @@ describe("MCP advanced capabilities", () => {
     expect(names).toContain("explain-code");
     expect(names).toContain("review-diff");
     expect(names).toContain("architectural-analysis");
-  });
+  }, 60_000);
 
   it("getting explain-code prompt returns correct message structure", async () => {
     const response = await callMcpServer([
@@ -157,7 +180,7 @@ describe("MCP advanced capabilities", () => {
     expect(msg.content.type).toBe("text");
     expect(msg.content.text).toContain("typescript");
     expect(msg.content.text).toContain("const x = 1;");
-  });
+  }, 60_000);
 
   it("getting review-diff prompt returns a user message", async () => {
     const response = await callMcpServer([
@@ -184,7 +207,7 @@ describe("MCP advanced capabilities", () => {
     expect(msg.content.type).toBe("text");
     expect(msg.content.text).toContain("javascript");
     expect(msg.content.text).toContain("const x = 1;");
-  });
+  }, 60_000);
 
   it("getting architectural-analysis prompt returns a user message", async () => {
     const response = await callMcpServer([
@@ -211,7 +234,7 @@ describe("MCP advanced capabilities", () => {
     expect(msg.content.type).toBe("text");
     expect(msg.content.text).toContain("src/index.ts");
     expect(msg.content.text).toContain("data flow");
-  });
+  }, 60_000);
 
   it("throws for unknown prompt", async () => {
     const response = await callMcpServer([
@@ -231,7 +254,7 @@ describe("MCP advanced capabilities", () => {
     expect(response.error).toBeDefined();
     const error = response.error as any;
     expect(error.message).toContain("Prompt not found");
-  });
+  }, 60_000);
 
   // --- Resources ---
 
@@ -258,7 +281,7 @@ describe("MCP advanced capabilities", () => {
     expect(uris).toContain("smartread://config");
     expect(uris).toContain("smartread://repo-map");
     expect(uris).toContain("smartread://status");
-  });
+  }, 60_000);
 
   it("reading smartread://config returns JSON", async () => {
     const response = await callMcpServer([
@@ -294,7 +317,7 @@ describe("MCP advanced capabilities", () => {
     expect(parsed).toHaveProperty("search");
     expect(parsed).toHaveProperty("gitContext");
     expect(parsed).toHaveProperty("experimental");
-  });
+  }, 60_000);
 
   it("reading smartread://status returns JSON with server info", async () => {
     const response = await callMcpServer([
@@ -324,7 +347,7 @@ describe("MCP advanced capabilities", () => {
       prompts: true,
       resources: true,
     });
-  });
+  }, 60_000);
 
   it("reading smartread://repo-map returns placeholder text", async () => {
     const response = await callMcpServer([
@@ -342,7 +365,7 @@ describe("MCP advanced capabilities", () => {
     const content = result.contents[0]!;
     expect(content.uri).toBe("smartread://repo-map");
     expect(content.text).toContain("repo-map-placeholder");
-  });
+  }, 60_000);
 
   it("throws for unknown resource URI", async () => {
     const response = await callMcpServer([
@@ -361,7 +384,7 @@ describe("MCP advanced capabilities", () => {
     expect(response.error).toBeDefined();
     const error = response.error as any;
     expect(error.message).toContain("Resource not found");
-  });
+  }, 60_000);
 
   // --- Server capabilities ---
 
@@ -375,7 +398,7 @@ describe("MCP advanced capabilities", () => {
     expect(result.capabilities.tools).toBeDefined();
     expect(result.capabilities.prompts).toBeDefined();
     expect(result.capabilities.resources).toBeDefined();
-  });
+  }, 60_000);
 
   // --- maybeResourceLink helper ---
 
@@ -392,7 +415,7 @@ describe("MCP advanced capabilities", () => {
     // Should not create a resource_link
     expect(first).not.toHaveProperty("uri");
     expect(first).not.toHaveProperty("type", "resource_link");
-  });
+  }, 60_000);
 
   it("maybeResourceLink returns resource_link for large content", async () => {
     const { maybeResourceLink, LARGE_RESULT_THRESHOLD } = await import("../../mcp-resources.js");
@@ -406,7 +429,7 @@ describe("MCP advanced capabilities", () => {
     expect(first.type).toBe("resource_link");
     expect((first as any).uri).toBe("smartread://result/repo_map");
     expect((first as any).name).toBe("repo_map");
-  });
+  }, 60_000);
 
   it("maybeResourceLink is inclusive on the 8KB boundary", async () => {
     const { maybeResourceLink, LARGE_RESULT_THRESHOLD } = await import("../../mcp-resources.js");
@@ -422,5 +445,5 @@ describe("MCP advanced capabilities", () => {
     const overResult = maybeResourceLink("over", over);
     const overFirst = overResult[0]!;
     expect(overFirst.type).toBe("resource_link");
-  });
+  }, 60_000);
 });
