@@ -13,7 +13,7 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 | `read` | Single-file read with contextual enrichment (imports, git, graphify) |
 | `read_files` | Multi-file batch read with adaptive output packing |
 | `intent_read` | Intent-based file discovery with hybrid RRF retrieval (BM25 + embeddings) |
-| `search` | Consolidated search: AST-aware definition grep (`grep`), BM25 + embedding code search with symbol enrichment (`code`), agentic multi-channel deep search (`deep`) |
+| `search` | Consolidated search: grep-style text search with definition-aware ranking (`grep`), BM25 + embedding code search with symbol enrichment (`code`), agentic multi-channel deep search (`deep`) |
 | `repo_map` | PageRank-ranked repository map from native tree-sitter AST tags |
 | `find_symbol` | Symbol-level exploration: name search, file outline, references, declaration, implementations, workspace-wide LSP search, hover info |
 | `graph_mutate` | [experimental] Records semantic coupling observations (breakage edges, co-change edges) into the context graph |
@@ -137,7 +137,7 @@ Consolidated search with three modes.
 
 | Mode | What it does | Use when |
 |---|---|---|
-| `grep` (default) | AST-aware definition search: finds function/class/method definitions matching by name. Fast, no embeddings. | "find the `getConfig` function" |
+| `grep` (default) | Grep-style line search across code, config, and docs files. Definition hits are ranked first, then plain text hits. | "find `JWT_SECRET` in the repo" |
 | `code` | BM25 + optional embedding re-rank with symbol resolution and caller enrichment. | "find authentication middleware implementation" |
 | `deep` | Agentic multi-channel deep search orchestrating code, symbol, semantic, and graph channels with RRF fusion. | "how does the auth system work?" |
 
@@ -147,12 +147,24 @@ In `code` mode, results are enriched by default: top symbols are resolved and ca
 
 ### Examples
 
-**AST-aware definition grep:**
+**Grep-style text search:**
 
 ```json
 {
   "mode": "grep",
-  "query": "getRepoMap"
+  "query": "JWT_SECRET",
+  "contextLines": 1
+}
+```
+
+`grep` mode defaults to literal substring matching, auto-switches to case-sensitive matching for mixed-case queries, and also supports:
+
+```json
+{
+  "mode": "grep",
+  "query": "plugin-[a-z]+",
+  "matchMode": "regex",
+  "caseSensitive": false
 }
 ```
 
