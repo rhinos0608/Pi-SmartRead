@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 
 interface MonorepoWorkspace {
   /** Workspace root directory (absolute) */
@@ -16,6 +16,13 @@ const MONOREPO_MARKERS: Record<string, string[]> = {
   turborepo: ["turbo.json"],
   rush: ["rush.json"],
 };
+
+const PROJECT_MARKERS = [
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+] as const;
 
 /**
  * Detect monorepo structure from a root directory.
@@ -39,12 +46,11 @@ export function detectMonorepo(rootDir: string): MonorepoWorkspace | null {
  */
 export function detectMonorepoFromSubdir(startDir: string): MonorepoWorkspace | null {
   let current = resolve(startDir);
-  const home = require("os").homedir();
   while (true) {
     const mono = detectMonorepo(current);
     if (mono && mono.packages.length > 0) return mono;
     const parent = resolve(current, "..");
-    if (parent === current || current === home) return null;
+    if (parent === current) return null;
     current = parent;
   }
 }
@@ -57,7 +63,7 @@ export function detectMonorepoFromSubdir(startDir: string): MonorepoWorkspace | 
 export function expandToMonorepoRoots(cwd: string): string[] {
   const mono = detectMonorepoFromSubdir(cwd);
   if (!mono) return [cwd];
-  return [cwd, ...mono.packages];
+  return [...new Set([cwd, ...mono.packages])];
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
@@ -70,112 +76,152 @@ function detectMonorepoType(rootDir: string): MonorepoWorkspace["type"] {
       if (existsSync(join(rootDir, marker))) return type as MonorepoWorkspace["type"];
     }
   }
-  // Check pnpm-workspace.yaml
   if (existsSync(join(rootDir, "pnpm-workspace.yaml"))) return "pnpm";
-  // Check pyproject.toml for poetry
+
   const pyprojectPath = join(rootDir, "pyproject.toml");
   if (existsSync(pyprojectPath)) {
     try {
       const content = readFileSync(pyprojectPath, "utf-8");
       if (content.includes("[tool.poetry]") && content.includes("packages")) return "poetry";
-    } catch { /* ignore */ }
+    } catch {
+      // ignore malformed pyproject files
+    }
   }
-  // package.json with workspaces covers yarn, npm
+
   return "npm";
 }
 
 function resolveWorkspaceGlobs(rootDir: string): WorkspaceGlob[] {
+  const workspaces: string[] = [];
   const pkgPath = join(rootDir, "package.json");
-  if (!existsSync(pkgPath)) return [];
 
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+        workspaces?: string[] | { packages?: string[] };
+      };
+      if (Array.isArray(pkg.workspaces)) {
+        workspaces.push(...pkg.workspaces);
+      } else if (Array.isArray(pkg.workspaces?.packages)) {
+        workspaces.push(...pkg.workspaces.packages);
+      }
+    } catch {
+      // ignore malformed package.json
+    }
+  }
+
+  const lernaPath = join(rootDir, "lerna.json");
+  if (existsSync(lernaPath)) {
+    try {
+      const lerna = JSON.parse(readFileSync(lernaPath, "utf-8")) as { packages?: string[] };
+      if (Array.isArray(lerna.packages)) {
+        workspaces.push(...lerna.packages);
+      }
+    } catch {
+      // ignore malformed lerna config
+    }
+  }
+
+  const pnpmPath = join(rootDir, "pnpm-workspace.yaml");
+  if (existsSync(pnpmPath)) {
+    try {
+      const content = readFileSync(pnpmPath, "utf-8");
+      let inPackages = false;
+      for (const rawLine of content.split("\n")) {
+        const line = rawLine.trim();
+        if (line === "packages:") {
+          inPackages = true;
+          continue;
+        }
+        if (!inPackages) continue;
+        if (line.startsWith("- ")) {
+          workspaces.push(line.slice(2).trim().replace(/^['"]|['"]$/g, ""));
+          continue;
+        }
+        if (line.length > 0) {
+          inPackages = false;
+        }
+      }
+    } catch {
+      // ignore malformed pnpm-workspace.yaml
+    }
+  }
+
+  return [...new Set(workspaces.filter((pattern) => typeof pattern === "string" && pattern.trim().length > 0))];
+}
+
+function hasProjectMarker(dir: string): boolean {
+  return PROJECT_MARKERS.some((marker) => existsSync(join(dir, marker)));
+}
+
+function escapeRegex(text: string): string {
+  return text.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function globSegmentToRegex(segment: string): RegExp {
+  return new RegExp(`^${escapeRegex(segment).replace(/\*/g, ".*")}$`);
+}
+
+function expandPatternSegments(baseDir: string, segments: string[], index: number): string[] {
+  if (index >= segments.length) return [baseDir];
+
+  const segment = segments[index]!;
+  if (!segment.includes("*")) {
+    const nextDir = join(baseDir, segment);
+    if (!existsSync(nextDir)) return [];
+    return expandPatternSegments(nextDir, segments, index + 1);
+  }
+
+  const matcher = globSegmentToRegex(segment);
+  let entries: Array<{ name: string; isDirectory(): boolean }>;
   try {
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-    const workspaces: string[] = pkg.workspaces ?? pkg.workspaces?.packages ?? [];
-
-    // Lerna-style: lerna.json may have its own packages field
-    const lernaPath = join(rootDir, "lerna.json");
-    if (existsSync(lernaPath)) {
-      try {
-        const lerna = JSON.parse(readFileSync(lernaPath, "utf-8"));
-        if (Array.isArray(lerna.packages)) {
-          workspaces.push(...lerna.packages);
-        }
-      } catch { /* ignore */ }
-    }
-
-    // Pnpm workspace
-    const pnpmPath = join(rootDir, "pnpm-workspace.yaml");
-    if (existsSync(pnpmPath)) {
-      try {
-        const content = readFileSync(pnpmPath, "utf-8");
-        const yamlLines = content.split("\n");
-        let inPackages = false;
-        for (const line of yamlLines) {
-          const trimmed = line.trim();
-          if (trimmed === "packages:") { inPackages = true; continue; }
-          if (inPackages && trimmed.startsWith("- ")) {
-            workspaces.push(trimmed.slice(2).trim());
-          } else if (inPackages && !trimmed.startsWith("- ") && trimmed) {
-            inPackages = false;
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    return [...new Set(workspaces)];
+    entries = readdirSync(baseDir, { withFileTypes: true });
   } catch {
     return [];
   }
+
+  const matches: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    if (!matcher.test(entry.name)) continue;
+    matches.push(...expandPatternSegments(join(baseDir, entry.name), segments, index + 1));
+  }
+  return matches;
+}
+
+function resolveWorkspacePackageRoot(rootDir: string, candidate: string): string | null {
+  let current = resolve(candidate);
+  while (isSubpath(rootDir, current)) {
+    if (hasProjectMarker(current)) return current;
+    const parent = resolve(current, "..");
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+function isSubpath(parent: string, child: string): boolean {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === "" || (!rel.startsWith("..") && rel !== "");
 }
 
 function expandWorkspaceGlobs(rootDir: string, globs: WorkspaceGlob[]): string[] {
-  const packages: string[] = [];
+  const packages = new Set<string>();
 
   for (const glob of globs) {
-    // Simple glob: "packages/*" → list directories under packages/
-    // Also handles: "apps/*", "libs/*", etc.
-    const parts = glob.split("/");
-    const hasStar = parts.some((p) => p.includes("*"));
-    if (!hasStar) {
-      // Single directory like "packages/shared"
-      const fullPath = join(rootDir, glob);
-      if (existsSync(fullPath)) {
-        packages.push(fullPath);
-      }
-      continue;
+    const normalized = glob.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!normalized) continue;
+
+    const segments = normalized.split("/").filter(Boolean);
+    const candidates = segments.some((segment) => segment.includes("*"))
+      ? expandPatternSegments(rootDir, segments, 0)
+      : [join(rootDir, ...segments)];
+
+    for (const candidate of candidates) {
+      const packageRoot = resolveWorkspacePackageRoot(rootDir, candidate);
+      if (packageRoot) packages.add(packageRoot);
     }
-
-    // Expand star patterns
-    const starIndex = parts.findIndex((p) => p.includes("*"));
-    if (starIndex === -1) continue;
-
-    const baseDir = join(rootDir, ...parts.slice(0, starIndex));
-    if (!existsSync(baseDir)) continue;
-
-    const starPattern = parts[starIndex]!;
-    const prefix = starPattern.replace("*", "");
-    const suffix = starPattern.replace("*", "");
-
-    try {
-      const entries = require("fs").readdirSync(baseDir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name.startsWith(".")) continue;
-        // Apply prefix/suffix filtering (e.g., "plugin-*")
-    if (prefix && !entry.name.startsWith(prefix)) continue;
-    if (suffix && !entry.name.endsWith(suffix)) continue;
-    if (entry.name) {
-      packages.push(join(baseDir, entry.name));
-    }
-      }
-    } catch { /* ignore */ }
   }
 
-  return packages.filter((pkg) => {
-    // Must have a package.json or be a recognizable project
-    return existsSync(join(pkg, "package.json")) ||
-           existsSync(join(pkg, "pyproject.toml")) ||
-           existsSync(join(pkg, "Cargo.toml")) ||
-           existsSync(join(pkg, "go.mod"));
-  });
+  return [...packages];
 }
