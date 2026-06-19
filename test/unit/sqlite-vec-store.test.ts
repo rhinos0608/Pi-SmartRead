@@ -50,21 +50,20 @@ describe("SqliteVecStore", () => {
     store.close();
   });
 
-  it("initializes the vec0 virtual table", () => {
+  it("initializes the vec0 virtual table", async () => {
     const dbPath = join(tmpDir, "vectors.db");
     const store = new SqliteVecStore(dbPath, TEST_DIM);
 
     // Open a raw handle to inspect the schema.
     // Use bun:sqlite if running in Bun (better-sqlite3 unavailable),
     // otherwise better-sqlite3 for Node.js.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const rawDb = (typeof Bun !== "undefined")
+        const rawDb = (typeof Bun !== "undefined")
       ? (() => {
           const { Database } = require("bun:sqlite");
           try { Database.setCustomSQLite("/opt/homebrew/opt/sqlite3/lib/libsqlite3.dylib"); } catch { /* ok */ }
           return new Database(dbPath);
         })()
-      : new (require("better-sqlite3"))(dbPath);
+      : new ((await import("better-sqlite3")).default)(dbPath);
 
     const tables = rawDb
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -76,21 +75,20 @@ describe("SqliteVecStore", () => {
     store.close();
   });
 
-  it("creates _schema_version and records version 1", () => {
+  it("creates _schema_version and records version 1", async () => {
     const dbPath = join(tmpDir, "vectors.db");
     const store = new SqliteVecStore(dbPath, TEST_DIM);
 
     // Open a raw handle using bun:sqlite (in Bun) or better-sqlite3 (in Node.js)
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const rawDb = (typeof Bun !== "undefined")
       ? (() => {
           const { Database } = require("bun:sqlite");
           try { Database.setCustomSQLite("/opt/homebrew/opt/sqlite3/lib/libsqlite3.dylib"); } catch { /* ok */ }
           return new Database(dbPath);
         })()
-      : new (require("better-sqlite3"))(dbPath);
+      : new ((await import("better-sqlite3")).default)(dbPath);
 
-    const row = rawDb
+const row = rawDb
       .prepare("SELECT max(version) as v FROM _schema_version")
       .get() as any;
     expect(row?.v).toBe(1);

@@ -50,22 +50,22 @@ describe("config: validateEmbeddingConfig", () => {
   });
 
   it("falls back to legacy EMBEDDING_BASE_URL and EMBEDDING_MODEL", () => {
-    process.env.EMBEDDING_BASE_URL = "http://legacy:11434/v1";
+    process.env.EMBEDDING_BASE_URL = "http://localhost:11434/v1";
     process.env.EMBEDDING_MODEL = "legacy-model";
     const cfg = validateEmbeddingConfig(SAFE_CWD);
     expect(cfg).not.toBeNull();
-    expect(cfg!.baseUrl).toBe("http://legacy:11434/v1");
+    expect(cfg!.baseUrl).toBe("http://localhost:11434/v1");
     expect(cfg!.model).toBe("legacy-model");
   });
 
   it("PI_SMARTREAD_ variables take precedence over legacy EMBEDDING_ variables", () => {
-    process.env.EMBEDDING_BASE_URL = "http://legacy:11434/v1";
+    process.env.EMBEDDING_BASE_URL = "http://localhost:11434/v1";
     process.env.EMBEDDING_MODEL = "legacy-model";
-    process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://primary:11434/v1";
+    process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11435/v1";
     process.env.PI_SMARTREAD_EMBEDDING_MODEL = "primary-model";
     const cfg = validateEmbeddingConfig(SAFE_CWD);
     expect(cfg).not.toBeNull();
-    expect(cfg!.baseUrl).toBe("http://primary:11434/v1");
+    expect(cfg!.baseUrl).toBe("http://localhost:11435/v1");
     expect(cfg!.model).toBe("primary-model");
   });
 

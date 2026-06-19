@@ -160,16 +160,12 @@ describe("MCP stdio server", () => {
     const toolNames = result.tools.map((t: any) => t.name);
     expect(toolNames).toContain("read");
     expect(toolNames).toContain("read_files");
-    expect(toolNames).toContain("intent_read");
+    expect(toolNames).toContain("semantic_read");
     expect(toolNames).toContain("search");
     expect(toolNames).toContain("repo_map");
     expect(toolNames).toContain("find_symbol");
-    expect(toolNames).toContain("file_outline");
-    expect(toolNames).toContain("find_references");
-    expect(toolNames).toContain("find_declaration");
-    expect(toolNames).toContain("find_implementations");
-    expect(toolNames).toContain("workspace_symbol");
-    expect(toolNames).toContain("hover_type");
+    expect(toolNames).toContain("symbol_info");
+    expect(toolNames).toContain("deep_search");
     // graph_mutate and git_notes are experimental — disabled by default
     expect(toolNames).not.toContain("graph_mutate");
     expect(toolNames).not.toContain("git_notes_read");

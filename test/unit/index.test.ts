@@ -30,16 +30,12 @@ describe("index extension wiring", () => {
     const names = registered.map((t) => t.name);
     expect(names).toContain("read");
     expect(names).toContain("read_files");
-    expect(names).toContain("intent_read");
+    expect(names).toContain("semantic_read");
     expect(names).toContain("search");
     expect(names).toContain("repo_map");
     expect(names).toContain("find_symbol");
-    expect(names).toContain("file_outline");
-    expect(names).toContain("find_references");
-    expect(names).toContain("find_declaration");
-    expect(names).toContain("find_implementations");
-    expect(names).toContain("workspace_symbol");
-    expect(names).toContain("hover_type");
+    expect(names).toContain("symbol_info");
+    expect(names).toContain("deep_search");
     // graph_mutate and git_notes are experimental — disabled by default
     expect(names).not.toContain("graph_mutate");
     expect(names).not.toContain("git_notes_read");

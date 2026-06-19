@@ -28,6 +28,7 @@ import {
 		selectorToOffsetLimit,
 			splitPathAndSelector,
 			resolveReadPath,
+			resolveWorkspacePath,
 			formatRecoveryHint,
 			WRAPPER_LINES,
 	} from "./utils.js";
@@ -115,7 +116,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 	const largeRequest = params.files.length > LARGE_REQUEST_THRESHOLD;
 
 	// Process files in chunks to avoid blocking the event loop on very large requests.
-	for (let chunkStart = 0; chunkStart < params.files.length; chunkStart += CHUNK_SIZE) {
+	chunkLoop: for (let chunkStart = 0; chunkStart < params.files.length; chunkStart += CHUNK_SIZE) {
 		const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, params.files.length);
 		for (let i = chunkStart; i < chunkEnd; i++) {
 				if (signal?.aborted) {
@@ -160,7 +161,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 					if (params.stopOnError && !ok) break;
 					continue;
 				}
-				const resolvedPath = resolveReadPath(targetPath);
+				const resolvedPath = resolveWorkspacePath(ctx.cwd, resolveReadPath(targetPath));
 				const selectorArgs = selectorToOffsetLimit(selector);
 				const rawMode = selectorArgs.raw === true;
 				const input: ReadToolInput = {
@@ -193,6 +194,9 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 						body += `\n[${imageCount} image attachment(s) omitted; use read on this file for image payload.]`;
 					}
 
+					// Track whether summarization was applied to prevent cache corruption
+					let summaryApplied = false;
+
 					// Try structural summarization for large full-file reads without a line selector
 					if (!selector && !rawMode && body && body.length > 8192) {
 						const bodyLines = body.split("\n").length;
@@ -202,6 +206,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 								if (summary.parsed && summary.elided) {
 									const rendered = renderSummary(summary, resolvedPath);
 									body = rendered.text;
+									summaryApplied = true;
 								}
 							} catch { /* fall through to raw body */ }
 						}
@@ -230,9 +235,12 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 						truncation: details?.truncation,
 					});
 					// Record raw lines in the file-read cache for anchor-stale recovery.
-					const sessionKey = resolveSessionKey(toolCallId);
-					const rawLines = rawBody.split("\n");
-					recordContiguous(sessionKey, resolvedPath, startLine, rawLines);
+					// Skip when summarization replaced body — summary lines would corrupt cache.
+					if (!summaryApplied) {
+						const sessionKey = resolveSessionKey(toolCallId);
+						const rawLines = rawBody.split("\n");
+						recordContiguous(sessionKey, resolvedPath, startLine, rawLines);
+					}
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					const fullText = formatContentBlock(request.path, `[Error: ${message}]`, i + 1);
@@ -251,7 +259,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 					});
 
 					if (params.stopOnError) {
-						break;
+						break chunkLoop;
 					}
 				}
 			}
