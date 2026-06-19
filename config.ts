@@ -193,6 +193,43 @@ function findConfigFile(startDir: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Returns true if the host is a loopback or private IP address.
+ */
+function isPrivateHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.startsWith("192.168.") ||
+    hostname.startsWith("10.") ||
+    hostname.startsWith("172.16.") ||
+    hostname.endsWith(".local")
+  );
+}
+
+/**
+ * Validate that the URL uses HTTPS, unless it's a local/private host.
+ * Public internet URLs must use HTTPS.
+ */
+function validateUrl(url: string, label: string): void {
+  try {
+    const parsed = new URL(url);
+    // Allow HTTP for local/private hosts (e.g. Ollama on localhost)
+    if (parsed.protocol === "http:" && isPrivateHost(parsed.hostname)) {
+      return;
+    }
+    if (parsed.protocol !== "https:") {
+      throw new Error(`${label} must use HTTPS protocol. Got: ${url}`);
+    }
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error(`${label} is not a valid URL: ${url}`);
+    }
+    throw err;
+  }
+}
+
 function loadRaw(cwd?: string): RawConfig {
   const resolvedCwd = cwd ?? process.cwd();
 
@@ -207,16 +244,26 @@ function loadRaw(cwd?: string): RawConfig {
     }
   }
 
+  // Security: repo-level config is untrusted for network endpoints.
+  // Only use environment variables for baseUrl and API keys.
+  // Non-network settings (model, chunk sizes, feature flags) may come from file.
+  const baseUrl =
+    process.env.PI_SMARTREAD_EMBEDDING_BASE_URL ??
+    process.env.EMBEDDING_BASE_URL;
+
+  // When baseUrl comes from the user's env, validate it.
+  // Repo-level baseUrl is silently ignored (untrusted).
+  if (baseUrl !== undefined) {
+    validateUrl(baseUrl, "baseUrl");
+  }
+
   return {
-    baseUrl:
-      fromFile.baseUrl ??
-      process.env.PI_SMARTREAD_EMBEDDING_BASE_URL ??
-      process.env.EMBEDDING_BASE_URL,
+    baseUrl,
     model:
       fromFile.model ??
       process.env.PI_SMARTREAD_EMBEDDING_MODEL ??
       process.env.EMBEDDING_MODEL,
-    apiKey: fromFile.apiKey ?? process.env.PI_SMARTREAD_EMBEDDING_API_KEY,
+    apiKey: process.env.PI_SMARTREAD_EMBEDDING_API_KEY,
     chunkSizeChars:
       fromFile.chunkSizeChars ??
       (process.env.PI_SMARTREAD_CHUNK_SIZE ? parseInt(process.env.PI_SMARTREAD_CHUNK_SIZE, 10) : undefined),
@@ -271,7 +318,16 @@ export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig |
     probeEnabled: raw.probeEnabled ?? false,
     rerankEnabled: raw.rerankEnabled ?? false,
     hydeEnabled: raw.hydeEnabled ?? false,
-    externalReranker: raw.externalReranker,
+    // Security: repo-level externalReranker config is untrusted for network endpoints.
+    // Only env vars supply the reranker baseUrl/apiKey.
+    // Model and timeout settings may still come from file config.
+    externalReranker: raw.externalReranker
+      ? {
+          ...raw.externalReranker,
+          baseUrl: process.env.PI_SMARTREAD_RERANKER_BASE_URL ?? raw.externalReranker.baseUrl,
+          apiKey: process.env.PI_SMARTREAD_RERANKER_API_KEY ?? raw.externalReranker.apiKey,
+        }
+      : undefined,
   };
 }
 

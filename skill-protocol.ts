@@ -6,6 +6,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import type { UrlHandler, UrlSourceInfo } from "./internal-url-router.js";
@@ -34,6 +35,20 @@ export async function resolveSkillUrl(
 	const resolvedBase = resolve(basePath);
 	if (!resolved.startsWith(resolvedBase + sep)) {
 		throw new Error(`Invalid skill path: traversal detected in ${url}`);
+	}
+
+	// Symlink-hardened check: compare real paths
+	try {
+		const realResolved = realpathSync(resolved);
+		const realBase = realpathSync(resolvedBase);
+		if (!realResolved.startsWith(realBase + sep) && realResolved !== realBase) {
+			throw new Error(`Invalid skill path: symlink traversal detected in ${url}`);
+		}
+	} catch (err) {
+		if (err instanceof Error && err.message.includes("symlink traversal")) {
+			throw err;
+		}
+		// realpath may fail for non-existent files; lexical check already passed
 	}
 
 	let text: string;

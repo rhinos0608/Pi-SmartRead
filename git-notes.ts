@@ -1,12 +1,37 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+// ── Commit-ish validation ────────────────────────────────────────────
+
+const SAFE_REF_RE = /^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/;
+const HEX_SHA_RE = /^[0-9a-f]{7,40}$/i;
+
 import type { CommitRecord } from "./git-context.js";
 
 const execFileAsync = promisify(execFile);
 
 interface ExecResult {
   stdout: string;
+}
+
+/**
+ * Validate a commit-ish value to prevent option injection.
+ * Allows: HEAD, hex SHA (7-40 chars), safe ref names (alphanumeric, dots, hyphens, slashes).
+ * Rejects values starting with `-` (option injection) or empty strings.
+ */
+export function isValidCommitIsh(value: string | undefined): value is string {
+  if (!value || typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  // Option injection: values starting with - are git options, not commit-ish
+  if (trimmed.startsWith("-")) return false;
+  // Allow HEAD
+  if (trimmed === "HEAD") return true;
+  // Allow hex SHA
+  if (HEX_SHA_RE.test(trimmed)) return true;
+  // Allow safe ref names
+  if (SAFE_REF_RE.test(trimmed)) return true;
+  return false;
 }
 
 export const PI_NOTES_REF = "refs/notes/pi-smartread";
@@ -26,8 +51,11 @@ export interface NoteEntry {
 }
 
 export async function readNote(gitRoot: string, commitHash: string, ref = PI_NOTES_REF): Promise<string | null> {
+  if (!isValidCommitIsh(commitHash)) {
+    return null;
+  }
   try {
-    const { stdout } = await execFileAsync("git", ["notes", `--ref=${ref}`, "show", commitHash], {
+    const { stdout } = await execFileAsync("git", ["notes", `--ref=${ref}`, "show", "--", commitHash], {
       cwd: gitRoot,
       encoding: "utf-8",
       maxBuffer: 1024 * 1024,
@@ -40,7 +68,10 @@ export async function readNote(gitRoot: string, commitHash: string, ref = PI_NOT
 }
 
 export async function writeNote(gitRoot: string, content: string, commitHash = "HEAD"): Promise<void> {
-  await execFileAsync("git", ["notes", `--ref=${PI_NOTES_REF}`, "add", "-f", "-m", content, commitHash], {
+  if (!isValidCommitIsh(commitHash)) {
+    throw new Error(`Invalid commit-ish: ${commitHash}`);
+  }
+  await execFileAsync("git", ["notes", `--ref=${PI_NOTES_REF}`, "add", "-f", "-m", content, "--", commitHash], {
     cwd: gitRoot,
     encoding: "utf-8",
     maxBuffer: 1024 * 1024,

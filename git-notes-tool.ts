@@ -1,10 +1,11 @@
 import { Type, type Static } from "@sinclair/typebox";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition, toToolDefinitions } from "./types.js";
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import { detectDefaultBranch, findBranchPoint, findGitRoot, getStructuredLog } from "./git-context.js";
-import { COMPAT_NOTES_REFS, PI_NOTES_REF, formatBranchNotes, readNote, scanBranchNotes, writeNote } from "./git-notes.js";
+import { COMPAT_NOTES_REFS, PI_NOTES_REF, formatBranchNotes, isValidCommitIsh, readNote, scanBranchNotes, writeNote } from "./git-notes.js";
 
 // ── Schemas ─────────────────────────────────────────────────────────
 
@@ -16,7 +17,7 @@ const GitNotesReadSchema = Type.Object({
 });
 
 const GitNotesWriteSchema = Type.Object({
-  content: Type.String({ description: "Note content to attach. Use Lore-style trailers for machine-parseable decisions: Constraint:, Rejected:, Directive:, Confidence:" }),
+  content: Type.String({ description: "Note content to attach. Use Lore-style trailers for machine-parseable decisions: Constraint:, Rejected:, Directive:, Confidence:", maxLength: 64000 }),
   commit: Type.Optional(
     Type.String({ description: "Commit hash to attach the note to (default: HEAD)." }),
   ),
@@ -26,9 +27,7 @@ const GitNotesWriteSchema = Type.Object({
 type GitNotesReadInput = Static<typeof GitNotesReadSchema>;
 type GitNotesWriteInput = Static<typeof GitNotesWriteSchema>;
 
-interface ToolContext {
-  cwd: string;
-}
+// ToolContext no longer needed — uses ExtensionContext from pi-coding-agent directly
 
 // ── Read tool ────────────────────────────────────────────────────────
 
@@ -37,9 +36,7 @@ function createGitNotesReadTool(): ToolDefinition {
     name: "git_notes_read",
     label: "git_notes_read",
     description:
-      "[EXPERIMENTAL] Read AI session context attached to git commits as notes. " +
-      "Returns conversation context, decisions, and constraints from previous sessions. " +
-      "Searches refs/notes/pi-smartread, refs/notes/lore, refs/notes/opencode, and refs/notes/commits.",
+      "[EXPERIMENTAL] Read AI session context attached to git commits. Returns decisions, constraints from prior sessions.",
     parameters: GitNotesReadSchema,
 
     async execute(
@@ -47,14 +44,14 @@ function createGitNotesReadTool(): ToolDefinition {
       params: unknown,
       _signal: unknown,
       _onUpdate: unknown,
-      ctx: ToolContext,
-    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
-      const input = params as GitNotesReadInput;
-      const startDir = input.directory ? resolve(ctx.cwd, input.directory) : ctx.cwd;
+      ctx: ExtensionContext,
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError?: boolean }> {
+        const input = params as GitNotesReadInput;
+        const startDir = resolveDirParam(ctx.cwd, input.directory);
       const gitRoot = await findGitRoot(startDir);
 
       if (!gitRoot) {
-        return { content: [{ type: "text", text: "No git repository found." }], details: {} };
+        return { content: [{ type: "text", text: "No git repository found." }], details: {}, isError: true };
       }
 
       return handleRead(gitRoot, input);
@@ -69,13 +66,7 @@ function createGitNotesWriteTool(): ToolDefinition {
     name: "git_notes_write",
     label: "git_notes_write",
     description:
-      "[EXPERIMENTAL] Write AI session context as a git note attached to a commit. " +
-      "Records decisions, rejected approaches, and forward-looking directives. " +
-      "Tip: Use Lore-style trailers for machine-parseable decisions:\n" +
-      "  Constraint: <rule that shaped this decision>\n" +
-      "  Rejected: <alternative> | <reason>\n" +
-      "  Directive: <forward instruction for future modifier>\n" +
-      "  Confidence: high|medium|low",
+      "[EXPERIMENTAL] Write session context as git note. Use Lore-style trailers: Constraint:, Rejected:, Directive:, Confidence:",
     parameters: GitNotesWriteSchema,
 
     async execute(
@@ -83,19 +74,19 @@ function createGitNotesWriteTool(): ToolDefinition {
       params: unknown,
       _signal: unknown,
       _onUpdate: unknown,
-      ctx: ToolContext,
-    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
+      ctx: ExtensionContext,
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError?: boolean }> {
       const input = params as GitNotesWriteInput;
 
       if (typeof input.content !== "string" || !input.content.trim()) {
         throw new Error("content must be a non-empty string");
       }
 
-      const startDir = input.directory ? resolve(ctx.cwd, input.directory) : ctx.cwd;
+      const startDir = resolveDirParam(ctx.cwd, input.directory);
       const gitRoot = await findGitRoot(startDir);
 
       if (!gitRoot) {
-        return { content: [{ type: "text", text: "No git repository found." }], details: {} };
+        return { content: [{ type: "text", text: "No git repository found." }], details: {}, isError: true };
       }
 
       return handleWrite(gitRoot, input);
@@ -108,8 +99,11 @@ function createGitNotesWriteTool(): ToolDefinition {
 async function handleRead(
   gitRoot: string,
   input: GitNotesReadInput,
-): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError?: boolean }> {
   if (input.commit) {
+    if (!isValidCommitIsh(input.commit)) {
+      return { content: [{ type: "text", text: `Invalid commit reference: ${input.commit}` }], details: {} };
+    }
     const entries: string[] = [];
     for (const ref of [PI_NOTES_REF, ...COMPAT_NOTES_REFS]) {
       const note = await readNote(gitRoot, input.commit, ref);
@@ -132,17 +126,26 @@ async function handleRead(
 async function handleWrite(
   gitRoot: string,
   input: GitNotesWriteInput,
-): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown>; isError?: boolean }> {
   const timestamp = new Date().toISOString();
   const content = `[pi-smartread session ${timestamp}]\n\n${input.content}`;
 
+  const targetCommit = input.commit ?? "HEAD";
+  if (!isValidCommitIsh(targetCommit)) {
+    return {
+      content: [{ type: "text", text: `Invalid commit reference: ${targetCommit}` }],
+      details: {},
+      isError: true,
+    };
+  }
   try {
-    await writeNote(gitRoot, content, input.commit ?? "HEAD");
+    await writeNote(gitRoot, content, targetCommit);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
       content: [{ type: "text", text: `Failed to write git note: ${message}` }],
       details: { error: message },
+      isError: true,
     };
   }
 
@@ -156,4 +159,27 @@ async function handleWrite(
 
 export function createGitNotesTools(): ToolDefinition[] {
   return toToolDefinitions([createGitNotesReadTool(), createGitNotesWriteTool()]);
+}
+
+function resolveDirParam(cwd: string, directory: string | undefined): string {
+  const resolvedDir = directory ? resolve(cwd, directory) : resolve(cwd);
+  try {
+    const realCwd = realpathSync(resolve(cwd));
+    let realDir: string;
+    try {
+      realDir = realpathSync(resolvedDir);
+    } catch {
+      realDir = resolvedDir;
+    }
+    const rel = relative(realCwd, realDir);
+    if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+      throw new Error(`Directory outside workspace: ${directory ?? "."}`);
+    }
+    return realDir;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
+      throw err;
+    }
+    return resolvedDir;
+  }
 }

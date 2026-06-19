@@ -48,9 +48,25 @@ function getResolvedConfig(): Record<string, unknown> {
   const gitContext = loadGitContextConfig();
   const experimental = loadExperimentalConfig();
 
+  // Redact secrets: never expose raw API keys in config resource
+  const safeEmbedding = embedding
+    ? {
+        baseUrl: embedding.baseUrl,
+        model: embedding.model,
+        apiKeyConfigured: !!embedding.apiKey,
+        chunkSizeChars: embedding.chunkSizeChars,
+        chunkOverlapChars: embedding.chunkOverlapChars,
+        maxChunksPerFile: embedding.maxChunksPerFile,
+        probeEnabled: embedding.probeEnabled,
+        rerankEnabled: embedding.rerankEnabled,
+        hydeEnabled: embedding.hydeEnabled,
+        externalRerankerConfigured: !!embedding.externalReranker,
+      }
+    : { _note: "No embedding config found — BM25-only mode active" };
+
   return {
     version: VERSION,
-    embedding: embedding ?? { _note: "No embedding config found — BM25-only mode active" },
+    embedding: safeEmbedding,
     search,
     gitContext,
     experimental,
@@ -121,7 +137,7 @@ export type ContentItem = { type: "text"; text: string } | { type: "resource_lin
  * instead of embedding it inline. Otherwise, return the inline text item.
  *
  * Use this helper in tool result handlers for large-content tools like
- * `repo_map`, `search` (mode=deep), and `search`.
+ * `repo_map`, `deep_search`, and `search`.
  *
  * @param name  - Resource name used for the URI (`smartread://result/{name}`)
  * @param content - Raw content string
