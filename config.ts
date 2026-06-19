@@ -42,7 +42,7 @@ export interface SearchEnrichModeConfig {
 
 export interface SearchConfig {
   enrich?: {
-    /** Enrichment behaviour for mode="code". */
+    /** Enrichment behaviour for code search. */
     code?: SearchEnrichModeConfig;
   };
 }

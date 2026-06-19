@@ -15,7 +15,7 @@ function getMatchLocations(result: unknown): string[] {
   return (details?.matches ?? []).map((match) => `${match.relFile}:${match.line}`).sort();
 }
 
-describe("search tool grep mode", () => {
+describe("search tool combined search", () => {
   const cleanupRoots: string[] = [];
 
   afterEach(() => {
@@ -40,15 +40,16 @@ describe("search tool grep mode", () => {
     const tool = createSearchTool();
     const result = await tool.execute(
       "grep-body",
-      { mode: "grep", query: "body-only-literal" },
+      { query: "body-only-literal" },
       undefined,
       undefined,
       { cwd: root } as any,
     );
 
     const details = (result as any).details;
-    expect(details.total).toBe(1);
-    expect(details.definitionHits).toBe(1);
+    // Combined search: code finds the definition, grep finds the literal text
+    expect(details.total).toBeGreaterThanOrEqual(1);
+    expect(details.definitionHits).toBeGreaterThanOrEqual(1);
     expect(details.matches[0].name).toBe("calculateTotal");
     expect(details.matches[0].relFile).toBe("service.ts");
   });
@@ -64,7 +65,7 @@ describe("search tool grep mode", () => {
     const tool = createSearchTool();
     const result = await tool.execute(
       "grep-text",
-      { mode: "grep", query: "SEARCH_TOKEN", maxResults: 10 },
+      { query: "SEARCH_TOKEN", maxResults: 10 },
       undefined,
       undefined,
       { cwd: root } as any,
@@ -102,7 +103,7 @@ describe("search tool grep mode", () => {
     const tool = createSearchTool();
     const result = await tool.execute(
       "grep-ignore",
-      { mode: "grep", query: "NEEDLE", maxResults: 20 },
+      { query: "NEEDLE", maxResults: 20 },
       undefined,
       undefined,
       { cwd: root } as any,
@@ -136,7 +137,7 @@ describe("search tool grep mode", () => {
     const tool = createSearchTool();
     const result = await tool.execute(
       "grep-rg-parity",
-      { mode: "grep", query: "EXACT_NEEDLE_123", maxResults: 20 },
+      { query: "EXACT_NEEDLE_123", maxResults: 20 },
       undefined,
       undefined,
       { cwd: root } as any,

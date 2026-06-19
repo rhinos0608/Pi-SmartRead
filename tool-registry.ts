@@ -13,7 +13,7 @@ import { toToolDefinitions } from "./types.js";
 export enum ToolCategory {
   /** Symbol-level retrieval tools */
   SYMBOL = "symbol",
-  /** Code search (grep, code, deep) */
+  /** Unified text + code search */
   SEARCH = "search",
   /** File reading with contextual enrichment */
   READ = "read",

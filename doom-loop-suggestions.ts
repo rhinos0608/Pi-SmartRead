@@ -59,7 +59,7 @@ export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
   find_symbol: [
     str("try a more specific query"),
     { text: "try symbol_info for richer results", toolHint: "symbol_info" },
-    { text: "check with search mode=code if no results", toolHint: "search", toolInput: { mode: "code" } },
+    { text: "try search for text + code search", toolHint: "search" },
   ],
   symbol_info: [
     str("use action=outline for file structure"),
@@ -68,9 +68,7 @@ export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
     str("use action=implementations for subclass/impl finding"),
   ],
   search: [
-    str("try a different mode (grep, code)"),
-    str("resolve specific symbols instead of searching broadly"),
-    { text: "try mode 'code' for AST-aware search", toolHint: "search", toolInput: { mode: "code" } },
+    str("try a more specific query"),
     { text: "try deep_search for multi-channel exploration", toolHint: "deep_search" },
   ],
   repo_map: [
@@ -115,7 +113,7 @@ export const SUGGESTIONS_LEGACY: Record<string, readonly string[]> = {
   find_symbol: [
     "try a more specific query",
     "try symbol_info for richer results",
-    "check with search mode=code if no results",
+    "try search for text + code search",
   ],
   symbol_info: [
     "use action=outline for file structure",
@@ -124,8 +122,8 @@ export const SUGGESTIONS_LEGACY: Record<string, readonly string[]> = {
     "use action=implementations for subclass/impl finding",
   ],
   search: [
-    "try a different mode (grep, code)",
-    "resolve specific symbols instead of searching broadly",
+    "try a more specific query",
+    "try deep_search for multi-channel exploration",
     "narrow the search with a more specific query",
   ],
   repo_map: [

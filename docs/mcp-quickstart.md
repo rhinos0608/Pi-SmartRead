@@ -222,7 +222,7 @@ Or in `.mcp.json`:
 
 **No semantic ranking** — The MCP server uses the same embedding config as the Pi extension. Set `PI_SMARTREAD_EMBEDDING_BASE_URL` and `PI_SMARTREAD_EMBEDDING_MODEL`, or place a `pi-smartread.config.json` in the working directory.
 
-**Tool returns "Error: Embedding baseUrl is required"** — Use `read` or `search mode="grep"` for config-free operation, or configure embeddings.
+**Tool returns "Error: Embedding baseUrl is required"** — Use `read` or `search` for config-free operation, or configure embeddings.
 
 **Configuration changes not taking effect** — Restart Claude Code (or the respective MCP client) after changing config. Run `claude mcp list` to verify connected servers.
 

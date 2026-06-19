@@ -83,9 +83,9 @@ All tools are registered through the central `ToolRegistry` (`tool-registry.ts`)
 ### Old tool consolidation
 
 The following standalone tools have been removed and their functionality absorbed into `search`:
-- `search_symbols` → `search mode="grep"` or `find_symbol action="symbol"`
-- `resolve_symbol` → `search mode="code"` (auto-resolves top symbols)
-- `find_callers` → `search mode="code"` (caller enrichment in results)
+- `search_symbols` → `search` (grep) or `find_symbol action="symbol"`
+- `resolve_symbol` → `search` (code) with auto-enrichment
+- `find_callers` → `search` (code) with caller enrichment
 - `smartread_status` → absorbed into cross-cutting health checks
 
 ---

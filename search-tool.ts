@@ -1,10 +1,9 @@
 /**
- * Consolidated search tool.
+ * Unified search tool.
  *
- * Modes:
- *   - (default)   grep-style repository text search with definition-aware ranking.
- *   - code        AST-aware search + BM25 scoring + optional embedding re-rank
- *                  + symbol resolution enrichment.
+ * Runs both grep-style text search and AST-aware code search, merging
+ * results into a single response. For multi-channel deep search,
+ * use the dedicated deep_search tool.
  */
 import { existsSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
@@ -26,27 +25,16 @@ import { loadSearchConfig } from "./config.js";
 import { bm25Scores, computeRrfScores } from "./scoring.js";
 import { fetchEmbeddings } from "./embedding.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
-import { executeDeepSearch } from "./deep-search.js";
 import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
 import { expandToMonorepoRoots } from "./monorepo-detector.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { recordSparse, resolveSessionKey } from "./file-read-cache.js";
 
-type SearchMode = "grep" | "code" | "deep";
 type SearchMatchMode = "literal" | "regex";
 
 // ── Schema ────────────────────────────────────────────────────────
 
 const SearchSchema = Type.Object({
-  mode: Type.Optional(
-    Type.Unsafe<SearchMode>({
-      type: "string",
-      enum: ["grep", "code", "deep"],
-      description:
-        "Search mode. grep (default): line-oriented text/pattern search. code: BM25 + optional embedding re-rank with symbol resolution. deep: multi-channel deep search (deprecated — use deep_search tool directly).",
-      default: "grep",
-    }),
-  ),
   query: Type.String({
     description: "Identifier name, code pattern, or search query",
     minLength: 1,
@@ -496,8 +484,7 @@ function formatGrepResults(
   } else if (matches.length < 3) {
     lines.push(
       `> 💡 Only ${matches.length} result(s) found. Try ` +
-        `\`search mode=code query="${query}"\` for structural ranking, or ` +
-        `\`deep_search query="${query}"\` for multi-channel exploration.`,
+        `\`deep_search query="${query}"\` for multi-channel semantic search + graph expansion.`,
     );
     lines.push("");
   }
@@ -507,7 +494,7 @@ function formatGrepResults(
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-async function handleGrep(
+export async function handleGrep(
   toolCallId: string,
   params: SearchInput,
   cwd: string,
@@ -629,7 +616,7 @@ async function handleGrep(
   };
 }
 
-async function handleCode(
+export async function handleCode(
   toolCallId: string,
   params: SearchInput,
   cwd: string,
@@ -880,7 +867,7 @@ export default function createSearchTool(): ToolDefinition {
     name: "search",
     label: "search",
     description:
-        'Search repository text and code. mode=grep (default): line-oriented text search with definition-aware ranking. mode=code: BM25 + optional embedding re-rank with symbol resolution. For multi-channel orchestration, use deep_search.',
+        'Search repository text and code. Returns both grep-style text matches and AST-aware code definitions with BM25 + optional embedding re-rank. For multi-channel deep search, use the deep_search tool directly.',
     parameters: SearchSchema,
 
     async execute(
@@ -892,35 +879,54 @@ export default function createSearchTool(): ToolDefinition {
     ) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      const mode = params.mode ?? "grep";
       const cwd = resolveSearchRoot(params, ctx.cwd);
 
       if (typeof params.query !== "string" || !params.query.trim()) {
-        throw new Error(`search mode "${mode}" requires a non-empty "query"`);
+        throw new Error('search requires a non-empty "query"');
       }
 
-      switch (mode) {
-        case "grep":
-          return handleGrep(toolCallId, params, cwd, signal);
-        case "code": {
-          const config = loadSearchConfig(cwd);
-          const enrich =
-            config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false;
-          return handleCode(toolCallId, params, cwd, signal, enrich);
-        }
-        case "deep": {
-          const deepResult = await executeDeepSearch({
-            query: params.query!.trim(),
-            depth: "standard",
-            scope: "all",
-            directory: cwd,
-            limit: params.maxResults ?? 15,
-            maxSnippetChars: 400,
-            outputBudget: 4096,
-          }, signal, ctx);
-          return deepResult;
-        }
+      const config = loadSearchConfig(cwd);
+      const enrich =
+        config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false;
+
+      // Run code and grep searches, combining results.
+      const codeResult = await handleCode(toolCallId, params, cwd, signal, enrich);
+      const grepResult = await handleGrep(toolCallId, params, cwd, signal);
+
+      const codeText = codeResult.content[0]?.type === "text" ? codeResult.content[0].text : "";
+      const grepText = grepResult.content[0]?.type === "text" ? grepResult.content[0].text : "";
+
+      const codeDetails = codeResult.details as Record<string, unknown>;
+      const grepDetails = grepResult.details as Record<string, unknown>;
+
+      const parts: string[] = [];
+      if (codeText && (codeDetails?.total as number ?? 0) > 0) {
+        parts.push(codeText);
       }
+      if (grepText && (grepDetails?.total as number ?? 0) > 0) {
+        parts.push(grepText);
+      }
+      if (parts.length === 0) {
+        const query = params.query.trim();
+        const files = (codeDetails?.filesScanned as number ?? 0) || (grepDetails?.filesScanned as number ?? 0);
+        parts.push(`[No matches for "${query}" across ${files} files.]`);
+      }
+
+      return {
+        content: [{ type: "text" as const, text: parts.join("\n") }],
+        details: {
+          total: (codeDetails?.total as number ?? 0) + (grepDetails?.total as number ?? 0),
+          query: params.query.trim(),
+          codeDefinitions: codeDetails?.total ?? 0,
+          textMatches: grepDetails?.total ?? 0,
+          definitionHits: grepDetails?.definitionHits ?? 0,
+          textHits: grepDetails?.textHits ?? 0,
+          matches: grepDetails?.matches ?? [],
+          lspResults: codeDetails?.lspResults ?? 0,
+          filesScanned: codeDetails?.filesScanned ?? grepDetails?.filesScanned ?? 0,
+          timeMs: Math.max(codeDetails?.timeMs as number ?? 0, grepDetails?.timeMs as number ?? 0),
+        },
+      };
     },
   } as unknown as ToolDefinition;
 }

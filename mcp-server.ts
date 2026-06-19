@@ -10,7 +10,7 @@
  *   - intent_read:  Hybrid RRF retrieval (BM25 + embeddings)
  *   - read_files:  Multi-file reader with packing
  *   - repo_map:  Repository symbol map (PageRank + tree-sitter)
- *   - search:  Consolidated search (grep, code, deep)
+ *   - search:  Unified text + code search
  *
  * Usage:
  *   node --import tsx mcp-server.ts    # Run as MCP stdio server

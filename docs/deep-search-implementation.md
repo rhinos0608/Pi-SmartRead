@@ -1,6 +1,6 @@
 # Deep Search Implementation Plan
 
-> **Note (2026-06-18):** Deep search was split from `search mode=deep` into its own first-class `deep_search` tool. The implementation lives in `deep-search.ts` and is exposed via `deep-search-tool.ts`. The original `smartread_status` tool referenced below was removed.
+> **Note (2026-06-18):** Deep search is a first-class `deep_search` tool. The implementation lives in `deep-search.ts` and is exposed via `deep-search-tool.ts`. The original `smartread_status` tool referenced below was removed.
 
 ## Source brief
 

@@ -2,7 +2,7 @@
 // Symbol resolution, caller graph, declaration finding
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import createSearchTool from "./search-tool.js";
+import { handleGrep } from "./search-tool.js";
 import { findCallers } from "./callgraph.js";
 
 import type { DeepSearchCandidate } from "./deep-search.js";
@@ -111,15 +111,13 @@ export async function runSymbolChannel(
   cwd: string,
   maxResults: number,
   signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
+  _ctx: ExtensionContext,
 ): Promise<DeepSearchCandidate[]> {
-  const searchTool = createSearchTool();
-  const result = await searchTool.execute(
+  const result = await handleGrep(
     "deep-search:grep",
-    { mode: "grep", query, maxResults, directory: cwd },
+    { query, maxResults, directory: cwd },
+    cwd,
     signal,
-    undefined,
-    ctx,
   );
   return parseGrepCandidates(result);
 }

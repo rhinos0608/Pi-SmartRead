@@ -124,7 +124,7 @@ describe("search tool (consolidated)", () => {
     );
 
     const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain("No text matches");
+    expect(text).toContain("No matches");
   });
 
   it("rejects empty query", async () => {
@@ -139,9 +139,9 @@ describe("search tool (consolidated)", () => {
     ).rejects.toThrow(/query/i);
   });
 
-  // ── Execution: mode="code" ──
+  // ── Execution: empty results ──
 
-  it('mode="code" returns no-defs message when no files match', async () => {
+  it('returns no-matches message when no files match', async () => {
     const { discoverFiles } = await import("../../file-discovery.js");
     vi.mocked(discoverFiles).mockResolvedValue({
       files: [],
@@ -159,21 +159,21 @@ describe("search tool (consolidated)", () => {
 
     const result = await tool.execute(
       "call-3",
-      { mode: "code", query: "something" },
+      { query: "something" },
       undefined,
       undefined,
       makeExtensionContext(),
     );
 
     const text: string = (result.content[0] as any).text as string;
-    expect(text).toContain("No code definitions found");
+    expect(text).toContain("No matches");
   });
 
-  it('mode="deep" requires a query', async () => {
+  it('requires a query', async () => {
     await expect(
       tool.execute(
         "call-4",
-        { mode: "deep", query: "" },
+        { query: "" },
         undefined,
         undefined,
         makeExtensionContext(),

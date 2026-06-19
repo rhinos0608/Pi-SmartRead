@@ -131,54 +131,43 @@ The output includes framed heredoc blocks plus ranking metadata in `details.file
 
 ## `search`
 
-Consolidated search with three modes.
+Unified search: runs both text grep and AST-aware code search, returning combined results.
 
-### Modes
+### Options
 
-| Mode | What it does | Use when |
-|---|---|---|
-| `grep` (default) | Grep-style line search across code, config, and docs files. Definition hits are ranked first, then plain text hits. | "find `JWT_SECRET` in the repo" |
-| `code` | BM25 + optional embedding re-rank with symbol resolution and caller enrichment. | "find authentication middleware implementation" |
-| `deep` | Agentic multi-channel deep search orchestrating code, symbol, semantic, and graph channels with RRF fusion. | "how does the auth system work?" |
+| Parameter | Description |
+|---|---|
+| `query` (required) | Search term, identifier, or regex pattern |
+| `directory` | Root directory to search (default: working dir) |
+| `maxResults` | Max results per channel (default: 30) |
+| `matchMode` | `literal` (default) or `regex` |
+| `caseSensitive` | Auto-detected by default (mixed-case = sensitive) |
+| `contextLines` | Surrounding lines for grep hits (default: 3) |
 
-### Enrichment
-
-In `code` mode, results are enriched by default: top symbols are resolved and caller info is appended. Set `enrich: false` for bare results.
+Results include both code definitions (AST-ranked) and grep text matches.
 
 ### Examples
 
-**Grep-style text search:**
+**Text + code search:**
 
 ```json
 {
-  "mode": "grep",
   "query": "JWT_SECRET",
   "contextLines": 1
 }
 ```
 
-`grep` mode defaults to literal substring matching, auto-switches to case-sensitive matching for mixed-case queries, and also supports:
+**Regex pattern search:**
 
 ```json
 {
-  "mode": "grep",
   "query": "plugin-[a-z]+",
   "matchMode": "regex",
   "caseSensitive": false
 }
 ```
 
-**Code search with enrichment:**
-
-```json
-{
-  "mode": "code",
-  "query": "authentication middleware",
-  "directory": "src"
-}
-```
-
-**Deep search (first-class tool, split from `search mode=deep`):**
+**Deep search (dedicated tool):**
 
 ```json
 {
@@ -560,7 +549,7 @@ To migrate:
 - `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan
 - `docs/advanced-retrieval-research.md` — Academic and industry research survey
 - `docs/pi-hashline-readmap-research.md` — Cross-extension integration analysis
-- `docs/deep-search-spec.md` — Deep search specification (predates consolidation into `search mode="deep"`)
+- `docs/deep-search-spec.md` — Deep search specification
 - `docs/deep-search-implementation.md` — Deep search implementation plan
 - `docs/phase-6-8-implementation-notes.md` — Notes on external reranker, MCP server, HyDE, benchmarks, multi-language call graphs
 - `docs/mcp-quickstart.md` — MCP server setup for Claude Desktop, Cursor, and generic clients

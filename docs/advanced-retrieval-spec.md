@@ -18,7 +18,7 @@ The system should answer repository-context questions by combining:
 
 ## Non-goals
 
-- Replace `intent_read`, `repo_map`, or `search`. (Note: the helper tools `search_symbols`, `resolve_symbol`, and `find_callers` were consolidated into `search mode="code"` and `find_symbol` for API simplicity.)
+- Replace `intent_read`, `repo_map`, or `search`. (Note: the helper tools `search_symbols`, `resolve_symbol`, and `find_callers` were consolidated into `search` and `find_symbol` for API simplicity.)
 - Convert the project into an MCP-only server.
 - Require a vector database. (Note: `sqlite-vec` and `@orama/orama` are optional complements to the file-based cache, not replacements.)
 - Require token logprobs for default use.

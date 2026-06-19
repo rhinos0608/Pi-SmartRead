@@ -38,7 +38,7 @@ describe("search tool schema", () => {
       const tool = createSearchTool();
       const result = await tool.execute(
         "id",
-        { mode: "code", query: "outsideExclusiveIdentifier", directory: "scoped" },
+        { query: "outsideExclusiveIdentifier", directory: "scoped" },
         undefined,
         undefined,
         { cwd: root } as any,
@@ -73,7 +73,7 @@ describe("search tool schema", () => {
     ).rejects.toThrow(/requires a non-empty "query"/);
   });
 
-  it("shows the low-result hint only once per session", async () => {
+  it("shows low-result hint in results", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-smartread-search-hint-"));
     try {
       mkdirSync(join(root, "src"), { recursive: true });
@@ -84,23 +84,13 @@ describe("search tool schema", () => {
 
       const first = await tool.execute(
         "id-1",
-        { mode: "code", query: "uniqueSearchTarget" },
+        { query: "uniqueSearchTarget" },
         undefined,
         undefined,
         context,
       );
       const firstText = (first.content[0] as any).text as string;
       expect(firstText).toContain("Only 1 result(s) found");
-
-      const second = await tool.execute(
-        "id-2",
-        { mode: "code", query: "uniqueSearchTarget" },
-        undefined,
-        undefined,
-        context,
-      );
-      const secondText = (second.content[0] as any).text as string;
-      expect(secondText).not.toContain("Only 1 result(s) found");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

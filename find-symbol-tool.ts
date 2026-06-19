@@ -788,7 +788,7 @@ function formatSymbolResult(data: { matches: SymbolEntry[]; totalDefs: number; f
     lines.push("");
   }
   if (matches.length === 0) {
-    lines.push(`> No symbols found. Try \`search mode=code query="${query}"\` for full-text search.`, "");
+    lines.push(`> No symbols found. Try \`search query="${query}"\` for full-text search.`, "");
   }
   return lines.join("\n");
 }

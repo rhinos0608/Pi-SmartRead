@@ -2,7 +2,7 @@
 // Tree-sitter AST parsing, code structure analysis
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import createSearchTool from "./search-tool.js";
+import { handleGrep, handleCode } from "./search-tool.js";
 import {
   type RelevanceClass,
   relevanceClassWeight,
@@ -96,20 +96,20 @@ export async function runSearchChannel(
   mode: "code" | "grep",
   maxResults: number,
   signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
+  _ctx: ExtensionContext,
 ): Promise<DeepSearchCandidate[]> {
-  const searchTool = createSearchTool();
-  const result = await searchTool.execute(
-    `deep-search:${mode}`,
-    { mode, query, maxResults, directory: cwd },
-    signal,
-    undefined,
-    ctx,
-  );
+  const toolCallId = `deep-search:${mode}`;
+  const params = { query, maxResults, directory: cwd };
+  let result;
   if (mode === "grep") {
+    result = await handleGrep(toolCallId, params, cwd, signal);
     return parseGrepCandidates(result, "structural");
   }
-
+  const { loadSearchConfig } = await import("./config.js");
+  const config = loadSearchConfig(cwd);
+  const enrich =
+    config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false;
+  result = await handleCode(toolCallId, params, cwd, signal, enrich);
   const text = extractTextFromToolResult(result);
   return parseCodeCandidates(text, "structural");
 }

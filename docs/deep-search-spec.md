@@ -42,7 +42,7 @@ The tool returns markdown:
 2. `Matches` grouped by ranked item;
 3. optional `Relationships` section;
 4. `Summary` with channels used, files inspected, and elapsed time;
-5. `Follow-ups` with concrete calls to `read_files`, `search mode=resolve`, and `search mode=callers`.
+5. `Follow-ups` with concrete calls to `read_files`, `search`, and `find_symbol`.
 
 The returned result also includes machine-readable `details` with matches, channel counts, files inspected, and degraded-mode notes.
 

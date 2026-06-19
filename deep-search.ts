@@ -301,7 +301,7 @@ function generateFollowUps(
   if (notFoundTerms.length > 0) {
     for (const term of notFoundTerms.slice(0, 3)) {
       lines.push(
-        `- Search code for: \`search\` mode=code query="${term}"`,
+        `- Search code for: \`search\` query="${term}"`,
       );
     }
   }
@@ -399,7 +399,7 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
     if (notFound.length > 0) {
       lines.push(
         `> ⚠️ **Note:** ${notFound.map((t) => `\`${t}\``).join(", ")} not found in top ${details.matches.length} results. ` +
-        `Consider using \`search\` mode=code for these terms.`,
+        `Consider using \`search\` for these terms.`,
         "",
       );
     }
@@ -524,7 +524,7 @@ function generateSearchGuidelines(notFoundTerms: string[]): string {
   lines.push("");
   lines.push("**4. Multi-channel search:**");
   lines.push("   - `find_symbol action=symbol query=term` → find symbol definitions");
-  lines.push("   - `search mode=code query=term` → AST-aware code search");
+  lines.push("   - `search query=term` → text + code search");
   lines.push("   - `find_symbol action=declaration query=name` → resolve symbol");
   lines.push("");
 
