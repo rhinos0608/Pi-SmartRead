@@ -14,3 +14,9 @@ graphify-out/
 .understand-anything/meta.json
 understand-anything.config.json
 .smart-edit-undo/
+test/unit/CLAUDE.md
+.subagent-work/
+research/
+dump.ts
+config.enc
+bun.lock

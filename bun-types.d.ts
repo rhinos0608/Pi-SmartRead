@@ -12,4 +12,4 @@ declare module "bun:sqlite" {
   }
 }
 
-declare var Bun: any;
+declare const Bun: any;
