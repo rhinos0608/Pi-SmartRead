@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { findSrcFiles } from "./file-discovery.js";
 import { getTagsBatch, initParser } from "./tags.js";
@@ -57,18 +57,21 @@ export const RESOLUTION_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", 
 export function isPathInside(root: string, path: string): boolean {
   const resolvedRoot = resolve(root);
   const resolvedPath = resolve(path);
-  const lexicalRel = relative(resolvedRoot, resolvedPath);
-  if (lexicalRel === "" || (!lexicalRel.startsWith("..") && !isAbsolute(lexicalRel))) {
-    return true;
-  }
 
+  // Symlink-hardened check: always try realpath first to prevent symlink escape.
+  // Only fall back to lexical comparison when realpath is unavailable.
   try {
     const realRoot = realpathSync(resolvedRoot);
     const realResolved = realpathSync(resolvedPath);
     const realRel = relative(realRoot, realResolved);
-    return realRel === "" || (!realRel.startsWith("..") && !isAbsolute(realRel));
-  } catch {
+    if (realRel === "" || (!realRel.startsWith("..") && !isAbsolute(realRel))) {
+      return true;
+    }
     return false;
+  } catch {
+    // If realpath fails (e.g. target doesn't exist), fall back to lexical check.
+    const lexicalRel = relative(resolvedRoot, resolvedPath);
+    return lexicalRel === "" || (!lexicalRel.startsWith("..") && !isAbsolute(lexicalRel));
   }
 }
 
@@ -126,6 +129,8 @@ export class ContextGraph {
   private mutationEdges: Map<string, Provenance[]> = new Map();
   private static readonly MUTATION_EDGES_MAX = 10_000;
 
+  private lastBuildFilesLength: number = -1;
+
   constructor(private root: string) {
     this.tagsCache = new TagsCache(root);
   }
@@ -156,14 +161,22 @@ export class ContextGraph {
     this.loadMutationEdges();
 
     if (this.mutationEdges.size === 0 && !options.skipGitPopulation) {
+      const GIT_POPULATION_TIMEOUT_MS = 10_000;
       const config = loadGitContextConfig(this.root);
       const limit = config.coCommitAnalysisLimit ?? 100;
-      findGitRoot(this.root).then(async (gitRoot) => {
+      const gitPromise = findGitRoot(this.root).then(async (gitRoot) => {
         if (!gitRoot) return;
         const pairs = await extractCoCommitPairs(gitRoot, limit);
         await autoPopulateEdgeStore(gitRoot, pairs);
         this.loadMutationEdges();
-      }).catch(() => {});
+      });
+      // Await with bounded timeout to prevent indefinite blocking
+      await Promise.race([
+        gitPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("git population timed out")), GIT_POPULATION_TIMEOUT_MS)),
+      ]).catch(() => {
+        // Timeout or failure is non-fatal — graph proceeds without git edges
+      });
     }
 
     const allFiles = await findSrcFiles(this.root);
@@ -173,6 +186,13 @@ export class ContextGraph {
     }
 
     if (this.symbolIndex !== null) return; // already built
+
+    // Invalidate indices if the file set changed since last build
+    if (this.lastBuildFilesLength >= 0 && allFiles.length !== this.lastBuildFilesLength) {
+      this.symbolIndex = null;
+      this.fileIndex = null;
+    }
+    this.lastBuildFilesLength = allFiles.length;
 
     if (allFiles.length === 0) {
       this.symbolIndex = new LruCache(1);
@@ -375,7 +395,8 @@ export class ContextGraph {
 
   private getImportNeighbours(path: string): string[] {
     const neighbours: string[] = [];
-    const fullPath = isAbsolute(path) ? path : resolve(this.root, path);
+    // Normalize to resolved absolute path so edge keys are consistent
+    const fullPath = resolve(this.root, path);
     
     if (!isPathInside(this.root, fullPath)) return [];
 
@@ -652,6 +673,12 @@ export interface MutationEvent {
  */
 export class EdgeStore {
   private static readonly EDGE_LOG_RELPATH = ".pi-smartread/graph-mutations.jsonl";
+  /** Max size of the mutation log file (1 MB) before tail-read is truncated. */
+  private static readonly EDGE_LOG_MAX_BYTES = 1024 * 1024;
+  /** Max context string length per event. */
+  private static readonly EDGE_CONTEXT_MAX_CHARS = 500;
+  /** Max lines to read from the tail of the log. */
+  private static readonly EDGE_LOG_MAX_LINES = 5000;
 
   /**
    * Append a breakage event to the mutation log.
@@ -671,7 +698,13 @@ export class EdgeStore {
   ): void {
     const event: MutationEvent = {
       type: "breakage",
-      data: { from, to, context, confidence, source: "diagnostics" },
+      data: {
+        from,
+        to,
+        context: context ? context.slice(0, EdgeStore.EDGE_CONTEXT_MAX_CHARS) : undefined,
+        confidence,
+        source: "diagnostics",
+      },
       timestamp: Date.now(),
     };
     EdgeStore.append(root, event);
@@ -695,7 +728,13 @@ export class EdgeStore {
   ): void {
     const event: MutationEvent = {
       type: "co_change",
-      data: { from, to, context, confidence: confidence ?? 0.7, source: "git_history" },
+      data: {
+        from,
+        to,
+        context: context ? context.slice(0, EdgeStore.EDGE_CONTEXT_MAX_CHARS) : undefined,
+        confidence: confidence ?? 0.7,
+        source: "git_history",
+      },
       timestamp: Date.now(),
     };
     EdgeStore.append(root, event);
@@ -716,14 +755,20 @@ export class EdgeStore {
     const events: MutationEvent[] = [];
 
     try {
-      const text = readFileSync(logPath, "utf-8");
+      // Tail-read: read last EDGE_LOG_MAX_BYTES from end of file
+      const text = EdgeStore.tailRead(logPath, EdgeStore.EDGE_LOG_MAX_BYTES);
+      if (text === null) return [];
+
+      let lineCount = 0;
       for (const line of text.split("\n")) {
+        if (lineCount >= EdgeStore.EDGE_LOG_MAX_LINES) break;
         const trimmed = line.trim();
         if (!trimmed) continue;
         try {
           const event = JSON.parse(trimmed) as MutationEvent;
           if (now - event.timestamp <= maxAgeMs) {
             events.push(event);
+            lineCount++;
           }
         } catch {
           // Skip malformed lines silently
@@ -749,6 +794,21 @@ export class EdgeStore {
       // Resolve relative paths against root
       const fromPath = resolve(root, ev.data.from);
       const toPath = resolve(root, ev.data.to);
+
+      // Validate paths: both must be inside the root
+      try {
+        const realRoot = realpathSync(resolve(root));
+        const realFrom = realpathSync(fromPath);
+        const realTo = realpathSync(toPath);
+        const fromRel = relative(realRoot, realFrom);
+        const toRel = relative(realRoot, realTo);
+        const fromInside = fromRel === "" || (!fromRel.startsWith("..") && !isAbsolute(fromRel));
+        const toInside = toRel === "" || (!toRel.startsWith("..") && !isAbsolute(toRel));
+        if (!fromInside || !toInside) continue; // Skip events with paths outside root
+      } catch {
+        continue; // Skip if path resolution fails
+      }
+
       const key = `${fromPath}||${toPath}||${ev.type}`;
 
       const edgeType: EdgeType = ev.type === "breakage" ? "breakage" : "co_change";
@@ -770,6 +830,25 @@ export class EdgeStore {
 
   private static getLogPath(root: string): string {
     return `${resolve(root)}/${EdgeStore.EDGE_LOG_RELPATH}`;
+  }
+
+  /**
+   * Tail-read: read the last `maxBytes` bytes from a file.
+   * Returns null if the file cannot be read.
+   */
+  private static tailRead(filePath: string, maxBytes: number): string | null {
+    try {
+      const fd = openSync(filePath, "r");
+      const stat = statSync(filePath);
+      const readSize = Math.min(stat.size, maxBytes);
+      const startPos = Math.max(0, stat.size - readSize);
+      const buffer = Buffer.alloc(readSize);
+      readSync(fd, buffer, 0, readSize, startPos);
+      closeSync(fd);
+      return buffer.toString("utf-8");
+    } catch {
+      return null;
+    }
   }
 
   private static append(root: string, event: MutationEvent): void {

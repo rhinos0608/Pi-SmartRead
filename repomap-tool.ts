@@ -5,6 +5,8 @@
  * - `repo_map` — generate a PageRank-ranked map of the repo
  * - `search` — consolidated search (symbols, callers, resolve, code)
  */
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionAPI,
@@ -28,9 +30,7 @@ const RepoMapSchema = Type.Object({
   mapTokens: Type.Optional(
     Type.Number({
       description:
-        "Token budget for the map output (default: 4096)",
-      minimum: 256,
-      maximum: 32768,
+        "Token budget for the map output (default: 4096, clamped to 256-32768).",
     }),
   ),
   focus: Type.Optional(
@@ -44,9 +44,20 @@ const RepoMapSchema = Type.Object({
         "Compact output format — single-line file summaries with symbol counts instead of full code context (default: false). Compact is more token-efficient for LLM consumption.",
     }),
   ),
+  delta: Type.Optional(
+    Type.Boolean({
+      description:
+        "Return only the diff (new/changed entries) since the last call instead of the full map. Useful for iterative re-ranking. (default: false).",
+    }),
+  ),
 });
 
 type RepoMapInput = Static<typeof RepoMapSchema>;
+
+function clampMapTokens(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 4096;
+  return Math.max(256, Math.min(32768, Math.trunc(value)));
+}
 
 export function createRepoTool(): ToolDefinition {
   const repoMapInstances = new Map<string, RepoMap>();
@@ -63,7 +74,7 @@ export function createRepoTool(): ToolDefinition {
   return {
     name: "repo_map",
     label: "repo_map",
-    description: `Map a repository using tree-sitter AST analysis (default) or import-based dependency mapping (fallback). Scans source files, extracts definitions and references, ranks files by PageRank importance (default) or import in-degree (fallback), and returns a token-budgeted map of the most important symbols with code context. Use 'focus' to boost specific files or symbols. Use the fallback when tree-sitter WASM isn't available or for faster mapping of very large repos.`,
+    description: `Map repository via tree-sitter AST (default) or import-based dependency mapping (fallback). Ranks files by PageRank, returns token-budgeted map of important symbols. Use focus to boost specific files/symbols.`,
     parameters: RepoMapSchema,
 
     async execute(
@@ -73,7 +84,7 @@ export function createRepoTool(): ToolDefinition {
       _onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
-      const cwd = params.directory ? params.directory : ctx.cwd;
+      const cwd = resolveDirParam(ctx.cwd, params.directory);
       const rm = getRepoMap(cwd);
 
       if (signal?.aborted) throw new Error("Operation aborted");
@@ -82,8 +93,10 @@ export function createRepoTool(): ToolDefinition {
       const focusIdents = focus.filter(f => !f.includes('/') && !f.includes('.'));
       const focusPaths = focus.filter(f => f.includes('/') || f.includes('.'));
 
+      const mapTokens = clampMapTokens(params.mapTokens);
+
       const result = await rm.getRepoMap({
-        mapTokens: params.mapTokens,
+        mapTokens,
         focusFiles: focusPaths,
         priorityIdentifiers: focusIdents,
         mentionedIdents: focusIdents,
@@ -94,6 +107,7 @@ export function createRepoTool(): ToolDefinition {
         autoFallback: true,
         compact: params.compact ?? false,
         verbose: false,
+        delta: params.delta ?? false,
       });
 
       if (!result.map) {
@@ -110,6 +124,7 @@ export function createRepoTool(): ToolDefinition {
 
       // Enrich with graphify knowledge graph data (when available)
       let enrichedMap = result.map;
+      if (!params.delta) {
       try {
         const enricher = getGraphifyEnricher(cwd);
         if (enricher.isAvailable) {
@@ -148,6 +163,7 @@ export function createRepoTool(): ToolDefinition {
       } catch {
         // Graphify enrichment is best-effort
       }
+      }
 
       return {
         content: [{ type: "text" as const, text: enrichedMap }],
@@ -155,6 +171,29 @@ export function createRepoTool(): ToolDefinition {
       };
     },
   } as unknown as ToolDefinition;
+}
+
+function resolveDirParam(cwd: string, directory: string | undefined): string {
+  const resolvedDir = directory ? resolve(cwd, directory) : resolve(cwd);
+  try {
+    const realCwd = realpathSync(resolve(cwd));
+    let realDir: string;
+    try {
+      realDir = realpathSync(resolvedDir);
+    } catch {
+      realDir = resolvedDir;
+    }
+    const rel = relative(realCwd, realDir);
+    if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+      throw new Error(`Directory outside workspace: ${directory ?? "."}`);
+    }
+    return realDir;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
+      throw err;
+    }
+    return resolvedDir;
+  }
 }
 
 // ── Registration ──────────────────────────────────────────────────

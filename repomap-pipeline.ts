@@ -50,6 +50,7 @@ export interface RepoMapOptions {
   progress?: (msg: string) => void;
   mentionedIdents?: string[];
   mentionedFnames?: string[];
+  delta?: boolean;
 }
 
 export interface RepoMapResult {
@@ -282,6 +283,21 @@ async function searchIdentifiersByText(
   return sorted.slice(0, options.maxResults);
 }
 
+/**
+ * Line-level diff between two map strings.
+ * Returns only lines present in next but absent from prev.
+ */
+function diffMaps(prev: string, next: string): string {
+  const prevLines = new Set(prev.split("\n"));
+  const nextLines = next.split("\n");
+  const added: string[] = [];
+  for (const line of nextLines) {
+    if (!prevLines.has(line)) added.push(line);
+  }
+  if (added.length === 0) return "(no changes since last call)";
+  return added.join("\n");
+}
+
 // ── RepoMap orchestrator ─────────────────────────────────────────
 
 export class RepoMap {
@@ -295,6 +311,7 @@ export class RepoMap {
   private mapProcessingTime: number;
   private lastFileSet: Set<string> | null;
   private searchTreeSitterAvailable: boolean | null;
+  private searchTreeSitterAttemptsSinceFailure: number;
 
   constructor(root: string, options: Partial<RepoMapOptions> = {}) {
     this.root = path.resolve(root);
@@ -307,6 +324,7 @@ export class RepoMap {
     this.mapProcessingTime = 0;
     this.lastFileSet = null;
     this.searchTreeSitterAvailable = null;
+    this.searchTreeSitterAttemptsSinceFailure = 0;
   }
 
   /**
@@ -328,7 +346,7 @@ export class RepoMap {
 
     // ── Cache check ──
     const cacheKey = this.computeCacheKey(options);
-    if (!forceRefresh) {
+    if (!forceRefresh && !options.delta) {
       if (refresh === "manual" && this.lastMap !== null) {
         return this.buildCachedResult(cacheKey, startTime);
       }
@@ -399,7 +417,16 @@ export class RepoMap {
 
     this.mapProcessingTime = Date.now() - startTime;
     this.mapCache.set(cacheKey, result);
-    this.lastMap = result.map;
+
+    const fullMap = result.map;
+    if (options.delta && this.lastMap !== null && fullMap !== null) {
+      const deltaMap = diffMaps(this.lastMap, fullMap);
+      this.lastMap = fullMap;
+      this.lastMapTokens = result.tokenCount;
+      return { ...result, map: deltaMap };
+    }
+
+    this.lastMap = fullMap;
     this.lastMapTokens = result.tokenCount;
 
     return result;
@@ -736,7 +763,13 @@ export class RepoMap {
       return [];
     }
 
-    const shouldTryTreeSitter = this.searchTreeSitterAvailable !== false;
+    // Retry tree-sitter every 5 calls even after permanent failure
+    const RETRY_INTERVAL = 5;
+    const shouldTryTreeSitter = this.searchTreeSitterAvailable !== false ||
+      this.searchTreeSitterAttemptsSinceFailure >= RETRY_INTERVAL;
+    if (this.searchTreeSitterAvailable === false && shouldTryTreeSitter) {
+      this.searchTreeSitterAttemptsSinceFailure = 0;
+    }
     let allTags: Tag[] = [];
     let treeSitterAttempted = false;
 
@@ -772,13 +805,18 @@ export class RepoMap {
 
         if (allSrcFiles.length > 0 && allTags.length === 0) {
           this.searchTreeSitterAvailable = false;
+          this.searchTreeSitterAttemptsSinceFailure = 0;
         } else {
           this.searchTreeSitterAvailable = true;
+          this.searchTreeSitterAttemptsSinceFailure = 0;
         }
       } catch {
         this.searchTreeSitterAvailable = false;
+        this.searchTreeSitterAttemptsSinceFailure = 0;
         allTags = [];
       }
+    } else if (this.searchTreeSitterAvailable === false) {
+      this.searchTreeSitterAttemptsSinceFailure++;
     }
 
     let useTextFallback =

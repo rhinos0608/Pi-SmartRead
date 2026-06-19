@@ -199,6 +199,8 @@ export class FsScanCache<T extends unknown[]> {
 			if (age < ttl) {
 				return { entries: cached, cacheAgeMs: age }
 			}
+			// Expired — delete before rescan to prevent stale refs and race conditions
+			this.cache.delete(key)
 		}
 
 		// Cache miss or expired — run the scan
@@ -285,22 +287,39 @@ export class FsScanCache<T extends unknown[]> {
 	}
 }
 
-// ── Default instance for cross-tool sharing ─────────────────────────────────
+// ── Default instances for cross-tool sharing ─────────────────────────────────
+// Partitioned by root so cache eviction in one repo doesn't affect another.
+const _defaultInstances = new Map<string, FsScanCache<string[]>>()
 
-const _defaultInstance = new FsScanCache<string[]>()
-
-/**
- * Get the shared default FsScanCache instance.
- * Suitable for use by search, find, read_files tools.
- */
-export function getFsScanCache(): FsScanCache<string[]> {
-		return _defaultInstance
+function defaultInstanceForRoot(root?: string): FsScanCache<string[]> {
+	const key = root ?? ""
+	let cache = _defaultInstances.get(key)
+	if (!cache) {
+		cache = new FsScanCache<string[]>()
+		_defaultInstances.set(key, cache)
 	}
+	return cache
+}
 
 /**
- * Invalidate the shared cache for a mutated path.
- * Call this from write/edit tool handlers in index.ts.
- */
+* Get the shared default FsScanCache instance.
+* Suitable for use by search, find, read_files tools.
+*
+* @param root - Optional root directory to partition the cache by.
+*/
+export function getFsScanCache(root?: string): FsScanCache<string[]> {
+	return defaultInstanceForRoot(root)
+}
+
+/**
+* Invalidate the shared cache for a mutated path.
+* Call this from write/edit tool handlers in index.ts.
+* Invalidates across all root partitions.
+*/
 export function invalidateFsScanCache(target: string): number {
-	return _defaultInstance.invalidatePath(target) as number
+	let total = 0
+	for (const cache of _defaultInstances.values()) {
+		total += cache.invalidatePath(target) as number
+	}
+	return total
 }
