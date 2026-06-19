@@ -5,11 +5,10 @@
  *   - (default)   grep-style repository text search with definition-aware ranking.
  *   - code        AST-aware search + BM25 scoring + optional embedding re-rank
  *                  + symbol resolution enrichment.
- *   - deep        Full multi-channel orchestration: code + symbols + semantic + graph.
  */
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
-import { relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import Parser, { Query } from "tree-sitter";
@@ -27,9 +26,9 @@ import { loadSearchConfig } from "./config.js";
 import { bm25Scores, computeRrfScores } from "./scoring.js";
 import { fetchEmbeddings } from "./embedding.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
+import { executeDeepSearch } from "./deep-search.js";
 import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
 import { expandToMonorepoRoots } from "./monorepo-detector.js";
-import { executeDeepSearch } from "./deep-search.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { recordSparse, resolveSessionKey } from "./file-read-cache.js";
 
@@ -44,7 +43,7 @@ const SearchSchema = Type.Object({
       type: "string",
       enum: ["grep", "code", "deep"],
       description:
-        "Search mode. Default 'grep': grep-style line search across repository text files with definition-aware ranking. 'code': BM25 + optional embedding re-rank with symbol resolution. 'deep': multi-channel orchestration.",
+        "Search mode. grep (default): line-oriented text/pattern search. code: BM25 + optional embedding re-rank with symbol resolution. deep: multi-channel deep search (deprecated — use deep_search tool directly).",
       default: "grep",
     }),
   ),
@@ -60,9 +59,8 @@ const SearchSchema = Type.Object({
   ),
   maxResults: Type.Optional(
     Type.Number({
-      description: "Maximum results to return (1-10000)",
-      minimum: 1,
-      maximum: 10000,
+      description: "Maximum results to return (default: 30, clamped to 1-10000).",
+      default: 30,
     }),
   ),
   matchMode: Type.Optional(
@@ -81,10 +79,8 @@ const SearchSchema = Type.Object({
   ),
   contextLines: Type.Optional(
     Type.Number({
-      description: "Number of surrounding context lines to include for grep hits (0-2).",
-      minimum: 0,
-      maximum: 2,
-      default: 0,
+      description: "Number of surrounding context lines to include for grep hits (default: 3, clamped to 0-5).",
+      default: 3,
     }),
   ),
 });
@@ -121,6 +117,9 @@ interface DiscoverySummary extends FileDiscoveryDiagnostics {
   workspaceRootsSearched: string[];
 }
 
+// Parser pool keyed by language to avoid rebuilding parsers per file
+const parserPool = new Map<string, Parser>();
+
 async function extractCodeDefinitions(
   filePath: string,
   relFile: string,
@@ -138,8 +137,12 @@ async function extractCodeDefinitions(
     return [];
   }
 
-  const parser = new Parser();
-  parser.setLanguage(grammar);
+  let parser = parserPool.get(lang);
+  if (!parser) {
+    parser = new Parser();
+    parser.setLanguage(grammar);
+    parserPool.set(lang, parser);
+  }
   const chunkSize = 1024;
   const tree = parser.parse((offset) => code.slice(offset, offset + chunkSize));
   if (!tree?.rootNode) return [];
@@ -310,8 +313,30 @@ function lspSymbolKindToString(kind: number): string {
 }
 
 function resolveSearchRoot(params: SearchInput, defaultCwd: string): string {
-  const directory = params.directory?.trim();
-  return directory ? resolve(defaultCwd, directory) : defaultCwd;
+  const dir = params.directory?.trim();
+  const resolvedDir = dir ? resolve(defaultCwd, dir) : resolve(defaultCwd);
+  // Verify resolved directory stays inside workspace
+  try {
+    const realCwd = realpathSync(resolve(defaultCwd));
+    let realDir: string;
+    try {
+      realDir = realpathSync(resolvedDir);
+    } catch {
+      // Directory may not exist yet (e.g. test tempdir) — use resolved form
+      realDir = resolvedDir;
+    }
+    const rel = relative(realCwd, realDir);
+    if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+      throw new Error(`Directory outside workspace: ${dir ?? "."}`);
+    }
+    return realDir;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
+      throw err;
+    }
+    // If cwd itself can't be realpath'd (e.g. test env), fall back to resolved path
+    return resolvedDir;
+  }
 }
 
 function defaultCaseSensitive(query: string): boolean {
@@ -319,8 +344,13 @@ function defaultCaseSensitive(query: string): boolean {
 }
 
 function clampContextLines(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(2, Math.trunc(value)));
+  if (value === undefined || !Number.isFinite(value)) return 3;
+  return Math.max(0, Math.min(5, Math.trunc(value)));
+}
+
+function clampMaxResults(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 30;
+  return Math.max(1, Math.min(10000, Math.trunc(value)));
 }
 
 function collapseSearchRoots(roots: string[]): string[] {
@@ -467,7 +497,7 @@ function formatGrepResults(
     lines.push(
       `> 💡 Only ${matches.length} result(s) found. Try ` +
         `\`search mode=code query="${query}"\` for structural ranking, or ` +
-        `\`search mode=deep query="${query}"\` for multi-channel exploration.`,
+        `\`deep_search query="${query}"\` for multi-channel exploration.`,
     );
     lines.push("");
   }
@@ -477,75 +507,6 @@ function formatGrepResults(
 
 // ── Handlers ──────────────────────────────────────────────────────
 
-async function handleDeep(
-  toolCallId: string,
-  params: SearchInput,
-  cwd: string,
-  signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
-) {
-  const query = params.query ?? "";
-  if (!query.trim()) throw new Error('search mode "deep" requires a non-empty "query"');
-  const result = await executeDeepSearch(
-    {
-      query,
-      depth: "standard",
-      scope: "all",
-      directory: params.directory ?? cwd,
-      limit: params.maxResults ?? 15,
-      maxSnippetChars: 400,
-      outputBudget: 4096,
-      includeRelationships: undefined,
-      focusFiles: undefined,
-    },
-    signal,
-    ctx,
-  );
-
-  const sessionKey = resolveSessionKey(toolCallId);
-
-  let validMatches: Array<{ file: string; lines?: { start: number }; snippet: string }> | undefined;
-  const rawDetails = result.details;
-  if (rawDetails && typeof rawDetails === "object" && !Array.isArray(rawDetails)) {
-    const rawMatches = (rawDetails as Record<string, unknown>).matches;
-    if (Array.isArray(rawMatches)) {
-      validMatches = rawMatches.filter(
-        (match): match is { file: string; lines?: { start: number }; snippet: string } => {
-          if (!match || typeof match !== "object") return false;
-          const entry = match as Record<string, unknown>;
-          if (typeof entry.file !== "string") return false;
-          if (typeof entry.snippet !== "string") return false;
-          if (entry.lines !== undefined) {
-            if (typeof entry.lines !== "object" || entry.lines === null) return false;
-            const lines = entry.lines as Record<string, unknown>;
-            if (lines.start !== undefined && typeof lines.start !== "number") return false;
-          }
-          return true;
-        },
-      );
-      if (validMatches.length === 0) {
-        validMatches = undefined;
-      }
-    }
-  }
-
-  if (validMatches && validMatches.length > 0) {
-    const byFile = new Map<string, Array<{ line: number; text: string }>>();
-    for (const match of validMatches) {
-      const absPath = resolve(cwd, match.file);
-      const lineNum = match.lines?.start ?? 1;
-      const entries = byFile.get(absPath) ?? [];
-      entries.push({ line: lineNum, text: match.snippet });
-      byFile.set(absPath, entries);
-    }
-    for (const [absPath, entries] of byFile) {
-      recordSparse(sessionKey, absPath, entries);
-    }
-  }
-
-  return result;
-}
-
 async function handleGrep(
   toolCallId: string,
   params: SearchInput,
@@ -553,7 +514,7 @@ async function handleGrep(
   signal: AbortSignal | undefined,
 ) {
   const query = params.query!.trim();
-  const maxResults = params.maxResults ?? 30;
+  const maxResults = clampMaxResults(params.maxResults);
   const matchMode = params.matchMode ?? "literal";
   const caseSensitive = params.caseSensitive ?? defaultCaseSensitive(query);
   const contextLines = clampContextLines(params.contextLines);
@@ -565,9 +526,19 @@ async function handleGrep(
   const definitionCache = new Map<string, CodeDefinition[]>();
   const matches: GrepSearchMatch[] = [];
 
+  const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
   for (const filePath of allFiles) {
     if (signal?.aborted) throw new Error("Operation aborted");
     if (matches.length >= maxResults) break;
+
+    // Skip oversized files to avoid unbounded memory reads
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.size > MAX_FILE_BYTES) continue;
+    } catch {
+      continue;
+    }
 
     let content: string;
     try {
@@ -717,7 +688,7 @@ async function handleCode(
     // best-effort only
   }
 
-  const allResults = [...scored, ...bm25Only.sort((a, b) => b.score - a.score)];
+  const allResults = [...scored, ...bm25Only].sort((a, b) => b.score - a.score);
 
   let lspResultsCount = 0;
   try {
@@ -812,9 +783,9 @@ async function handleCode(
 
   if (top.length < 3 && enrich !== false && shouldShowLowResultHint()) {
     lines.push(
-      `> 💡 Only ${top.length} result(s) found. Try ` +
-        `\`search mode=deep query="${query}"\` for multi-channel semantic search + graph expansion.`,
-    );
+        `> 💡 Only ${top.length} result(s) found. Try ` +
+          `\`deep_search query="${query}"\` for multi-channel semantic search + graph expansion.`,
+      );
     lines.push("");
   }
 
@@ -909,10 +880,7 @@ export default function createSearchTool(): ToolDefinition {
     name: "search",
     label: "search",
     description:
-      'Search repository text and code. Default mode (grep): line-oriented text search with definition-aware ranking. ' +
-      'mode=code: BM25 + optional embedding re-rank with symbol resolution and caller enrichment. ' +
-      'mode=deep: multi-channel orchestration (code + symbols + semantic + graph). ' +
-      'Use directory to scope the search root.',
+        'Search repository text and code. mode=grep (default): line-oriented text search with definition-aware ranking. mode=code: BM25 + optional embedding re-rank with symbol resolution. For multi-channel orchestration, use deep_search.',
     parameters: SearchSchema,
 
     async execute(
@@ -940,8 +908,18 @@ export default function createSearchTool(): ToolDefinition {
             config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false;
           return handleCode(toolCallId, params, cwd, signal, enrich);
         }
-        case "deep":
-          return handleDeep(toolCallId, params, cwd, signal, ctx);
+        case "deep": {
+          const deepResult = await executeDeepSearch({
+            query: params.query!.trim(),
+            depth: "standard",
+            scope: "all",
+            directory: cwd,
+            limit: params.maxResults ?? 15,
+            maxSnippetChars: 400,
+            outputBudget: 4096,
+          }, signal, ctx);
+          return deepResult;
+        }
       }
     },
   } as unknown as ToolDefinition;

@@ -600,7 +600,7 @@ function fuseCandidates(
     match.handle = makeHandle(match);
   }
 
-  matches.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+  matches.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file) || a.name.localeCompare(b.name) || a.handle.localeCompare(b.handle));
   const maxScore = Math.max(...matches.map((m) => m.score), 0.000001);
   return matches.slice(0, limit).map((match) => ({
     ...match,
@@ -635,6 +635,10 @@ export async function executeDeepSearch(
   const cwd = resolveDeepSearchRoot(params, ctx.cwd);
   const degraded: string[] = [];
 
+  // Serial bottleneck: discoveredFiles is awaited before channels start because
+  // both semantic (phase 2) and graph (phase 3) channels need the full file list.
+  // Structural/grep/symbol channels (phase 1) could in theory start earlier with a
+  // partial list, but the complexity/benefit ratio is marginal for the current design.
   const discoveredFiles = await discoverCandidateFiles(cwd, scope, signal);
   const candidatePathFilter = new Set(discoveredFiles.map((path) => toRelativePath(cwd, path)));
   const maxChannelResults = Math.min(100, Math.max(limit * 3, limit));

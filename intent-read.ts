@@ -182,8 +182,8 @@ export function createIntentReadTool(
   const persistentCaches = new LruCache<PersistentEmbeddingCache>(10);
 
   return {
-    name: "intent_read",
-    label: "intent_read",
+    name: "semantic_read",
+    label: "semantic_read",
     description: `Read up to 20 files, rank them by hybrid RRF (BM25 keyword + semantic cosine) against a query, and return the top-K relevant files. Combined output respects limits (${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}). Requires embedding config via pi-smartread.config.json or PI_SMARTREAD_EMBEDDING_BASE_URL / PI_SMARTREAD_EMBEDDING_MODEL env vars.`,
     parameters: IntentReadSchema,
 
@@ -262,7 +262,13 @@ export function createIntentReadTool(
         const reordered = presortPathsByQuery(pathStrings, query);
         resolvedFiles = reordered.map((p) => ({ path: p }));
       } else {
-        resolvedFiles = params.files!;
+        // Deduplicate by path to prevent silent overwrites in detail map
+        const seenPaths = new Set<string>();
+        resolvedFiles = params.files!.filter(f => {
+          if (seenPaths.has(f.path)) return false;
+          seenPaths.add(f.path);
+          return true;
+        });
       }
 
       const candidateCountBeforeGraph = resolvedFiles.length;
@@ -695,9 +701,9 @@ export function createIntentReadTool(
               persistentCache.set(persistentKey, { vectors });
             }
 
-          if (vectors.length === allChunkTexts.length + 1) {
+          if (vectors.length >= allChunkTexts.length + 1) {
             const queryVec = vectors[0]!;
-            const chunkVecs = vectors.slice(1);
+            const chunkVecs = vectors.slice(1, allChunkTexts.length + 1);
 
             // Map chunk vectors back to parent files, taking max similarity
             let chunkIdx = 0;

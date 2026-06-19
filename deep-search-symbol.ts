@@ -75,32 +75,31 @@ function parseGrepCandidates(result: unknown): DeepSearchCandidate[] {
     }
   }
   if (text.length > 0 && candidates.length === 0) {
-  // Skip fallback if the output is a clear "no results" message
-  const noResultPattern = /no (?:definitions?|matches?|results?|symbols?)/i;
-  if (!noResultPattern.test(text)) {
-   console.warn(`parseGrepCandidates: no candidates parsed from ${text.length} chars, first 200: ${text.slice(0, 200)}`);
-   // Fallback: try to extract path:line from each line before treating as plain text.
-   // The grep output format is "  file:line-endline  [kind]  name", so candidates built
-   // here with proper file/line pass through candidatePathFilter in deep-search.ts.
-   const pathLineRe = /^\s*([^\s:]+?):(\d+)/;
-   for (let i = 0; i < Math.min(lines.length, 5); i++) {
-    const trimmed = lines[i]!.trim();
-    if (trimmed) {
-     const plMatch = pathLineRe.exec(trimmed);
-     candidates.push({
-      file: plMatch?.[1] ?? "unknown",
-      line: plMatch ? Number(plMatch[2]) : 1,
-      name: trimmed.slice(0, 80),
-      kind: "symbol",
-      channel: "symbol",
-      snippet: trimmed.slice(0, 400),
-      rawScore: 1.0,
-      rank: candidates.length + 1,
-     });
+    // Skip fallback if the output is a clear "no results" message
+    const noResultPattern = /no (?:definitions?|matches?|results?|symbols?)/i;
+    if (!noResultPattern.test(text)) {
+      // Fallback: try to extract path:line from each line before treating as plain text.
+      // The grep output format is "  file:line-endline  [kind]  name", so candidates built
+      // here with proper file/line pass through candidatePathFilter in deep-search.ts.
+      const pathLineRe = /^\s*([^\s:]+?):(\d+)/;
+      for (let i = 0; i < Math.min(lines.length, 5); i++) {
+        const trimmed = lines[i]!.trim();
+        if (trimmed) {
+          const plMatch = pathLineRe.exec(trimmed);
+          candidates.push({
+            file: plMatch?.[1] ?? "unknown",
+            line: plMatch ? Number(plMatch[2]) : 1,
+            name: trimmed.slice(0, 80),
+            kind: "symbol",
+            channel: "symbol",
+            snippet: trimmed.slice(0, 400),
+            rawScore: 1.0,
+            rank: candidates.length + 1,
+          });
+        }
+      }
     }
-   }
   }
- }
   return candidates;
 }
 
