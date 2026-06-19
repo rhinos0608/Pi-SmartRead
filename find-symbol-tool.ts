@@ -1,5 +1,5 @@
-import { existsSync, promises as fs } from "node:fs";
-import { relative, resolve } from "node:path";
+import { existsSync, promises as fs, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition } from "./types.js";
@@ -11,7 +11,7 @@ import { resolveSymbol } from "./symbol-resolver.js";
 import { loadGrammar } from "./grammar-loader.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { ToolCategory, ToolRegistry } from "./tool-registry.js";
-import { getLSPBridge, type LSPBridge, type LSPDocumentSymbol, type LSPWorkspaceSymbol } from "./lsp-bridge.js";
+import { getLSPBridge, type LSPBridge, type LSPDocumentSymbol } from "./lsp-bridge.js";
 import { expandToMonorepoRoots } from "./monorepo-detector.js";
 
 // ── Schemas ─────────────────────────────────────────────────────────
@@ -23,46 +23,21 @@ const FindSymbolSchema = Type.Object({
   directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
 });
 
-const FileOutlineSchema = Type.Object({
-  path: Type.String({ description: "File path relative to project root." }),
-  childDepth: Type.Optional(Type.Number({ description: "Levels of children to include (0 = top-level only, default: 0).", minimum: 0, maximum: 5, default: 0 })),
-  directory: Type.Optional(Type.String({ description: "Root directory to resolve path against (default: extension working directory).", default: "." })),
+const SymbolInfoSchema = Type.Object({
+  action: Type.Union([
+    Type.Literal("outline"),
+    Type.Literal("declaration"),
+    Type.Literal("references"),
+    Type.Literal("implementations"),
+  ], { description: "What to query: outline (file structure), declaration (canonical definition), references (all usages), implementations (interface/class implementors)." }),
+  query: Type.Optional(Type.String({ description: "Symbol name or pattern (required for declaration/references/implementations)." })),
+  path: Type.Optional(Type.String({ description: "File path (required for outline; optional context for others)." })),
+  directory: Type.Optional(Type.String({ description: "Root directory (default: cwd).", default: "." })),
+  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body (declaration/implementations)." })),
+  maxResults: Type.Optional(Type.Number({ description: "Max results (references/implementations, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
+  childDepth: Type.Optional(Type.Number({ description: "Child depth for outline (default: 0).", minimum: 0, maximum: 5, default: 0 })),
 });
 
-const FindReferencesSchema = Type.Object({
-  query: Type.String({ description: "Symbol name to find references for." }),
-  path: Type.Optional(Type.String({ description: "Optional context file to narrow the search." })),
-  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
-  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
-});
-
-const FindDeclarationSchema = Type.Object({
-  query: Type.String({ description: "Symbol name to find the declaration/definition for." }),
-  path: Type.Optional(Type.String({ description: "Optional context file to narrow the search." })),
-  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body in results (default: false)." })),
-  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
-});
-
-const FindImplementationsSchema = Type.Object({
-  query: Type.String({ description: "Interface or class name to find implementors of." }),
-  path: Type.Optional(Type.String({ description: "Optional context file to narrow the search." })),
-  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body in results (default: false)." })),
-  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
-  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
-});
-
-const WorkspaceSymbolSchema = Type.Object({
-  query: Type.String({ description: "Symbol name or pattern to search for across the workspace." }),
-  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
-  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
-});
-
-const HoverTypeSchema = Type.Object({
-  path: Type.String({ description: "File path relative to project root." }),
-  line: Type.Number({ description: "Line number (1-indexed).", minimum: 1 }),
-  character: Type.Number({ description: "Character position on the line (1-indexed).", minimum: 1 }),
-  directory: Type.Optional(Type.String({ description: "Root directory to resolve path against (default: extension working directory).", default: "." })),
-});
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -78,7 +53,26 @@ interface SymbolEntry {
 }
 
 function resolveDirectory(directory: string | undefined, defaultCwd: string): string {
-  return directory ? resolve(defaultCwd, directory) : defaultCwd;
+  const result = directory ? resolve(defaultCwd, directory) : resolve(defaultCwd);
+  try {
+    const realCwd = realpathSync(resolve(defaultCwd));
+    let realDir: string;
+    try {
+      realDir = realpathSync(result);
+    } catch {
+      realDir = result;
+    }
+    const rel = relative(realCwd, realDir);
+    if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+      throw new Error(`Directory outside workspace: ${directory ?? "."}`);
+    }
+    return realDir;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
+      throw err;
+    }
+    return result;
+  }
 }
 
 function extractSymbolName(node: { childForFieldName: (n: string) => { text: string } | null; namedChildren: ReadonlyArray<{ type: string; text: string; isNamed: boolean }> }): string | null {
@@ -202,6 +196,25 @@ async function handleSymbol(
   cwd: string,
   signal?: AbortSignal,
 ) {
+  // Fire off LSP workspace search concurrently with the tree-sitter scan so
+  // both strategies contribute without sequential latency cost.
+  const lspSearchPromise: Promise<SymbolEntry[]> = (async (): Promise<SymbolEntry[]> => {
+    try {
+      const bridge = await lsp();
+      if (!bridge) return [];
+      const symbols = await bridge.workspaceSymbol(query, root);
+      return symbols.map((s) => ({
+        name: s.name,
+        kind: symbolKindToString(s.kind),
+        relative_path: relative(cwd, decodeURIComponent(s.location.uri.replace(/^file:\/\//, ""))),
+        line: s.location.range.start.line + 1,
+        name_path: s.containerName ? `${s.containerName}.${s.name}` : s.name,
+      }));
+    } catch {
+      return [];
+    }
+  })();
+
   const searchRoots = expandToMonorepoRoots(root);
   let allFiles: string[] = [];
   for (const sr of searchRoots) {
@@ -285,7 +298,24 @@ async function handleSymbol(
     }
   }
 
-  return { matches, totalDefs, filesScanned: allFiles.length };
+  // Merge LSP results first (typically faster/more accurate for configured
+  // language servers), then fill remaining slots with tree-sitter results.
+  // Deduplicate by file:line so the same symbol isn't shown twice.
+  const lspResults = await lspSearchPromise;
+  const seen = new Set<string>();
+  const merged: SymbolEntry[] = [];
+  for (const r of lspResults) {
+    if (merged.length >= maxResults) break;
+    const key = `${r.relative_path}:${r.line}`;
+    if (!seen.has(key)) { seen.add(key); merged.push(r); }
+  }
+  for (const m of matches) {
+    if (merged.length >= maxResults) break;
+    const key = `${m.relative_path}:${m.line}`;
+    if (!seen.has(key)) { seen.add(key); merged.push(m); }
+  }
+
+  return { matches: merged, totalDefs, filesScanned: allFiles.length };
 }
 
 // ── LSP helpers ────────────────────────────────────────────────────
@@ -331,87 +361,7 @@ function symbolKindToString(kind: number): string {
   }
 }
 
-// ── Action: workspace ───────────────────────────────────────────────
 
-interface WorkspaceSymbolEntry {
-  name: string;
-  kind: string;
-  file: string;
-  line: number;
-  containerName?: string;
-}
-
-async function handleWorkspace(
-  query: string,
-  maxResults: number,
-  root: string,
-): Promise<{ symbol: string; results: WorkspaceSymbolEntry[]; total: number }> {
-  const bridge = await lsp();
-  if (!bridge) return { symbol: query, results: [], total: 0 };
-
-  const symbols: LSPWorkspaceSymbol[] = await bridge.workspaceSymbol(query, root);
-  const results: WorkspaceSymbolEntry[] = symbols.slice(0, maxResults).map((s) => {
-    const filePath = s.location.uri.replace(/^file:\/\//, "");
-    const relFile = relative(root, filePath);
-    return {
-      name: s.name,
-      kind: symbolKindToString(s.kind),
-      file: relFile,
-      line: s.location.range.start.line + 1,
-      containerName: s.containerName,
-    };
-  });
-
-  return { symbol: query, results, total: symbols.length };
-}
-
-// ── Action: hover ────────────────────────────────────────────────────
-
-interface HoverResult {
-  contents: string | null;
-  kind: "markdown" | "plaintext" | null;
-  range?: { startLine: number; startChar: number; endLine: number; endChar: number };
-}
-
-async function handleHover(
-  relativePath: string,
-  line: number,
-  character: number,
-  root: string,
-): Promise<{ symbol: string; result: HoverResult | null }> {
-  const fullPath = resolve(root, relativePath);
-  const bridge = await lsp();
-  if (!bridge) return { symbol: relativePath, result: null };
-
-  const hover = await bridge.hover(fullPath, line, character, root);
-  if (!hover) return { symbol: relativePath, result: null };
-
-  let contents: string;
-  let kind: "markdown" | "plaintext" | null = null;
-
-  if (typeof hover.contents === "string") {
-    contents = hover.contents;
-  } else if (Array.isArray(hover.contents)) {
-    contents = hover.contents
-      .map((c) => (typeof c === "string" ? c : c.value))
-      .join("\n");
-  } else {
-    contents = hover.contents.value;
-    kind = hover.contents.kind;
-  }
-
-  const result: HoverResult = { contents, kind };
-  if (hover.range) {
-    result.range = {
-      startLine: hover.range.start.line + 1,
-      startChar: hover.range.start.character,
-      endLine: hover.range.end.line + 1,
-      endChar: hover.range.end.character,
-    };
-  }
-
-  return { symbol: relativePath, result };
-}
 
 // ── Action: overview ───────────────────────────────────────────────
 
@@ -936,39 +886,7 @@ function formatImplementationsResult(data: any, _query: string, startTime: numbe
   return lines.join("\n");
 }
 
-function formatWorkspaceResult(data: { symbol: string; results: WorkspaceSymbolEntry[]; total: number }, _query: string, startTime: number): string {
-  const lines: string[] = [
-    `Workspace symbols for "${data.symbol}" (${data.total} found, ${Date.now() - startTime}ms):`,
-    "",
-  ];
-  if (data.results.length === 0) {
-    lines.push(`  [No workspace symbols found]`, "");
-    return lines.join("\n");
-  }
-  for (const r of data.results) {
-    const container = r.containerName ? ` (in ${r.containerName})` : "";
-    lines.push(`  ${r.file}:${r.line}  [${r.kind}]  ${r.name}${container}`);
-  }
-  lines.push("");
-  return lines.join("\n");
-}
 
-function formatHoverResult(data: { symbol: string; result: HoverResult | null }, _query: string, startTime: number): string {
-  const elapsed = Date.now() - startTime;
-  if (!data.result) {
-    return `Hover for "${data.symbol}" (${elapsed}ms):\n\n  [No hover info available]\n`;
-  }
-  const rangeStr = data.result.range
-    ? ` at L${data.result.range.startLine}:${data.result.range.startChar}-L${data.result.range.endLine}:${data.result.range.endChar}`
-    : "";
-  const kindStr = data.result.kind ? `  [${data.result.kind}]` : "";
-  return [
-    `Hover for "${data.symbol}"${rangeStr} (${elapsed}ms):${kindStr}`,
-    "",
-    data.result.contents,
-    "",
-  ].join("\n");
-}
 
 // ── Tool definitions ───────────────────────────────────────────────
 
@@ -976,7 +894,7 @@ function createFindSymbolSearchTool(): ToolDefinition {
   return toToolDefinition({
     name: "find_symbol",
     label: "find_symbol",
-    description: "Find symbols by name or pattern using tree-sitter AST analysis. Supports qualified paths like 'ClassName.methodName' for precise matching.",
+    description: "Find symbols by name or pattern across the codebase using AST analysis and LSP (when available). Use when you know a symbol name and need to navigate to where it's defined. Supports qualified paths like 'ClassName.methodName' for precise matching.",
     parameters: FindSymbolSchema,
 
     async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
@@ -992,125 +910,48 @@ function createFindSymbolSearchTool(): ToolDefinition {
   });
 }
 
-function createFileOutlineTool(): ToolDefinition {
+function createSymbolInfoTool(): ToolDefinition {
   return toToolDefinition({
-    name: "file_outline",
-    label: "file_outline",
-    description: "Get a file outline via AST analysis. Returns all top-level symbols with types, line ranges, and child symbol counts.",
-    parameters: FileOutlineSchema,
+    name: "symbol_info",
+    label: "symbol_info",
+    description: "Query symbol information: outline (file structure), declaration (canonical definition), references (all usages), or implementations (interface/class implementors).",
+    parameters: SymbolInfoSchema,
 
     async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
       if (signal?.aborted) throw new Error("Operation aborted");
       const startTime = Date.now();
       const root = resolveDirectory(params.directory, ctx.cwd);
-      const data = await handleOverview(params.path, params.childDepth ?? 0, root);
-      return {
-        content: [{ type: "text" as const, text: formatOverviewResult(data, startTime) }],
-        details: data,
-      };
+      const action = params.action as string;
+
+      switch (action) {
+        case "outline": {
+          if (!params.path) throw new Error('action "outline" requires "path" parameter');
+          const data = await handleOverview(params.path, params.childDepth ?? 0, root);
+          return { content: [{ type: "text" as const, text: formatOverviewResult(data, startTime) }], details: data };
+        }
+        case "declaration": {
+          if (!params.query) throw new Error('action "declaration" requires "query" parameter');
+          const data = await handleDeclaration(params.query, params.path, params.include_body ?? false, root, ctx.cwd);
+          return { content: [{ type: "text" as const, text: formatDeclarationResult(data, params.query, startTime) }], details: data };
+        }
+        case "references": {
+          if (!params.query) throw new Error('action "references" requires "query" parameter');
+          const data = await handleReferences(params.query, params.path, params.maxResults ?? 30, root, ctx.cwd);
+          return { content: [{ type: "text" as const, text: formatReferencesResult(data, params.query, startTime) }], details: data };
+        }
+        case "implementations": {
+          if (!params.query) throw new Error('action "implementations" requires "query" parameter');
+          const data = await handleImplementations(params.query, params.path, params.include_body ?? false, params.maxResults ?? 30, root, ctx.cwd, signal);
+          return { content: [{ type: "text" as const, text: formatImplementationsResult(data, params.query, startTime) }], details: data };
+        }
+        default:
+          throw new Error(`Unknown action: ${action}. Use outline, declaration, references, or implementations.`);
+      }
     },
   });
 }
 
-function createFindReferencesTool(): ToolDefinition {
-  return toToolDefinition({
-    name: "find_references",
-    label: "find_references",
-    description: "Find all cross-file references to a symbol.",
-    parameters: FindReferencesSchema,
 
-    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-      const startTime = Date.now();
-      const root = resolveDirectory(params.directory, ctx.cwd);
-      const data = await handleReferences(params.query, params.path, params.maxResults ?? 30, root, ctx.cwd);
-      return {
-        content: [{ type: "text" as const, text: formatReferencesResult(data, params.query, startTime) }],
-        details: data,
-      };
-    },
-  });
-}
-
-function createFindDeclarationTool(): ToolDefinition {
-  return toToolDefinition({
-    name: "find_declaration",
-    label: "find_declaration",
-    description: "Find the definition/declaration of a symbol. Optionally narrow the search with a context file.",
-    parameters: FindDeclarationSchema,
-
-    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-      const startTime = Date.now();
-      const root = resolveDirectory(params.directory, ctx.cwd);
-      const data = await handleDeclaration(params.query, params.path, params.include_body ?? false, root, ctx.cwd);
-      return {
-        content: [{ type: "text" as const, text: formatDeclarationResult(data, params.query, startTime) }],
-        details: data,
-      };
-    },
-  });
-}
-
-function createFindImplementationsTool(): ToolDefinition {
-  return toToolDefinition({
-    name: "find_implementations",
-    label: "find_implementations",
-    description: "Find types that implement, extend, or subclass a given interface or class.",
-    parameters: FindImplementationsSchema,
-
-    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-      const startTime = Date.now();
-      const root = resolveDirectory(params.directory, ctx.cwd);
-      const data = await handleImplementations(params.query, params.path, params.include_body ?? false, params.maxResults ?? 30, root, ctx.cwd, signal);
-      return {
-        content: [{ type: "text" as const, text: formatImplementationsResult(data, params.query, startTime) }],
-        details: data,
-      };
-    },
-  });
-}
-
-function createWorkspaceSymbolTool(): ToolDefinition {
-  return toToolDefinition({
-    name: "workspace_symbol",
-    label: "workspace_symbol",
-    description: "Workspace-wide symbol search via LSP.",
-    parameters: WorkspaceSymbolSchema,
-
-    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-      const startTime = Date.now();
-      const root = resolveDirectory(params.directory, ctx.cwd);
-      const data = await handleWorkspace(params.query, params.maxResults ?? 30, root);
-      return {
-        content: [{ type: "text" as const, text: formatWorkspaceResult(data, params.query, startTime) }],
-        details: data,
-      };
-    },
-  });
-}
-
-function createHoverTypeTool(): ToolDefinition {
-  return toToolDefinition({
-    name: "hover_type",
-    label: "hover_type",
-    description: "Get type/signature/quick-info at a file position via LSP.",
-    parameters: HoverTypeSchema,
-
-    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-      const startTime = Date.now();
-      const root = resolveDirectory(params.directory, ctx.cwd);
-      const data = await handleHover(params.path, params.line - 1, params.character - 1, root);
-      return {
-        content: [{ type: "text" as const, text: formatHoverResult(data, `${params.path}:${params.line}:${params.character}`, startTime) }],
-        details: data,
-      };
-    },
-  });
-}
 
 // ── Registration ───────────────────────────────────────────────────
 
@@ -1118,12 +959,7 @@ export function registerFindSymbolTool(): void {
   const registry = ToolRegistry.getInstance();
   const tools = [
     createFindSymbolSearchTool(),
-    createFileOutlineTool(),
-    createFindReferencesTool(),
-    createFindDeclarationTool(),
-    createFindImplementationsTool(),
-    createWorkspaceSymbolTool(),
-    createHoverTypeTool(),
+    createSymbolInfoTool(),
   ];
   for (const tool of tools) {
     if (registry.get(tool.name)) continue;
