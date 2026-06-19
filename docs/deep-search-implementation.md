@@ -1,6 +1,6 @@
 # Deep Search Implementation Plan
 
-> **Note (2026-05-19):** Deep search shipped and was later consolidated into the unified `search` tool as `mode: "deep"`. The implementation lives in `deep-search.ts` and is invoked by `search-tool.ts` when `mode="deep"`. The `smartread_status` tool referenced below was removed.
+> **Note (2026-06-18):** Deep search was split from `search mode=deep` into its own first-class `deep_search` tool. The implementation lives in `deep-search.ts` and is exposed via `deep-search-tool.ts`. The original `smartread_status` tool referenced below was removed.
 
 ## Source brief
 
@@ -31,7 +31,7 @@ The module depends on existing primitives instead of duplicating index builders:
 
 ### 2. Register tools
 
-Update `mcp-registry.ts` to register the deep search tool. ✅ Shipped — `deep_search` now accessible via `search mode="deep"`.
+Update `mcp-registry.ts` to register the deep search tool. ✅ Shipped — `deep_search` is now its own first-class tool registered via `createDeepSearchTool()`.
 
 ### 3. Package metadata
 

@@ -102,7 +102,7 @@ let bunSqliteConfigured = false;
 function openDatabase(path: string): SQLiteDatabase {
   // Try better-sqlite3 first — works in both raw node and vitest workers.
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+     
     const BetterSqlite3 = require("better-sqlite3") as typeof import("better-sqlite3");
     const raw = new BetterSqlite3(path) as RawDbHandle;
     return makeWrapper(raw);
@@ -115,7 +115,7 @@ function openDatabase(path: string): SQLiteDatabase {
 }
 
 function openBunDatabase(path: string): SQLiteDatabase {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+   
   const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
 
   // On macOS, Bun ships Apple's system SQLite which has extension loading disabled.
