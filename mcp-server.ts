@@ -15,7 +15,6 @@
  * Usage:
  *   node --import tsx mcp-server.ts    # Run as MCP stdio server
  */
-import { cwd } from "node:process";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -26,12 +25,16 @@ import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { Value } from "@sinclair/typebox/value";
 import { buildToolRegistry } from "./mcp-registry.js";
 import { MCP_PROMPTS } from "./mcp-prompts.js";
 import { MCP_RESOURCES, resolveResource } from "./mcp-resources.js";
 import { coerceText } from "./utils.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toExtensionContext } from "./types.js";
+
+// Capture cwd once at server start
+const SERVER_CWD = process.cwd();
 
 // ── Build Registry ─────────────────────────────────────────────────
 
@@ -58,7 +61,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 let toolCallCounter = 0;
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args } = request.params;
 
   const tool = tools.find((t) => t.name === name);
@@ -70,10 +73,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
-    const toolCallId = `mcp-${++toolCallCounter}`;
-    const ctx = toExtensionContext(cwd());
+    // Validate tool args against inputSchema
+    if (tool.parameters && args !== undefined && args !== null) {
+      try {
+        // Simple type-based validation using Value.Check
+        const valid = (Value as any).Check(tool.parameters, args);
+        if (!valid) {
+          const errors = [...(Value as any).Errors(tool.parameters, args)];
+          return {
+            content: [{ type: "text" as const, text: `Invalid params: ${errors.map((e: { message: string }) => e.message).join("; ")}` }],
+            isError: true,
+          };
+        }
+      } catch {
+        // Validation not supported for this schema type — skip
+      }
+    }
 
-    const result = await tool.execute(toolCallId, args ?? {}, undefined, undefined, ctx);
+    const toolCallId = `mcp-${++toolCallCounter}`;
+    const ctx = toExtensionContext(SERVER_CWD);
+
+    const result = await tool.execute(toolCallId, args ?? {}, extra.signal ?? undefined, undefined, ctx);
 
     // Convert tool result to MCP content format
     const content: Array<{ type: "text"; text: string }> = (result.content ?? []).map((item: any) => {
@@ -85,9 +105,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     return {
       content:
-        content.length > 0
-          ? content
-          : [{ type: "text" as const, text: "Tool executed successfully (no output)" }],
+        result === undefined
+          ? [{ type: "text" as const, text: "Tool executed successfully (no output)" }]
+          : content,
       isError: false,
     };
   } catch (err) {
@@ -108,6 +128,15 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => {
 server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
+  // Validate required prompt arguments
+  const promptDef = MCP_PROMPTS.find(p => p.name === name);
+  if (promptDef?.arguments) {
+    for (const arg of promptDef.arguments) {
+      if (arg.required && (args === undefined || args === null || !(arg.name in args))) {
+        throw Object.assign(new Error(`Missing required argument: ${arg.name}`), { code: -32602 });
+      }
+    }
+  }
 
   if (name === "explain-code") {
     const lang = args?.language ?? "code";

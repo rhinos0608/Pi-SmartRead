@@ -100,9 +100,7 @@ export function createMinimalContext(cwd: string): ExtensionContext {
       setFooter: () => {},
       setHeader: () => {},
       setTitle: () => {},
-      custom: async () => {
-        throw new Error("UI custom not available in MCP context");
-      },
+      custom: async () => undefined as any,
       pasteToEditor: () => {},
       setEditorText: () => {},
       getEditorText: () => "",

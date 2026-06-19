@@ -1,12 +1,8 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerSessionHooks } from "./hook.js";
-import { createGraphMutateTool } from "./graph-mutate.js";
-import { createGitNotesTools } from "./git-notes-tool.js";
-import { loadExperimentalConfig } from "./config.js";
 import { coerceText, ensureHashlineReady } from "./utils.js";
 import { initHandlers } from "./read-many.js";
 import { invalidateFsScanCache } from "./fs-scan-cache.js";
-import { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import { registerFindSymbolTool } from "./find-symbol-tool.js";
@@ -14,23 +10,21 @@ import "./mcp-registry.js"; // registers read, search, repo_map with ToolRegistr
 import { getLSPBridge } from "./lsp-bridge.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
-	isInternalUrl,
-	resolveUrl,
-	parseInternalUrl,
-	registerHandler,
-	getHandler,
+  isInternalUrl,
+  resolveUrl,
+  parseInternalUrl,
+  registerHandler,
+  getHandler,
 } from "./internal-url-router.js";
 export { resolveSkillUrl, resolveMemoryUrl, resolveGraphUrl } from "./internal-url-router.js";
-import {
-  recordContiguous,
-  recordSparse,
-  getSnapshot,
-  invalidate,
-  clearSession,
-  resolveSessionKey,
-  type FileSnapshot,
-  type SearchMatchEntry,
-} from "./file-read-cache.js";
+
+// ── File-read cache API (re-exported for external use) ───────────────────
+export { recordContiguous, recordSparse, getSnapshot, invalidate, clearSession, resolveSessionKey } from "./file-read-cache.js";
+export type { FileSnapshot, SearchMatchEntry } from "./file-read-cache.js";
+
+// ── Code summary API ───────────────────────────────────────────────
+export { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
+export type { SummaryOptions, SummarySegment, SummaryResult } from "./code-summary.js";
 
 // Ensure all tools are registered with the central registry
 registerFindSymbolTool();
@@ -144,9 +138,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ── LSP incremental document tracking ──
-    // After a read, open the file on the LSP server so subsequent LSP queries
-    // don't re-open it. After a mutation via graph_mutate, close mutated files
-    // so the next read re-opens them with fresh content.
     if (toolCallId && event.input) {
       const lspInput = event.input as Record<string, unknown>;
       if (toolName === "read") {
@@ -159,7 +150,6 @@ export default function (pi: ExtensionAPI) {
             .catch(() => {});
         }
       } else if (toolName === "graph_mutate") {
-        // Close mutated files so LSP re-opens them with fresh content
         const closePaths: string[] = [];
         if (typeof lspInput.from === "string") closePaths.push(lspInput.from);
         if (typeof lspInput.to === "string") closePaths.push(lspInput.to);
@@ -208,7 +198,6 @@ export default function (pi: ExtensionAPI) {
         .join("\n");
 
       if (textContent) {
-        // Use tool-specific profile; pass base config for env var overrides
         const profile = resolveGuardProfile(toolName, bashContextGuardConfig);
         const lineCount = textContent === "" ? 0 : textContent.split("\n").length;
         const byteCount = Buffer.byteLength(textContent, "utf8");
@@ -232,7 +221,6 @@ export default function (pi: ExtensionAPI) {
             const nonTextContent = event.content.filter(
               (c: any) => c.type !== "text",
             );
-            // Replace default hint with tool-specific hint
             const toolHint = GUARD_HINT_GENERIC;
             const guardedText = result.text.replace(
               GUARD_HINT_RE,
@@ -321,14 +309,10 @@ export default function (pi: ExtensionAPI) {
 
   // ── Tool registration ──────────────────────────────────────────
 
-  const experimental = loadExperimentalConfig();
-
   // 1. Session hooks: eager repo-map generation + startup injection
   registerSessionHooks(pi);
 
-  // 2. Core tools: registered via the ToolRegistry loop below
-
-  // 3. Additional tools: the loop iterates all tools from ToolRegistry.getAll()
+  // 2. Core tools: the loop iterates all tools from ToolRegistry.getAll()
   //    and registers each via pi.registerTool (covers unified read, search, repo_map,
   //    find_symbol, and any other registered tools).
   const reg = ToolRegistry.getInstance();
@@ -341,36 +325,4 @@ export default function (pi: ExtensionAPI) {
       execute: tool.execute,
     }));
   }
-
-  // 6. Graph mutation tool [EXPERIMENTAL] — receives breakage/co-change edges from Smart-Edit
-  if (experimental.graphMutate) {
-    pi.registerTool(toToolDefinition(createGraphMutateTool()));
-  }
-
-  // 7. Git notes tool [EXPERIMENTAL] — read/write annotations on git objects
-  if (experimental.gitNotes) {
-    for (const tool of createGitNotesTools()) {
-      pi.registerTool(toToolDefinition(tool));
-    }
-  }
-
-  // 8. Graphify knowledge graph is consumed internally by read's intent mode,
-  //    hook.ts's contextual enrichment, and search-tool.ts's centrality boosting.
-  //    No separate tools needed.
 }
-
-// ── File-read cache API (re-exported for external use) ───────────────────
-export {
-  recordContiguous,
-  recordSparse,
-  getSnapshot,
-  invalidate,
-  clearSession,
-  resolveSessionKey,
-};
-export type { FileSnapshot, SearchMatchEntry };
-
-// ── Code summary API ───────────────────────────────────────────────
-export { summarizeCode, renderSummary, canSummarize };
-export type { SummaryOptions, SummarySegment, SummaryResult } from "./code-summary.js";
-

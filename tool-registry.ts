@@ -5,8 +5,8 @@
  * and a category. The registry provides lookup by name/category and produces
  * consistent ToolDefinition arrays for both the pi extension API and the MCP server.
  */
-import type { ExtensionAPI, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { toToolDefinition, toToolDefinitions } from "./types.js";
+import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { toToolDefinitions } from "./types.js";
 
 // ── Categories ─────────────────────────────────────────────────────
 
@@ -58,6 +58,10 @@ export class ToolRegistry {
     this.tools.set(registration.name, registration);
   }
 
+  has(name: string): boolean {
+    return this.tools.has(name);
+  }
+
   get(name: string): ToolRegistration | undefined {
     return this.tools.get(name);
   }
@@ -76,18 +80,5 @@ export class ToolRegistry {
       parameters: t.inputSchema,
       execute: t.execute,
     })));
-  }
-
-  /** Register all non-experimental tools with pi's ExtensionAPI. */
-  registerAllWithPi(pi: ExtensionAPI): void {
-    for (const tool of this.tools.values()) {
-      if (tool.experimental) continue;
-      pi.registerTool(toToolDefinition({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-        execute: tool.execute,
-      }));
-    }
   }
 }

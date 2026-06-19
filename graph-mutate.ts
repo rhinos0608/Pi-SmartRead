@@ -33,19 +33,11 @@ interface GraphMutateInput { from: string; to: string; relation?: "breakage" | "
 // ── Tool Definition ─────────────────────────────────────────────────
 
 export function createGraphMutateTool(): ToolDefinition {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const def: any = {
     name: "graph_mutate",
     label: "graph_mutate",
-    description: `[EXPERIMENTAL] Record a semantic coupling observation (breakage or co-change) into Pi-SmartRead's context graph.
-
-Breakage (default): when editing file A causes type-checking errors in file B,
-call this tool with relation="breakage". The next intent_read touching A includes B.
-
-Co-change: when files A and B consistently change together in git history,
-call this tool with relation="co-change". Edge weight decays with time.
-
-Edges are event-sourced to disk and survive session restarts.`,
+    description: `[EXPERIMENTAL] Record breakage or co-change edge into the context graph. Breakage: editing A causes errors in B. Co-change: A and B change together in git history. Edges are event-sourced to disk.`,
     parameters: GraphMutateInputSchema,
 
     async execute(
@@ -54,20 +46,20 @@ Edges are event-sourced to disk and survive session restarts.`,
       _signal: unknown,
       _onUpdate: unknown,
       _ctx: unknown,
-    ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
       const input = params as GraphMutateInput;
       const directory = input.directory ?? process.cwd();
       const resolvedRoot = isAbsolute(directory) ? directory : resolve(process.cwd(), directory);
 
       if (!existsSync(resolvedRoot)) {
-        return { content: [{ type: "text", text: `❌ Root directory not found: ${resolvedRoot}` }] };
+        return { content: [{ type: "text", text: `❌ Root directory not found: ${resolvedRoot}` }], isError: true };
       }
 
       const fromPath = isAbsolute(input.from) ? input.from : resolve(resolvedRoot, input.from);
       const toPath = isAbsolute(input.to) ? input.to : resolve(resolvedRoot, input.to);
 
       if (!isPathInside(resolvedRoot, fromPath) || !isPathInside(resolvedRoot, toPath)) {
-        return { content: [{ type: "text", text: `❌ Paths must be inside project root: ${input.from} → ${input.to}` }] };
+        return { content: [{ type: "text", text: `❌ Paths must be inside project root: ${input.from} → ${input.to}` }], isError: true };
       }
 
       try {
@@ -83,7 +75,7 @@ Edges are event-sourced to disk and survive session restarts.`,
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return { content: [{ type: "text", text: `❌ Failed: ${message}` }] };
+        return { content: [{ type: "text", text: `❌ Failed: ${message}` }], isError: true };
       }
     },
   };
