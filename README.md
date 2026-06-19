@@ -178,11 +178,10 @@ In `code` mode, results are enriched by default: top symbols are resolved and ca
 }
 ```
 
-**Deep search:**
+**Deep search (first-class tool, split from `search mode=deep`):**
 
 ```json
 {
-  "mode": "deep",
   "query": "how does JWT token validation work?",
   "depth": "standard",
   "scope": "code",

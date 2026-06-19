@@ -1,49 +1,54 @@
 # Progress
 
 ## Status
-In Progress
+Complete
 
-## Tasks
+## Changes Made
 
-- [x] P3a: Create `fs-scan-cache.ts` with TTL-based LRU cache
-- [x] P3a: Integrate cache into `file-discovery.ts`
-- [x] P3a: Export from `index.ts` (cache invalidation on write/edit)
-- [x] P3a: Add unit tests in `test/unit/fs-scan-cache.test.ts`
+1. **package.json** — Replaced hand-maintained `files[]` with glob patterns; added `prepublishOnly` script
+2. **tsconfig.json** — Replaced hand-maintained denylist `include` with simple globs
+3. **bun-types.d.ts:15** — Changed `declare var Bun` → `declare const Bun`
+4. **code-summary.test.ts** — Moved from root to `test/unit/`, updated import path; deleted root copy
+5. **.gitignore** — Added `test/unit/CLAUDE.md`, `.subagent-work/`, `research/`, `dump.ts`, `config.enc`, `bun.lock`
+6. **vitest.config.ts** — Created with parallel workers, 45s timeout, setupFiles placeholder, keepAlive comment
+7. **test/unit/deep-search.test.ts** — Replaced `delete process.env.X` with `vi.stubEnv()` / `vi.unstubAllEnvs()`
+8. **test/unit/sqlite-vec-store.test.ts** — Changed `require("better-sqlite3")` to dynamic `await import(...)`
+9. **test/unit/local-embedding-provider.test.ts** — Added `canImport()` helper, replaced env-var gating with `it.runIf(canImport(...))`
+10. **test/unit/mcp-server.test.ts** and **index.test.ts** — Added `expect(...).toContain("deep_search")` assertion
+11. **eslint --fix** — Ran successfully, 0 errors, only no-console warnings
+12. **mcp-server.ts** — Plumb signal, validate args, fix fallback, enforce prompt args, snapshot cwd
+13. **types.ts** — Replace throw in `ui.custom` with no-op return
+14. **graph-mutate.ts** — Add `isError: true` to error returns
+15. **git-notes-tool.ts** — Add `isError`, use ExtensionContext, add maxLength, fix imports
+16. **mcp-registry.ts** — Dedup guard in `reg()`
+17. **find-symbol-tool.ts** — Replace Type.Unsafe with Type.Union
+18. **deep-search-tool.ts** — Replace Type.Unsafe with Type.Union, rename shadowing cwd
 
-## Files Changed
+## Validation
+- Typecheck: passes (pre-existing unused-import warnings only)
+- All MCP tests pass
+- 8 pre-existing failing test files unchanged
+- Output written to: fix-mcp.md
 
-- `fs-scan-cache.ts` (new) — TTL-based LRU cache for cross-tool FS scan sharing
-- `file-discovery.ts` (modified) — wrapped `findSrcFiles` and `findSrcFilesWithContextMode` with cache
-- `index.ts` (modified) — added `invalidateFsScanCache` import and cache invalidation on write/edit/graph_mutate tool calls
-- `test/unit/fs-scan-cache.test.ts` (new) — 10 tests covering cache operations, LRU eviction, invalidation, cache key uniqueness, cacheAgeMs, and global instance
+---
 
-## Implementation Details
+## Core Retrieval Bug Fixes (19 Jun 2026)
 
-### fs-scan-cache.ts
+- [x] Fix 1: `search-tool.ts` — handleCode global sort after merge (`allResults.sort`)
+- [x] Fix 2: `read-many.ts` — stopOnError uses labeled break (`break chunkLoop`) instead of inner-only `break`
+- [x] Fix 3: `read-many.ts` — skip `recordContiguous` when summary replaced body (`summaryApplied` flag)
+- [x] Fix 4: `intent-read.ts` — vector count check `>=` instead of `===` with `.slice(1, n+1)`
+- [x] Fix 5: `intent-read.ts` — deduplicate `params.files` by path in non-directory branch
+- [x] Fix 6: `search-tool.ts` — handleGrep file size cap (`MAX_FILE_BYTES = 10MB`) before read
+- [x] Fix 7: `search-tool.ts` — parser pool (`Map<string, Parser>`) in `extractCodeDefinitions`
 
-- `FsScanCache<T>` class with configurable TTL, empty-recheck window, and max entries
-- `getOrScan(root, scanFn)` — returns cached results or runs scan
-- `forceRescan(root, scanFn)` — bypasses cache and re-caches
-- `invalidatePath(target)` — removes cache entries covering the target path
-- `invalidateAll()` — clears entire cache
-- LRU eviction: tracks access count, evicts lowest-score entry when capacity exceeded
-- Default config: TTL=1000ms, emptyRecheck=200ms, maxEntries=16
-- Configurable via env vars: `FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`
-- Global default instance (`getFsScanCache()`) for cross-tool sharing
+## Files Changed (retrieval fixes)
+- `search-tool.ts` (+48, −56): fixes 1, 6, 7
+- `read-many.ts` (+14, −2): fixes 2, 3
+- `intent-read.ts` (+16, −4): fixes 4, 5
 
-### file-discovery.ts integration
-
-- `findSrcFiles` and `findSrcFilesWithContextMode` now use `getOrScan` with the cache
-- Cache key is resolved root path (no gitignore hash in v1 — can be extended)
-- Results are capped to `maxFiles` after retrieval
-
-### index.ts integration
-
-- On `tool_call` events for `write`, `edit`, `graph_mutate`, the cache is invalidated for the target path
-- Uses `invalidateFsScanCache(target)` from the global default instance
-
-## Notes
-
-- Empty-result fast recheck: 200ms (allows rapid re-scanning when empty to catch newly created files)
-- Cache key uniqueness based on resolved paths (normalizes `dir/../dir` → `dir`)
-- All 10 new tests pass; all 8 existing file-discovery tests still pass
+## Validation (retrieval fixes)
+- Typecheck: 0 errors in edited files
+- read-many tests: 15/15 pass
+- Pre-existing config HTTPS validation issue blocks intent-read + repomap tests
+- Output written to: fix-core.md

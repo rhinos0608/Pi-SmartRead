@@ -139,7 +139,7 @@ function createCodeTokenizer() {
 // Index creation
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 export type CodeSearchDB = any;
 
 /**
@@ -194,7 +194,7 @@ export async function insertCodeChunks(db: CodeSearchDB, chunks: CodeChunk[]): P
 // Search
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 type OramaSearchParams = any;
 
 /**

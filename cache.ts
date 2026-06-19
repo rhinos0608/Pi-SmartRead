@@ -257,7 +257,7 @@ export class TagsCache {
       if (existsSync(this.cacheDir)) {
         await fs.rm(this.cacheDir, { recursive: true, force: true });
       }
-      await fs.mkdir(this.cacheDir, { recursive: true });
+      await fs.mkdir(this.cacheDir, { recursive: true, mode: 0o700 });
       this.memoryCache.clear();
       this.corruptionCount = 0;
       this.dependentsFull = false;

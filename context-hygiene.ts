@@ -272,9 +272,15 @@ export function renderStaleContextPlaceholder(record: ContextHygieneStaleRecord)
     case "read":
     case "read_files":
     case "intent_read":
+    case "semantic_read":
+    case "find_symbol":
+    case "symbol_info":
+    case "workspace_symbol":
+    case "hover_type":
       return renderStaleReadPlaceholder();
     case "grep":
     case "search":
+    case "deep_search":
       return renderStaleGrepPlaceholder();
     case "bash":
       return renderStaleBashPlaceholder(record);

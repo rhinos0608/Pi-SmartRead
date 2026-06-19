@@ -292,7 +292,7 @@ export async function summarizeCode(options: SummaryOptions): Promise<SummaryRes
 		}
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	 
 	const language = grammarInfo.language as any
 
 	let tree: any = null

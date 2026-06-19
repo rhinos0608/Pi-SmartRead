@@ -215,12 +215,12 @@ export async function extractSymbolBoundariesAst(
   grammarInfo: GrammarInfo,
 ): Promise<{ spans: AstSymbolSpan[]; hasErrors: boolean; parseTimeMs: number }> {
   const startTime = Date.now();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   const language = grammarInfo.language as any;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   let parserInstance: any = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   let tree: any = null;
 
   try {
@@ -233,7 +233,7 @@ export async function extractSymbolBoundariesAst(
     // Since grammar-loader already initialized the WASM runtime,
     // the Language object was loaded via Parser.Language.load().
     // We import web-tree-sitter dynamically to get the Parser class.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     const ParserModule: any = (await import("web-tree-sitter")).default;
     if (!ParserModule) {
       return { spans: [], hasErrors: false, parseTimeMs: Date.now() - startTime };
