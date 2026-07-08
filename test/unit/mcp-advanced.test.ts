@@ -124,7 +124,7 @@ function callMcpServer(
 describe("MCP advanced capabilities", () => {
   // --- Prompts ---
 
-  it("lists all 3 prompts via prompts/list", async () => {
+  it("lists all 4 prompts via prompts/list", async () => {
     const response = await callMcpServer([
       mcpInitialize(),
       mcpInitialized(),
@@ -141,12 +141,13 @@ describe("MCP advanced capabilities", () => {
     const result = response.result as any;
     expect(result.prompts).toBeDefined();
     expect(Array.isArray(result.prompts)).toBe(true);
-    expect(result.prompts.length).toBe(3);
+    expect(result.prompts.length).toBe(4);
 
     const names = result.prompts.map((p: any) => p.name);
     expect(names).toContain("explain-code");
     expect(names).toContain("review-diff");
     expect(names).toContain("architectural-analysis");
+    expect(names).toContain("smartread-tool-guide");
   }, 60_000);
 
   it("getting explain-code prompt returns correct message structure", async () => {
@@ -234,6 +235,34 @@ describe("MCP advanced capabilities", () => {
     expect(msg.content.type).toBe("text");
     expect(msg.content.text).toContain("src/index.ts");
     expect(msg.content.text).toContain("data flow");
+  }, 60_000);
+
+  it("getting smartread-tool-guide prompt returns tool selection guidance", async () => {
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 15,
+        method: "prompts/get",
+        params: {
+          name: "smartread-tool-guide",
+          arguments: {
+            task: "find all usages of Authenticator",
+          },
+        },
+      },
+    ]);
+
+    const result = response.result as any;
+    expect(result.messages).toBeDefined();
+    const msg = result.messages[0]!;
+    expect(msg.role).toBe("user");
+    expect(msg.content.type).toBe("text");
+    expect(msg.content.text).toContain("find all usages of Authenticator");
+    expect(msg.content.text).toContain('depth: "deep"');
+    expect(msg.content.text).toContain("- symbol:");
+    expect(msg.content.text).toContain("repo_map");
   }, 60_000);
 
   it("throws for unknown prompt", async () => {

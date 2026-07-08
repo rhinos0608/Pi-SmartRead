@@ -5,7 +5,7 @@ import { initHandlers } from "./read-many.js";
 import { invalidateFsScanCache } from "./fs-scan-cache.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
-import { registerFindSymbolTool } from "./find-symbol-tool.js";
+import { registerSymbolTool } from "./find-symbol-tool.js";
 import "./mcp-registry.js"; // registers read, search, repo_map with ToolRegistry
 import { getLSPBridge } from "./lsp-bridge.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
@@ -27,13 +27,16 @@ export { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
 export type { SummaryOptions, SummarySegment, SummaryResult } from "./code-summary.js";
 
 // Ensure all tools are registered with the central registry
-registerFindSymbolTool();
+registerSymbolTool();
 
 // Context hygiene — tracks tool results and marks stale reads after mutations
 import {
   resetContextHygieneTracker,
   buildContextHygieneMetadata,
   buildFileResource,
+  recordAnchorDelta,
+  type AnchorHygieneEvent,
+  type AnchorDeltaEntry,
   type ContextHygieneMetadata,
   type ContextHygieneResource,
 } from "./context-hygiene.js";
@@ -45,6 +48,8 @@ import {
   consumeDoomLoopWarning,
   formatDoomLoopMessage,
   recordToolCall,
+  recordToolResult,
+  resetDoomLoopState,
 } from "./doom-loop.js";
 
 // Bash context guard — caps oversized bash output with head/tail preview
@@ -52,10 +57,17 @@ import {
   applyBashContextGuard,
   resolveBashContextGuardConfig,
   resolveGuardProfile,
-  GUARD_HINT_GENERIC,
-  GUARD_HINT_RE,
   suggestShellCommands,
 } from "./bash-context-guard.js";
+
+const SMARTREAD_GUARD_TOOLS = new Set([
+  "read",
+  "read_files",
+  "search",
+  "repo_map",
+  "symbol",
+  "git_notes_read",
+]);
 
 // Fire-and-forget hashline init at module load time
 ensureHashlineReady().catch((err) =>
@@ -80,8 +92,21 @@ export default function (pi: ExtensionAPI) {
     return [];
   }
 
+  function mutationResourcesForTool(toolName: string, input: Record<string, unknown>): ContextHygieneResource[] {
+    if (toolName === "graph_mutate") {
+      const resources: ContextHygieneResource[] = [];
+      if (typeof input.from === "string") resources.push(buildFileResource(input.from));
+      if (typeof input.to === "string") resources.push(buildFileResource(input.to));
+      return resources;
+    }
+    if (toolName === "write" || toolName === "edit") {
+      return resourcesForTool(toolName, input);
+    }
+    return [];
+  }
+
   function classificationForTool(toolName: string): ContextHygieneMetadata["classification"] {
-    if (toolName === "graph_mutate") return "mutation";
+    if (toolName === "graph_mutate" || toolName === "write" || toolName === "edit") return "mutation";
     if (toolName === "bash") return "command-output";
     return "read-context";
   }
@@ -115,24 +140,50 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", (event: any): any => {
     const toolName = event.toolName as string;
     const toolCallId = event.toolCallId as string;
+    let outputEvent = event;
+    let outputChanged = false;
 
     // ── Context hygiene: record every tool result ──
     if (toolCallId) {
       const input = (event.input ?? {}) as Record<string, unknown>;
-      const metadata = buildContextHygieneMetadata({
-        tool: toolName,
-        classification: classificationForTool(toolName),
-        resources: resourcesForTool(toolName, input),
-      });
-      hygieneTracker.record(metadata, { resultId: toolCallId });
+      const mutationResources = mutationResourcesForTool(toolName, input);
+      if (mutationResources.length > 0) {
+        hygieneTracker.recordMutation(mutationResources, { resultId: toolCallId, tool: toolName });
+      } else {
+        const metadata = buildContextHygieneMetadata({
+          tool: toolName,
+          classification: classificationForTool(toolName),
+          resources: resourcesForTool(toolName, input),
+        });
+        hygieneTracker.record(metadata, { resultId: toolCallId });
+      }
 
-      // ── Auto-invalidation: record graph_mutate mutations for stale detection ──
-      if (toolName === "graph_mutate") {
-        const mutationResources: ContextHygieneResource[] = [];
-        if (typeof input.from === "string") mutationResources.push(buildFileResource(input.from));
-        if (typeof input.to === "string") mutationResources.push(buildFileResource(input.to));
-        if (mutationResources.length > 0) {
-          hygieneTracker.recordMutation(mutationResources, { resultId: toolCallId });
+      // ── Anchor hygiene: consume anchor delta from edit results ──
+      if (toolName === "edit" && (event.details as Record<string, unknown>)?.anchorDelta) {
+        const ad = (event.details as Record<string, unknown>).anchorDelta as {
+          summary: string;
+          shifted: number;
+          deleted: number;
+          changed: number;
+        };
+        const totalChanges = (ad.shifted || 0) + (ad.deleted || 0) + (ad.changed || 0);
+        if (totalChanges > 0) {
+          const input = (event.input ?? {}) as Record<string, unknown>;
+          const filePath = typeof input.path === "string" ? input.path : undefined;
+          if (filePath) {
+            const entries: AnchorDeltaEntry[] = [];
+            const event_: AnchorHygieneEvent = {
+              file: filePath,
+              timestamp: Date.now(),
+              deltas: entries,
+              churnExceeded: totalChanges > 20,
+            };
+            try {
+              recordAnchorDelta(hygieneTracker, event_);
+            } catch {
+              // Anchor delta recording is advisory
+            }
+          }
         }
       }
     }
@@ -167,6 +218,17 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    // ── Content chanting: record result text for pattern detection ──
+    if (toolCallId) {
+      const resultText = Array.isArray(event.content)
+        ? event.content
+            .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
+            .map((c: any) => (typeof c.text === "string" ? c.text : ""))
+            .join("\n")
+        : "";
+      recordToolResult(doomLoopState, toolCallId, resultText);
+    }
+
     // ── Doom-loop: inject warning if this call triggered a loop ──
     const doomLoop = consumeDoomLoopWarning(doomLoopState, toolCallId);
     if (doomLoop && Array.isArray(event.content)) {
@@ -186,13 +248,13 @@ export default function (pi: ExtensionAPI) {
       } else {
         content.unshift({ type: "text" as const, text: prefix });
       }
-      return { ...event, content };
+      outputEvent = { ...event, content };
+      outputChanged = true;
     }
 
     // ── Bash context guard: cap oversized output for SmartRead tools ──
-    const SMARTREAD_GUARD_TOOLS = new Set(["search", "read"]);
-    if (SMARTREAD_GUARD_TOOLS.has(toolName) && Array.isArray(event.content)) {
-      const textContent = event.content
+    if (SMARTREAD_GUARD_TOOLS.has(toolName) && Array.isArray(outputEvent.content)) {
+      const textContent = outputEvent.content
         .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
         .map((c: any) => coerceText(c.text))
         .join("\n");
@@ -208,6 +270,7 @@ export default function (pi: ExtensionAPI) {
           const result = applyBashContextGuard({
             text: textContent,
             command: undefined,
+            toolName,
             config: {
               enabled: true,
               maxLines: profile.maxLines,
@@ -218,19 +281,14 @@ export default function (pi: ExtensionAPI) {
           });
 
           if (result.text !== textContent) {
-            const nonTextContent = event.content.filter(
+            const nonTextContent = outputEvent.content.filter(
               (c: any) => c.type !== "text",
             );
-            const toolHint = GUARD_HINT_GENERIC;
-            const guardedText = result.text.replace(
-              GUARD_HINT_RE,
-              toolHint + "\n",
-            );
             return {
-              ...event,
-              content: [{ type: "text", text: guardedText }, ...nonTextContent],
+              ...outputEvent,
+              content: [{ type: "text", text: result.text }, ...nonTextContent],
               details: {
-                ...(event.details && typeof event.details === "object" ? event.details : {}),
+                ...(outputEvent.details && typeof outputEvent.details === "object" ? outputEvent.details : {}),
                 bashContextGuard: { ...result.metadata, toolName },
               },
             };
@@ -240,8 +298,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ── Bash context guard: cap oversized bash output ──
-    if (toolName === "bash" && bashContextGuardConfig.enabled && Array.isArray(event.content)) {
-      const textContent = event.content
+    if (toolName === "bash" && bashContextGuardConfig.enabled && Array.isArray(outputEvent.content)) {
+      const textContent = outputEvent.content
         .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
         .map((c: any) => coerceText(c.text))
         .join("\n");
@@ -254,14 +312,14 @@ export default function (pi: ExtensionAPI) {
         });
 
         if (guarded.text !== textContent) {
-          const nonTextContent = event.content.filter(
+          const nonTextContent = outputEvent.content.filter(
             (c: any) => c.type !== "text",
           );
           return {
-            ...event,
+            ...outputEvent,
             content: [{ type: "text", text: guarded.text }, ...nonTextContent],
             details: {
-              ...(event.details && typeof event.details === "object" ? event.details : {}),
+              ...(outputEvent.details && typeof outputEvent.details === "object" ? outputEvent.details : {}),
               bashContextGuard: guarded.metadata,
             },
           };
@@ -273,14 +331,14 @@ export default function (pi: ExtensionAPI) {
       const typedInput = event.input as Record<string, unknown> | undefined;
       const cmd = typeof typedInput?.command === "string" ? typedInput.command : undefined;
       const exit = typeof typedInput?.exitCode === "number" ? typedInput.exitCode : undefined;
-      const outputText = Array.isArray(event.content)
-        ? event.content.filter((c: any) => c.type === "text").map((c: any) => coerceText(c.text)).join("\n")
+      const outputText = Array.isArray(outputEvent.content)
+        ? outputEvent.content.filter((c: any) => c.type === "text").map((c: any) => coerceText(c.text)).join("\n")
         : "";
       if (cmd && exit !== undefined && exit !== 0) {
         const suggestions = suggestShellCommands(cmd, outputText, exit);
         if (suggestions.length > 0) {
           const suggestionBlock = "\n\nCommand suggestions:\n" + suggestions.map(s => `  • ${s}`).join("\n");
-          const content = Array.isArray(event.content) ? [...event.content] : [];
+          const content = Array.isArray(outputEvent.content) ? [...outputEvent.content] : [];
           let textIndex = -1;
           for (let i = 0; i < content.length; i++) {
             const item = content[i] as any;
@@ -289,13 +347,13 @@ export default function (pi: ExtensionAPI) {
           if (textIndex >= 0) {
             const item = content[textIndex] as { type: "text"; text?: unknown };
             content[textIndex] = { ...item, text: coerceText(item.text) + suggestionBlock };
-            return { ...event, content };
+            return { ...outputEvent, content };
           }
         }
       }
     }
 
-    return undefined;
+    return outputChanged ? outputEvent : undefined;
   });
 
   // 3. context: apply stale markers before messages are sent to the model
@@ -310,11 +368,22 @@ export default function (pi: ExtensionAPI) {
   // ── Tool registration ──────────────────────────────────────────
 
   // 1. Session hooks: eager repo-map generation + startup injection
-  registerSessionHooks(pi);
+  registerSessionHooks({
+    ...pi,
+    on: ((eventName: string, handler: (...args: any[]) => any) => {
+      if (eventName === "session_start" || eventName === "before_agent_start") {
+        return (pi.on as any)(eventName, (...args: any[]) => {
+          resetDoomLoopState(doomLoopState);
+          return handler(...args);
+        });
+      }
+      return (pi.on as any)(eventName, handler);
+    }) as ExtensionAPI["on"],
+  } as ExtensionAPI);
 
   // 2. Core tools: the loop iterates all tools from ToolRegistry.getAll()
   //    and registers each via pi.registerTool (covers unified read, search, repo_map,
-  //    find_symbol, and any other registered tools).
+  //    symbol, and any other registered tools).
   const reg = ToolRegistry.getInstance();
   for (const tool of reg.getAll()) {
     pi.registerTool(toToolDefinition({

@@ -70,7 +70,7 @@ describe("Advanced Retrieval Baseline (Phase 0)", () => {
     const details = result.details as any;
 
     expect(text).toContain("app.ts");
-    // Current intent_read SHOULD already support direct relative import augmentation
+    // Current intent-read engine SHOULD already support direct relative import augmentation
     expect(details.graphAugmentation.addedPaths).toContain(fixture.root + "/config.ts");
   });
 

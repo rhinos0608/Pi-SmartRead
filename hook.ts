@@ -38,6 +38,7 @@ import {
 } from "./utils.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { getLSPBridge } from "./lsp-bridge.js";
+import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./tool-guidance.js";
 import {
   scanMicroagents as doScanMicroagents,
   matchMicroagents,
@@ -247,13 +248,13 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
          startupGitContextCache.get(key) ?? Promise.resolve(null),
       ]);
 
-      if (!map && !gitCtx?.contextString && !gitCtx?.notesString && cachedMicroagents.length === 0) return;
-
-      const systemPromptParts = Array.isArray((event as any).systemPrompt)
-         ? (event as any).systemPrompt as string[]
-         : [(event as any).systemPrompt as string];
+      const rawSystemPrompt = (event as any).systemPrompt;
+      const systemPromptParts = (Array.isArray(rawSystemPrompt) ? rawSystemPrompt : [rawSystemPrompt])
+         .filter((part): part is string => typeof part === "string" && part.length > 0);
 
       const additions: string[] = [...systemPromptParts];
+
+      additions.push("", `## ${SMARTREAD_TOOL_GUIDE_TITLE}`, renderSmartReadToolGuide());
 
       if (map) {
          additions.push("", "## Repository Map",
@@ -276,8 +277,8 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
       }
 
       return {
-         systemPrompt: additions,
-      } as any;
+         systemPrompt: additions.join("\n"),
+      };
    });
 
    pi.on("session_shutdown", () => {
@@ -532,8 +533,8 @@ async function interceptContextualRead(
  * contextual enrichment.
  *
  * The returned ToolDefinition:
- *   - Preserves the built-in read's name, label, description,
- *     promptSnippet, promptGuidelines, renderCall, and renderResult
+ *   - Preserves the built-in read's name, label, promptSnippet,
+ *     promptGuidelines, renderCall, and renderResult
  *   - Delegates dynamically to createReadToolDefinition(ctx.cwd) so
  *     the correct working directory is used at execution time
  *   - Wraps every read with contextual annotations (imports, git recency)
@@ -567,7 +568,7 @@ export function wrapBuiltinReadTool(): ToolDefinition {
    return {
       name: baseDef.name,
       label: baseDef.label,
-      description: baseDef.description,
+      description: "Read the contents of a file at a known path, including images, with optional line windows or raw mode. Use when you already know the exact path, e.g. { path: \"src/auth.ts\", offset: 40, limit: 80 } or { path: \"src/auth.ts:120-180\" }. Prefer read_files for several known files (or with query: \"...\" for natural-language file discovery), search/symbol when the path is unknown, and repo_map for orientation.",
       promptSnippet: baseDef.promptSnippet,
       promptGuidelines: baseDef.promptGuidelines,
       parameters: baseDef.parameters,

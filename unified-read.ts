@@ -16,4 +16,3 @@ export function createReadFilesTool(): ToolDefinition {
   return createReadManyTool();
 }
 
-export { createIntentReadTool } from "./intent-read.js";

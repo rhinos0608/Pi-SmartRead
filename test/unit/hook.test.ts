@@ -206,12 +206,14 @@ describe("registerSessionHooks", () => {
     );
 
     // Should have appended repo map
-    const typed = result as { systemPrompt?: string | string[] } | undefined;
+    const typed = result as { systemPrompt?: string } | undefined;
     expect(typed).toBeDefined();
-    const promptText = Array.isArray(typed!.systemPrompt)
-      ? typed!.systemPrompt.join("\n")
-      : typed!.systemPrompt;
+    expect(typeof typed!.systemPrompt).toBe("string");
+    const promptText = typed!.systemPrompt;
     expect(promptText).toContain("Repository Map");
+    expect(promptText).toContain("SmartRead Tool Guide");
+    expect(promptText).toContain('depth: "deep"');
+    expect(promptText).toContain("- symbol:");
   }, 15_000);
 
   it("before_agent_start returns undefined for subsequent turns", async () => {

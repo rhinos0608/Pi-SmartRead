@@ -30,13 +30,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
 }
 
+const MASKABLE_STALE_TOOLS = new Set([
+  "read",
+  "read_files",
+  "search",
+  "grep",
+  "symbol",
+  "repo_map",
+  "bash",
+]);
+
 function isMaskableStaleTool(tool: string): boolean {
-  return (
-    tool === "read" ||
-    tool === "search" ||
-    tool === "grep" ||
-    tool === "bash"
-  );
+  return MASKABLE_STALE_TOOLS.has(tool);
 }
 
 function staleRecordsByResultId(report: ContextHygieneReport): Map<string, ContextHygieneStaleRecord> {

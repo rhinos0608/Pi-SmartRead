@@ -160,12 +160,17 @@ describe("MCP stdio server", () => {
     const toolNames = result.tools.map((t: any) => t.name);
     expect(toolNames).toContain("read");
     expect(toolNames).toContain("read_files");
-    expect(toolNames).toContain("semantic_read");
     expect(toolNames).toContain("search");
     expect(toolNames).toContain("repo_map");
-    expect(toolNames).toContain("find_symbol");
-    expect(toolNames).toContain("symbol_info");
-    expect(toolNames).toContain("deep_search");
+    expect(toolNames).toContain("symbol");
+    expect(toolNames).toContain("skill");
+    expect(toolNames).not.toContain("intent_read");
+    expect(toolNames).not.toContain("find_symbol");
+    expect(toolNames).not.toContain("symbol_info");
+    expect(toolNames).not.toContain("deep_search");
+    expect(toolNames.every((name: string) => !name.startsWith("smartread_"))).toBe(true);
+    // context_graph is not exposed as an agent-facing tool
+    expect(toolNames).not.toContain("context_graph");
     // graph_mutate and git_notes are experimental — disabled by default
     expect(toolNames).not.toContain("graph_mutate");
     expect(toolNames).not.toContain("git_notes_read");
@@ -178,6 +183,13 @@ describe("MCP stdio server", () => {
       expect(tool.description).toBeDefined();
       expect(typeof tool.description).toBe("string");
       expect(tool.inputSchema).toBeDefined();
+    }
+
+    const guidedTools = ["read", "read_files", "search", "repo_map", "symbol", "skill"];
+    for (const name of guidedTools) {
+      const tool = result.tools.find((candidate: any) => candidate.name === name);
+      expect(tool?.description).toMatch(/e\.g\.|Example:/);
+      expect(tool?.description).toContain("Prefer");
     }
   }, 60_000);
 

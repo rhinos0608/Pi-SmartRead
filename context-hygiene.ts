@@ -63,7 +63,7 @@ export interface ContextHygieneRehydrateDescriptor {
 export type ContextHygieneStaleInvalidationReason =
   | "mutation-after-read"
   | "bash-repo-state-after-mutation"
-  | "bash-verification-success-rerun";
+  | "bash-verification-success-rerun" | "anchor-drift";
 
 export type ContextHygieneRetirementReason = "command-rerun" | "same-command-success-rerun";
 
@@ -257,6 +257,10 @@ export function renderStaleGrepPlaceholder(): string {
   return "[Stale grep context: matched file content changed after this result. Re-run grep to refresh.]";
 }
 
+export function renderStaleRepoMapPlaceholder(): string {
+  return "[Stale repo_map context: repository structure changed after this result. Re-run repo_map to refresh.]";
+}
+
 export function renderStaleBashPlaceholder(record: ContextHygieneStaleRecord): string {
   const command = record.command ? ` Command: ${record.command}` : "";
   return `[Stale bash context: ${record.reason}. Re-run the Bash command to refresh.${command}]`;
@@ -271,16 +275,12 @@ export function renderStaleContextPlaceholder(record: ContextHygieneStaleRecord)
   switch (record.originalTool) {
     case "read":
     case "read_files":
-    case "intent_read":
-    case "semantic_read":
-    case "find_symbol":
-    case "symbol_info":
-    case "workspace_symbol":
-    case "hover_type":
+    case "symbol":
       return renderStaleReadPlaceholder();
+    case "repo_map":
+      return renderStaleRepoMapPlaceholder();
     case "grep":
     case "search":
-    case "deep_search":
       return renderStaleGrepPlaceholder();
     case "bash":
       return renderStaleBashPlaceholder(record);
@@ -333,7 +333,7 @@ export interface ContextHygieneTracker {
    */
   recordMutation(
     mutationResources: ContextHygieneResource[],
-    options?: { resultId?: string; rehydrate?: ContextHygieneRehydrateDescriptor },
+    options?: { resultId?: string; rehydrate?: ContextHygieneRehydrateDescriptor; tool?: string },
   ): ContextHygieneEvent;
   generateReport(): ContextHygieneReport;
 }
@@ -363,7 +363,7 @@ class DefaultContextHygieneTracker implements ContextHygieneTracker {
 
   recordMutation(
     mutationResources: ContextHygieneResource[],
-    options: { resultId?: string; rehydrate?: ContextHygieneRehydrateDescriptor } = {},
+    options: { resultId?: string; rehydrate?: ContextHygieneRehydrateDescriptor; tool?: string } = {},
   ): ContextHygieneEvent {
     try {
       // Deduplicate resources by key to match generateReport's bucketing
@@ -377,7 +377,7 @@ class DefaultContextHygieneTracker implements ContextHygieneTracker {
 
       const event: ContextHygieneEvent = {
         id: this.nextEventId++,
-        tool: "graph_mutate",
+        tool: options.tool ?? "graph_mutate",
         classification: "mutation",
         resources: deduped,
       };
@@ -393,7 +393,7 @@ class DefaultContextHygieneTracker implements ContextHygieneTracker {
       // Return a no-op event so callers don't break
       return {
         id: -1,
-        tool: "graph_mutate",
+        tool: options.tool ?? "graph_mutate",
         classification: "mutation" as const,
         resources: [],
       };
@@ -568,4 +568,63 @@ export async function lintAfterMutation(
   });
 
   tracker.record(lintMetadata);
+}
+
+// ─── Anchor-level hygiene ─────────────────────────────────────────────
+
+export interface AnchorDeltaEntry {
+  hash: string;
+  oldLine: number;
+  newLine: number;
+  contentChanged: boolean;
+  status: "shifted" | "deleted" | "changed";
+}
+
+export interface AnchorHygieneEvent {
+  file: string;
+  timestamp: number;
+  deltas: AnchorDeltaEntry[];
+  churnExceeded: boolean;
+}
+
+export function recordAnchorDelta(
+  tracker: ContextHygieneTracker,
+  event: AnchorHygieneEvent,
+): void {
+  const resource = buildFileResource(event.file);
+  tracker.recordMutation([resource], { resultId: undefined, tool: "anchor-delta" });
+
+  if (event.churnExceeded) {
+    // Generate report to trigger stale candidate computation.
+    // generateReport cross-references mutations with prior reads
+    // and produces staleCandidates for any resource that was read
+    // before the mutation.
+    tracker.generateReport();
+  }
+}
+
+export function buildAnchorStaleRecord(input: {
+  file: string;
+  deltas: AnchorDeltaEntry[];
+  churnExceeded: boolean;
+}): ContextHygieneStaleRecord {
+  const resource = buildFileResource(input.file);
+  return buildStaleContextRecord({
+    originalTool: "read",
+    staleResourceKeys: [resource.key],
+    invalidatingMutationEventId: -1,
+    reason: "anchor-drift",
+    command: undefined,
+  });
+}
+
+export function renderAnchorDriftPlaceholder(
+  deltas: AnchorDeltaEntry[],
+  churnExceeded: boolean,
+): string {
+  if (churnExceeded) {
+    return "[Anchor drift: significant structural change. Re-read file to refresh anchors.]";
+  }
+  const count = deltas.length;
+  return `[Anchor drift: ${count} anchors shifted/deleted/changed. Re-read affected sections.]`;
 }

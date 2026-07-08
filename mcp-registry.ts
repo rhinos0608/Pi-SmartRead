@@ -10,24 +10,24 @@
  * extension API.
  */
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
-import { registerFindSymbolTool } from "./find-symbol-tool.js";
-import { createReadTool, createReadFilesTool, createIntentReadTool } from "./unified-read.js";
+import { registerSymbolTool } from "./find-symbol-tool.js";
+import { createReadTool, createReadFilesTool } from "./unified-read.js";
 import createSearchTool from "./search-tool.js";
-import createDeepSearchTool from "./deep-search-tool.js";
 import { createRepoTool } from "./repomap-tool.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
+import { createSkillTool } from "./skill-tool.js";
 import { loadExperimentalConfig } from "./config.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition, toToolDefinitions } from "./types.js";
 
 // ── Register all tools with the central registry ───────────────────
 
-// Explicitly initialize registry before calling registerFindSymbolTool()
+// Explicitly initialize registry before calling registerSymbolTool()
 // (it depends on ToolRegistry.getInstance() being available)
 const registry = ToolRegistry.getInstance();
 
-registerFindSymbolTool();
+registerSymbolTool();
 
 function reg(name: string, factory: () => ToolDefinition, category: ToolCategory, experimental = false): void {
   if (registry.has(name)) return;
@@ -35,26 +35,11 @@ function reg(name: string, factory: () => ToolDefinition, category: ToolCategory
   registry.register({ name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category, experimental });
 }
 
-/** Register an alias for an existing tool (same execute/params, different name). */
-function alias(name: string, target: string): void {
-  if (registry.has(name)) return;
-  const existing = registry.get(target);
-  if (!existing) throw new Error(`Cannot alias "${name}" — target tool "${target}" not registered`);
-  registry.register({ name, description: existing.description, inputSchema: existing.inputSchema, execute: existing.execute, category: existing.category, experimental: existing.experimental });
-}
-
 reg("read", () => toToolDefinition(createReadTool()), ToolCategory.READ);
 reg("read_files", () => toToolDefinition(createReadFilesTool()), ToolCategory.READ);
-reg("intent_read", () => toToolDefinition(createIntentReadTool()), ToolCategory.READ);
-alias("semantic_read", "intent_read");
-
 reg("search", () => toToolDefinition(createSearchTool()), ToolCategory.SEARCH);
-reg("deep_search", () => toToolDefinition(createDeepSearchTool()), ToolCategory.SEARCH);
 reg("repo_map", () => toToolDefinition(createRepoTool()), ToolCategory.MAP);
-
-// Aliases for backwards compatibility
-alias("workspace_symbol", "find_symbol");
-alias("hover_type", "symbol_info");
+reg("skill", () => toToolDefinition(createSkillTool()), ToolCategory.SKILL);
 
 const experimental = loadExperimentalConfig();
 if (experimental.graphMutate) {
@@ -66,6 +51,7 @@ if (experimental.gitNotes) {
     registry.register({ name: def.name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category: ToolCategory.NOTES, experimental: true });
   }
 }
+
 
 // ── Build ──────────────────────────────────────────────────────────
 

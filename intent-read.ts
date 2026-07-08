@@ -182,9 +182,9 @@ export function createIntentReadTool(
   const persistentCaches = new LruCache<PersistentEmbeddingCache>(10);
 
   return {
-    name: "semantic_read",
-    label: "semantic_read",
-    description: `Read up to 20 files, rank them by hybrid RRF (BM25 keyword + semantic cosine) against a query, and return the top-K relevant files. Combined output respects limits (${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}). Requires embedding config via pi-smartread.config.json or PI_SMARTREAD_EMBEDDING_BASE_URL / PI_SMARTREAD_EMBEDDING_MODEL env vars.`,
+    name: "intent_read",
+    label: "intent_read",
+    description: `Find and read files relevant to a natural-language intent, then pack top results under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}. Internal engine for read_files query mode, e.g. { query: "where refresh tokens are validated", directory: "src", topK: 5 }.`,
     parameters: IntentReadSchema,
 
     async execute(
@@ -204,10 +204,7 @@ export function createIntentReadTool(
 
       if (!embeddingConfig) {
         console.warn(
-          "[Pi-SmartRead] Embedding config missing (baseUrl/model not set). " +
-            "intent_read will operate in BM25-only mode. " +
-            "Set baseUrl/model in pi-smartread.config.json or via " +
-            "PI_SMARTREAD_EMBEDDING_BASE_URL / PI_SMARTREAD_EMBEDDING_MODEL env vars to enable semantic ranking.",
+          "[Pi-SmartRead] Semantic ranking unavailable; falling back to BM25-only ranking.",
         );
       }
 

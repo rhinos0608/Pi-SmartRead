@@ -1,5 +1,5 @@
-import { existsSync, promises as fs, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { existsSync, promises as fs } from "node:fs";
+import { relative, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition } from "./types.js";
@@ -16,25 +16,19 @@ import { expandToMonorepoRoots } from "./monorepo-detector.js";
 
 // ── Schemas ─────────────────────────────────────────────────────────
 
-const FindSymbolSchema = Type.Object({
-  query: Type.String({ description: "Symbol name or pattern to search for. Supports qualified paths like 'ClassName.methodName'." }),
-  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body in results (default: false)." })),
-  maxResults: Type.Optional(Type.Number({ description: "Maximum results to return (1-10000, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
-  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
-});
-
-const SymbolInfoSchema = Type.Object({
-  action: Type.Union([
+const SymbolSchema = Type.Object({
+  query: Type.Optional(Type.String({ description: "Symbol name or pattern. Supports qualified paths like 'ClassName.methodName'. Required for every action except outline." })),
+  action: Type.Optional(Type.Union([
+    Type.Literal("find"),
     Type.Literal("outline"),
     Type.Literal("declaration"),
     Type.Literal("references"),
     Type.Literal("implementations"),
-  ], { description: "What to query: outline (file structure), declaration (canonical definition), references (all usages), implementations (interface/class implementors)." }),
-  query: Type.Optional(Type.String({ description: "Symbol name or pattern (required for declaration/references/implementations)." })),
-  path: Type.Optional(Type.String({ description: "File path (required for outline; optional context for others)." })),
-  directory: Type.Optional(Type.String({ description: "Root directory (default: cwd).", default: "." })),
-  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body (declaration/implementations)." })),
-  maxResults: Type.Optional(Type.Number({ description: "Max results (references/implementations, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
+  ], { description: "find (default): locate candidate symbols by name via AST + LSP. outline: file structure. declaration: canonical definition. references: all usages. implementations: interface/class implementors.", default: "find" })),
+  path: Type.Optional(Type.String({ description: "File path (required for outline; optional disambiguation context for declaration/references/implementations)." })),
+  directory: Type.Optional(Type.String({ description: "Root directory to scope the search (default: extension working directory).", default: "." })),
+  include_body: Type.Optional(Type.Boolean({ description: "Include symbol source body (find/declaration/implementations). Default: false." })),
+  maxResults: Type.Optional(Type.Number({ description: "Max results (find/references/implementations, default: 30).", minimum: 1, maximum: 10000, default: 30 })),
   childDepth: Type.Optional(Type.Number({ description: "Child depth for outline (default: 0).", minimum: 0, maximum: 5, default: 0 })),
 });
 
@@ -53,26 +47,7 @@ interface SymbolEntry {
 }
 
 function resolveDirectory(directory: string | undefined, defaultCwd: string): string {
-  const result = directory ? resolve(defaultCwd, directory) : resolve(defaultCwd);
-  try {
-    const realCwd = realpathSync(resolve(defaultCwd));
-    let realDir: string;
-    try {
-      realDir = realpathSync(result);
-    } catch {
-      realDir = result;
-    }
-    const rel = relative(realCwd, realDir);
-    if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
-      throw new Error(`Directory outside workspace: ${directory ?? "."}`);
-    }
-    return realDir;
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
-      throw err;
-    }
-    return result;
-  }
+  return directory ? resolve(defaultCwd, directory) : resolve(defaultCwd);
 }
 
 function extractSymbolName(node: { childForFieldName: (n: string) => { text: string } | null; namedChildren: ReadonlyArray<{ type: string; text: string; isNamed: boolean }> }): string | null {
@@ -788,7 +763,7 @@ function formatSymbolResult(data: { matches: SymbolEntry[]; totalDefs: number; f
     lines.push("");
   }
   if (matches.length === 0) {
-    lines.push(`> No symbols found. Try \`search query="${query}"\` for full-text search.`, "");
+    lines.push(`> No symbols found. Try search { query: "${query}" } for text matches, or search { query: "...", depth: "deep" } if the name is uncertain.`, "");
   }
   return lines.join("\n");
 }
@@ -890,40 +865,26 @@ function formatImplementationsResult(data: any, _query: string, startTime: numbe
 
 // ── Tool definitions ───────────────────────────────────────────────
 
-function createFindSymbolSearchTool(): ToolDefinition {
+function createSymbolTool(): ToolDefinition {
   return toToolDefinition({
-    name: "find_symbol",
-    label: "find_symbol",
-    description: "Find symbols by name or pattern across the codebase using AST analysis and LSP (when available). Use when you know a symbol name and need to navigate to where it's defined. Supports qualified paths like 'ClassName.methodName' for precise matching.",
-    parameters: FindSymbolSchema,
+    name: "symbol",
+    label: "symbol",
+    description: "Navigate code symbols: find candidates by name (default action), or get outline/declaration/references/implementations. Use when a symbol name is known or guessable, e.g. { query: \"AuthService.login\" } to locate it, { action: \"references\", query: \"AuthService.login\" } for usages, or { action: \"outline\", path: \"src/auth.ts\" } for file structure. Prefer search for raw text, structural patterns, or uncertain names, and read/read_files for known paths.",
+    parameters: SymbolSchema,
 
     async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
       if (signal?.aborted) throw new Error("Operation aborted");
       const startTime = Date.now();
       const root = resolveDirectory(params.directory, ctx.cwd);
-      const data = await handleSymbol(params.query, params.maxResults ?? 30, params.include_body ?? false, root, ctx.cwd, signal);
-      return {
-        content: [{ type: "text" as const, text: formatSymbolResult(data, params.query, startTime) }],
-        details: data,
-      };
-    },
-  });
-}
-
-function createSymbolInfoTool(): ToolDefinition {
-  return toToolDefinition({
-    name: "symbol_info",
-    label: "symbol_info",
-    description: "Query symbol information: outline (file structure), declaration (canonical definition), references (all usages), or implementations (interface/class implementors).",
-    parameters: SymbolInfoSchema,
-
-    async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-      const startTime = Date.now();
-      const root = resolveDirectory(params.directory, ctx.cwd);
-      const action = params.action as string;
+      const action = (params.action as string | undefined) ?? "find";
 
       switch (action) {
+        case "find": {
+          if (!params.query) throw new Error('action "find" requires "query" parameter');
+          const data = await handleSymbol(params.query, params.maxResults ?? 30, params.include_body ?? false, root, ctx.cwd, signal);
+          const text = formatSymbolResult(data, params.query, startTime);
+          return { content: [{ type: "text" as const, text }], details: data };
+        }
         case "outline": {
           if (!params.path) throw new Error('action "outline" requires "path" parameter');
           const data = await handleOverview(params.path, params.childDepth ?? 0, root);
@@ -945,7 +906,7 @@ function createSymbolInfoTool(): ToolDefinition {
           return { content: [{ type: "text" as const, text: formatImplementationsResult(data, params.query, startTime) }], details: data };
         }
         default:
-          throw new Error(`Unknown action: ${action}. Use outline, declaration, references, or implementations.`);
+          throw new Error(`Unknown action: ${action}. Use find, outline, declaration, references, or implementations.`);
       }
     },
   });
@@ -955,20 +916,15 @@ function createSymbolInfoTool(): ToolDefinition {
 
 // ── Registration ───────────────────────────────────────────────────
 
-export function registerFindSymbolTool(): void {
+export function registerSymbolTool(): void {
   const registry = ToolRegistry.getInstance();
-  const tools = [
-    createFindSymbolSearchTool(),
-    createSymbolInfoTool(),
-  ];
-  for (const tool of tools) {
-    if (registry.get(tool.name)) continue;
-    registry.register({
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.parameters as Record<string, unknown>,
-      execute: tool.execute,
-      category: ToolCategory.SYMBOL,
-    });
-  }
+  const tool = createSymbolTool();
+  if (registry.get(tool.name)) return;
+  registry.register({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.parameters as Record<string, unknown>,
+    execute: tool.execute,
+    category: ToolCategory.SYMBOL,
+  });
 }

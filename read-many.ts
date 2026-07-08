@@ -33,6 +33,7 @@ import {
 			WRAPPER_LINES,
 	} from "./utils.js";
 import { registerHandler, resolveUrl, isInternalUrl } from "./internal-url-router.js";
+import { createIntentReadTool } from "./intent-read.js";
 import { skillHandler } from "./skill-protocol.js";
 import { memoryHandler } from "./memory-protocol.js";
 import { graphHandler } from "./graph-protocol.js";
@@ -46,7 +47,7 @@ const CHUNK_SIZE = 500;
 const LARGE_REQUEST_THRESHOLD = 500;
 
 const ReadManySchema = Type.Object({
-	files: Type.Array(
+	files: Type.Optional(Type.Array(
 		Type.Object({
 			path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 			offset: Type.Optional(Type.Number({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
@@ -55,9 +56,12 @@ const ReadManySchema = Type.Object({
 		{
 			minItems: 1,
 			maxItems: 10000,
-			description: "Files to read in the exact order listed (max 10000)",
+			description: "Files to read in the exact order listed (max 10000). Required unless query is set.",
 		},
-	),
+	)),
+	query: Type.Optional(Type.String({ description: "Natural-language intent. When set, candidate files (from files, directory, or cwd) are ranked by hybrid BM25 + semantic relevance and only the most relevant are packed. Use when you know the goal but not the exact files." })),
+	directory: Type.Optional(Type.String({ description: "Directory to scan for candidates (only valid with query; default: cwd)." })),
+	topK: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: "Max files to pack when query is set (default: 20)." })),
 	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)" })),
 });
 
@@ -94,10 +98,11 @@ interface ReadManyDetails {
 }
 
 export function createReadManyTool(readToolFactory: typeof createReadTool = createReadTool): ToolDefinition {
+	let intentTool: ToolDefinition | undefined;
 	return {
 		name: "read_files",
 		label: "read_files",
-		description: `Read multiple files in one call with per-file offset/limit. Combined output uses per-file heredoc blocks (DICT_N_HASH); image attachments are summarized in text. Under combined output limits (${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}), packing is adaptive: request-order by default, trying smallest-first then relevance-first when they fit more complete successful files. Rendered section order stays original.`,
+		description: `Read several files in one call. With exact paths, e.g. { files: [{ path: "src/auth.ts" }, { path: "src/session.ts", offset: 40, limit: 80 }] }. With query: "your intent", candidate files are ranked by relevance and only the best are packed — use when you know the goal but not the exact files. Output is packed under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)} using adaptive ordering while preserving rendered request order. Prefer read for one known file, search for exact text/code patterns, and repo_map for a repository overview.`,
 		parameters: ReadManySchema,
 
 		async execute(
@@ -107,6 +112,24 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 			_onUpdate: unknown,
 			ctx: ExtensionContext,
 		) {
+			if (params.query?.trim()) {
+				const tool = intentTool ?? (intentTool = createIntentReadTool(readToolFactory));
+				return tool.execute(toolCallId, {
+					query: params.query,
+					files: params.files,
+					directory: params.directory,
+					topK: params.topK,
+					stopOnError: params.stopOnError,
+					defaultToCwd: true,
+				}, signal, undefined, ctx);
+			}
+			if (params.directory || params.topK !== undefined) {
+				throw new Error("directory/topK are only valid together with query");
+			}
+			if (!params.files || params.files.length === 0) {
+				throw new Error("Provide files to read, or query to rank and read by intent");
+			}
+
 			// Ensure hashline engine is ready before processing reads
 			await ensureHashlineReady();
 
@@ -348,6 +371,7 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 			// Hint for files omitted due to packing limits
 			if (plan.omittedIndexes.length > 0) {
 				recoveryHints.push(formatRecoveryHint("file", "", { type: "omitted", count: plan.omittedIndexes.length }));
+				recoveryHints.push(`${plan.omittedIndexes.length} file(s) omitted by the output budget. Add query: "<your intent>" to rank files by relevance and pack the best ones instead.`);
 			}
 
 			// Hint for partial file content

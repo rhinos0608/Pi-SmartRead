@@ -287,10 +287,10 @@ function generateFollowUps(
   );
   for (const term of resolveTerms.slice(0, 3)) {
     lines.push(
-      `- Resolve symbol: \`find_symbol\` action=declaration query=${term}`,
+      `- Resolve symbol: \`symbol\` action=declaration query=${term}`,
     );
     lines.push(
-      `- Find callers: \`find_symbol\` action=references query=${term}`,
+      `- Find callers: \`symbol\` action=references query=${term}`,
     );
   }
 
@@ -311,10 +311,10 @@ function generateFollowUps(
     const topSymbol = matches.find((m) => m.kind !== "file")?.name;
     if (topSymbol && /^[A-Za-z_$][\w$]*$/.test(topSymbol)) {
       lines.push(
-        `- Resolve symbol: \`find_symbol\` action=declaration query=${topSymbol}`,
+        `- Resolve symbol: \`symbol\` action=declaration query=${topSymbol}`,
       );
       lines.push(
-        `- Find callers: \`find_symbol\` action=references query=${topSymbol}`,
+        `- Find callers: \`symbol\` action=references query=${topSymbol}`,
       );
     }
   }
@@ -438,8 +438,8 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
       lines.push(`- Read full files: \`read mode=multiple\` with files: [${topFiles.join(", ")}]`);
     }
     if (topSymbol) {
-      lines.push(`- Resolve symbol: \`find_symbol\` action=declaration query=${topSymbol}`);
-      lines.push(`- Find callers: \`find_symbol\` action=references query=${topSymbol}`);
+      lines.push(`- Resolve symbol: \`symbol\` action=declaration query=${topSymbol}`);
+      lines.push(`- Find callers: \`symbol\` action=references query=${topSymbol}`);
     }
   }
 
@@ -509,7 +509,7 @@ function generateSearchGuidelines(notFoundTerms: string[]): string {
   lines.push("");
   lines.push("**1. Use specific technical terms, not concepts:**");
   lines.push(`   - ❌ "${notFoundTerms.slice(0, 2).join('" or "') || 'entry point'}" (concept)`);
-  lines.push("   - ✅ `createDeepSearchTool` (exact symbol name)");
+  lines.push("   - ✅ `createSearchTool` (exact symbol name)");
   lines.push("   - ✅ `parseCodeCandidates` (function name)");
   lines.push("   - ✅ `QueryTermCoverage` (interface/type name)");
   lines.push("");
@@ -523,9 +523,9 @@ function generateSearchGuidelines(notFoundTerms: string[]): string {
   lines.push("   - `repo_map(focusFiles: [\"file.ts\"])` → personalized ranking");
   lines.push("");
   lines.push("**4. Multi-channel search:**");
-  lines.push("   - `find_symbol action=symbol query=term` → find symbol definitions");
+  lines.push("   - `symbol query=term` → find symbol definitions");
   lines.push("   - `search query=term` → text + code search");
-  lines.push("   - `find_symbol action=declaration query=name` → resolve symbol");
+  lines.push("   - `symbol action=declaration query=name` → resolve symbol");
   lines.push("");
 
   return lines.join("\n");
@@ -613,7 +613,7 @@ function fuseCandidates(
 /**
  * Execute deep search — internal function called by search-tool.ts.
  * Orchestrates structural code search, symbol search, LSP workspace symbol search,
- * optional intent_read semantic ranking, graph expansion, RRF fusion, provenance,
+ * optional intent-based semantic ranking, graph expansion, RRF fusion, provenance,
  * and follow-up suggestions.
  */
 export async function executeDeepSearch(

@@ -31,11 +31,11 @@ export const GUARD_HINT_RE = /💡 (To see specific sections|Use a more specific
 
 /** Tool-specific overrides for the bash context guard. */
 export const TOOL_GUARD_PROFILES: Record<string, Partial<BashContextGuardProfile>> = {
-  // Search can return substantial context
   search: { maxLines: 2500, maxBytes: 60 * 1024, headLines: 100, tailLines: 140 },
-  // Read with intent/multiple mode can produce large output
   read: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
-  // Default profile (also used for bash)
+  read_files: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
+  repo_map: { maxLines: 1500, maxBytes: 40 * 1024, headLines: 60, tailLines: 80 },
+  symbol: { maxLines: 1500, maxBytes: 40 * 1024, headLines: 60, tailLines: 80 },
   default: { maxLines: 2000, maxBytes: 50 * 1024, headLines: 80, tailLines: 120 },
 };
 
@@ -161,6 +161,11 @@ function isProtectedNotice(line: string): boolean {
     /^Command exited with code \d+/.test(trimmed) ||
     trimmed.startsWith("⚠ REPEATED-CALL WARNING:") ||
     trimmed.startsWith("⚠ ALTERNATING-CALL WARNING:") ||
+    trimmed.startsWith("⚠ CONTENT-CHANTING WARNING:") ||
+    trimmed.startsWith("⚠ ACTION-STAGNATION WARNING:") ||
+    trimmed.startsWith("⚠ READ-FILE-LOOP WARNING:") ||
+    trimmed.startsWith("⚠ GLOBAL-DUPLICATE WARNING:") ||
+    trimmed.startsWith("⚠ HARD-CAP WARNING:") ||
     trimmed.startsWith("⚠ DOOM-LOOP WARNING:") ||
     // Guard hint lines for truncated output
     trimmed === GUARD_HINT_GENERIC ||
@@ -209,7 +214,7 @@ function renderPreview(options: {
   const command = compactCommand(options.command);
 
   // Generate tool-specific hint for truncated output
-  const hint = options.toolName === "deep_search" ? GUARD_HINT_DEEP_SEARCH : GUARD_HINT_GENERIC;
+  const hint = options.toolName === "search" ? GUARD_HINT_DEEP_SEARCH : GUARD_HINT_GENERIC;
 
   const rendered: string[] = [
     "[Bash context guard: preview]",
@@ -259,6 +264,7 @@ export function applyBashContextGuard(options: {
   text: string;
   command?: string;
   config?: BashContextGuardConfig;
+  toolName?: string;
 }): BashContextGuardResult {
   const config = options.config ?? resolveBashContextGuardConfig();
   const postRtkLineCount = lineCount(options.text);
@@ -286,7 +292,7 @@ export function applyBashContextGuard(options: {
     const outputPath = writeOutput(fs, options.text);
     const metadata: BashContextGuardMetadata = { ...baseMetadata, trimmed: true, postRtkOutputPath: outputPath };
     return {
-      text: renderPreview({ text: options.text, outputPath, command: options.command, metadata, preservedNotices }),
+      text: renderPreview({ text: options.text, outputPath, command: options.command, metadata, preservedNotices, toolName: options.toolName }),
       metadata,
     };
   } catch (error) {

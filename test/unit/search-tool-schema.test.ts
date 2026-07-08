@@ -22,6 +22,16 @@ describe("search tool schema", () => {
     expect(schema.properties).not.toHaveProperty("folder");
   });
 
+  it("exposes depth and scope params for deep search", () => {
+    const tool = createSearchTool();
+    const schema = tool.parameters as { properties?: Record<string, any> };
+
+    const depth = schema.properties?.depth;
+    expect(depth).toBeDefined();
+    expect(depth.anyOf?.map((v: any) => v.const) ?? depth.enum).toEqual(["quick", "deep"]);
+    expect(schema.properties).toHaveProperty("scope");
+  });
+
   it("scopes search to the requested directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-smartread-search-scoped-"));
     try {
@@ -55,6 +65,33 @@ describe("search tool schema", () => {
       expect(text).not.toContain("outside.ts");
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows absolute directories outside cwd", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "pi-smartread-search-unbounded-"));
+    const root = join(parent, "repo");
+    const outside = join(parent, "outside");
+    try {
+      mkdirSync(root, { recursive: true });
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, "target.ts"), "export const unboundedSearchTarget = true;\n");
+
+      const tool = createSearchTool();
+      const result = await tool.execute(
+        "id",
+        { query: "unboundedSearchTarget", directory: outside },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const text = (result.content[0] as any).text as string;
+      const details = result.details as any;
+      expect(details.total).toBeGreaterThan(0);
+      expect(text).toContain("target.ts");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 

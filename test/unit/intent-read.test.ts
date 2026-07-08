@@ -48,6 +48,25 @@ afterEach(() => {
 });
 
 describe("intent_read: input validation", () => {
+  it("allows parent-relative files outside cwd", async () => {
+    const seen: Array<{ path: string; offset?: number; limit?: number }> = [];
+    const tool = createIntentReadTool(
+      () => makeReadTool({ "../outside.ts": "outside authentication helper" }, (input) => seen.push(input)) as any,
+      makeEmbedder([[1, 0], [1, 0]]),
+    );
+
+    const result = await tool.execute(
+      "id",
+      { query: "authentication", files: [{ path: "../outside.ts" }] },
+      undefined,
+      undefined,
+      { cwd: "/workspace/repo" } as any,
+    );
+
+    expect(seen[0]).toEqual({ path: "../outside.ts", offset: undefined, limit: undefined });
+    expect((result.content[0] as any).text).toContain("outside authentication helper");
+  });
+
   it("throws when both files and directory are provided", async () => {
     const tool = createIntentReadTool(() => makeReadTool({}) as any, makeEmbedder([]));
     await expect(
@@ -545,7 +564,7 @@ describe("intent_read: graph-neighbour augmentation", () => {
     }
   });
 
-  it("does not add graph neighbours outside the workspace", async () => {
+  it("adds graph neighbours outside cwd", async () => {
     const parent = mkdtempSync(join(tmpdir(), "intent-read-graph-escape-"));
     const root = join(parent, "repo");
     try {
@@ -557,7 +576,7 @@ describe("intent_read: graph-neighbour augmentation", () => {
 
       const tool = createIntentReadTool(
         () => makeReadTool({ [fileA]: "authentication entry", [outside]: "secret" }) as any,
-        makeEmbedder([[1, 0], [1, 0]]),
+        makeEmbedder([[1, 0], [1, 0], [1, 0]]),
       );
 
       const result = await tool.execute(
@@ -569,14 +588,14 @@ describe("intent_read: graph-neighbour augmentation", () => {
       );
 
       const details = result.details as any;
-      expect(details.graphAugmentation.addedPaths).toEqual([]);
-      expect(details.files.map((f: any) => f.path)).not.toContain(outside);
+      expect(details.graphAugmentation.addedPaths).toEqual([outside]);
+      expect(details.files.map((f: any) => f.path)).toContain(outside);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
   });
 
-  it("does not add graph neighbours through symlinks that point outside the workspace", async () => {
+  it("adds graph neighbours through symlinks that point outside cwd", async () => {
     const parent = mkdtempSync(join(tmpdir(), "intent-read-graph-symlink-"));
     const root = join(parent, "repo");
     try {
@@ -590,7 +609,7 @@ describe("intent_read: graph-neighbour augmentation", () => {
 
       const tool = createIntentReadTool(
         () => makeReadTool({ [fileA]: "authentication entry", [link]: "secret" }) as any,
-        makeEmbedder([[1, 0], [1, 0]]),
+        makeEmbedder([[1, 0], [1, 0], [1, 0]]),
       );
 
       const result = await tool.execute(
@@ -602,14 +621,14 @@ describe("intent_read: graph-neighbour augmentation", () => {
       );
 
       const details = result.details as any;
-      expect(details.graphAugmentation.addedPaths).toEqual([]);
-      expect(details.files.map((f: any) => f.path)).not.toContain(link);
+      expect(details.graphAugmentation.addedPaths).toEqual([link]);
+      expect(details.files.map((f: any) => f.path)).toContain(link);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
   });
 
-  it("does not add graph neighbours through symlinked directories that point outside the workspace", async () => {
+  it("adds graph neighbours through symlinked directories that point outside cwd", async () => {
     const parent = mkdtempSync(join(tmpdir(), "intent-read-graph-symlink-dir-"));
     const root = join(parent, "repo");
     const outsideDir = join(parent, "outside-dir");
@@ -626,7 +645,7 @@ describe("intent_read: graph-neighbour augmentation", () => {
 
       const tool = createIntentReadTool(
         () => makeReadTool({ [fileA]: "authentication entry", [linkedFile]: "secret" }) as any,
-        makeEmbedder([[1, 0], [1, 0]]),
+        makeEmbedder([[1, 0], [1, 0], [1, 0]]),
       );
 
       const result = await tool.execute(
@@ -638,8 +657,8 @@ describe("intent_read: graph-neighbour augmentation", () => {
       );
 
       const details = result.details as any;
-      expect(details.graphAugmentation.addedPaths).toEqual([]);
-      expect(details.files.map((f: any) => f.path)).not.toContain(linkedFile);
+      expect(details.graphAugmentation.addedPaths).toEqual([linkedFile]);
+      expect(details.files.map((f: any) => f.path)).toContain(linkedFile);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

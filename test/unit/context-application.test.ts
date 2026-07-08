@@ -317,6 +317,48 @@ describe("applyContextHygieneStaleContext", () => {
     });
   });
 
+  describe("masks stale SmartRead retrieval results", () => {
+    it.each([
+      "read_files",
+      "symbol",
+      "repo_map",
+    ])("replaces stale %s result", (toolName) => {
+      const messages = [
+        {
+          role: "toolResult",
+          toolCallId: `call-${toolName}`,
+          toolName,
+          content: [{ type: "text", text: `${toolName} results` }],
+        },
+      ];
+      const report: ContextHygieneReport = {
+        eventCount: 2,
+        resourceCount: 1,
+        readReuse: [],
+        mutationAfterRead: [],
+        staleCandidates: [
+          {
+            resourceKey: "file:/project/src/foo.ts",
+            staleEventIds: [1],
+            mutationEventId: 2,
+            reason: "mutation-after-read",
+            staleResults: [
+              buildStaleContextRecord({
+                originalTool: toolName,
+                originalResultId: `call-${toolName}`,
+                staleResourceKeys: ["file:/project/src/foo.ts"],
+                invalidatingMutationEventId: 2,
+              }),
+            ],
+          },
+        ],
+        retirementCandidates: [],
+      };
+      const result = applyContextHygieneStaleContext(messages, report);
+      expect(result[0]!.content[0]!.text).toContain("Stale");
+    });
+  });
+
   describe("masks retired bash results", () => {
     it("replaces retired bash result content with placeholder", () => {
       const messages = [

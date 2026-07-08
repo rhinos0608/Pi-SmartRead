@@ -1,7 +1,7 @@
 /**
  * Retrieval benchmarks: Recall@k and MRR metrics.
  *
- * Measures how well the intent_read retrieval pipeline ranks relevant files.
+ * Measures how well the intent-read retrieval pipeline ranks relevant files.
  * Each benchmark scenario defines a query, candidate files, and ground-truth
  * relevant files. We compute:
  *

@@ -9,6 +9,7 @@ import {
   resolveGuardProfile,
   suggestShellCommands,
   GUARD_HINT_GENERIC,
+  GUARD_HINT_DEEP_SEARCH,
   TOOL_GUARD_PROFILES,
   type BashContextGuardConfig,
 } from "../../bash-context-guard.js";
@@ -77,6 +78,14 @@ describe("resolveGuardProfile", () => {
   it("returns read-specific profile for 'read' tool", () => {
     const profile = resolveGuardProfile("read");
     expect(profile.maxLines).toBe(3000);
+  });
+
+  it("has profiles for high-output SmartRead tools", () => {
+    for (const toolName of ["read_files", "search", "repo_map", "symbol"]) {
+      const profile = resolveGuardProfile(toolName);
+      expect(profile.maxLines).toBeGreaterThan(0);
+      expect(profile.maxBytes).toBeGreaterThan(0);
+    }
   });
 
   it("merges tool profile on top of baseConfig", () => {
@@ -218,7 +227,55 @@ describe("applyBashContextGuard", () => {
       expect(result.text).toContain("⚠ DOOM-LOOP WARNING:");
     });
 
-    it("preserves guard hint lines", () => {
+    it("preserves ACTION-STAGNATION WARNING lines", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 3000; i++) lines.push(`line ${i}`);
+    lines.splice(100, 0, "⚠ ACTION-STAGNATION WARNING: Same tool called 10 times consecutively.");
+    const text = lines.join("\n");
+    const config: BashContextGuardConfig = {
+      enabled: true,
+      maxLines: 2000,
+      maxBytes: 50 * 1024,
+      headLines: 80,
+      tailLines: 120,
+    };
+    const result = applyBashContextGuard({ text, config });
+    expect(result.text).toContain("⚠ ACTION-STAGNATION WARNING:");
+  });
+
+  it("preserves CONTENT-CHANTING WARNING lines", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 3000; i++) lines.push(`line ${i}`);
+    lines.splice(100, 0, "⚠ CONTENT-CHANTING WARNING: Same output pattern detected 12+ times.");
+    const text = lines.join("\n");
+    const config: BashContextGuardConfig = {
+      enabled: true,
+      maxLines: 2000,
+      maxBytes: 50 * 1024,
+      headLines: 80,
+      tailLines: 120,
+    };
+    const result = applyBashContextGuard({ text, config });
+    expect(result.text).toContain("⚠ CONTENT-CHANTING WARNING:");
+  });
+
+  it("preserves READ-FILE-LOOP WARNING lines", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 3000; i++) lines.push(`line ${i}`);
+    lines.splice(100, 0, "⚠ READ-FILE-LOOP WARNING: 10+ read operations in last 15 calls.");
+    const text = lines.join("\n");
+    const config: BashContextGuardConfig = {
+      enabled: true,
+      maxLines: 2000,
+      maxBytes: 50 * 1024,
+      headLines: 80,
+      tailLines: 120,
+    };
+    const result = applyBashContextGuard({ text, config });
+    expect(result.text).toContain("⚠ READ-FILE-LOOP WARNING:");
+  });
+
+  it("preserves guard hint lines", () => {
       const lines: string[] = [];
       for (let i = 0; i < 3000; i++) lines.push(`line ${i}`);
       const text = lines.join("\n");
@@ -354,6 +411,20 @@ describe("applyBashContextGuard", () => {
       };
       const result = applyBashContextGuard({ text, config });
       expect(result.text).toContain(GUARD_HINT_GENERIC);
+    });
+  });
+
+  describe("tool-specific guidance", () => {
+    it("uses deep-search hint for the search tool", () => {
+      const text = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+      const result = applyBashContextGuard({
+        text,
+        toolName: "search",
+        config: { enabled: true, maxLines: 5, maxBytes: 1024 * 1024, headLines: 2, tailLines: 2 },
+      });
+
+      expect(result.text).toContain(GUARD_HINT_DEEP_SEARCH);
+      expect(result.text).not.toContain(GUARD_HINT_GENERIC);
     });
   });
 

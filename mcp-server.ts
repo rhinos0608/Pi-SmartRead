@@ -7,10 +7,10 @@
  *
  * Tools exposed:
  *   - graph_mutate:  Record a single breakage or co-change edge
- *   - intent_read:  Hybrid RRF retrieval (BM25 + embeddings)
- *   - read_files:  Multi-file reader with packing
+ *   - read_files:  Multi-file reader with packing (query mode ranks by intent)
  *   - repo_map:  Repository symbol map (PageRank + tree-sitter)
- *   - search:  Unified text + code search
+ *   - search:  Unified text + code search (depth: "deep" for multi-channel)
+ *   - symbol:  Symbol navigation and metadata
  *
  * Usage:
  *   node --import tsx mcp-server.ts    # Run as MCP stdio server
@@ -32,6 +32,7 @@ import { MCP_RESOURCES, resolveResource } from "./mcp-resources.js";
 import { coerceText } from "./utils.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toExtensionContext } from "./types.js";
+import { renderSmartReadToolGuide } from "./tool-guidance.js";
 
 // Capture cwd once at server start
 const SERVER_CWD = process.cwd();
@@ -95,6 +96,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
     const result = await tool.execute(toolCallId, args ?? {}, extra.signal ?? undefined, undefined, ctx);
 
+    if (result === undefined) {
+      return {
+        content: [{ type: "text" as const, text: "Tool executed successfully (no output)" }],
+        isError: false,
+      };
+    }
+
     // Convert tool result to MCP content format
     const content: Array<{ type: "text"; text: string }> = (result.content ?? []).map((item: any) => {
       if (item.type === "text") {
@@ -104,10 +112,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     });
 
     return {
-      content:
-        result === undefined
-          ? [{ type: "text" as const, text: "Tool executed successfully (no output)" }]
-          : content,
+      content,
       isError: false,
     };
   } catch (err) {
@@ -178,6 +183,20 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
           content: {
             type: "text" as const,
             text: `Please perform an architectural analysis of the file \`${filePath}\`.\n\n${query}`,
+          },
+        },
+      ],
+    };
+  }
+
+  if (name === "smartread-tool-guide") {
+    return {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: renderSmartReadToolGuide(typeof args?.task === "string" ? args.task : undefined),
           },
         },
       ],

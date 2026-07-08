@@ -96,6 +96,27 @@ describe("read_files: helper logic", () => {
 		expect(text).toMatch(/\n3[a-z]{2}\|line 3/);
 	});
 
+	it("allows parent-relative paths outside cwd", async () => {
+		const seen: Array<{ path: string; offset?: number; limit?: number }> = [];
+		const tool = createToolWithMap(
+			{
+				"/workspace/outside.ts": { content: [{ type: "text", text: "outside" }] },
+			},
+			(input) => seen.push(input),
+		);
+
+		const result = await tool.execute(
+			"call-parent",
+			{ files: [{ path: "../outside.ts" }] },
+			undefined,
+			undefined,
+			{ cwd: "/workspace/repo" } as any,
+		);
+
+		expect(seen[0]).toEqual({ path: "/workspace/outside.ts", offset: undefined, limit: undefined });
+		expect((result.content[0] as any).text).toContain("outside");
+	});
+
 	it("adds suffix when delimiter collides with content", () => {
 		const path = "/tmp/collide.txt";
 		const base = `PINE_1_${createPathHash(path)}`;
@@ -166,6 +187,52 @@ describe("read_files: helper logic", () => {
 		const plan = buildPlan("request-order", [0, 1, 2], candidates);
 		expect(plan.fullCount).toBe(3);
 		expect(plan.fullSuccessCount).toBe(2);
+	});
+});
+
+describe("read_files: query (intent) mode", () => {
+	it("ranks and packs files by relevance when query is set", async () => {
+		const tool = createToolWithMap({
+			"/a": { content: [{ type: "text", text: "authentication logic here" }] },
+			"/b": { content: [{ type: "text", text: "database schema" }] },
+		});
+
+		const result = await tool.execute(
+			"call-q1",
+			{ query: "authentication", files: [{ path: "/a" }, { path: "/b" }], topK: 1 },
+			undefined,
+			undefined,
+			{ cwd: "/" } as any,
+		);
+
+		const text = (result.content[0] as any).text as string;
+		const details = result.details as any;
+		expect(details.query).toBe("authentication");
+		expect(text).toContain("@/a");
+		expect(text).not.toContain("@/b");
+		expect(Array.isArray(details.files)).toBe(true);
+	});
+
+	it("throws when neither files nor query is provided", async () => {
+		const tool = createToolWithMap({});
+		await expect(
+			tool.execute("call-q2", {} as any, undefined, undefined, { cwd: "/" } as any),
+		).rejects.toThrow(/files|query/i);
+	});
+
+	it("throws when directory is provided without query", async () => {
+		const tool = createToolWithMap({
+			"/a": { content: [{ type: "text", text: "x" }] },
+		});
+		await expect(
+			tool.execute(
+				"call-q3",
+				{ files: [{ path: "/a" }], directory: "." } as any,
+				undefined,
+				undefined,
+				{ cwd: "/" } as any,
+			),
+		).rejects.toThrow(/query/i);
 	});
 });
 

@@ -11,11 +11,10 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 | Tool | What it does |
 |---|---|
 | `read` | Single-file read with contextual enrichment (imports, git, graphify) |
-| `read_files` | Multi-file batch read with adaptive output packing |
-| `intent_read` | Intent-based file discovery with hybrid RRF retrieval (BM25 + embeddings) |
-| `search` | Consolidated search: grep-style text search with definition-aware ranking (`grep`), BM25 + embedding code search with symbol enrichment (`code`), agentic multi-channel deep search (`deep`) |
+| `read_files` | Multi-file batch read with adaptive output packing; `query` mode ranks candidates with hybrid RRF retrieval (BM25 + embeddings) |
+| `search` | Unified text + code search: grep-style matches plus AST-aware code definitions; `depth: "deep"` adds multi-channel structural, semantic, symbol, graph, and LSP signals |
 | `repo_map` | PageRank-ranked repository map from native tree-sitter AST tags |
-| `find_symbol` | Symbol-level exploration: name search, file outline, references, declaration, implementations, workspace-wide LSP search, hover info |
+| `symbol` | Symbol-level exploration: name search (default), file outline, declaration, references, implementations |
 | `graph_mutate` | [experimental] Records semantic coupling observations (breakage edges, co-change edges) into the context graph |
 
 ### Cross-cutting features
@@ -27,7 +26,7 @@ Pi-SmartRead also provides passive safety and enrichment that runs across all to
 | **Context hygiene** | Tracks every read tool result; marks stale reads in the context window after file mutations |
 | **Doom-loop detection** | Warns when the LLM repeats identical tool calls 3+ times, with tool-specific suggestions |
 | **Bash context guard** | Caps oversized bash output to head+tail preview, writes full output to temp file |
-| **Startup repo map injection** | Injects a compact repo map on the first turn of every session — no wasted round trips |
+| **Startup tool guidance + repo map injection** | Injects SmartRead tool-selection guidance and a compact repo map on the first turn — no wasted round trips |
 | **Read enrichment** | Appends import relationships, git recency, branch notes, and graphify knowledge to every file read |
 | **LSP bridge** | Tracks opened files on the language server for faster subsequent LSP queries; closes mutated files for fresh re-reads |
 | **Microagents** | Scans `.pi-smartread/microagents/` for markdown-based agent instructions with trigger-based or always-loaded rules |
@@ -89,9 +88,9 @@ Read up to 20 files in one call with adaptive output packing.
 
 ---
 
-## `intent_read`
+## `read_files` query mode
 
-Find the most relevant files for a query using hybrid retrieval.
+Find the most relevant files for a query using hybrid retrieval (`read_files { query: "..." }`).
 
 **How it works:**
 1. Resolves candidates from explicit files or a non-recursive directory scan
@@ -227,35 +226,32 @@ Generate a repository map using **native tree-sitter AST extraction** by default
 
 ---
 
-## `find_symbol`
+## `symbol`
 
-Symbol-level code exploration with seven actions.
+Symbol-level code exploration.
 
 ### Actions
 
 | Action | What it does |
 |---|---|
-| `symbol` (default) | Find symbols by name/pattern. Supports qualified paths (`ClassName.methodName`). |
-| `overview` | File outline via AST analysis — all top-level symbols with types and line ranges. |
+| `find` (default) | Find symbols by name/pattern via AST + LSP. Supports qualified paths (`ClassName.methodName`). |
+| `outline` | File outline via AST analysis — all top-level symbols with types and line ranges. |
+| `declaration` | Find the canonical definition of a symbol with optional context file. |
 | `references` | All reference locations for a symbol across the codebase. |
-| `declaration` | Find the definition/declaration of a symbol with optional context file. |
 | `implementations` | Find types that implement an interface or extend a class. |
-| `workspace` | Workspace-wide symbol search via LSP. |
-| `hover` | Type/signature/quick-info at a file position via LSP. |
 
 ### Examples
 
 ```json
 {
-  "action": "symbol",
   "query": "UserService.create"
 }
 ```
 
 ```json
 {
-  "action": "overview",
-  "relative_path": "src/services/auth.ts"
+  "action": "outline",
+  "path": "src/services/auth.ts"
 }
 ```
 
@@ -263,14 +259,7 @@ Symbol-level code exploration with seven actions.
 {
   "action": "references",
   "query": "Authenticator",
-  "relative_path": "src/middleware/auth.ts"
-}
-```
-
-```json
-{
-  "action": "hover",
-  "relative_path": "src/services/auth.ts:42:12"
+  "path": "src/middleware/auth.ts"
 }
 ```
 
@@ -300,7 +289,7 @@ When editing file A causes type-checking errors in file B:
 }
 ```
 
-The next `intent_read` touching A will automatically include B as a candidate.
+The next `read_files` query touching A will automatically include B as a candidate.
 
 ### Co-change
 
@@ -469,7 +458,9 @@ Pi-SmartRead includes a standalone **MCP (Model Context Protocol) stdio server**
 npm run mcp-server
 ```
 
-Exposes: `read`, `read_files`, `intent_read`, `search`, `repo_map`, `find_symbol`, and (if experimental features are enabled) `graph_mutate` and git notes tools.
+Exposes: `read`, `read_files`, `search`, `repo_map`, `symbol`, and (if experimental features are enabled) `graph_mutate` and git notes tools.
+
+Prompts include `smartread-tool-guide`, which returns task-specific guidance for choosing between `read`, `read_files`, `search`, `symbol`, and `repo_map`.
 
 See **[docs/mcp-quickstart.md](docs/mcp-quickstart.md)** for full setup instructions.
 

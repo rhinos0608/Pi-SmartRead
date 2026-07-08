@@ -3,8 +3,23 @@ import {
   resetContextHygieneTracker,
   buildContextHygieneMetadata,
   buildFileResource,
+  buildStaleContextRecord,
+  renderStaleContextPlaceholder,
   type ContextHygieneTracker,
 } from "../../context-hygiene.js";
+
+describe("renderStaleContextPlaceholder", () => {
+  it("renders repo_map stale guidance", () => {
+    const placeholder = renderStaleContextPlaceholder(buildStaleContextRecord({
+      originalTool: "repo_map",
+      staleResourceKeys: ["file:/project/src/foo.ts"],
+      invalidatingMutationEventId: 2,
+    }));
+
+    expect(placeholder).toContain("repo_map");
+    expect(placeholder).toContain("refresh");
+  });
+});
 
 describe("recordMutation: stale-result auto-invalidation", () => {
   let tracker: ContextHygieneTracker;

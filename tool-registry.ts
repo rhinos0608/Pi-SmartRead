@@ -25,6 +25,8 @@ export enum ToolCategory {
   NOTES = "notes",
   /** Health checks and status reporting */
   STATUS = "status",
+  /** Agent skill discovery and loading */
+  SKILL = "skill",
 }
 
 // ── Registration shape ─────────────────────────────────────────────

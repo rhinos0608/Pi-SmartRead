@@ -89,7 +89,7 @@ function toRelativePath(cwd: string, path: string): string {
 }
 
 /**
- * Run the semantic channel using intent_read for embedding-based ranking.
+ * Run the semantic channel using the intent-read engine for embedding-based ranking.
  */
 export async function runSemanticChannel(
   query: string,

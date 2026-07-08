@@ -5,8 +5,7 @@
  * - `repo_map` — generate a PageRank-ranked map of the repo
  * - `search` — consolidated search (symbols, callers, resolve, code)
  */
-import { realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionAPI,
@@ -74,7 +73,7 @@ export function createRepoTool(): ToolDefinition {
   return {
     name: "repo_map",
     label: "repo_map",
-    description: `Map repository via tree-sitter AST (default) or import-based dependency mapping (fallback). Ranks files by PageRank, returns token-budgeted map of important symbols. Use focus to boost specific files/symbols.`,
+    description: `Create a compact, ranked repository map from AST symbols and dependency structure. Use for first-pass orientation, architecture questions, or choosing files to inspect, e.g. { mapTokens: 4096, focus: ["auth", "src/session.ts"] }. Prefer search for exact text/code lookup (depth: "deep" for evidence on a specific question), symbol for symbol navigation, and read/read_files once target files are known.`,
     parameters: RepoMapSchema,
 
     async execute(
@@ -174,26 +173,7 @@ export function createRepoTool(): ToolDefinition {
 }
 
 function resolveDirParam(cwd: string, directory: string | undefined): string {
-  const resolvedDir = directory ? resolve(cwd, directory) : resolve(cwd);
-  try {
-    const realCwd = realpathSync(resolve(cwd));
-    let realDir: string;
-    try {
-      realDir = realpathSync(resolvedDir);
-    } catch {
-      realDir = resolvedDir;
-    }
-    const rel = relative(realCwd, realDir);
-    if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
-      throw new Error(`Directory outside workspace: ${directory ?? "."}`);
-    }
-    return realDir;
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
-      throw err;
-    }
-    return resolvedDir;
-  }
+  return directory ? resolve(cwd, directory) : resolve(cwd);
 }
 
 // ── Registration ──────────────────────────────────────────────────
