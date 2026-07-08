@@ -1,8 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition, toToolDefinitions } from "./types.js";
-import { realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import { detectDefaultBranch, findBranchPoint, findGitRoot, getStructuredLog } from "./git-context.js";
 import { COMPAT_NOTES_REFS, PI_NOTES_REF, formatBranchNotes, isValidCommitIsh, readNote, scanBranchNotes, writeNote } from "./git-notes.js";
@@ -36,7 +35,7 @@ function createGitNotesReadTool(): ToolDefinition {
     name: "git_notes_read",
     label: "git_notes_read",
     description:
-      "[EXPERIMENTAL] Read AI session context attached to git commits. Returns decisions, constraints from prior sessions.",
+      "[EXPERIMENTAL] Read AI session notes attached to git commits, including prior decisions, constraints, and rejected approaches. Use when continuing work on a branch or inspecting commit-specific context, e.g. { commit: \"HEAD\" } or {} for branch notes. Prefer git log/diff via shell for raw version history, repo_map/search for code discovery, and git_notes_write only when adding durable session context.",
     parameters: GitNotesReadSchema,
 
     async execute(
@@ -66,7 +65,7 @@ function createGitNotesWriteTool(): ToolDefinition {
     name: "git_notes_write",
     label: "git_notes_write",
     description:
-      "[EXPERIMENTAL] Write session context as git note. Use Lore-style trailers: Constraint:, Rejected:, Directive:, Confidence:",
+      "[EXPERIMENTAL] Write durable AI session context as a git note. Use for decisions future agents should preserve, e.g. { content: \"Constraint: keep public API stable\\nConfidence: high\", commit: \"HEAD\" }. Prefer final chat summaries for normal reporting; use git_notes_read to inspect existing notes before adding new ones.",
     parameters: GitNotesWriteSchema,
 
     async execute(
@@ -162,24 +161,5 @@ export function createGitNotesTools(): ToolDefinition[] {
 }
 
 function resolveDirParam(cwd: string, directory: string | undefined): string {
-  const resolvedDir = directory ? resolve(cwd, directory) : resolve(cwd);
-  try {
-    const realCwd = realpathSync(resolve(cwd));
-    let realDir: string;
-    try {
-      realDir = realpathSync(resolvedDir);
-    } catch {
-      realDir = resolvedDir;
-    }
-    const rel = relative(realCwd, realDir);
-    if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
-      throw new Error(`Directory outside workspace: ${directory ?? "."}`);
-    }
-    return realDir;
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
-      throw err;
-    }
-    return resolvedDir;
-  }
+  return directory ? resolve(cwd, directory) : resolve(cwd);
 }

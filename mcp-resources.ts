@@ -3,9 +3,12 @@
  *
  * Defines resource URIs and a resolver that returns the resource content.
  */
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Resource } from "@modelcontextprotocol/sdk/types.js";
 import { validateEmbeddingConfig, loadSearchConfig, loadGitContextConfig, loadExperimentalConfig } from "./config.js";
 import { buildToolRegistry } from "./mcp-registry.js";
+import { getGraphifyEnricher } from "./graphify-enricher.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -37,6 +40,36 @@ export const MCP_RESOURCES: Resource[] = [
     name: "Server Status",
     mimeType: "application/json",
     description: "Server version, tool count, and runtime status",
+  },
+  {
+    uri: "smartread://repo/stats",
+    name: "Repository Statistics",
+    mimeType: "application/json",
+    description: "Repository file count, language breakdown, and source-file statistics",
+  },
+  {
+    uri: "smartread://repo/graph/summary",
+    name: "Context Graph Summary",
+    mimeType: "text/plain",
+    description: "Knowledge graph summary — nodes, edges, communities, and file coverage",
+  },
+  {
+    uri: "smartread://repo/graph/communities",
+    name: "Graph Communities",
+    mimeType: "text/plain",
+    description: "Detected architectural clusters with file counts and sample filenames",
+  },
+  {
+    uri: "smartread://repo/graph/god-nodes",
+    name: "Graph God Nodes",
+    mimeType: "text/plain",
+    description: "Highest-centrality graph nodes (core abstractions), sorted by connection count",
+  },
+  {
+    uri: "smartread://repo/index/status",
+    name: "Index Status",
+    mimeType: "application/json",
+    description: "Knowledge graph index — file count, last modified, and pending changes",
   },
 ];
 
@@ -70,6 +103,54 @@ function getResolvedConfig(): Record<string, unknown> {
     search,
     gitContext,
     experimental,
+  };
+}
+
+function getRepoStats(): Record<string, unknown> {
+  const cwd = process.cwd();
+
+  // Walk source files (non-recursive top-level scan is too shallow; do shallow scan of src/ and lib/)
+  const dirsToScan = [
+    resolve(cwd, "src"),
+    resolve(cwd, "lib"),
+    resolve(cwd, "packages"),
+  ].filter((d) => existsSync(d));
+
+  if (dirsToScan.length === 0) {
+    // Fallback: scan cwd non-recursively
+    dirsToScan.push(cwd);
+  }
+
+  const extensions = new Map<string, number>();
+  let totalFiles = 0;
+
+  for (const dir of dirsToScan) {
+    try {
+      const entries = readdirSync(dir, { withFileTypes: true, recursive: true });
+      for (const entry of entries) {
+        if (entry.isFile()) {
+          totalFiles++;
+          const ext = entry.name.includes(".") ? entry.name.split(".").pop()?.toLowerCase() ?? "(none)" : "(none)";
+          extensions.set(ext, (extensions.get(ext) ?? 0) + 1);
+        }
+      }
+    } catch {
+      // Directory may not exist or may be inaccessible
+    }
+  }
+
+  // Sort by count descending
+  const sortedLangBreakdown = [...extensions.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([ext, count]) => ({ ext, count }));
+
+  return {
+    cwd,
+    scannedDirectories: dirsToScan,
+    totalFiles,
+    languageBreakdown: sortedLangBreakdown,
+    languages: sortedLangBreakdown.length,
   };
 }
 
@@ -125,6 +206,145 @@ export function resolveResource(uri: string): { uri: string; mimeType: string; t
     };
   }
 
+  if (uri === "smartread://repo/stats") {
+    return {
+      uri,
+      mimeType: "application/json",
+      text: JSON.stringify(getRepoStats(), null, 2),
+    };
+  }
+
+  if (uri === "smartread://repo/index/status") {
+    const cwd = process.cwd();
+    const enricher = getGraphifyEnricher(cwd);
+    const graphPath = enricher.path;
+
+    let lastModified: string | null = null;
+    let fileSize: number | null = null;
+    if (graphPath) {
+      try {
+        const st = statSync(graphPath);
+        lastModified = st.mtime.toISOString();
+        fileSize = st.size;
+      } catch {
+        // stat failed
+      }
+    }
+
+    const status = {
+      hasGraph: enricher.isAvailable,
+      graphPath: graphPath ?? "(not found)",
+      nodes: enricher.stats?.nodeCount ?? 0,
+      edges: enricher.stats?.edgeCount ?? 0,
+      communities: enricher.stats?.communityCount ?? 0,
+      sourceFiles: enricher.stats?.fileCount ?? 0,
+      lastModified,
+      fileSize,
+      loadError: enricher.loadErrorMessage ?? null,
+    };
+
+    return {
+      uri,
+      mimeType: "application/json",
+      text: JSON.stringify(status, null, 2),
+    };
+  }
+
+  if (uri === "smartread://repo/graph/summary") {
+    const cwd = process.cwd();
+    const enricher = getGraphifyEnricher(cwd);
+
+    if (!enricher.isAvailable) {
+      return {
+        uri,
+        mimeType: "text/plain",
+        text: "No graphify knowledge graph found. Run graphify pipeline to generate graphify-out/graph.json.",
+      };
+    }
+
+    const s = enricher.stats;
+    const lines = [
+      `Nodes:  ${s?.nodeCount ?? "?"}`,
+      `Edges:  ${s?.edgeCount ?? "?"}`,
+      `Communities:  ${s?.communityCount ?? "?"}`,
+      `Source files:  ${s?.fileCount ?? "?"}`,
+      `Graph file:  ${enricher.path ?? "unknown"}`,
+    ];
+
+    return {
+      uri,
+      mimeType: "text/plain",
+      text: lines.join("\n"),
+    };
+  }
+
+  if (uri === "smartread://repo/graph/communities") {
+    const cwd = process.cwd();
+    const enricher = getGraphifyEnricher(cwd);
+
+    if (!enricher.isAvailable) {
+      return {
+        uri,
+        mimeType: "text/plain",
+        text: "No graphify knowledge graph found. Run graphify pipeline to generate graphify-out/graph.json.",
+      };
+    }
+
+    const cc = enricher.communityCount;
+    const lines: string[] = [
+      `Total communities: ${cc}`,
+      "",
+    ];
+
+    // Collect actual community IDs (may be non-contiguous from graph.json)
+    const communityIds = new Set<number>();
+    for (let cid = 0; cid < cc + 100 && communityIds.size < 50; cid++) {
+      const files = enricher.getCommunityFiles(cid);
+      if (files.length > 0) communityIds.add(cid);
+    }
+    for (const cid of [...communityIds].sort((a, b) => a - b).slice(0, 50)) {
+      const files = enricher.getCommunityFiles(cid);
+      if (files.length === 0) continue;
+      const stems = files
+        .map((f) => f.split("/").pop() ?? f)
+        .slice(0, 6)
+        .join(", ");
+      lines.push(`  Cluster ${cid} (${files.length} files):  ${stems}${files.length > 6 ? ` (+${files.length - 6})` : ""}`);
+    }
+
+    return {
+      uri,
+      mimeType: "text/plain",
+      text: lines.join("\n"),
+    };
+  }
+
+  if (uri === "smartread://repo/graph/god-nodes") {
+    const cwd = process.cwd();
+    const enricher = getGraphifyEnricher(cwd);
+
+    if (!enricher.isAvailable) {
+      return {
+        uri,
+        mimeType: "text/plain",
+        text: "No graphify knowledge graph found. Run graphify pipeline to generate graphify-out/graph.json.",
+      };
+    }
+
+    const gods = enricher.getGodNodes(20);
+    const lines = [
+      `Top ${gods.length} most connected graph nodes:`,
+      "",
+      ...gods.map((g, i) => `  ${i + 1}. ${g.label}  (degree: ${g.degree})`),
+    ];
+
+    return {
+      uri,
+      mimeType: "text/plain",
+      text: lines.join("\n"),
+    };
+  }
+
   throw new Error(`Resource not found: ${uri}`);
 }
 
@@ -137,7 +357,7 @@ export type ContentItem = { type: "text"; text: string } | { type: "resource_lin
  * instead of embedding it inline. Otherwise, return the inline text item.
  *
  * Use this helper in tool result handlers for large-content tools like
- * `repo_map`, `deep_search`, and `search`.
+ * `repo_map` and `search`.
  *
  * @param name  - Resource name used for the URI (`smartread://result/{name}`)
  * @param content - Raw content string

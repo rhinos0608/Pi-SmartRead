@@ -7,6 +7,8 @@ export interface ChunkResult {
   wasHardSplit: boolean;
   contextHeader?: string;
   embeddingText?: string;
+  /** Non-whitespace character count (present when using cAST chunking) */
+  nwsChars?: number;
   /** Present when using symbol-boundary chunking */
   symbolBoundary?: {
     type: "function" | "method" | "class" | "interface" | "enum" | "type_alias" | "variable" | "export";
@@ -25,6 +27,10 @@ export interface ChunkOptions {
   compressForEmbedding?: boolean;
   /** Use tree-sitter symbol boundaries (functions, classes, methods) instead of character-based splitting */
   useSymbolBoundaries?: boolean;
+  /** Use cAST (Chunking via Abstract Syntax Trees) algorithm — recursive split-then-merge with NWS metric */
+  useCAST?: boolean;
+  /** Maximum non-whitespace characters per chunk (default 2000, optimal range 2000-2500) */
+  maxNwsChars?: number;
 }
 
 export interface CompressSnippetOptions {
@@ -188,6 +194,22 @@ const DEFAULT_CHUNK_OVERLAP_CHARS = 512;
 const DEFAULT_MAX_CHUNKS_PER_FILE = 12;
 const DEFAULT_MIN_CHUNK_CHARS = 200;
 const CHARS_PER_TOKEN = 4;
+const DEFAULT_MAX_NWS_CHARS = 2000;
+
+/**
+ * Count non-whitespace characters in text.
+ * Used by cAST chunking as the size metric.
+ */
+export function nwsChars(text: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v") {
+      count++;
+    }
+  }
+  return count;
+}
 
 export function compressSnippet(text: string, options: CompressSnippetOptions = {}): string {
   const maxChars = options.maxChars ?? DEFAULT_COMPRESSED_SNIPPET_CHARS;
@@ -234,6 +256,342 @@ function enrichChunk(chunk: ChunkResult, options: ChunkOptions): void {
   chunk.embeddingText = contextHeader ? `${contextHeader}\n${body}` : body;
 }
 
+// ── cAST (Chunking via Abstract Syntax Trees) ────────────────────
+
+/**
+ * Internal node for cAST tree representation.
+ */
+interface CASTNode {
+  startByte: number;
+  endByte: number;
+  type?: string;
+  name?: string;
+  children: CASTNode[];
+}
+
+/**
+ * Internal segment produced by the cAST splitting algorithm.
+ * Each segment covers a contiguous byte range of the source text.
+ * Concatenating all segments in order reproduces the original text.
+ */
+interface CASTSegment {
+  startByte: number;
+  endByte: number;
+}
+
+/**
+ * Build a hierarchical tree from flat symbol spans.
+ * Spans are nested by containment: if span B is fully inside span A,
+ * B becomes a child of A. The root encompasses the entire text.
+ */
+function spansToTree(text: string, spans: SymbolSpan[]): CASTNode {
+  const root: CASTNode = {
+    startByte: 0,
+    endByte: text.length,
+    children: [],
+  };
+
+  if (spans.length === 0) return root;
+
+  // Sort by start, then by end descending (parents before children)
+  const sorted = [...spans].sort((a, b) => a.startByte - b.startByte || (b.endByte - b.startByte) - (a.endByte - a.startByte));
+
+  function attach(parent: CASTNode, candidates: SymbolSpan[], depth: number): void {
+    let i = 0;
+    while (i < candidates.length) {
+      const span = candidates[i]!;
+      if (span.startByte < parent.startByte || span.endByte > parent.endByte) {
+        i++;
+        continue;
+      }
+
+      // Collect candidates nested strictly inside this span
+      const nested: SymbolSpan[] = [];
+      let j = i + 1;
+      while (j < candidates.length && candidates[j]!.startByte < span.endByte) {
+        if (candidates[j]!.startByte >= span.startByte && candidates[j]!.endByte <= span.endByte) {
+          nested.push(candidates[j]!);
+        }
+        j++;
+      }
+
+      const node: CASTNode = {
+        startByte: span.startByte,
+        endByte: span.endByte,
+        type: span.type,
+        name: span.name,
+        children: [],
+      };
+
+      attach(node, nested, depth + 1);
+      parent.children.push(node);
+      i = j;
+    }
+  }
+
+  attach(root, sorted, 0);
+  return root;
+}
+
+/**
+ * Hard-split a contiguous text segment into fixed-size NWS chunks.
+ * Used when a leaf segment (no children) exceeds maxNwsChars.
+ */
+function cASTHardSplit(
+  text: string,
+  startByte: number,
+  endByte: number,
+  maxNws: number,
+): CASTSegment[] {
+  const segments: CASTSegment[] = [];
+  let chunkStart = startByte;
+  let nwsAccum = 0;
+
+  for (let i = startByte; i < endByte; i++) {
+    const ch = text[i]!;
+    const isNws = ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v";
+
+    if (isNws) {
+      if (nwsAccum >= maxNws) {
+        segments.push({ startByte: chunkStart, endByte: i });
+        chunkStart = i;
+        nwsAccum = 0;
+      }
+      nwsAccum++;
+    }
+  }
+
+  // Emit remaining
+  if (chunkStart < endByte) {
+    segments.push({ startByte: chunkStart, endByte });
+  }
+
+  return segments;
+}
+
+/**
+ * Merge adjacent small segments whose combined NWS count is ≤ maxNws.
+ * Prevents over-fragmentation from greedy splitting.
+ */
+function mergeAdjacentSmall(segments: CASTSegment[], text: string, maxNws: number): CASTSegment[] {
+  if (segments.length <= 1) return segments;
+
+  const merged: CASTSegment[] = [];
+  let pending = segments[0]!;
+
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i]!;
+    const combinedText = text.slice(pending.startByte, seg.endByte);
+    const combinedNws = nwsChars(combinedText);
+
+    if (combinedNws <= maxNws) {
+      pending = { startByte: pending.startByte, endByte: seg.endByte };
+    } else {
+      merged.push(pending);
+      pending = seg;
+    }
+  }
+
+  merged.push(pending);
+  return merged;
+}
+
+/**
+ * Recursive split-then-merge for the cAST algorithm.
+ *
+ * Given a parent range and its children (from tree/span analysis),
+ * splits the text into contiguous segments covering the entire parent range.
+ * Children serve as split hints — gaps between children are treated as atomic segments.
+ *
+ * Algorithm (adapted from arXiv 2506.15655v1):
+ *   1. If node fits in maxNws, keep as one segment.
+ *   2. Otherwise, iterate children: pack fitting children into current batch,
+ *      recursively split oversized children.
+ *   3. After initial pass, merge adjacent small siblings to avoid over-fragmentation.
+ */
+function cASTSplitSegments(
+  parentStart: number,
+  parentEnd: number,
+  text: string,
+  children: CASTNode[],
+  maxNws: number,
+): CASTSegment[] {
+  const parentText = text.slice(parentStart, parentEnd);
+  if (nwsChars(parentText) <= maxNws) {
+    return [{ startByte: parentStart, endByte: parentEnd }];
+  }
+
+  if (children.length === 0) {
+    return cASTHardSplit(text, parentStart, parentEnd, maxNws);
+  }
+
+  // ── First pass: split at child boundaries into contiguous segments ──
+  const segments: { startByte: number; endByte: number; children?: CASTNode[] }[] = [];
+
+  // Ensure children are sorted
+  const sorted = [...children].sort((a, b) => a.startByte - b.startByte);
+  let cursor = parentStart;
+
+  for (const child of sorted) {
+    // Gap before this child
+    if (child.startByte > cursor) {
+      segments.push({ startByte: cursor, endByte: child.startByte });
+    }
+    // The child itself
+    segments.push({
+      startByte: child.startByte,
+      endByte: child.endByte,
+      children: child.children.length > 0 ? child.children : undefined,
+    });
+    cursor = child.endByte;
+  }
+
+  // Trailing gap
+  if (cursor < parentEnd) {
+    segments.push({ startByte: cursor, endByte: parentEnd });
+  }
+
+  // ── Second pass: apply split-then-merge with greedy packing ──
+  const packed: CASTSegment[] = [];
+  let currentBatch: { startByte: number; endByte: number }[] = [];
+  let currentNws = 0;
+
+  for (const seg of segments) {
+    let segSegments: CASTSegment[];
+
+    if (seg.children && seg.children.length > 0 && nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
+      // Child has internal structure and exceeds limit — recursively split
+      segSegments = cASTSplitSegments(seg.startByte, seg.endByte, text, seg.children, maxNws);
+    } else if (nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
+      // Over-large atomic segment with no internal structure — hard split
+      segSegments = cASTHardSplit(text, seg.startByte, seg.endByte, maxNws);
+    } else {
+      segSegments = [{ startByte: seg.startByte, endByte: seg.endByte }];
+    }
+
+    // Try to pack sub-segments into current batch
+    for (const sub of segSegments) {
+      const subNws = nwsChars(text.slice(sub.startByte, sub.endByte));
+
+      if (currentNws + subNws <= maxNws) {
+        // Add to current batch
+        if (currentBatch.length === 0) {
+          currentBatch.push(sub);
+        } else {
+          // Extend the end of the batch to include this sub
+          currentBatch[currentBatch.length - 1]!.endByte = sub.endByte;
+        }
+        currentNws += subNws;
+      } else {
+        // Flush current batch
+        if (currentBatch.length > 0) {
+          packed.push({
+            startByte: currentBatch[0]!.startByte,
+            endByte: currentBatch[currentBatch.length - 1]!.endByte,
+          });
+        }
+        currentBatch = [{ startByte: sub.startByte, endByte: sub.endByte }];
+        currentNws = subNws;
+      }
+    }
+  }
+
+  // Flush remaining batch
+  if (currentBatch.length > 0) {
+    packed.push({
+      startByte: currentBatch[0]!.startByte,
+      endByte: currentBatch[currentBatch.length - 1]!.endByte,
+    });
+  }
+
+  // ── Third pass: merge adjacent small segments ──
+  return mergeAdjacentSmall(packed, text, maxNws);
+}
+
+/**
+ * Convert cAST segments to ChunkResult array.
+ */
+function segmentsToChunks(
+  segments: CASTSegment[],
+  text: string,
+  maxChunksPerFile: number,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  const results: ChunkResult[] = [];
+
+  for (let i = 0; i < Math.min(segments.length, maxChunksPerFile); i++) {
+    const seg = segments[i]!;
+    const chunkTextContent = text.slice(seg.startByte, seg.endByte);
+    const chunkNws = nwsChars(chunkTextContent);
+
+    results.push({
+      text: chunkTextContent,
+      chunkIndex: i,
+      startChar: seg.startByte,
+      endChar: seg.endByte,
+      estimatedTokens: Math.ceil(chunkTextContent.length / CHARS_PER_TOKEN),
+      wasHardSplit: false,
+      nwsChars: chunkNws,
+    });
+  }
+
+  // Enrich with context headers and embedding text
+  for (const chunk of results) {
+    enrichChunk(chunk, options ?? {});
+  }
+
+  // Re-assign chunk indices after potential removals from enrichChunk
+  for (let i = 0; i < results.length; i++) {
+    results[i]!.chunkIndex = i;
+  }
+
+  return results;
+}
+
+/**
+ * Main cAST entry point (sync).
+ *
+ * Extracts symbol boundaries via lightweight regex AST, builds a tree,
+ * and applies the recursive split-then-merge cAST algorithm.
+ * Falls back to character-based splitting when no symbols are found.
+ *
+ * @param text - Source code text
+ * @param options - Chunking options
+ * @returns Array of ChunkResults covering the entire text contiguously
+ */
+export function cASTChunkText(
+  text: string,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
+
+  const maxNws = options?.maxNwsChars ?? DEFAULT_MAX_NWS_CHARS;
+  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
+
+  // Extract symbol boundaries (lightweight regex-based)
+  const spans = extractSymbolBoundaries(text);
+
+  // Build tree from spans
+  const root = spansToTree(text, spans);
+
+  // If tree has no children (no symbols found), use hard NWS split
+  if (root.children.length === 0) {
+    const segments = cASTHardSplit(text, 0, text.length, maxNws);
+    return segmentsToChunks(segments, text, maxChunksPerFile, options);
+  }
+
+  // Apply cAST recursive split-then-merge
+  const segments = cASTSplitSegments(
+    root.startByte,
+    root.endByte,
+    text,
+    root.children,
+    maxNws,
+  );
+
+  return segmentsToChunks(segments, text, maxChunksPerFile, options);
+}
+
 // ── Main chunking entry point ────────────────────────────────────
 
 /**
@@ -249,8 +607,13 @@ export function chunkText(
   options?: ChunkOptions,
 ): ChunkResult[] {
   const useSymbolBoundaries = options?.useSymbolBoundaries ?? false;
+  const useCast = options?.useCAST ?? false;
 
   if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
+
+  if (useCast) {
+    return cASTChunkText(text, options);
+  }
 
   if (useSymbolBoundaries) {
     return chunkBySymbolBoundaries(text, options);
@@ -414,6 +777,30 @@ export async function chunkTextAst(
     }};
   }
 
+  const filePath = options?.filePath ?? "";
+  const startTime = Date.now();
+
+  // Route to cAST when useCAST is set
+  if (options?.useCAST) {
+    try {
+      const { cASTChunkByAstBoundaries } = await import("./ast-chunker.js");
+      const { chunks, diagnostics } = await cASTChunkByAstBoundaries(text, filePath, options);
+      return {
+        chunks,
+        diagnostics: {
+          usedAst: !diagnostics.usedFallback,
+          wasmAvailable: diagnostics.wasmAvailable,
+          parseTimeMs: diagnostics.parseTimeMs,
+          symbolCount: diagnostics.symbolCount,
+          grammarExtension: diagnostics.grammarExtension,
+          wasmFile: diagnostics.wasmFile ?? null,
+        },
+      };
+    } catch {
+      // cAST failed — fall through to symbol-boundary chunking
+    }
+  }
+
   // Only use AST chunking when useSymbolBoundaries is set
   if (!options?.useSymbolBoundaries) {
     return {
@@ -424,9 +811,6 @@ export async function chunkTextAst(
       },
     };
   }
-
-  const filePath = options?.filePath ?? "";
-  const startTime = Date.now();
 
   try {
     const { chunkByAstBoundaries } = await import("./ast-chunker.js");

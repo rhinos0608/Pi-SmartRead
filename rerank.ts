@@ -356,3 +356,458 @@ export function rerank(
     })),
   ];
 }
+
+// ── ColBERT-style late-interaction reranker ────────────────────────
+
+export interface ColbertRerankerInput extends RerankerInput {
+  /** The full document text for segmentation and embedding. */
+  body: string;
+}
+
+export interface ColbertRerankerOptions extends RerankerOptions {
+  /**
+   * Weight for the ColBERT MaxSim score in the blended final score.
+   * RRF receives (1 - colbertWeight). Default: 0.7.
+   */
+  colbertWeight?: number;
+  /** Max segments per document (default: 8). */
+  maxSegments?: number;
+  /** Target char size per segment (default: 512). */
+  segmentSize?: number;
+  /** Top K candidates after Stage-1 pooled cosine filter (default: 10). */
+  pooledFilterTopK?: number;
+}
+
+export interface ColbertRerankerResult extends RerankerResult {
+  /** The ColBERT MaxSim score (late-interaction relevance). */
+  colbertScore: number;
+  /** The MaxSim component before blending. */
+  maxSimScore: number;
+  /** The Stage-1 pooled cosine similarity score. */
+  pooledCosScore: number;
+}
+
+const COLBERT_DEFAULTS: Required<Pick<ColbertRerankerOptions, "colbertWeight" | "maxSegments" | "segmentSize" | "pooledFilterTopK">> = {
+  colbertWeight: 0.7,
+  maxSegments: 8,
+  segmentSize: 512,
+  pooledFilterTopK: 10,
+};
+
+/**
+ * Split text into sentence-aware segments.
+ * First splits on sentence boundaries (. ! ?), then merges short
+ * sentences up to `segmentSize` chars, capped at `maxSegments`.
+ */
+export function segmentText(
+  text: string,
+  segmentSize: number,
+  maxSegments: number,
+): string[] {
+  if (!text) return [];
+
+  // Split on sentence boundaries (period, exclamation, question mark
+  // followed by whitespace or end-of-string).
+  const sentences = text.split(/(?<=[.!?])(?:\s+|$)/).filter(Boolean);
+  const segments: string[] = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) continue;
+
+    if (current.length + trimmed.length > segmentSize && current.length > 0) {
+      segments.push(current);
+      current = trimmed;
+    } else {
+      current = current ? `${current} ${trimmed}` : trimmed;
+    }
+
+    if (segments.length >= maxSegments) break;
+  }
+
+  if (current && segments.length < maxSegments) {
+    segments.push(current);
+  }
+
+  return segments.length > 0 ? segments.slice(0, maxSegments) : [text.slice(0, segmentSize)];
+}
+
+/**
+ * L2-normalised cosine similarity between two vectors.
+ * Vectors are assumed pre-normalised (dot product === cosine sim).
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const aVal = a[i]!;
+    const bVal = b[i]!;
+    dot += aVal * bVal;
+    magA += aVal * aVal;
+    magB += bVal * bVal;
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Mean-pool a list of vectors into a single vector. */
+export function meanPool(vectors: number[][]): number[] {
+  if (vectors.length === 0) return [];
+  const dim = vectors[0]!.length;
+  const pooled = new Array(dim).fill(0);
+  for (let i = 0; i < vectors.length; i++) {
+    const vec = vectors[i]!;
+    for (let j = 0; j < dim; j++) {
+      pooled[j] += vec[j];
+    }
+  }
+  const n = vectors.length;
+  for (let j = 0; j < dim; j++) {
+    pooled[j] /= n;
+  }
+  return pooled;
+}
+
+/**
+ * ColBERT-style MaxSim scoring.
+ * For each query token vector, find the maximum dot product against
+ * any document token vector. Sum and normalise by query-token count.
+ *
+ * When vectors are L2-normalised, dot product === cosine similarity.
+ */
+export function computeMaxSim(
+  queryVectors: number[][],
+  docVectors: number[][],
+): number {
+  if (queryVectors.length === 0 || docVectors.length === 0) return 0;
+
+  let totalMaxDot = 0;
+  for (let qi = 0; qi < queryVectors.length; qi++) {
+    const qv = queryVectors[qi]!;
+    let maxDot = -Infinity;
+    for (let di = 0; di < docVectors.length; di++) {
+      const dv = docVectors[di]!;
+      const dim = Math.min(qv.length, dv.length);
+      let dot = 0;
+      for (let k = 0; k < dim; k++) {
+        dot += qv[k]! * dv[k]!;
+      }
+      if (dot > maxDot) maxDot = dot;
+    }
+    totalMaxDot += maxDot;
+  }
+
+  return totalMaxDot / queryVectors.length;
+}
+
+/**
+ * ColBERT-style late-interaction reranker ("poor man's ColBERT").
+ *
+ * Two-stage pipeline:
+ *   Stage 1 (cheap): embed each candidate's full body text, compute
+ *     pooled cosine similarity vs query embedding, keep top K.
+ *   Stage 2 (expensive): segment query and top-K candidates, embed
+ *     each segment, compute full MaxSim (maximum dot product per
+ *     query segment summed across all query segments), blend with RRF.
+ *
+ * Falls back to structural reranker when local embedding is unavailable.
+ */
+export async function colbertRerank(
+  query: string,
+  candidates: ColbertRerankerInput[],
+  queryEmbedding: number[],
+  options?: ColbertRerankerOptions,
+): Promise<{
+  results: ColbertRerankerResult[];
+  usedColbert: boolean;
+  error?: string;
+}> {
+  if (candidates.length === 0) {
+    return { results: [], usedColbert: false, error: "no candidates" };
+  }
+
+  const opts = {
+    ...COLBERT_DEFAULTS,
+    ...options,
+    // Always cap maxCandidates (default 20 to match structural reranker)
+    maxCandidates: options?.maxCandidates ?? Math.min(candidates.length, 20),
+  };
+
+  // Try to import local embedding lazily — if unavailable, fall back
+  let fetchLocal: typeof import("./embedding.js").fetchLocalEmbeddings | null = null;
+  try {
+    const mod = await import("./embedding.js");
+    fetchLocal = mod.fetchLocalEmbeddings;
+    // Quick availability check — if the optional dep is missing,
+    // calling fetchLocalEmbeddings will throw, so we verify.
+    const { isLocalEmbeddingAvailable } = await import("./local-embedding-provider.js");
+    const available = await isLocalEmbeddingAvailable();
+    if (!available) {
+      fetchLocal = null;
+    }
+  } catch {
+    fetchLocal = null;
+  }
+
+  if (!fetchLocal) {
+    // Fall back to structural reranker
+    const fallback = rerank(candidates, options);
+    return {
+      results: fallback.map((r) => ({
+        ...r,
+        colbertScore: 0,
+        maxSimScore: 0,
+        pooledCosScore: 0,
+      })),
+      usedColbert: false,
+      error: "local embedding unavailable, fell back to structural reranker",
+    };
+  }
+
+  const slice = candidates.slice(0, opts.maxCandidates);
+  const rest = candidates.slice(opts.maxCandidates);
+
+  try {
+    // ── Stage 1: Pooled cosine similarity filter ──────────────────
+
+    // Embed each candidate's full body text as one vector
+    const bodyEmbedResult = await fetchLocal({
+      inputs: slice.map((c) => c.body || ""),
+    });
+    const bodyVectors = bodyEmbedResult.vectors;
+
+    // Compute pooled cosine similarity against query embedding
+    const pooledCosScores = bodyVectors.map((vec) =>
+      cosineSimilarity(queryEmbedding, vec),
+    );
+
+    // Pair each candidate with its pooled score and sort descending
+    // originalIndex tiebreaker ensures stable ordering when scores tie.
+    const scored = slice.map((c, i) => ({
+      candidate: c,
+      index: i,
+      pooledCosScore: pooledCosScores[i]!,
+      rrfScore: c.rrfScore,
+    }));
+    scored.sort(
+      (a, b) => b.pooledCosScore - a.pooledCosScore || a.index - b.index,
+    );
+
+    // Keep top K candidates for full MaxSim
+    const topKCount = Math.min(
+      opts.pooledFilterTopK ?? COLBERT_DEFAULTS.pooledFilterTopK,
+      scored.length,
+    );
+    const topKCandidates = scored.slice(0, topKCount);
+
+    // ── Stage 2: Full MaxSim on top K candidates ──────────────────
+
+    // Segment the query
+    const querySegments = segmentText(query, opts.segmentSize ?? COLBERT_DEFAULTS.segmentSize, opts.maxSegments ?? COLBERT_DEFAULTS.maxSegments);
+
+    // Embed query segments
+    let querySegmentVectors: number[][] = [];
+    if (querySegments.length > 0 && querySegments[0]) {
+      const qr = await fetchLocal({ inputs: querySegments });
+      querySegmentVectors = qr.vectors;
+    }
+
+    // If query produced no segment vectors, fall back to structural
+    if (querySegmentVectors.length === 0) {
+      const fallback = rerank(candidates, options);
+      return {
+        results: fallback.map((r) => ({
+          ...r,
+          colbertScore: 0,
+          maxSimScore: 0,
+          pooledCosScore: 0,
+        })),
+        usedColbert: false,
+        error: "query produced no segment vectors",
+      };
+    }
+
+    // Segment and embed top-K candidate bodies, batched
+    const topKWithSegments: Array<{
+      originalIndex: number;
+      segments: string[];
+      segmentStart: number;
+    }> = [];
+    const allSegments: string[] = [];
+
+    for (const scored of topKCandidates) {
+      const segs = segmentText(
+        scored.candidate.body || "",
+        opts.segmentSize ?? COLBERT_DEFAULTS.segmentSize,
+        opts.maxSegments ?? COLBERT_DEFAULTS.maxSegments,
+      );
+      topKWithSegments.push({
+        originalIndex: scored.index,
+        segments: segs,
+        segmentStart: allSegments.length,
+      });
+      allSegments.push(...segs);
+    }
+
+    // Batch-embed all segments from all top-K candidates in one call
+    let allSegmentVectors: number[][] = [];
+    if (allSegments.length > 0) {
+      const sr = await fetchLocal({ inputs: allSegments });
+      allSegmentVectors = sr.vectors;
+    }
+
+    // Compute MaxSim for each top-K candidate
+    const topKResults = topKWithSegments.map((entry) => {
+      const docVectors = allSegmentVectors.slice(
+        entry.segmentStart,
+        entry.segmentStart + entry.segments.length,
+      );
+      const maxSimScore =
+        docVectors.length > 0
+          ? computeMaxSim(querySegmentVectors, docVectors)
+          : 0;
+      const candidate = topKCandidates.find(
+        (sc) => sc.index === entry.originalIndex,
+      )!;
+      return {
+        candidate,
+        maxSimScore,
+      };
+    });
+
+    // ── Blend scores ──────────────────────────────────────────
+
+    const colbertW = opts.colbertWeight ?? COLBERT_DEFAULTS.colbertWeight;
+    const rrfW = 1 - colbertW;
+
+    // Normalise RRF scores among the top-K candidates
+    const topKRRFScores = topKCandidates.map((sc) => sc.rrfScore);
+    const normalizedTopKRRF = normalize(topKRRFScores);
+
+    // F-5: Normalise MaxSim scores among the top-K candidates so colbertWeight
+    // behaves as a true fraction. Without this, MaxSim is on a different scale
+    // than the normalised RRF score and colbertWeight does not mean what it says.
+    const topKMaxSims = topKResults.map((r) => r.maxSimScore);
+    const normalizedTopKMaxSims = normalize(topKMaxSims);
+
+    // Build composite results for top K
+    const blendedTopK = topKResults.map((r, i) => {
+      const maxSimScore = r.maxSimScore;
+      const pooledCosScore = r.candidate.pooledCosScore;
+      const colbertScore =
+        colbertW * (normalizedTopKMaxSims[i] ?? 0) +
+        rrfW * (normalizedTopKRRF[i] ?? 0.5);
+      return {
+        path: r.candidate.candidate.path,
+        rerankScore: colbertScore,
+        originalRank: r.candidate.index,
+        newRank: 0,
+        // F-2: changed flag is recomputed after sorting below; placeholder here.
+        changed: false,
+        signals: {
+          rrfWeight: rrfW,
+          structuralWeight: 0,
+          proximityWeight: 0,
+        },
+        colbertScore,
+        maxSimScore,
+        pooledCosScore,
+      };
+    });
+
+    // Sort top K by blended score descending (stable on originalRank)
+    blendedTopK.sort(
+      (a, b) => b.rerankScore - a.rerankScore || a.originalRank - b.originalRank,
+    );
+    blendedTopK.forEach((r, i) => {
+      r.newRank = i;
+      // F-2: derived from rank comparison, not hardcoded true.
+      r.changed = r.newRank !== r.originalRank;
+    });
+
+    // Map top-K results back, handle non-top-K candidates
+    const topKFinalIndices = new Set(
+      topKCandidates.map((sc) => sc.index),
+    );
+
+    // Candidates beyond top-K (within slice) get sequential ranks by pooled-cos
+    // order (their slice index preserves their position in the input order,
+    // which matches the pooled-cosine sort from F-13). F-6: their rerankScore
+    // is normalised pooled-cosine so it lives on the same [0,1] scale as the
+    // blended top-K scores.
+    const nonTopKScores = slice
+      .map((_c, i) => (!topKFinalIndices.has(i) ? pooledCosScores[i] ?? 0 : null))
+      .filter((s): s is number => s !== null);
+    const normalizedNonTopK = normalize(nonTopKScores);
+    let nonTopKCursor = 0;
+
+    // Candidates beyond maxCandidates: keep original position, sentinel score
+    const results: ColbertRerankerResult[] = [
+      ...slice.map((c, i) => {
+        if (!topKFinalIndices.has(i)) {
+          // F-3: sequential ranks instead of shared blendedTopK.length + 0
+          const newRank = blendedTopK.length + nonTopKCursor;
+          const normalizedScore = normalizedNonTopK[nonTopKCursor] ?? 0;
+          nonTopKCursor += 1;
+          return {
+            path: c.path,
+            rerankScore: normalizedScore,
+            originalRank: i,
+            newRank,
+            // F-4: derive changed from rank comparison, not hardcoded false
+            changed: newRank !== i,
+            signals: {
+              rrfWeight: rrfW,
+              structuralWeight: 0,
+              proximityWeight: 0,
+            },
+            colbertScore: normalizedScore,
+            maxSimScore: 0,
+            pooledCosScore: pooledCosScores[i] ?? 0,
+          };
+        }
+        const found = blendedTopK.find((r) => r.originalRank === i);
+        return found!;
+      }),
+      ...rest.map((c, i) => {
+        const newRank = slice.length + i;
+        return {
+          path: c.path,
+          rerankScore: 0,
+          originalRank: newRank,
+          newRank,
+          // Rest preserves its position; only flag a change when something
+          // would actually displace it (none can with this layout, but use
+          // the same derived rule for consistency).
+          changed: false,
+          signals: {
+            rrfWeight: rrfW,
+            structuralWeight: 0,
+            proximityWeight: 0,
+          },
+          colbertScore: 0,
+          maxSimScore: 0,
+          pooledCosScore: 0,
+        };
+      }),
+    ];
+
+    return { results, usedColbert: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const fallback = rerank(candidates, options);
+    return {
+      results: fallback.map((r) => ({
+        ...r,
+        colbertScore: 0,
+        maxSimScore: 0,
+        pooledCosScore: 0,
+      })),
+      usedColbert: false,
+      error: msg,
+    };
+  }
+}

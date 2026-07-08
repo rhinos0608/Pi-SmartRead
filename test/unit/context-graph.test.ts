@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
@@ -69,19 +69,22 @@ describe("ContextGraph", () => {
     expect(ref?.provenance.type).toBe("references");
   });
 
-  it("respects workspace boundaries", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "pi-smartread-outside-"));
-    const outside = join(tmp, "outside.ts");
-    writeFileSync(outside, "export const secret = 1;");
-    
-    const fileA = join(root, "a.ts");
-    writeFileSync(fileA, `import '${outside}'`);
-    
+  it("follows parent-relative imports outside the graph root", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "pi-smartread-outside-"));
+    const localRoot = join(parent, "repo");
+    const localGraph = new ContextGraph(localRoot);
+    const outside = join(parent, "outside.ts");
+
     try {
-      const neighbours = await graph.getFileNeighbours(fileA);
-      expect(neighbours).toHaveLength(0);
+      mkdirSync(localRoot);
+      writeFileSync(outside, "export const secret = 1;");
+      const fileA = join(localRoot, "a.ts");
+      writeFileSync(fileA, "import '../outside';");
+
+      const neighbours = await localGraph.getFileNeighbours(fileA);
+      expect(neighbours.map(n => n.path)).toContain(outside);
     } finally {
-      rmSync(tmp, { recursive: true, force: true });
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 });

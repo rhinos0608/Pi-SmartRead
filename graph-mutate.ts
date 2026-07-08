@@ -5,9 +5,9 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { EdgeStore, isPathInside } from "./context-graph.js";
-import { resolve, isAbsolute } from "node:path";
+import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { EdgeStore } from "./context-graph.js";
+import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 
 // ── Schema ──────────────────────────────────────────────────────────
@@ -37,7 +37,7 @@ export function createGraphMutateTool(): ToolDefinition {
   const def: any = {
     name: "graph_mutate",
     label: "graph_mutate",
-    description: `[EXPERIMENTAL] Record breakage or co-change edge into the context graph. Breakage: editing A causes errors in B. Co-change: A and B change together in git history. Edges are event-sourced to disk.`,
+    description: `[EXPERIMENTAL] Record a verified breakage or co-change relationship between two files/symbols for future graph-aware retrieval. Use only after evidence proves coupling, e.g. { from: "src/auth.ts", to: "test/auth.test.ts", relation: "breakage", context: "auth edit broke token expiry test" }. Prefer search/repo_map to discover relationships before recording; do not use for speculative notes or ordinary reads.`,
     parameters: GraphMutateInputSchema,
 
     async execute(
@@ -45,22 +45,18 @@ export function createGraphMutateTool(): ToolDefinition {
       params: unknown,
       _signal: unknown,
       _onUpdate: unknown,
-      _ctx: unknown,
+      ctx: ExtensionContext | undefined,
     ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
       const input = params as GraphMutateInput;
-      const directory = input.directory ?? process.cwd();
-      const resolvedRoot = isAbsolute(directory) ? directory : resolve(process.cwd(), directory);
+      const baseCwd = ctx?.cwd ?? process.cwd();
+      const resolvedRoot = input.directory ? resolve(baseCwd, input.directory) : resolve(baseCwd);
 
       if (!existsSync(resolvedRoot)) {
         return { content: [{ type: "text", text: `❌ Root directory not found: ${resolvedRoot}` }], isError: true };
       }
 
-      const fromPath = isAbsolute(input.from) ? input.from : resolve(resolvedRoot, input.from);
-      const toPath = isAbsolute(input.to) ? input.to : resolve(resolvedRoot, input.to);
-
-      if (!isPathInside(resolvedRoot, fromPath) || !isPathInside(resolvedRoot, toPath)) {
-        return { content: [{ type: "text", text: `❌ Paths must be inside project root: ${input.from} → ${input.to}` }], isError: true };
-      }
+      const fromPath = resolve(resolvedRoot, input.from);
+      const toPath = resolve(resolvedRoot, input.to);
 
       try {
         const relation = input.relation ?? "breakage";

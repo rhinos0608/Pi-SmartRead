@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkText, compressSnippet } from "../../chunking.js";
+import { chunkText, compressSnippet, cASTChunkText, nwsChars } from "../../chunking.js";
 
 describe("chunkText", () => {
   it("returns empty array for empty string", () => {
@@ -255,5 +255,167 @@ const z = 3;
   it("handles empty input", () => {
     expect(chunkText("", { useSymbolBoundaries: true })).toEqual([]);
     expect(chunkText("   ", { useSymbolBoundaries: true })).toEqual([]);
+  });
+});
+
+describe("nwsChars", () => {
+  it("counts non-whitespace characters only", () => {
+    expect(nwsChars("")).toBe(0);
+    expect(nwsChars("abc")).toBe(3);
+    expect(nwsChars("a b c")).toBe(3);
+    expect(nwsChars("  \n\t  ")).toBe(0);
+    expect(nwsChars("function foo() { return 1; }")).toBe(23);
+  });
+});
+
+describe("cASTChunkText", () => {
+  it("returns empty array for empty string", () => {
+    expect(cASTChunkText("")).toEqual([]);
+  });
+
+  it("returns empty array for whitespace-only string", () => {
+    expect(cASTChunkText("   ")).toEqual([]);
+  });
+
+  it("produces a single chunk when text fits in maxNwsChars", () => {
+    const code = `function foo() { return 1; }`;
+    const result = cASTChunkText(code, { maxNwsChars: 1000 });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.text).toBe(code);
+    expect(result[0]!.nwsChars).toBe(nwsChars(code));
+    expect(result[0]!.wasHardSplit).toBe(false);
+  });
+
+  it("reports nwsChars on every chunk for diagnostics", () => {
+    const code = `function a() { return 1; }\nfunction b() { return 2; }`;
+    const result = cASTChunkText(code, { maxNwsChars: 100 });
+    expect(result.length).toBeGreaterThan(0);
+    for (const chunk of result) {
+      expect(chunk.nwsChars).toBe(nwsChars(chunk.text));
+    }
+  });
+
+  it("splits large file into multiple chunks that each fit in maxNwsChars", () => {
+    const funcs = Array.from({ length: 30 }, (_, i) =>
+      `function func${i}() { return ${i}; }`,
+    ).join("\n\n");
+
+    const maxNws = 80;
+    const result = cASTChunkText(funcs, { maxNwsChars: maxNws });
+
+    expect(result.length).toBeGreaterThan(1);
+    for (const chunk of result) {
+      expect(chunk.nwsChars).toBeLessThanOrEqual(maxNws);
+    }
+  });
+
+  it("guarantees reconstruction: concatenating chunks reproduces the original text", () => {
+    const code = `function alpha() {\n  return "alpha";\n}\n\n` +
+      `function beta() {\n  return "beta";\n}\n\n` +
+      `function gamma() {\n  return "gamma";\n}\n`;
+
+    const result = cASTChunkText(code, { maxNwsChars: 50 });
+
+    // Concatenating all chunks in order reproduces the original
+    const reconstructed = result.map((c) => c.text).join("");
+    expect(reconstructed).toBe(code);
+  });
+
+  it("preserves contiguous byte ranges (no gaps, no overlaps)", () => {
+    const code = Array.from({ length: 15 }, (_, i) =>
+      `export function handler${i}() { console.log(${i}); }`,
+    ).join("\n\n");
+
+    const result = cASTChunkText(code, { maxNwsChars: 60, maxChunksPerFile: 100 });
+
+    // Verify contiguous coverage
+    expect(result.length).toBeGreaterThan(1);
+    for (let i = 0; i < result.length - 1; i++) {
+      expect(result[i]!.endChar).toBe(result[i + 1]!.startChar);
+    }
+    if (result.length > 0) {
+      expect(result[0]!.startChar).toBe(0);
+      expect(result[result.length - 1]!.endChar).toBe(code.length);
+    }
+  });
+
+  it("uses cAST when useCAST flag is set in chunkText", () => {
+    const code = `function a() { return 1; }\nfunction b() { return 2; }`;
+    const result = chunkText(code, { useCAST: true, maxNwsChars: 1000 });
+    // Small text should produce one chunk
+    expect(result).toHaveLength(1);
+    expect(result[0]!.text).toBe(code);
+    expect(result[0]!.nwsChars).toBe(nwsChars(code));
+  });
+
+  it("uses cAST on large text when useCAST flag is set", () => {
+    const funcs = Array.from({ length: 20 }, (_, i) =>
+      `function fn${i}() { return ${i}; }`,
+    ).join("\n\n");
+
+    const result = chunkText(funcs, { useCAST: true, maxNwsChars: 50 });
+    expect(result.length).toBeGreaterThan(1);
+    for (const chunk of result) {
+      expect(chunk.nwsChars).toBeLessThanOrEqual(50);
+    }
+  });
+
+  it("falls back to hard split when no symbols found", () => {
+    // No function/class declarations — only plain text
+    const text = "just some plain text with no symbols ".repeat(50);
+    const result = cASTChunkText(text, { maxNwsChars: 100 });
+
+    expect(result.length).toBeGreaterThan(0);
+    // Should still respect NWS limit
+    for (const chunk of result) {
+      expect(chunk.nwsChars).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it("merges adjacent small chunks to avoid over-fragmentation", () => {
+    // Many small functions that together fit in one chunk
+    const code = `function a() {} function b() {} function c() {} function d() {}`;
+    const result = cASTChunkText(code, { maxNwsChars: 1000 });
+
+    // All should fit in one chunk thanks to merge pass
+    expect(result.length).toBe(1);
+  });
+
+  it("respects maxChunksPerFile limit", () => {
+    const funcs = Array.from({ length: 50 }, (_, i) =>
+      `function fn${i}() { return ${i}; }`,
+    ).join("\n");
+
+    const result = cASTChunkText(funcs, { maxNwsChars: 30, maxChunksPerFile: 5 });
+    expect(result.length).toBeLessThanOrEqual(5);
+  });
+
+  it("handles deeply nested code (multi-level recursion)", () => {
+    const code = `class Outer {\n` +
+      `  method() {\n` +
+      `    function inner() {\n` +
+      `      return "deep";\n` +
+      `    }\n` +
+      `    return inner();\n` +
+      `  }\n` +
+      `}`;
+
+    const result = cASTChunkText(code, { maxNwsChars: 50, maxChunksPerFile: 100 });
+    // Should produce chunks that respect NWS limit
+    expect(result.length).toBeGreaterThan(0);
+    for (const chunk of result) {
+      expect(chunk.nwsChars).toBeLessThanOrEqual(50);
+    }
+    // Reconstruction guarantee
+    const reconstructed = result.map((c) => c.text).join("");
+    expect(reconstructed).toBe(code);
+  });
+});
+
+describe("ChunkResult cAST fields", () => {
+  it("includes nwsChars in cAST chunks", () => {
+    const code = `function a() { return 1; }`;
+    const result = cASTChunkText(code, { maxNwsChars: 100 });
+    expect(result[0]!.nwsChars).toBe(nwsChars(code));
   });
 });

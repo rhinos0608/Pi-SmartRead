@@ -67,4 +67,15 @@ export const MCP_PROMPTS: Prompt[] = [
       },
     ],
   },
+  {
+    name: "smartread-tool-guide",
+    description: "Guide for selecting the right SmartRead retrieval tool for a task",
+    arguments: [
+      {
+        name: "task",
+        description: "Retrieval task to plan tool usage for",
+        required: true,
+      },
+    ],
+  },
 ];

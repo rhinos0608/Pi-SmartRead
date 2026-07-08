@@ -9,14 +9,15 @@ import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
 import { LruCache } from "./utils.js";
 import { autoPopulateEdgeStore, extractCoCommitPairs, findGitRoot } from "./git-context.js";
 import { loadGitContextConfig } from "./config.js";
+import { getIncrementalIndex } from "./incremental-index.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
 export type NodeType = "file" | "symbol" | "function";
-export type EdgeType = 
-  | "imports" | "imported_by" 
-  | "defines" | "defined_in" 
-  | "references" | "referenced_by" 
+export type EdgeType =
+  | "imports" | "imported_by"
+  | "defines" | "defined_in"
+  | "references" | "referenced_by"
   | "calls" | "called_by"
   | "breakage" | "co_change";
 
@@ -40,6 +41,12 @@ export interface ContextGraphOptions {
   includeCalls?: boolean; // Phase 1: mostly ignored, kept for API stability
   forceRefresh?: boolean;
   skipGitPopulation?: boolean; // Skip first-run git co-commit auto-population
+  /**
+   * Enable incremental indexing using content-addressable file hashing.
+   * When enabled, skips re-parsing files whose content hasn't changed
+   * since the last graph build.
+   */
+  incrementalIndex?: boolean;
 }
 
 export interface GraphNeighbour {
@@ -52,34 +59,10 @@ export interface GraphNeighbour {
 export const IMPORT_SPECIFIER_RE = /^\s*(?:import\s+(?:[^"']+?\s+from\s+)?|import\s*\(|(?:const|let|var)\s+[^=]+?=\s*require\(|export\s+[^"']+?\s+from\s+)["']([^"']+)["']/gm;
 export const RESOLUTION_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", "/index.ts", "/index.tsx", "/index.js"];
 
-// ── Path Helpers (moved from intent-read.ts) ──────────────────────
-
-export function isPathInside(root: string, path: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedPath = resolve(path);
-
-  // Symlink-hardened check: always try realpath first to prevent symlink escape.
-  // Only fall back to lexical comparison when realpath is unavailable.
+export function isReadableWorkspaceFile(_cwd: string, path: string): boolean {
   try {
-    const realRoot = realpathSync(resolvedRoot);
-    const realResolved = realpathSync(resolvedPath);
-    const realRel = relative(realRoot, realResolved);
-    if (realRel === "" || (!realRel.startsWith("..") && !isAbsolute(realRel))) {
-      return true;
-    }
-    return false;
-  } catch {
-    // If realpath fails (e.g. target doesn't exist), fall back to lexical check.
-    const lexicalRel = relative(resolvedRoot, resolvedPath);
-    return lexicalRel === "" || (!lexicalRel.startsWith("..") && !isAbsolute(lexicalRel));
-  }
-}
-
-export function isReadableWorkspaceFile(cwd: string, path: string): boolean {
-  try {
-    if (!existsSync(path) || !isPathInside(cwd, path)) return false;
-    const realPath = realpathSync(path);
-    return isPathInside(cwd, realPath) && statSync(realPath).isFile();
+    if (!existsSync(path)) return false;
+    return statSync(realpathSync(path)).isFile();
   } catch {
     return false;
   }
@@ -91,7 +74,6 @@ export function resolveImportSpecifier(cwd: string, importerPath: string, specif
   if (!specifier.startsWith(".")) return undefined;
 
   const basePath = resolve(dirname(importerPath), specifier);
-  if (!isPathInside(cwd, basePath)) return undefined;
   for (const ext of RESOLUTION_EXTENSIONS) {
     const candidate = `${basePath}${ext}`;
     if (isReadableWorkspaceFile(cwd, candidate)) return candidate;
@@ -179,15 +161,56 @@ export class ContextGraph {
       });
     }
 
+    // Always compute the current source-file set so the file-count safety
+    // net below can detect divergence from the previous build (F-2 fix).
     const allFiles = await findSrcFiles(this.root);
-    
+
+    // When incremental indexing is enabled, query it for content-level changes.
+    // The incremental index is the primary signal; the file-count delta below
+    // is a secondary check that catches cases where the index missed something.
+    let incrementalChanges: { added: string[]; modified: string[]; deleted: string[]; unchanged: string[] } | null = null;
+    if (options.incrementalIndex) {
+      const idx = getIncrementalIndex(this.root);
+      incrementalChanges = idx.getChanges();
+    }
+
+    // File-count safety net: if the source-file count diverges from the previous
+    // build, the incremental index may have drifted (e.g. on filesystems that
+    // don't propagate child changes up to ancestor directory mtimes). Force
+    // a full re-scan to guarantee the indices reflect the actual tree.
+    const fileCountChanged =
+      this.lastBuildFilesLength >= 0 && allFiles.length !== this.lastBuildFilesLength;
+    if (options.incrementalIndex && fileCountChanged) {
+      getIncrementalIndex(this.root).invalidate();
+    }
+
+    // Decide whether we need to rebuild the symbol/file indices. We rebuild
+    // when ANY of the following are true:
+    //   - No symbol index has ever been built (first build / force-refresh).
+    //   - Incremental index reports added/modified/deleted files.
+    //   - File count diverged from the previous build (safety net).
+    const incrementalHasChanges =
+      incrementalChanges !== null &&
+      (incrementalChanges.added.length > 0 ||
+        incrementalChanges.modified.length > 0 ||
+        incrementalChanges.deleted.length > 0);
+
+    const needsRebuild =
+      this.symbolIndex === null || incrementalHasChanges || fileCountChanged;
+
     if (options.includeCalls && this.callGraph === null && allFiles.length > 0) {
       this.callGraph = await buildCallGraph(allFiles);
     }
 
-    if (this.symbolIndex !== null) return; // already built
+    // Fast-path: nothing changed and index already built. Skip rebuilding.
+    if (!needsRebuild) {
+      this.lastBuildFilesLength = allFiles.length;
+      return;
+    }
 
-    // Invalidate indices if the file set changed since last build
+    // Invalidate indices if the file set changed since last build (F-3 fix:
+    // performed BEFORE any early-return so the indices actually rebuild when
+    // incrementalIndex reports changes).
     if (this.lastBuildFilesLength >= 0 && allFiles.length !== this.lastBuildFilesLength) {
       this.symbolIndex = null;
       this.fileIndex = null;
@@ -397,8 +420,6 @@ export class ContextGraph {
     const neighbours: string[] = [];
     // Normalize to resolved absolute path so edge keys are consistent
     const fullPath = resolve(this.root, path);
-    
-    if (!isPathInside(this.root, fullPath)) return [];
 
     let text: string;
     try {
@@ -503,7 +524,7 @@ export class ContextGraph {
     // Slow path: rescan files
     const relPath = relative(this.root, path);
     const tags = await getTagsBatch([{ fname: path, relFname: relPath }], this.tagsCache, options.forceRefresh ?? false);
-    
+
     const references = tags.filter(t => t.kind === "ref");
     const uniqueRefNames = new Set(references.map(tag => tag.name));
 
@@ -560,7 +581,7 @@ export class ContextGraph {
 
   /**
    * Get neighbor files reachable via mutation edges (breakage/co-change)
-   * from a given path. Used during graph expansion in intent_read.
+   * from a given path. Used during graph expansion in the intent-read engine.
    */
   getMutationNeighbours(path: string): GraphNeighbour[] {
     const neighbours: GraphNeighbour[] = [];
@@ -597,7 +618,7 @@ export class ContextGraph {
 // ── Legacy Compatibility ──────────────────────────────────────────
 
 /**
- * Maintained for backward compatibility with existing intent_read.
+ * Maintained for backward compatibility with the existing intent-read engine.
  */
 export function findDirectImportNeighbours(cwd: string, paths: string[], maxCount: number): string[] {
   if (maxCount <= 0) return [];
@@ -610,8 +631,6 @@ export function findDirectImportNeighbours(cwd: string, paths: string[], maxCoun
     const fullPath = isAbsolute(path) ? path : resolve(cwd, path);
     // Use the private method logic or just re-implement here to avoid complex async in this sync-looking function
     // intent-read.ts's version was synchronous.
-    
-    if (!isPathInside(cwd, fullPath)) continue;
 
     let text: string;
     try {
@@ -794,20 +813,6 @@ export class EdgeStore {
       // Resolve relative paths against root
       const fromPath = resolve(root, ev.data.from);
       const toPath = resolve(root, ev.data.to);
-
-      // Validate paths: both must be inside the root
-      try {
-        const realRoot = realpathSync(resolve(root));
-        const realFrom = realpathSync(fromPath);
-        const realTo = realpathSync(toPath);
-        const fromRel = relative(realRoot, realFrom);
-        const toRel = relative(realRoot, realTo);
-        const fromInside = fromRel === "" || (!fromRel.startsWith("..") && !isAbsolute(fromRel));
-        const toInside = toRel === "" || (!toRel.startsWith("..") && !isAbsolute(toRel));
-        if (!fromInside || !toInside) continue; // Skip events with paths outside root
-      } catch {
-        continue; // Skip if path resolution fails
-      }
 
       const key = `${fromPath}||${toPath}||${ev.type}`;
 

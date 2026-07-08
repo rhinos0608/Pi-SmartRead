@@ -30,7 +30,7 @@
 
 import { loadGrammar, type GrammarInfo } from "./grammar-loader.js";
 import type { ChunkResult, ChunkOptions } from "./chunking.js";
-import { extractSymbolBoundaries as chunkingExtractSymbolBoundaries } from "./chunking.js";
+import { extractSymbolBoundaries as chunkingExtractSymbolBoundaries, nwsChars, cASTChunkText } from "./chunking.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -496,4 +496,301 @@ export async function chunkByAstBoundaries(
 export function isAstChunkingAvailable(_ext: string): boolean {
   return loadGrammar !== undefined; // Grammar loader is always importable;
   // actual WASM availability is checked at async runtime
+}
+
+// ─── cAST chunking (Chunking via Abstract Syntax Trees) ──────────
+
+/**
+ * cAST chunking using tree-sitter AST.
+ *
+ * Parses code with tree-sitter, walks the real AST tree recursively,
+ * and applies the cAST (Chunking via Abstract Syntax Trees) algorithm
+ * from arXiv 2506.15655v1. Recursively splits oversized nodes and
+ * greedily merges adjacent small siblings, using non-whitespace
+ * character count as the size metric. Concatenating all chunks in
+ * order reproduces the original file.
+ *
+ * Falls back to sync regex-based cAST (cASTChunkText) when the
+ * tree-sitter grammar is unavailable for the file extension.
+ *
+ * @param text - Source code text
+ * @param filePath - File path (for language detection)
+ * @param options - Chunking options
+ * @returns Object with chunks array and diagnostics
+ */
+export async function cASTChunkByAstBoundaries(
+  text: string,
+  filePath: string,
+  options?: ChunkOptions,
+): Promise<{ chunks: ChunkResult[]; diagnostics: AstChunkerDiagnostics }> {
+  if (!text || text.length === 0 || /^\s*$/.test(text)) {
+    return {
+      chunks: [],
+      diagnostics: emptyDiagnostics(filePath),
+    };
+  }
+
+  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
+  const parseStart = Date.now();
+
+  // Try tree-sitter first
+  try {
+    const grammarInfo = await loadGrammar(ext);
+    if (grammarInfo) {
+      return await cASTChunkWithTreeSitter(text, grammarInfo, ext, options, parseStart);
+    }
+  } catch {
+    // Fall through to sync fallback
+  }
+
+  // Fallback: regex-based cAST
+  const chunks = cASTChunkText(text, options);
+  return {
+    chunks,
+    diagnostics: {
+      wasmAvailable: false,
+      grammarExtension: ext,
+      wasmFile: null,
+      hasParseErrors: false,
+      symbolCount: 0,
+      parseTimeMs: Date.now() - parseStart,
+      usedFallback: true,
+      symbolTypesFound: [],
+    },
+  };
+}
+
+function emptyDiagnostics(filePath: string): AstChunkerDiagnostics {
+  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
+  return {
+    wasmAvailable: false,
+    grammarExtension: ext,
+    wasmFile: null,
+    hasParseErrors: false,
+    symbolCount: 0,
+    parseTimeMs: 0,
+    usedFallback: false,
+    symbolTypesFound: [],
+  };
+}
+
+/**
+ * Internal: Parse with tree-sitter and walk AST for cAST chunking.
+ */
+async function cASTChunkWithTreeSitter(
+  text: string,
+  grammarInfo: GrammarInfo,
+  ext: string,
+  options?: ChunkOptions,
+  parseStart: number = Date.now(),
+): Promise<{ chunks: ChunkResult[]; diagnostics: AstChunkerDiagnostics }> {
+  const maxNws = options?.maxNwsChars ?? 2000;
+  const maxChunksPerFile = options?.maxChunksPerFile ?? 100;
+
+  // Dynamic import of web-tree-sitter (optional peer dependency)
+  const ParserModule: any = (await import("web-tree-sitter")).default;
+  const parser = new ParserModule();
+  parser.setLanguage(grammarInfo.language as any);
+  const tree = parser.parse(text);
+  const rootNode = tree.rootNode;
+
+  try {
+    const hasErrors = rootNode.hasError === true || rootNode.type === "ERROR";
+
+    // Walk tree-sitter tree, building segment list via cAST algorithm
+    const segments = cASTSplitTreeSitter(text, rootNode, maxNws);
+
+    // Convert segments to ChunkResults
+    const results: ChunkResult[] = [];
+    for (let i = 0; i < Math.min(segments.length, maxChunksPerFile); i++) {
+      const seg = segments[i]!;
+      const segText = text.slice(seg.startByte, seg.endByte);
+      results.push({
+        text: segText,
+        chunkIndex: i,
+        startChar: seg.startByte,
+        endChar: seg.endByte,
+        estimatedTokens: Math.ceil(segText.length / CHARS_PER_TOKEN),
+        wasHardSplit: false,
+        nwsChars: nwsChars(segText),
+      });
+    }
+
+    // Re-assign chunk indices
+    for (let i = 0; i < results.length; i++) {
+      results[i]!.chunkIndex = i;
+    }
+
+    return {
+      chunks: results,
+      diagnostics: {
+        wasmAvailable: true,
+        grammarExtension: ext,
+        wasmFile: grammarInfo.wasmFile,
+        hasParseErrors: hasErrors,
+        symbolCount: results.length,
+        parseTimeMs: Date.now() - parseStart,
+        usedFallback: false,
+        symbolTypesFound: [],
+      },
+    };
+  } finally {
+    try { tree.delete(); } catch { /* ignore */ }
+    try { parser.delete(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * cAST split-then-merge applied to a tree-sitter AST tree.
+ * Recursive: if a node fits in maxNws, return it as one segment.
+ * Otherwise, iterate named children, pack fitting children into a
+ * current batch, recursively split oversized children, and finally
+ * merge adjacent small segments to avoid over-fragmentation.
+ */
+function cASTSplitTreeSitter(
+  text: string,
+  node: { startIndex: number; endIndex: number; namedChildren: any[] },
+  maxNws: number,
+): Array<{ startByte: number; endByte: number }> {
+  const nodeNws = nwsChars(text.slice(node.startIndex, node.endIndex));
+  if (nodeNws <= maxNws) {
+    return [{ startByte: node.startIndex, endByte: node.endIndex }];
+  }
+
+  const namedChildren: any[] = (node.namedChildren ?? []).filter(
+    (c: any) => c.endIndex > c.startIndex,
+  );
+
+  if (namedChildren.length === 0) {
+    // Leaf node too large — hard split by NWS
+    return hardSplitByNws(text, node.startIndex, node.endIndex, maxNws);
+  }
+
+  // ── First pass: split at child boundaries into contiguous segments ──
+  const segments: Array<{ startByte: number; endByte: number; tsNode: any }> = [];
+  let cursor = node.startIndex;
+
+  for (const child of namedChildren) {
+    // Gap before this child
+    if (child.startIndex > cursor) {
+      segments.push({ startByte: cursor, endByte: child.startIndex, tsNode: null });
+    }
+    // The child itself
+    segments.push({ startByte: child.startIndex, endByte: child.endIndex, tsNode: child });
+    cursor = child.endIndex;
+  }
+
+  // Trailing gap
+  if (cursor < node.endIndex) {
+    segments.push({ startByte: cursor, endByte: node.endIndex, tsNode: null });
+  }
+
+  // ── Second pass: greedy packing + recursive splitting ──
+  const packed: Array<{ startByte: number; endByte: number }> = [];
+  let currentBatchStart = -1;
+  let currentBatchEnd = -1;
+  let currentNws = 0;
+
+  const flush = () => {
+    if (currentBatchStart >= 0) {
+      packed.push({ startByte: currentBatchStart, endByte: currentBatchEnd });
+      currentBatchStart = -1;
+      currentBatchEnd = -1;
+      currentNws = 0;
+    }
+  };
+
+  for (const seg of segments) {
+    let subSegments: Array<{ startByte: number; endByte: number }>;
+
+    if (seg.tsNode &&
+        seg.tsNode.namedChildren?.length > 0 &&
+        nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
+      // Recursively split over-large child
+      subSegments = cASTSplitTreeSitter(text, seg.tsNode, maxNws);
+    } else {
+      subSegments = [{ startByte: seg.startByte, endByte: seg.endByte }];
+    }
+
+    for (const sub of subSegments) {
+      const subNws = nwsChars(text.slice(sub.startByte, sub.endByte));
+
+      if (currentNws + subNws <= maxNws) {
+        if (currentBatchStart < 0) {
+          currentBatchStart = sub.startByte;
+        }
+        currentBatchEnd = sub.endByte;
+        currentNws += subNws;
+      } else {
+        flush();
+        currentBatchStart = sub.startByte;
+        currentBatchEnd = sub.endByte;
+        currentNws = subNws;
+      }
+    }
+  }
+  flush();
+
+  // ── Third pass: merge adjacent small segments ──
+  return mergeAdjacentSmall(packed, text, maxNws);
+}
+
+/**
+ * Merge adjacent small segments whose combined NWS ≤ maxNws.
+ * Prevents over-fragmentation from greedy splitting.
+ */
+function mergeAdjacentSmall(
+  segments: Array<{ startByte: number; endByte: number }>,
+  text: string,
+  maxNws: number,
+): Array<{ startByte: number; endByte: number }> {
+  if (segments.length <= 1) return segments;
+
+  const merged: Array<{ startByte: number; endByte: number }> = [];
+  let pending = segments[0]!;
+
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i]!;
+    const combinedNws = nwsChars(text.slice(pending.startByte, seg.endByte));
+    if (combinedNws <= maxNws) {
+      pending = { startByte: pending.startByte, endByte: seg.endByte };
+    } else {
+      merged.push(pending);
+      pending = seg;
+    }
+  }
+  merged.push(pending);
+  return merged;
+}
+
+/**
+ * Hard-split a contiguous text segment by NWS char count.
+ * Used for leaf segments that exceed maxNws and have no children.
+ */
+function hardSplitByNws(
+  text: string,
+  startByte: number,
+  endByte: number,
+  maxNws: number,
+): Array<{ startByte: number; endByte: number }> {
+  const segments: Array<{ startByte: number; endByte: number }> = [];
+  let chunkStart = startByte;
+  let nwsAccum = 0;
+
+  for (let i = startByte; i < endByte; i++) {
+    const ch = text[i]!;
+    const isNws = ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v";
+    if (isNws) {
+      if (nwsAccum >= maxNws) {
+        segments.push({ startByte: chunkStart, endByte: i });
+        chunkStart = i;
+        nwsAccum = 0;
+      }
+      nwsAccum++;
+    }
+  }
+  if (chunkStart < endByte) {
+    segments.push({ startByte: chunkStart, endByte });
+  }
+  return segments;
 }

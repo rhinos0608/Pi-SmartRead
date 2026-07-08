@@ -7,6 +7,7 @@ node_modules/
 *.wasm
 .pi-smartread.tags.cache/*
 .pi-smartread/*
+.pi-subagents/artifacts/*
 graphify-out/
 .understand-anything/.understandignore
 .understand-anything/fingerprints.json

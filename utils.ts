@@ -1,5 +1,5 @@
-import fs, { realpathSync } from "node:fs";
-import { resolve, isAbsolute, relative } from "node:path";
+import fs from "node:fs";
+import { resolve } from "node:path";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -276,7 +276,7 @@ export function resolvePathWithFallbacks(filePath: string): string {
 
 /**
  * Validate and resolve a path with macOS fallbacks.
- * Throws on empty path or path traversal attempts.
+ * Throws on empty path.
  * Returns the resolved path (first variant that exists on disk).
  */
 export function resolveReadPath(path: string): string {
@@ -284,68 +284,21 @@ export function resolveReadPath(path: string): string {
 	return resolvePathWithFallbacks(path);
 }
 
-/**
- * Resolve a file path against a workspace root and verify it stays inside.
- * Uses realpath for both root and target to prevent symlink escape.
- * Throws if the resolved path is outside the workspace.
- */
+/** Resolve a file path against cwd without applying a workspace sandbox. */
 export function resolveWorkspacePath(cwd: string, requestedPath: string): string {
-	const resolvedRoot = resolve(cwd);
-	const resolvedTarget = resolve(resolvedRoot, requestedPath);
-
-	try {
-		const realRoot = realpathSync(resolvedRoot);
-		let realTarget: string;
-		try {
-			realTarget = realpathSync(resolvedTarget);
-		} catch {
-			// Target may not exist yet (e.g. write target) — use resolved form
-			realTarget = resolvedTarget;
-		}
-		const rel = relative(realRoot, realTarget);
-		if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
-			return realTarget;
-		}
-	} catch {
-		// If cwd realpath fails, fall back to lexical check
-	}
-
-	throw new Error(`Path outside workspace: ${requestedPath} (resolved: ${resolvedTarget})`);
+	return resolve(cwd, requestedPath);
 }
 
-/**
- * Resolve a directory parameter (from tool inputs) against workspace root
- * and reject paths outside the workspace via realpath.
- */
+/** Resolve a directory parameter against cwd without applying a workspace sandbox. */
 export function resolveDirectoryParam(cwd: string, directory: string | undefined): string {
-	const resolvedDir = directory?.trim()
+	return directory?.trim()
 		? resolve(cwd, directory.trim())
 		: resolve(cwd);
-
-	try {
-		const realCwd = realpathSync(resolve(cwd));
-		const realDir = realpathSync(resolvedDir);
-		const rel = relative(realCwd, realDir);
-		if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
-			throw new Error(`Directory outside workspace: ${directory ?? "."}`);
-		}
-		return realDir;
-	} catch (err) {
-		if (err instanceof Error && err.message.startsWith("Directory outside workspace")) {
-			throw err;
-		}
-		throw new Error(`Cannot resolve directory: ${directory ?? "."}`);
-	}
 }
 
 export function validatePath(path: string): void {
 	if (!path || !path.trim()) {
 		throw new Error("File path must not be empty");
-	}
-	for (const segment of path.replace(/\\/g, "/").split("/")) {
-		if (segment === "..") {
-			throw new Error(`Path traversal not allowed: ${path}`);
-		}
 	}
 }
 
