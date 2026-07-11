@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import {
     computeInspectDetails,
     executeInspectDetails,
@@ -197,6 +197,89 @@ describe("executeInspectDetails (async modes)", () => {
                 sessionFilePath: "",
             }),
         ).rejects.toThrow(/session/i);
+    });
+});
+
+describe("directory scoping (query/symbol modes)", () => {
+    let subdirIn: string;
+    let subdirOut: string;
+    let fileIn: string;
+    let fileOut: string;
+
+    beforeEach(() => {
+        subdirIn = join(workdir, "scoped");
+        subdirOut = join(workdir, "other");
+        mkdirSync(subdirIn, { recursive: true });
+        mkdirSync(subdirOut, { recursive: true });
+        fileIn = join(subdirIn, "inner.ts");
+        fileOut = join(subdirOut, "outer.ts");
+        writeFileSync(fileIn, "function scopedNeedle() { return 1; }\n", "utf8");
+        writeFileSync(fileOut, "function scopedNeedle() { return 2; }\n", "utf8");
+    });
+
+    it("query mode (quick depth) with directory only matches within that directory", async () => {
+        const details = await executeInspectDetails({
+            query: "scopedNeedle",
+            directory: "scoped",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
+        expect(paths.length).toBeGreaterThan(0);
+        expect(paths.every((p) => p.includes(`${sep}scoped${sep}`))).toBe(true);
+        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(false);
+    });
+
+    it("query mode (deep depth) with directory only matches within that directory", async () => {
+        // Deep mode's `matches` shape (file/lines.start) differs from the
+        // quick-path shape (file/line) that the resource-builder expects, so
+        // deep query mode never produces `resources` (pre-existing, out of
+        // scope for the directory-scoping fix) — assert on contentText,
+        // which is what the model actually sees, instead.
+        const details = await executeInspectDetails({
+            query: "scopedNeedle",
+            depth: "deep",
+            directory: "scoped",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        expect(details.contentText).toContain("inner.ts");
+        expect(details.contentText).not.toContain("outer.ts");
+    });
+
+    it("symbol mode with directory only matches within that directory", async () => {
+        const details = await executeInspectDetails({
+            symbol: "scopedNeedle",
+            directory: "scoped",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
+        expect(paths.length).toBeGreaterThan(0);
+        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(false);
+        expect(paths.some((p) => p === realpathSync(fileIn))).toBe(true);
+    });
+
+    it("query mode without directory still searches the whole workspace (regression guard)", async () => {
+        const details = await executeInspectDetails({
+            query: "scopedNeedle",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
+        expect(paths.some((p) => p === realpathSync(fileIn))).toBe(true);
+        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(true);
+    });
+
+    it("symbol mode without directory still searches the whole workspace (regression guard)", async () => {
+        const details = await executeInspectDetails({
+            symbol: "scopedNeedle",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
+        expect(paths.some((p) => p === realpathSync(fileIn))).toBe(true);
+        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(true);
     });
 });
 

@@ -270,6 +270,8 @@ async function executeQueryInspectDetails(
         throw new Error('inspect query mode requires a non-empty "query"');
     }
     const depth = input.depth ?? "quick";
+    const directory = input.directory?.trim() || undefined;
+    const searchCwd = directory ? pathResolve(cwd, directory) : cwd;
 
     // Synthesize a toolCallId so the upstream search engine records the hits
     // in the file-read cache (handy for context hygiene). The id is
@@ -285,7 +287,7 @@ async function executeQueryInspectDetails(
         const fakeCtx = { cwd, sessionManager: undefined } as any;
         const result = await searchTool.execute(
             toolCallId,
-            { query, depth: "deep" } as any,
+            { query, depth: "deep", ...(directory ? { directory } : {}) } as any,
             input.signal,
             undefined,
             fakeCtx,
@@ -300,13 +302,13 @@ async function executeQueryInspectDetails(
         const grepResult = await handleGrep(
             toolCallId,
             { query, matchMode: "literal" } as any,
-            cwd,
+            searchCwd,
             input.signal,
         );
         const codeResult = await handleCode(
             toolCallId,
             { query, matchMode: "literal" } as any,
-            cwd,
+            searchCwd,
             input.signal,
             false,
         );
@@ -452,12 +454,17 @@ async function executeSymbolInspectDetails(
         throw new Error('inspect symbol mode requires a non-empty "symbol"');
     }
     const maxResults = 30;
+    const directory = input.directory?.trim() || undefined;
+    // `root` narrows the search scope; `cwd` stays the workspace root so
+    // relative_path in results is displayed relative to the workspace, not
+    // the subdirectory (matches the `symbol` tool's own directory handling).
+    const searchRoot = directory ? pathResolve(cwd, directory) : cwd;
 
     const data = await handleSymbol(
         symbolName,
         maxResults,
         true, // includeBody for evidence
-        cwd,
+        searchRoot,
         cwd,
         input.signal,
     );

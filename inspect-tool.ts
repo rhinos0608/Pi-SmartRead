@@ -27,7 +27,7 @@ const InspectSchema = Type.Object({
     })),
     symbol: Type.Optional(Type.String({ description: "Symbol name or qualified path. Symbol mode when set." })),
     action: Type.Optional(Type.Union([Type.Literal("map")], { description: "Specialised action. action: \"map\" produces a repo map (map mode)." })),
-    directory: Type.Optional(Type.String({ description: "Optional directory scope. Used by map mode and forwarded to query/symbol modes." })),
+    directory: Type.Optional(Type.String({ description: "Optional directory scope (relative to cwd). Used by map mode, and narrows the search root for query mode (both quick and deep depth) and symbol mode." })),
 });
 
 type InspectInput = Static<typeof InspectSchema>;
