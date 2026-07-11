@@ -7,9 +7,11 @@
  *  - symbol:         `{ symbol }` — symbol lookup + evidence
  *  - map:            `{ action: "map" }` — repo structure + evidence
  *
- * Every mode returns a `details.workspaceEvidence` envelope (schema v1+)
+ * Every mode returns a `details.workspaceEvidence` envelope (schema v3)
  * with the appropriate `mode` field. Use this envelope to authorize
- * subsequent patch calls.
+ * subsequent patch calls. Query/symbol modes carry weak ("search-match")
+ * coverage that patch will reject — the model must path-mode inspect a
+ * file before mutating it.
  */
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
@@ -45,7 +47,8 @@ const INSPECT_DESCRIPTION =
     "Query mode: { query: \"refreshToken\" } (default quick: grep + AST) or { query, depth: \"deep\" } (semantic + symbol + graph + LSP). " +
     "Symbol mode: { symbol: \"AuthService.login\" } — symbol lookup + evidence. " +
     "Map mode: { action: \"map\" } — repository structure + evidence. " +
-    "Every mode returns a details.workspaceEvidence envelope (schemaVersion 1) with the canonical path, allowed ranges, and SHA-256 freshness. Use this envelope to authorize subsequent patch calls.";
+    "Every mode returns a details.workspaceEvidence envelope (schemaVersion 3) with the canonical path, allowed ranges, coverage kind, and (for path mode) SHA-256 freshness. " +
+    "Path mode produces strong evidence that authorizes patch. Query and symbol modes produce weak (search-match) evidence — they help you find files, but you must path-mode inspect a file before patch will accept edits to it.";
 
 export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
     return {
@@ -105,12 +108,20 @@ export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
                       });
 
             // Publish into the resolver so patch can request it via RPC.
+            // Publishing is best-effort: a resolver failure must not prevent
+            // the model from seeing the inspect content (the durable evidence
+            // is the returned `details.workspaceEvidence`, not the resolver
+            // cache — patch's auto-inspect fallback works even if this fails).
             if (opts.resolver) {
-                opts.resolver.publishInspection(
-                    details.workspaceEvidence,
-                    sessionFilePath,
-                    details.workspaceEvidence.canonicalWorkspaceRoot,
-                );
+                try {
+                    opts.resolver.publishInspection(
+                        details.workspaceEvidence,
+                        sessionFilePath,
+                        details.workspaceEvidence.canonicalWorkspaceRoot,
+                    );
+                } catch {
+                    // best-effort; swallow
+                }
             }
 
             return {

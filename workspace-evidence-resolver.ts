@@ -15,7 +15,6 @@ import {
     validateInspectionEnvelope,
     hashSessionFilePath,
     type WorkspaceEvidenceEnvelope,
-    type InspectedResource,
 } from "@rhinos0608/pi-workspace-protocol";
 
 export interface ResolverBus {
@@ -85,22 +84,16 @@ export function createEvidenceResolver(opts: CreateEvidenceResolverOptions): Evi
             );
         }
 
-        // Duplicate inspectionId with conflicting envelope -> reject
+        // Duplicate inspectionId re-published for the SAME session: this is
+        // the normal re-inspect-after-change case (a resource's resourceId
+        // and inspectionId are content-independent by design — freshness is
+        // checked at patch-time via SHA-256 comparison, not via envelope
+        // identity). Overwrite rather than reject. Only a genuine identity
+        // conflict (different session claiming the same inspectionId) is an
+        // error.
         const existing = cache.get(envelope.inspectionId);
-        if (existing) {
-            if (existing.sessionFilePath !== sessionFilePath) {
-                throw new Error(`publishInspection: inspectionId ${envelope.inspectionId} already bound to a different session`);
-            }
-            // Compare envelope structure (resources). If different -> throw.
-            if (!sameEnvelope(existing.envelope, envelope)) {
-                throw new Error(`publishInspection: inspectionId ${envelope.inspectionId} already has a conflicting envelope`);
-            }
-            return; // idempotent
-        }
-
-        // Reject envelopes with empty resources (validator already does this, but be explicit)
-        if (envelope.resources.length === 0) {
-            throw new Error("publishInspection: envelope has no resources");
+        if (existing && existing.sessionFilePath !== sessionFilePath) {
+            throw new Error(`publishInspection: inspectionId ${envelope.inspectionId} already bound to a different session`);
         }
 
         const resourcePaths = new Map<string, string>();
@@ -204,33 +197,4 @@ export function createEvidenceResolver(opts: CreateEvidenceResolverOptions): Evi
     }
 
     return { install, publishInspection, getEnvelope, size, dispose };
-}
-
-function sameEnvelope(a: WorkspaceEvidenceEnvelope, b: WorkspaceEvidenceEnvelope): boolean {
-    if (a.inspectionId !== b.inspectionId) return false;
-    if (a.sessionId !== b.sessionId) return false;
-    if (a.canonicalWorkspaceRoot !== b.canonicalWorkspaceRoot) return false;
-    if (a.resources.length !== b.resources.length) return false;
-    for (let i = 0; i < a.resources.length; i++) {
-        const ra = a.resources[i]!;
-        const rb = b.resources[i]!;
-        if (!sameResource(ra, rb)) return false;
-    }
-    return true;
-}
-
-function sameResource(a: InspectedResource, b: InspectedResource): boolean {
-    if (a.resourceId !== b.resourceId) return false;
-    if (a.canonicalPath !== b.canonicalPath) return false;
-    if (a.kind !== b.kind) return false;
-    if (a.coverage !== b.coverage) return false;
-    if (a.fullFileSha256 !== b.fullFileSha256) return false;
-    if (a.fresh !== b.fresh) return false;
-    if (a.allowedRanges.length !== b.allowedRanges.length) return false;
-    for (let i = 0; i < a.allowedRanges.length; i++) {
-        const ra = a.allowedRanges[i]!;
-        const rb = b.allowedRanges[i]!;
-        if (ra.startLine !== rb.startLine || ra.endLine !== rb.endLine) return false;
-    }
-    return true;
 }

@@ -136,7 +136,7 @@ describe("createEvidenceResolver", () => {
         expect(v.ok).toBe(true);
     });
 
-    it("rejects duplicate inspectionId with conflicting envelope", async () => {
+    it("overwrites (does not throw) when the same session re-publishes the same inspectionId with different content (re-inspect after change)", async () => {
         const { bus } = makeBus();
         const resolver = createEvidenceResolver({ bus, channel: "test.rpc", timeoutMs: 200 });
         await resolver.install();
@@ -153,10 +153,35 @@ describe("createEvidenceResolver", () => {
             },
         ]);
         resolver.publishInspection(base, SESSION_FILE, CANONICAL_WS);
-        const conflicting = JSON.parse(JSON.stringify(base));
-        conflicting.resources[0].resourceId = "9".repeat(64);
-        expect(() => resolver.publishInspection(conflicting, SESSION_FILE, CANONICAL_WS)).toThrow(
-            /conflict|duplicate|inspectionId/i,
+        const updated = JSON.parse(JSON.stringify(base));
+        updated.resources[0].fullFileSha256 = "9".repeat(64);
+        expect(() => resolver.publishInspection(updated, SESSION_FILE, CANONICAL_WS)).not.toThrow();
+        expect(resolver.getEnvelope(inspectionId)?.resources[0]?.fullFileSha256).toBe("9".repeat(64));
+    });
+
+    it("rejects the same inspectionId re-published from a different session (genuine identity conflict)", async () => {
+        const { bus } = makeBus();
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc", timeoutMs: 200 });
+        await resolver.install();
+        const inspectionId = "c".repeat(64);
+        const base = envelopeFor(inspectionId, [
+            {
+                resourceId: "1".repeat(64),
+                canonicalPath: "/ws/a.ts",
+                kind: "full",
+                coverage: "full-file",
+                allowedRanges: [{ startLine: 1, endLine: 5 }],
+                fullFileSha256: "2".repeat(64),
+                fresh: true,
+            },
+        ]);
+        resolver.publishInspection(base, SESSION_FILE, CANONICAL_WS);
+        // Same inspectionId, but stamped with a different session's sessionId
+        // (as if two independently-hashed sessions collided on inspectionId).
+        const otherSession = "/sessions/other.jsonl";
+        const otherEnvelope = { ...base, sessionId: hashSessionFilePath(otherSession) };
+        expect(() => resolver.publishInspection(otherEnvelope, otherSession, CANONICAL_WS)).toThrow(
+            /different session/i,
         );
     });
 

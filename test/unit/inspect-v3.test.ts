@@ -246,4 +246,43 @@ describe("createInspectTool (schema)", () => {
             tool.execute("c1", { path: "hello.ts" }, undefined, undefined, makeCtx()),
         ).rejects.toThrow(/session/i);
     });
+
+    it("execute() with action:map publishes a zero-resource envelope through a real resolver without throwing", async () => {
+        const published: any[] = [];
+        const tool = createInspectTool({
+            getSessionFilePath: () => "/sessions/abc.jsonl",
+            resolver: {
+                publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
+                    published.push({ envelope, sessionFilePath, workspaceRoot });
+                },
+            },
+        });
+        const result = await tool.execute("c1", { action: "map" }, undefined, undefined, makeCtx());
+        const details = result.details as any;
+        expect(details.mode).toBe("map");
+        expect(details.workspaceEvidence.resources).toEqual([]);
+        expect(published).toHaveLength(1);
+        expect(published[0].envelope.resources).toEqual([]);
+    });
+
+    it("execute() with path mode twice on a changed file re-publishes without throwing (re-inspect after edit)", async () => {
+        const published: any[] = [];
+        const tool = createInspectTool({
+            getSessionFilePath: () => "/sessions/abc.jsonl",
+            resolver: {
+                publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
+                    published.push({ envelope, sessionFilePath, workspaceRoot });
+                },
+            },
+        });
+        const first = await tool.execute("c1", { path: "hello.ts" }, undefined, undefined, makeCtx());
+        const { writeFileSync } = await import("node:fs");
+        writeFileSync(file, "alpha\nbeta\ngamma\ndelta\nrefreshToken = 'changed'\n", "utf8");
+        const second = await tool.execute("c2", { path: "hello.ts" }, undefined, undefined, makeCtx());
+        expect(published).toHaveLength(2);
+        const firstDetails = (first.details as any).workspaceEvidence;
+        const secondDetails = (second.details as any).workspaceEvidence;
+        expect(firstDetails.inspectionId).toBe(secondDetails.inspectionId);
+        expect(firstDetails.resources[0].fullFileSha256).not.toBe(secondDetails.resources[0].fullFileSha256);
+    });
 });

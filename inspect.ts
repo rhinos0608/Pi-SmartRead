@@ -375,9 +375,13 @@ async function executeQueryInspectDetails(
                 }),
                 canonicalPath: canonical,
                 kind: "range",
-                coverage: "line-range",
+                // Weak coverage: this is a match pointer from a search hit,
+                // not a targeted read. No trustworthy fullFileSha256 is
+                // available. patch must reject this coverage kind — the
+                // model must path-mode inspect the file before mutating it.
+                coverage: "search-match",
                 allowedRanges: [{ startLine, endLine }],
-                fresh: true,
+                fresh: false,
             });
         }
     }
@@ -475,18 +479,33 @@ async function executeSymbolInspectDetails(
         }
         const startLine = Math.max(1, Math.floor(m.line ?? 1));
         const endLine = Math.max(startLine, Math.floor(m.end_line ?? startLine));
-        resourcesByPath.set(canonical, {
-            resourceId: resourceIdFor({
+        const existing = resourcesByPath.get(canonical);
+        if (existing) {
+            // Merge into the existing resource instead of overwriting —
+            // multiple symbol matches in the same file must all stay covered.
+            const ranges = [...existing.allowedRanges, { startLine, endLine }];
+            ranges.sort((a, b) => a.startLine - b.startLine);
+            resourcesByPath.set(canonical, {
+                ...existing,
+                allowedRanges: mergeRanges(ranges),
+            });
+        } else {
+            resourcesByPath.set(canonical, {
+                resourceId: resourceIdFor({
+                    canonicalPath: canonical,
+                    kind: "range",
+                    range: { startLine, endLine },
+                }),
                 canonicalPath: canonical,
                 kind: "range",
-                range: { startLine, endLine },
-            }),
-            canonicalPath: canonical,
-            kind: "range",
-            coverage: "line-range",
-            allowedRanges: [{ startLine, endLine }],
-            fresh: true,
-        });
+                // Weak coverage: symbol lookup does not perform a targeted
+                // read with a trustworthy fullFileSha256. patch must reject
+                // this coverage kind.
+                coverage: "search-match",
+                allowedRanges: [{ startLine, endLine }],
+                fresh: false,
+            });
+        }
     }
 
     const resources = [...resourcesByPath.values()];
