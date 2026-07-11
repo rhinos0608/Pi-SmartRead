@@ -18,6 +18,16 @@ export {
 } from "./internal-url-router.js";
 export { resolveSkillUrl, resolveMemoryUrl, resolveGraphUrl } from "./internal-url-router.js";
 
+// Workspace evidence resolver
+export {
+  createEvidenceResolver,
+} from "./workspace-evidence-resolver.js";
+export {
+  buildInspectToolForExtension,
+  registerInspectToolWithBus,
+  getSharedEvidenceResolver,
+} from "./mcp-registry.js";
+
 // ── File-read cache API (re-exported for external use) ───────────────────
 export { recordContiguous, recordSparse, getSnapshot, invalidate, clearSession, resolveSessionKey } from "./file-read-cache.js";
 export type { FileSnapshot, SearchMatchEntry } from "./file-read-cache.js";
@@ -74,7 +84,7 @@ ensureHashlineReady().catch((err) =>
   console.error("[SmartRead] hashline init failed:", err)
 );
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
   // ── Initialise internal URL handlers (skill://, memory://, graph://) ──
   initHandlers();
 
@@ -393,5 +403,20 @@ export default function (pi: ExtensionAPI) {
       parameters: tool.inputSchema,
       execute: tool.execute,
     }));
+  }
+
+  // 3. Inspect tool + versioned evidence RPC resolver. The `inspect` tool
+  //    is additive and registered into the same central registry so it
+  //    follows the same registration path as the other tools. The resolver
+  //    subscribes to `pi.events` for the protocol RPC channel.
+  try {
+    if (pi.events && typeof pi.events.on === "function") {
+      const bus = pi.events as { emit: (c: string, d: unknown) => void; on: (c: string, h: (d: unknown) => void) => () => void };
+      const { installInspectAndResolver } = await import("./mcp-registry.js");
+      await installInspectAndResolver(bus);
+    }
+  } catch (err) {
+    // Resolver install is non-fatal — the extension still works without it.
+    try { (pi as any).ui?.notify?.(`pi-workspace-protocol resolver unavailable: ${(err as Error).message}`); } catch { /* ignore */ }
   }
 }
