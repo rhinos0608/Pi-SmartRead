@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { resolve } from "node:path";
+import { resolveWorkspaceDirectory, resolveWorkspacePath as resolveBoundedWorkspacePath } from "./workspace-boundary.js";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -284,16 +284,14 @@ export function resolveReadPath(path: string): string {
 	return resolvePathWithFallbacks(path);
 }
 
-/** Resolve a file path against cwd without applying a workspace sandbox. */
+/** Resolve a file path against cwd; an allowed-root env var can opt into a boundary. */
 export function resolveWorkspacePath(cwd: string, requestedPath: string): string {
-	return resolve(cwd, requestedPath);
+	return resolveBoundedWorkspacePath(cwd, requestedPath, { mustExist: true, kind: "file" });
 }
 
-/** Resolve a directory parameter against cwd without applying a workspace sandbox. */
+/** Resolve a directory parameter against cwd; an allowed-root env var can opt into a boundary. */
 export function resolveDirectoryParam(cwd: string, directory: string | undefined): string {
-	return directory?.trim()
-		? resolve(cwd, directory.trim())
-		: resolve(cwd);
+	return resolveWorkspaceDirectory(cwd, directory);
 }
 
 export function validatePath(path: string): void {

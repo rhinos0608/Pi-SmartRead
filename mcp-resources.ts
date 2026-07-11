@@ -9,6 +9,12 @@ import type { Resource } from "@modelcontextprotocol/sdk/types.js";
 import { validateEmbeddingConfig, loadSearchConfig, loadGitContextConfig, loadExperimentalConfig } from "./config.js";
 import { buildToolRegistry } from "./mcp-registry.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
+import { readCoverage, summarizeCoverage } from "./index-coverage.js";
+import { readAdrs } from "./adr-store.js";
+import { findNearClones } from "./near-clone.js";
+import { discoverFiles } from "./file-discovery.js";
+import { getIndexLockStatus } from "./index-lock.js";
+import { verifySnapshot } from "./index-snapshot.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -70,6 +76,24 @@ export const MCP_RESOURCES: Resource[] = [
     name: "Index Status",
     mimeType: "application/json",
     description: "Knowledge graph index — file count, last modified, and pending changes",
+  },
+  {
+    uri: "smartread://repo/index/coverage",
+    name: "Index Coverage",
+    mimeType: "application/json",
+    description: "Index coverage records: indexed, ignored, unsupported, binary, partial, parse/read errors",
+  },
+  {
+    uri: "smartread://repo/adrs",
+    name: "Architecture Decision Records",
+    mimeType: "application/json",
+    description: "Project ADRs stored under .pi-smartread/adrs",
+  },
+  {
+    uri: "smartread://repo/near-clones",
+    name: "Near Clone Report",
+    mimeType: "application/json",
+    description: "MinHash+LSH near-clone pairs for source files",
   },
 ];
 
@@ -181,7 +205,7 @@ function getServerStatus(): Record<string, unknown> {
  * @param uri - A smartread:// URI string
  * @returns The resource contents, or throws if the URI is not recognized.
  */
-export function resolveResource(uri: string): { uri: string; mimeType: string; text: string } {
+export async function resolveResource(uri: string): Promise<{ uri: string; mimeType: string; text: string }> {
   if (uri === "smartread://config") {
     return {
       uri,
@@ -241,12 +265,46 @@ export function resolveResource(uri: string): { uri: string; mimeType: string; t
       lastModified,
       fileSize,
       loadError: enricher.loadErrorMessage ?? null,
+      locks: {
+        fileHashes: getIndexLockStatus(cwd, "file-hashes"),
+      },
+      snapshots: {
+        graph: verifySnapshot(cwd, "graph"),
+      },
     };
 
     return {
       uri,
       mimeType: "application/json",
       text: JSON.stringify(status, null, 2),
+    };
+  }
+
+  if (uri === "smartread://repo/index/coverage") {
+    const records = readCoverage(process.cwd());
+    return {
+      uri,
+      mimeType: "application/json",
+      text: JSON.stringify({ summary: summarizeCoverage(records), records: records.slice(0, 500) }, null, 2),
+    };
+  }
+
+  if (uri === "smartread://repo/adrs") {
+    return {
+      uri,
+      mimeType: "application/json",
+      text: JSON.stringify({ records: readAdrs(process.cwd()) }, null, 2),
+    };
+  }
+
+  if (uri === "smartread://repo/near-clones") {
+    const cwd = process.cwd();
+    const result = await discoverFiles(cwd, "code", 1000);
+    const clones = findNearClones(result.files, { threshold: 0.9, maxPairs: 100 });
+    return {
+      uri,
+      mimeType: "application/json",
+      text: JSON.stringify({ fileCount: result.files.length, clones }, null, 2),
     };
   }
 

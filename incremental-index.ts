@@ -23,6 +23,7 @@ import {
   dirname,
   join,
 } from "node:path";
+import { withIndexLockSync } from "./index-lock.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -119,7 +120,10 @@ export function saveCache(
       files,
       directories,
     };
-    writeFileSync(cachePath, JSON.stringify(data, null, 2), "utf-8");
+    const root = dirname(dirname(cachePath));
+    withIndexLockSync(root, "file-hashes", () => {
+      writeFileSync(cachePath, JSON.stringify(data, null, 2), "utf-8");
+    });
   } catch {
     // Non-fatal — cache writes are advisory
   }
@@ -207,6 +211,7 @@ const HARD_SKIP_DIRS = new Set([
   ".gem",
   ".build",
   "graphify-out",
+  ".pi-subagents",
 ]);
 
 // ── Two-pass scanning ─────────────────────────────────────────────
@@ -488,7 +493,10 @@ export function invalidateCache(rootDir: string): void {
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    writeFileSync(cachePath, JSON.stringify(data), "utf-8");
+    const root = dirname(dirname(cachePath));
+    withIndexLockSync(root, "file-hashes", () => {
+      writeFileSync(cachePath, JSON.stringify(data), "utf-8");
+    });
   } catch {
     // Non-fatal
   }

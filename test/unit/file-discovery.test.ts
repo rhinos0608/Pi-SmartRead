@@ -97,6 +97,22 @@ describe("findSrcFiles", () => {
     }
   });
 
+  it("ignores .pi-subagents artifacts to prevent self-referential contamination", async () => {
+    mkdirSync(join(tmpDir, ".pi-subagents", "artifacts"), { recursive: true });
+    writeFileSync(
+      join(tmpDir, ".pi-subagents", "artifacts", "run_output.jsonl"),
+      JSON.stringify({ content: [{ type: "text", text: "embedded git diff " + "x".repeat(500000) }] }),
+    );
+    writeFileSync(join(tmpDir, "main.ts"), "// main");
+
+    const result = await discoverFiles(tmpDir, "text");
+    expect(result.files).not.toContain(
+      join(tmpDir, ".pi-subagents", "artifacts", "run_output.jsonl"),
+    );
+    expect(result.files).toContain(join(tmpDir, "main.ts"));
+    expect(result.diagnostics.dirsSkippedHardDenied).toBeGreaterThanOrEqual(1);
+  });
+
   it("discovers searchable text files beyond supported code extensions", async () => {
     writeFileSync(join(tmpDir, "README.md"), "# Readme");
     writeFileSync(join(tmpDir, "config.yaml"), "name: test");
@@ -126,6 +142,38 @@ describe("findSrcFiles", () => {
     expect(result.files).toContain(join(tmpDir, "notes.txt"));
     expect(result.files).not.toContain(join(tmpDir, "blob.bin"));
     expect(result.diagnostics.filesSkippedBinary).toBe(1);
+  });
+
+  it("reports ignored file details with layer and source path", async () => {
+    writeFileSync(join(tmpDir, ".smartignore"), "ignored.ts\n");
+    writeFileSync(join(tmpDir, "ignored.ts"), "export const ignored = true;");
+    writeFileSync(join(tmpDir, "kept.ts"), "export const kept = true;");
+
+    const result = await discoverFiles(tmpDir, "code");
+    expect(result.files).toContain(join(tmpDir, "kept.ts"));
+    expect(result.files).not.toContain(join(tmpDir, "ignored.ts"));
+    expect(result.diagnostics.filesSkippedIgnored).toBe(1);
+    expect(result.diagnostics.ignoredDetails).toEqual([
+      expect.objectContaining({
+        path: join(tmpDir, "ignored.ts"),
+        layer: "smartignore",
+        sourcePath: join(tmpDir, ".smartignore"),
+      }),
+    ]);
+  });
+
+  it("lets context include rescue standard ignores but not hard-deny directories", async () => {
+    mkdirSync(join(tmpDir, "hidden"), { recursive: true });
+    mkdirSync(join(tmpDir, "node_modules"), { recursive: true });
+    writeFileSync(join(tmpDir, ".gitignore"), "hidden/keep.ts\nnode_modules/rescue.ts\n");
+    writeFileSync(join(tmpDir, ".context-mode-include"), "hidden/keep.ts\nnode_modules/rescue.ts\n");
+    writeFileSync(join(tmpDir, "hidden", "keep.ts"), "export const keep = true;");
+    writeFileSync(join(tmpDir, "node_modules", "rescue.ts"), "export const rescue = true;");
+
+    const result = await discoverFiles(tmpDir, "code");
+    expect(result.files).toContain(join(tmpDir, "hidden", "keep.ts"));
+    expect(result.files).not.toContain(join(tmpDir, "node_modules", "rescue.ts"));
+    expect(result.diagnostics.dirsSkippedHardDenied).toBe(1);
   });
 
 });

@@ -104,6 +104,7 @@ export interface DeepSearchDetails {
   depth: DeepSearchDepth;
   scope: DeepSearchScope;
   filesInspected: number;
+  discoveryTotal?: number;
   matches: DeepSearchMatch[];
   channelsUsed: ChannelName[];
   degraded: string[];
@@ -180,7 +181,7 @@ async function discoverCandidateFiles(
   cwd: string,
   scope: DeepSearchScope,
   signal?: AbortSignal,
-): Promise<string[]> {
+): Promise<{ files: string[]; totalBeforeScope: number }> {
   const all = new Map<string, string>();
   const profile: DiscoveryProfile = scope === "code" ? "code" : "text";
   const searchRoots = [...new Set(expandToMonorepoRoots(cwd).map((root) => resolve(root)))];
@@ -193,10 +194,12 @@ async function discoverCandidateFiles(
     }
   }
 
-  return [...all.entries()]
+  const totalBeforeScope = all.size;
+  const files = [...all.entries()]
     .filter(([rel]) => pathMatchesScope(rel, scope))
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([, abs]) => abs);
+  return { files, totalBeforeScope };
 }
 
 function candidateKey(candidate: DeepSearchCandidate): string {
@@ -420,6 +423,9 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
   lines.push("## 📊 Summary", "");
   lines.push(`- Channels: ${details.channelsUsed.length > 0 ? details.channelsUsed.join(", ") : "none"}`);
   lines.push(`- Files inspected: ${details.filesInspected}`);
+  if (details.discoveryTotal !== undefined && details.discoveryTotal !== details.filesInspected) {
+    lines.push(`- Searchable corpus: ${details.discoveryTotal} files (${details.scope} scope filtered to ${details.filesInspected})`);
+  }
   if (details.rerankRequested) lines.push("- Rerank: requested, reserved for configured V2 rerankers");
   if (details.degraded.length > 0) {
     lines.push(`- Degraded: ${details.degraded.join("; ")}`);
@@ -639,7 +645,7 @@ export async function executeDeepSearch(
   // both semantic (phase 2) and graph (phase 3) channels need the full file list.
   // Structural/grep/symbol channels (phase 1) could in theory start earlier with a
   // partial list, but the complexity/benefit ratio is marginal for the current design.
-  const discoveredFiles = await discoverCandidateFiles(cwd, scope, signal);
+  const { files: discoveredFiles, totalBeforeScope: discoveryTotal } = await discoverCandidateFiles(cwd, scope, signal);
   const candidatePathFilter = new Set(discoveredFiles.map((path) => toRelativePath(cwd, path)));
   const maxChannelResults = Math.min(100, Math.max(limit * 3, limit));
 
@@ -749,6 +755,7 @@ export async function executeDeepSearch(
     depth,
     scope,
     filesInspected: discoveredFiles.length,
+    discoveryTotal,
     matches,
     channelsUsed: channelSet(matches),
     degraded,

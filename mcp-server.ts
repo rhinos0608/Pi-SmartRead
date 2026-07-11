@@ -212,7 +212,7 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
 });
 
 server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const resolved = resolveResource(request.params.uri);
+  const resolved = await resolveResource(request.params.uri);
   return {
     contents: [
       {

@@ -21,6 +21,15 @@ const createIgnore = ignoreDefault as unknown as (options?: {
 
 export type DiscoveryProfile = "code" | "text";
 
+export type IgnoreLayer = "hard-deny" | "standard" | "smartignore" | "context-ignore" | "context-include";
+
+export interface IgnoredFileDetail {
+  path: string;
+  layer: IgnoreLayer;
+  reason: string;
+  sourcePath?: string;
+}
+
 export interface FileDiscoveryDiagnostics {
   profile: DiscoveryProfile;
   root: string;
@@ -28,8 +37,11 @@ export interface FileDiscoveryDiagnostics {
   filesConsidered: number;
   filesMatched: number;
   filesSkippedIgnored: number;
+  dirsSkippedHardDenied: number;
   filesSkippedBinary: number;
   filesSkippedUnsupported: number;
+  ignoredDetails: IgnoredFileDetail[];
+  ignoredDetailsTruncated: number;
 }
 
 export interface FileDiscoveryResult {
@@ -40,16 +52,21 @@ export interface FileDiscoveryResult {
 interface IgnoreSource {
   baseDir: string;
   matcher: Ignore;
+  sourcePath: string;
+  layer: IgnoreLayer;
 }
 
 interface ContextState {
   standard: IgnoreSource[];
+  smartignore: IgnoreSource[];
   contextIgnore: IgnoreSource[];
   contextInclude: IgnoreSource[];
 }
 
 const VCS_MARKERS = [".git", ".hg", ".svn", "_darcs"] as const;
 const STANDARD_IGNORE_FILES = [".gitignore", ".ignore", ".rgignore"] as const;
+const SMART_IGNORE_FILES = [".smartignore"] as const;
+export const IGNORED_DETAILS_LIMIT = 500;
 const TEXT_SNIFF_BYTES = 8_192;
 
 const HARD_DENY_DIRS = new Set([
@@ -101,6 +118,7 @@ const HARD_DENY_DIRS = new Set([
   ".pi-smartread.tags.cache",
   ".pi-smartread.embeddings.cache",
   "graphify-out",
+  ".pi-subagents",
 ]);
 
 const SEARCHABLE_TEXT_EXTENSIONS = new Set([
@@ -204,10 +222,12 @@ async function readIgnorePatterns(filePath: string): Promise<string[]> {
   }
 }
 
-function createIgnoreSource(baseDir: string, patterns: string[]): IgnoreSource | null {
+function createIgnoreSource(baseDir: string, sourcePath: string, layer: IgnoreLayer, patterns: string[]): IgnoreSource | null {
   if (patterns.length === 0) return null;
   return {
     baseDir,
+    sourcePath,
+    layer,
     matcher: createIgnore({ allowRelativePaths: true }).add(patterns),
   };
 }
@@ -241,64 +261,113 @@ async function extendContext(
   vcsRoot: string | null,
 ): Promise<ContextState> {
   const standard = [...parent.standard];
+  const smartignore = [...parent.smartignore];
   const contextIgnore = [...parent.contextIgnore];
   const contextInclude = [...parent.contextInclude];
 
   if (vcsRoot && dir === vcsRoot) {
+    const sourcePath = join(dir, ".git", "info", "exclude");
     const infoExclude = createIgnoreSource(
       dir,
-      await readIgnorePatterns(join(dir, ".git", "info", "exclude")),
+      sourcePath,
+      "standard",
+      await readIgnorePatterns(sourcePath),
     );
     if (infoExclude) standard.push(infoExclude);
   }
 
   for (const filename of STANDARD_IGNORE_FILES) {
+    const sourcePath = join(dir, filename);
     const source = createIgnoreSource(
       dir,
-      await readIgnorePatterns(join(dir, filename)),
+      sourcePath,
+      "standard",
+      await readIgnorePatterns(sourcePath),
     );
     if (source) standard.push(source);
   }
 
+  for (const filename of SMART_IGNORE_FILES) {
+    const sourcePath = join(dir, filename);
+    const source = createIgnoreSource(
+      dir,
+      sourcePath,
+      "smartignore",
+      await readIgnorePatterns(sourcePath),
+    );
+    if (source) smartignore.push(source);
+  }
+
+  const contextIgnorePath = join(dir, ".context-mode-ignore");
   const contextIgnoreSource = createIgnoreSource(
     dir,
-    await readIgnorePatterns(join(dir, ".context-mode-ignore")),
+    contextIgnorePath,
+    "context-ignore",
+    await readIgnorePatterns(contextIgnorePath),
   );
   if (contextIgnoreSource) contextIgnore.push(contextIgnoreSource);
 
+  const contextIncludePath = join(dir, ".context-mode-include");
   const contextIncludeSource = createIgnoreSource(
     dir,
-    await readIgnorePatterns(join(dir, ".context-mode-include")),
+    contextIncludePath,
+    "context-include",
+    await readIgnorePatterns(contextIncludePath),
   );
   if (contextIncludeSource) contextInclude.push(contextIncludeSource);
 
-  return { standard, contextIgnore, contextInclude };
+  return { standard, smartignore, contextIgnore, contextInclude };
+}
+
+interface IgnoreDecision {
+  ignored: boolean;
+  layer: IgnoreLayer;
+  reason: string;
+  sourcePath?: string;
 }
 
 function testSources(
   sources: IgnoreSource[],
   targetPath: string,
-): boolean | undefined {
-  let state: boolean | undefined;
+): IgnoreDecision | undefined {
+  let state: IgnoreDecision | undefined;
   for (const source of sources) {
     if (!isSubpath(source.baseDir, targetPath)) continue;
     const rel = normalizeForMatch(relative(source.baseDir, targetPath));
     if (!rel || rel.startsWith("../")) continue;
     const result = source.matcher.test(rel);
-    if (result.ignored) state = true;
-    if (result.unignored) state = false;
+    if (result.ignored) {
+      state = {
+        ignored: true,
+        layer: source.layer,
+        sourcePath: source.sourcePath,
+        reason: `${source.layer}:${normalizeForMatch(relative(source.baseDir, source.sourcePath))}`,
+      };
+    }
+    if (result.unignored) {
+      state = {
+        ignored: false,
+        layer: source.layer,
+        sourcePath: source.sourcePath,
+        reason: `${source.layer}:negation`,
+      };
+    }
   }
   return state;
 }
 
 function shouldIncludePath(fullPath: string, context: ContextState): boolean {
-  return testSources(context.contextInclude, fullPath) === true;
+  return testSources(context.contextInclude, fullPath)?.ignored === true;
 }
 
-function isIgnored(fullPath: string, context: ContextState): boolean {
-  if (shouldIncludePath(fullPath, context)) return false;
-  if (testSources(context.contextIgnore, fullPath) === true) return true;
-  return testSources(context.standard, fullPath) === true;
+function getIgnoreDecision(fullPath: string, context: ContextState): IgnoreDecision | undefined {
+  if (shouldIncludePath(fullPath, context)) return undefined;
+  const contextDecision = testSources(context.contextIgnore, fullPath);
+  if (contextDecision?.ignored) return contextDecision;
+  const smartDecision = testSources(context.smartignore, fullPath);
+  if (smartDecision?.ignored) return smartDecision;
+  const standardDecision = testSources(context.standard, fullPath);
+  return standardDecision?.ignored ? standardDecision : undefined;
 }
 
 async function matchesProfile(filePath: string, profile: DiscoveryProfile): Promise<"match" | "binary" | "unsupported"> {
@@ -327,8 +396,11 @@ export async function discoverFiles(
     filesConsidered: 0,
     filesMatched: 0,
     filesSkippedIgnored: 0,
+    dirsSkippedHardDenied: 0,
     filesSkippedBinary: 0,
     filesSkippedUnsupported: 0,
+    ignoredDetails: [],
+    ignoredDetailsTruncated: 0,
   };
 
   try {
@@ -341,7 +413,7 @@ export async function discoverFiles(
   }
 
   const vcsRoot = findVcsRoot(resolvedRoot);
-  let context: ContextState = { standard: [], contextIgnore: [], contextInclude: [] };
+  let context: ContextState = { standard: [], smartignore: [], contextIgnore: [], contextInclude: [] };
   const chain = vcsRoot && isSubpath(vcsRoot, resolvedRoot)
     ? getPathChain(vcsRoot, resolvedRoot)
     : [resolvedRoot];
@@ -350,6 +422,19 @@ export async function discoverFiles(
   }
 
   const results: string[] = [];
+
+  function recordIgnored(path: string, decision: IgnoreDecision): void {
+    if (diagnostics.ignoredDetails.length < IGNORED_DETAILS_LIMIT) {
+      diagnostics.ignoredDetails.push({
+        path,
+        layer: decision.layer,
+        reason: decision.reason,
+        sourcePath: decision.sourcePath,
+      });
+    } else {
+      diagnostics.ignoredDetailsTruncated++;
+    }
+  }
 
   async function walk(dir: string, dirContext: ContextState): Promise<void> {
     if (signal?.aborted || results.length >= maxFiles) return;
@@ -367,7 +452,11 @@ export async function discoverFiles(
 
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (HARD_DENY_DIRS.has(entry.name)) continue;
+        if (HARD_DENY_DIRS.has(entry.name)) {
+          diagnostics.dirsSkippedHardDenied++;
+          recordIgnored(fullPath, { ignored: true, layer: "hard-deny", reason: `hard-deny:${entry.name}` });
+          continue;
+        }
         const childContext = await extendContext(dirContext, fullPath, vcsRoot);
         await walk(fullPath, childContext);
         continue;
@@ -376,8 +465,10 @@ export async function discoverFiles(
       if (!entry.isFile()) continue;
 
       diagnostics.filesConsidered++;
-      if (isIgnored(fullPath, dirContext)) {
+      const ignoreDecision = getIgnoreDecision(fullPath, dirContext);
+      if (ignoreDecision) {
         diagnostics.filesSkippedIgnored++;
+        recordIgnored(fullPath, ignoreDecision);
         continue;
       }
 

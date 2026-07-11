@@ -407,6 +407,10 @@ export function createReadManyTool(readToolFactory: typeof createReadTool = crea
 				outputText = outputText + "\n\n" + recoveryHints.join("\n");
 			}
 
+			if (largeRequest) {
+				outputText = outputText + "\n\n" + `[Large request: ${params.files.length} files processed in chunks of ${CHUNK_SIZE}.]`;
+			}
+
 			let partialIncludedPath: string | undefined;
 			if (plan.partialSection !== undefined) {
 				const c = candidates[plan.partialSection.index];

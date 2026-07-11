@@ -18,9 +18,10 @@ import {
   discoverFiles,
   type DiscoveryProfile,
   type FileDiscoveryDiagnostics,
+  IGNORED_DETAILS_LIMIT,
 } from "./file-discovery.js";
 import { shouldShowLowResultHint } from "./hook.js";
-import { filenameToLang } from "./languages.js";
+import { filenameToLang, isSupportedFile } from "./languages.js";
 import { loadSearchConfig } from "./config.js";
 import { bm25Scores, computeRrfScores } from "./scoring.js";
 import { fetchEmbeddings } from "./embedding.js";
@@ -360,8 +361,11 @@ async function discoverAcrossRoots(
     filesConsidered: 0,
     filesMatched: 0,
     filesSkippedIgnored: 0,
+    dirsSkippedHardDenied: 0,
     filesSkippedBinary: 0,
     filesSkippedUnsupported: 0,
+    ignoredDetails: [],
+    ignoredDetailsTruncated: 0,
     workspaceRootsSearched: collapsedRoots,
   };
 
@@ -371,8 +375,12 @@ async function discoverAcrossRoots(
     summary.filesConsidered += result.diagnostics.filesConsidered;
     summary.filesMatched += result.diagnostics.filesMatched;
     summary.filesSkippedIgnored += result.diagnostics.filesSkippedIgnored;
+    summary.dirsSkippedHardDenied += result.diagnostics.dirsSkippedHardDenied;
     summary.filesSkippedBinary += result.diagnostics.filesSkippedBinary;
     summary.filesSkippedUnsupported += result.diagnostics.filesSkippedUnsupported;
+    const remainingIgnoredDetailSlots = Math.max(0, IGNORED_DETAILS_LIMIT - summary.ignoredDetails.length);
+    summary.ignoredDetails.push(...result.diagnostics.ignoredDetails.slice(0, remainingIgnoredDetailSlots));
+    summary.ignoredDetailsTruncated += result.diagnostics.ignoredDetailsTruncated + Math.max(0, result.diagnostics.ignoredDetails.length - remainingIgnoredDetailSlots);
 
     for (const file of result.files) {
       if (seen.has(file)) continue;
@@ -624,6 +632,13 @@ function buildLineMatcher(
   return (line) => regex.test(line);
 }
 
+const SNIPPET_LINE_MAX_CHARS = 500;
+
+function truncateLine(line: string, maxChars: number = SNIPPET_LINE_MAX_CHARS): string {
+  if (line.length <= maxChars) return line;
+  return `${line.slice(0, maxChars)} …[truncated ${line.length - maxChars} chars]`;
+}
+
 function formatSnippet(lines: string[], lineNumber: number, contextLines: number): { snippet: string; endLine: number } {
   const startIndex = Math.max(0, lineNumber - 1 - contextLines);
   const endIndex = Math.min(lines.length - 1, lineNumber - 1 + contextLines);
@@ -631,7 +646,7 @@ function formatSnippet(lines: string[], lineNumber: number, contextLines: number
 
   for (let index = startIndex; index <= endIndex; index++) {
     const displayLine = String(index + 1).padStart(4, " ");
-    snippetLines.push(`    ${displayLine} | ${lines[index] ?? ""}`);
+    snippetLines.push(`    ${displayLine} | ${truncateLine(lines[index] ?? "")}`);
   }
 
   return {
@@ -658,7 +673,7 @@ function formatGrepResults(
   const definitionHits = matches.filter((match) => match.group === "definition");
   const textHits = matches.filter((match) => match.group === "text");
   const lines: string[] = [
-    `Found ${matches.length} match(es) for "${query}" (${matchMode}, ${caseSensitive ? "case-sensitive" : "case-insensitive"}, ${elapsedMs}ms):`,
+    `Found ${matches.length} match(es) for "${query}" (${matchMode}, ${caseSensitive ? "case-sensitive" : "case-insensitive"}, ${summary.filesMatched} searchable files, ${elapsedMs}ms):`,
     "",
   ];
 
@@ -684,7 +699,7 @@ function formatGrepResults(
     lines.push(
       `[No text matches for "${query}" across ${summary.filesMatched} searchable files (${summary.filesSkippedBinary} binary skipped, ${summary.filesSkippedIgnored} ignored, ${summary.filesSkippedUnsupported} unsupported).]`,
     );
-  } else if (matches.length < 3) {
+  } else if (matches.length < 3 && shouldShowLowResultHint()) {
     lines.push(
       `> 💡 Only ${matches.length} result(s) found. Retry with ` +
         `depth: "deep" for multi-channel semantic search + graph expansion.`,
@@ -1239,6 +1254,7 @@ export async function handleGrep(
   params: SearchInput,
   cwd: string,
   signal: AbortSignal | undefined,
+  options?: { preDiscoveredFiles?: string[]; sharedDefinitionCache?: Map<string, CodeDefinition[]>; sharedSummary?: DiscoverySummary },
 ) {
   const query = params.query!.trim();
   const maxResults = clampMaxResults(params.maxResults);
@@ -1253,9 +1269,18 @@ export async function handleGrep(
   const startTime = Date.now();
   const matchLine = buildLineMatcher(query, matchMode, caseSensitive);
 
-  const searchRoots = expandToMonorepoRoots(cwd);
-  const { files: allFiles, summary } = await discoverAcrossRoots(searchRoots, "text", signal);
-  const definitionCache = new Map<string, CodeDefinition[]>();
+  let allFiles: string[];
+  let summary: DiscoverySummary;
+  if (options?.preDiscoveredFiles && options.sharedSummary) {
+    allFiles = options.preDiscoveredFiles;
+    summary = options.sharedSummary;
+  } else {
+    const searchRoots = expandToMonorepoRoots(cwd);
+    const discovered = await discoverAcrossRoots(searchRoots, "text", signal);
+    allFiles = discovered.files;
+    summary = discovered.summary;
+  }
+  const definitionCache = options?.sharedDefinitionCache ?? new Map<string, CodeDefinition[]>();
   const matches: GrepSearchMatch[] = [];
 
   const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -1302,7 +1327,7 @@ export async function handleGrep(
         endLine: snippet.endLine,
         kind: owner?.kind ?? "text",
         name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
-        lineText: line,
+        lineText: truncateLine(line, 200),
         snippet: snippet.snippet,
       });
 
@@ -1367,24 +1392,39 @@ export async function handleCode(
   cwd: string,
   signal: AbortSignal | undefined,
   enrich: boolean,
+  options?: { preDiscoveredFiles?: string[]; sharedDefinitionCache?: Map<string, CodeDefinition[]>; sharedSummary?: DiscoverySummary },
 ) {
   const maxResults = params.maxResults ?? 20;
   const startTime = Date.now();
   const query = params.query!.trim();
 
-  const searchRoots = expandToMonorepoRoots(cwd);
-  const { files: allFiles, summary } = await discoverAcrossRoots(searchRoots, "code", signal);
+  let allFiles: string[];
+  let summary: DiscoverySummary;
+  if (options?.preDiscoveredFiles && options.sharedSummary) {
+    allFiles = options.preDiscoveredFiles;
+    summary = options.sharedSummary;
+  } else {
+    const searchRoots = expandToMonorepoRoots(cwd);
+    const discovered = await discoverAcrossRoots(searchRoots, "code", signal);
+    allFiles = discovered.files;
+    summary = discovered.summary;
+  }
   const maxChars = 3_000_000;
 
   const allDefs: CodeDefinition[] = [];
   let totalChars = 0;
+  const definitionCache = options?.sharedDefinitionCache ?? new Map<string, CodeDefinition[]>();
 
   for (const filePath of allFiles) {
     if (signal?.aborted) throw new Error("Operation aborted");
     if (totalChars > maxChars) break;
 
     const relFile = relative(cwd, filePath).replace(/\\/g, "/");
-    const defs = await extractCodeDefinitions(filePath, relFile);
+    let defs = definitionCache.get(filePath);
+    if (!defs) {
+      defs = await extractCodeDefinitions(filePath, relFile);
+      definitionCache.set(filePath, defs);
+    }
     for (const definition of defs) {
       totalChars += definition.body.length;
       allDefs.push(definition);
@@ -1757,7 +1797,7 @@ export async function handleAstPattern(
 
   // Format output
   const lines: string[] = [
-    `Found ${matches.length} AST pattern match(es) for "${query}" (${Date.now() - startTime}ms):`,
+    `Found ${matches.length} AST pattern match(es) for "${query}" (${summary.filesMatched} searchable files, ${Date.now() - startTime}ms):`,
     "",
   ];
 
@@ -1773,7 +1813,7 @@ export async function handleAstPattern(
     lines.push(
       `[No AST pattern matches for "${query}" across ${summary.filesMatched} searchable files.]`,
     );
-  } else if (matches.length < 3) {
+  } else if (matches.length < 3 && shouldShowLowResultHint()) {
     lines.push(
       `> \uD83D\uDCA1 Only ${matches.length} result(s) found. Retry with ` +
         `depth: "deep" for multi-channel semantic search + graph expansion.`,
@@ -1911,10 +1951,34 @@ export default function createSearchTool(): ToolDefinition {
       // Run code and grep searches, combining results.
       // Skip code search for ast_pattern/boolean modes — they are grep-only.
       const skipCode = params.matchMode === "ast_pattern" || params.matchMode === "boolean";
-      const codeResult = skipCode
-        ? { content: [{ type: "text" as const, text: "" }], details: { total: 0, mode: "code" } }
-        : await handleCode(toolCallId, params, cwd, signal, enrich);
-      const grepResult = await handleGrep(toolCallId, params, cwd, signal);
+
+      // M1: Discover text files once and share across code+grep handlers to avoid
+      // duplicate directory walks and file reads in quick search mode.
+      let codeResult: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
+      let grepResult: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
+
+      if (skipCode) {
+        codeResult = { content: [{ type: "text" as const, text: "" }], details: { total: 0, mode: "code" } };
+        grepResult = await handleGrep(toolCallId, params, cwd, signal);
+      } else {
+        const searchRoots = expandToMonorepoRoots(cwd);
+        const { files: textFiles, summary: textSummary } = await discoverAcrossRoots(searchRoots, "text", signal);
+        const codeFiles = textFiles.filter((f) => isSupportedFile(f));
+        const sharedDefinitionCache = new Map<string, CodeDefinition[]>();
+
+        // Build a code-profile summary from the text discovery
+        const codeSummary: DiscoverySummary = {
+          ...textSummary,
+          profile: "code",
+          filesMatched: codeFiles.length,
+        };
+
+        const sharedOpts = { sharedDefinitionCache };
+        [codeResult, grepResult] = await Promise.all([
+          handleCode(toolCallId, params, cwd, signal, enrich, { preDiscoveredFiles: codeFiles, ...sharedOpts, sharedSummary: codeSummary }),
+          handleGrep(toolCallId, params, cwd, signal, { preDiscoveredFiles: textFiles, ...sharedOpts, sharedSummary: textSummary }),
+        ]);
+      }
 
       const codeText = codeResult.content[0]?.type === "text" ? codeResult.content[0].text : "";
       const grepText = grepResult.content[0]?.type === "text" ? grepResult.content[0].text : "";
@@ -1948,6 +2012,10 @@ export default function createSearchTool(): ToolDefinition {
           matches: grepDetails?.matches ?? [],
           lspResults: codeDetails?.lspResults ?? 0,
           filesScanned: codeDetails?.filesScanned ?? grepDetails?.filesScanned ?? 0,
+          filesConsidered: codeDetails?.filesConsidered ?? grepDetails?.filesConsidered ?? 0,
+          filesSkippedIgnored: grepDetails?.filesSkippedIgnored ?? 0,
+          filesSkippedBinary: grepDetails?.filesSkippedBinary ?? 0,
+          workspaceRootsSearched: grepDetails?.workspaceRootsSearched ?? codeDetails?.workspaceRootsSearched ?? [],
           timeMs: Math.max(codeDetails?.timeMs as number ?? 0, grepDetails?.timeMs as number ?? 0),
         },
       };

@@ -39,6 +39,7 @@ import {
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./tool-guidance.js";
+import { startResourceDiagnostics, stopResourceDiagnostics } from "./resource-diagnostics.js";
 import {
   scanMicroagents as doScanMicroagents,
   matchMicroagents,
@@ -70,6 +71,45 @@ function computeRepoKey(cwd: string): string {
 
 // ── Repo map generation (shared by startup hook) ──
 
+const PROJECT_MARKERS = [
+   "package.json",
+   "pyproject.toml",
+   "go.mod",
+   "Cargo.toml",
+   "pom.xml",
+   "build.gradle",
+   "build.gradle.kts",
+] as const;
+const STARTUP_CONTEXT_WAIT_MS = 750;
+
+function isProjectWorkspace(cwd: string): boolean {
+   if (findGitRoot(cwd)) return true;
+
+   let current = path.resolve(cwd);
+   while (true) {
+      if (PROJECT_MARKERS.some((marker) => existsSync(path.join(current, marker)))) {
+         return true;
+      }
+      const parent = path.dirname(current);
+      if (parent === current) return false;
+      current = parent;
+   }
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+   let timer: ReturnType<typeof setTimeout> | undefined;
+   try {
+      return await Promise.race([
+         promise.catch(() => fallback),
+         new Promise<T>((resolve) => {
+            timer = setTimeout(() => resolve(fallback), timeoutMs);
+         }),
+      ]);
+   } finally {
+      if (timer) clearTimeout(timer);
+   }
+}
+
 async function generateCompactMap(
    cwd: string,
    _signal?: AbortSignal,
@@ -80,8 +120,8 @@ async function generateCompactMap(
    try {
       const rm = new RepoMap(cwd);
       const result = await rm.getRepoMap({
-         useImportBased: false,
-         autoFallback: true,
+         useImportBased: true,
+         autoFallback: false,
          compact: true,
          mapTokens: 2048,
          verbose: false,
@@ -187,6 +227,7 @@ export function resetSessionState(): void {
    searchLowResultHintShownThisSession = false;
    startupRepoMapCache.clear();
    startupGitContextCache.clear();
+   stopResourceDiagnostics();
    // ── Microagent cache ──────────────────────────────────────────────
    cachedMicroagents = [];
 }
@@ -202,8 +243,11 @@ export function resetSessionState(): void {
 export function registerSessionHooks(pi: ExtensionAPI): void {
    pi.on("session_start", (_event, ctx) => {
       resetSessionState();
+      startResourceDiagnostics(ctx.cwd);
       const key = computeRepoKey(ctx.cwd);
-      const mapPromise = generateCompactMap(ctx.cwd).then((r) => r?.map ?? null);
+      const mapPromise = isProjectWorkspace(ctx.cwd)
+         ? generateCompactMap(ctx.cwd).then((r) => r?.map ?? null)
+         : Promise.resolve(null);
       const gitConfig = loadGitContextConfig(ctx.cwd);
       const gitBudget = gitConfig.tokenBudget.gitLog + gitConfig.tokenBudget.coCommitHotspots;
       const gitPromise = gitConfig.enabled ? buildStartupGitContext(ctx.cwd, gitBudget)
@@ -244,8 +288,16 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
 
       const key = computeRepoKey(ctx.cwd);
       const [map, gitCtx] = await Promise.all([
-         startupRepoMapCache.get(key) ?? Promise.resolve(null),
-         startupGitContextCache.get(key) ?? Promise.resolve(null),
+         settleWithin(
+            startupRepoMapCache.get(key) ?? Promise.resolve(null),
+            STARTUP_CONTEXT_WAIT_MS,
+            null,
+         ),
+         settleWithin(
+            startupGitContextCache.get(key) ?? Promise.resolve(null),
+            STARTUP_CONTEXT_WAIT_MS,
+            null,
+         ),
       ]);
 
       const rawSystemPrompt = (event as any).systemPrompt;
@@ -282,11 +334,12 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
    });
 
    pi.on("session_shutdown", () => {
-      repoMapInjectedThisSession = false;
-      searchLowResultHintShownThisSession = false;
-      sessionGitCache = null;
-      sessionGitCacheKey = null;
-   });
+    repoMapInjectedThisSession = false;
+    searchLowResultHintShownThisSession = false;
+    sessionGitCache = null;
+    sessionGitCacheKey = null;
+    stopResourceDiagnostics();
+  });
 }
 
 // ── Response types ────────────────────────────────────────────────

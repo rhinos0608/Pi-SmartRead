@@ -13,10 +13,14 @@ vi.mock("../../file-discovery.js", () => ({
       filesConsidered: 1,
       filesMatched: 1,
       filesSkippedIgnored: 0,
+      dirsSkippedHardDenied: 0,
       filesSkippedBinary: 0,
       filesSkippedUnsupported: 0,
+      ignoredDetails: [],
+      ignoredDetailsTruncated: 0,
     },
   }),
+  IGNORED_DETAILS_LIMIT: 500,
 }));
 
 // Mock resolveSymbol
@@ -110,8 +114,11 @@ describe("search tool (consolidated)", () => {
         filesConsidered: 0,
         filesMatched: 0,
         filesSkippedIgnored: 0,
+        dirsSkippedHardDenied: 0,
         filesSkippedBinary: 0,
         filesSkippedUnsupported: 0,
+        ignoredDetails: [],
+        ignoredDetailsTruncated: 0,
       },
     });
 
@@ -152,8 +159,11 @@ describe("search tool (consolidated)", () => {
         filesConsidered: 0,
         filesMatched: 0,
         filesSkippedIgnored: 0,
+        dirsSkippedHardDenied: 0,
         filesSkippedBinary: 0,
         filesSkippedUnsupported: 0,
+        ignoredDetails: [],
+        ignoredDetailsTruncated: 0,
       },
     });
 

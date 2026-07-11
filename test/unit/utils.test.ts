@@ -12,6 +12,8 @@ import {
   parseMultiRangeSelector,
   pickDelimiter,
   resolveMultiRangeContent,
+  resolveWorkspacePath,
+  resolveDirectoryParam,
   selectorToOffsetLimit,
   selectorToStartLine,
   splitPathAndSelector,
@@ -294,6 +296,29 @@ describe("utils: buildPartialSection", () => {
     expect(m.lines).toBeLessThanOrEqual(40);
     expect(m.bytes).toBeLessThanOrEqual(1500);
     expect(partial?.split("\n")[2]).toMatch(/^12[a-z]{2}\|line-0-/);
+  });
+});
+
+describe("utils: resolveWorkspacePath (opt-in boundary)", () => {
+  it("resolves paths without restriction when no env is set", () => {
+    const result = resolveWorkspacePath("/tmp", "file.ts");
+    expect(result).toBe(require("node:path").resolve("/tmp", "file.ts"));
+  });
+
+  it("throws for empty path", () => {
+    expect(() => resolveWorkspacePath("/tmp", "")).toThrow();
+  });
+});
+
+describe("utils: resolveDirectoryParam (opt-in boundary)", () => {
+  it("resolves directory without restriction when no env is set", () => {
+    const result = resolveDirectoryParam("/tmp", undefined);
+    expect(result).toBe(require("node:path").resolve("/tmp"));
+  });
+
+  it("resolves explicit directory", () => {
+    const result = resolveDirectoryParam("/tmp", "sub");
+    expect(result).toBe(require("node:path").resolve("/tmp", "sub"));
   });
 });
 

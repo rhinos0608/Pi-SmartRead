@@ -10,6 +10,9 @@ import { LruCache } from "./utils.js";
 import { autoPopulateEdgeStore, extractCoCommitPairs, findGitRoot } from "./git-context.js";
 import { loadGitContextConfig } from "./config.js";
 import { getIncrementalIndex } from "./incremental-index.js";
+import { writeCoverage } from "./index-coverage.js";
+import { chooseConcurrency } from "./adaptive-concurrency.js";
+import { writeSnapshot, computeSourceHash } from "./index-snapshot.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -232,8 +235,23 @@ export class ContextGraph {
       fileObjects,
       this.tagsCache,
       false, // don't force refresh; handled above
-      20,
+      chooseConcurrency({ fileCount: fileObjects.length, operation: "parse" }),
     );
+
+    const taggedFiles = new Set(allTags.map((t) => t.fname));
+    writeCoverage(this.root, allFiles.map((file) => ({
+      file: relative(this.root, file),
+      phase: "context-graph",
+      status: taggedFiles.has(file) ? "indexed" as const : "partial" as const,
+      updatedAt: Date.now(),
+    })));
+
+    writeSnapshot(this.root, "graph", { tagCount: allTags.length, fileCount: allFiles.length }, {
+      fileCount: allFiles.length,
+      tagCount: allTags.length,
+      sourceHash: computeSourceHash(allFiles),
+    });
+
 
     // Build symbol → tags index with memory caps
     const index = new LruCache<Tag[]>(20_000);

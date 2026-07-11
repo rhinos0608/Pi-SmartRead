@@ -123,6 +123,11 @@ export function createRepoTool(): ToolDefinition {
 
       // Enrich with graphify knowledge graph data (when available)
       let enrichedMap = result.map;
+
+      // M4: prepend corpus stats header so the caller knows coverage
+      const statsHeader = `# Repo Map — ${result.stats.totalFiles} files, ${result.stats.definitions} definitions (budget ${mapTokens} tokens, ~${result.tokenCount} used)`;
+      enrichedMap = statsHeader + "\n\n" + enrichedMap;
+
       if (!params.delta) {
       try {
         const enricher = getGraphifyEnricher(cwd);
