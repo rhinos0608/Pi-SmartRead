@@ -1,17 +1,31 @@
 /**
- * SmartRead `inspect` tool — single-file additive inspect.
+ * SmartRead `inspect` tool — multi-mode v3.
  *
- * Reuses the existing read engine (via `createReadTool`) to get the file text,
- * then computes the durable `workspaceEvidence` envelope in `details`.
+ * Modes (one per call, dispatched by input shape):
+ *  - path  (default): `{ path }` or `{ path, offset, limit }` — single file + evidence
+ *  - query:          `{ query }` or `{ query, depth: "deep" }` — intent-based search + evidence
+ *  - symbol:         `{ symbol }` — symbol lookup + evidence
+ *  - map:            `{ action: "map" }` — repo structure + evidence
+ *
+ * Every mode returns a `details.workspaceEvidence` envelope (schema v1+)
+ * with the appropriate `mode` field. Use this envelope to authorize
+ * subsequent patch calls.
  */
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { computeInspectDetails } from "./inspect.js";
+import { computeInspectDetails, executeInspectDetails, resolveMode } from "./inspect.js";
 
 const InspectSchema = Type.Object({
-    path: Type.String({ description: "File path to inspect (relative or absolute)." }),
-    offset: Type.Optional(Type.Number({ minimum: 1, description: "1-based start line." })),
-    limit: Type.Optional(Type.Number({ minimum: 1, description: "Maximum number of lines to read." })),
+    path: Type.Optional(Type.String({ description: "File path to inspect (relative or absolute). Path mode when set." })),
+    offset: Type.Optional(Type.Number({ minimum: 1, description: "1-based start line. Path mode only." })),
+    limit: Type.Optional(Type.Number({ minimum: 1, description: "Maximum number of lines to read. Path mode only." })),
+    query: Type.Optional(Type.String({ description: "Search intent. Query mode when set (use depth: \"deep\" for multi-channel evidence)." })),
+    depth: Type.Optional(Type.Union([Type.Literal("quick"), Type.Literal("deep")], {
+        description: "Query depth. \"quick\" (default): grep + AST. \"deep\": semantic + symbol + graph + LSP. Query mode only.",
+    })),
+    symbol: Type.Optional(Type.String({ description: "Symbol name or qualified path. Symbol mode when set." })),
+    action: Type.Optional(Type.Union([Type.Literal("map")], { description: "Specialised action. action: \"map\" produces a repo map (map mode)." })),
+    directory: Type.Optional(Type.String({ description: "Optional directory scope. Used by map mode and forwarded to query/symbol modes." })),
 });
 
 type InspectInput = Static<typeof InspectSchema>;
@@ -25,17 +39,24 @@ export interface InspectToolOptions {
     readonly getSessionFilePath: () => string | null | undefined;
 }
 
+const INSPECT_DESCRIPTION =
+    "Multi-mode inspect. " +
+    "Path mode: { path: \"src/auth.ts\" } or { path, offset, limit } — full/range file read + evidence. " +
+    "Query mode: { query: \"refreshToken\" } (default quick: grep + AST) or { query, depth: \"deep\" } (semantic + symbol + graph + LSP). " +
+    "Symbol mode: { symbol: \"AuthService.login\" } — symbol lookup + evidence. " +
+    "Map mode: { action: \"map\" } — repository structure + evidence. " +
+    "Every mode returns a details.workspaceEvidence envelope (schemaVersion 1) with the canonical path, allowed ranges, and SHA-256 freshness. Use this envelope to authorize subsequent patch calls.";
+
 export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
     return {
         name: "inspect",
         label: "inspect",
-        description:
-            "Inspect a single file. Returns a structured `details.workspaceEvidence` envelope (schemaVersion 1) with the canonical path, allowed ranges, and a full-file SHA-256 freshness hash. Use this to authorize subsequent patch calls.",
+        description: INSPECT_DESCRIPTION,
         parameters: InspectSchema as unknown as Record<string, unknown>,
         async execute(
             toolCallId: string,
             params: InspectInput,
-            _signal: AbortSignal | undefined,
+            signal: AbortSignal | undefined,
             _onUpdate: unknown,
             ctx: ExtensionContext,
         ) {
@@ -43,13 +64,45 @@ export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
             if (typeof sessionFilePath !== "string" || sessionFilePath.length === 0) {
                 throw new Error("inspect: no real session file (in-memory/ephemeral identity rejected)");
             }
-            const details = computeInspectDetails({
+            const mode = resolveMode({
                 path: params.path,
+                query: params.query,
+                symbol: params.symbol,
+                action: params.action,
                 offset: params.offset,
                 limit: params.limit,
+                depth: params.depth,
+                directory: params.directory,
                 cwd: ctx.cwd,
                 sessionFilePath,
             });
+            const details =
+                mode === "path"
+                    ? computeInspectDetails({
+                          path: params.path,
+                          query: params.query,
+                          symbol: params.symbol,
+                          action: params.action,
+                          offset: params.offset,
+                          limit: params.limit,
+                          depth: params.depth,
+                          directory: params.directory,
+                          cwd: ctx.cwd,
+                          sessionFilePath,
+                      })
+                    : await executeInspectDetails({
+                          path: params.path,
+                          query: params.query,
+                          symbol: params.symbol,
+                          action: params.action,
+                          offset: params.offset,
+                          limit: params.limit,
+                          depth: params.depth,
+                          directory: params.directory,
+                          cwd: ctx.cwd,
+                          sessionFilePath,
+                          signal,
+                      });
 
             // Publish into the resolver so patch can request it via RPC.
             if (opts.resolver) {
@@ -64,10 +117,14 @@ export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
                 content: [{ type: "text" as const, text: details.contentText }],
                 details: {
                     workspaceEvidence: details.workspaceEvidence,
+                    mode: details.mode,
                     lineCount: details.lineCount,
                     byteLength: details.byteLength,
                     truncated: details.truncated,
                     toolCallId,
+                    ...(details.upstreamDetails !== undefined
+                        ? { upstreamDetails: details.upstreamDetails }
+                        : {}),
                 },
             };
         },

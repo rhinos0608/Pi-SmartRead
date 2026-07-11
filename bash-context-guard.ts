@@ -31,6 +31,12 @@ export const GUARD_HINT_RE = /💡 (To see specific sections|Use a more specific
 
 /** Tool-specific overrides for the bash context guard. */
 export const TOOL_GUARD_PROFILES: Record<string, Partial<BashContextGuardProfile>> = {
+  // v3: inspect replaces read/read_files/search/repo_map/symbol. Per-mode
+  // profiles are looked up dynamically by tool + mode hint. The default
+  // `inspect` profile uses the same envelope as the old `read`.
+  inspect: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
+  // Back-compat profiles for old tool names so other consumers/tests that
+  // still reference them get sane defaults.
   search: { maxLines: 2500, maxBytes: 60 * 1024, headLines: 100, tailLines: 140 },
   read: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
   read_files: { maxLines: 3000, maxBytes: 80 * 1024, headLines: 120, tailLines: 160 },
@@ -198,6 +204,7 @@ function renderPreview(options: {
   metadata: BashContextGuardMetadata;
   preservedNotices: string[];
   toolName?: string;
+  details?: unknown;
 }): string {
   const { bodyLines, preservedNotices } = {
     ...splitPreviewLines(options.text),
@@ -214,7 +221,9 @@ function renderPreview(options: {
   const command = compactCommand(options.command);
 
   // Generate tool-specific hint for truncated output
-  const hint = options.toolName === "search" ? GUARD_HINT_DEEP_SEARCH : GUARD_HINT_GENERIC;
+  const hint = options.toolName === "inspect" && options.details && typeof options.details === "object" && (options.details as { mode?: string }).mode === "query"
+    ? GUARD_HINT_DEEP_SEARCH
+    : GUARD_HINT_GENERIC;
 
   const rendered: string[] = [
     "[Bash context guard: preview]",
@@ -265,6 +274,7 @@ export function applyBashContextGuard(options: {
   command?: string;
   config?: BashContextGuardConfig;
   toolName?: string;
+  details?: unknown;
 }): BashContextGuardResult {
   const config = options.config ?? resolveBashContextGuardConfig();
   const postRtkLineCount = lineCount(options.text);
@@ -292,7 +302,7 @@ export function applyBashContextGuard(options: {
     const outputPath = writeOutput(fs, options.text);
     const metadata: BashContextGuardMetadata = { ...baseMetadata, trimmed: true, postRtkOutputPath: outputPath };
     return {
-      text: renderPreview({ text: options.text, outputPath, command: options.command, metadata, preservedNotices, toolName: options.toolName }),
+      text: renderPreview({ text: options.text, outputPath, command: options.command, metadata, preservedNotices, toolName: options.toolName, details: options.details }),
       metadata,
     };
   } catch (error) {

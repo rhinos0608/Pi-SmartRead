@@ -29,12 +29,15 @@ describe("index extension wiring", () => {
     registerExtension(api);
 
     const names = registered.map((t) => t.name);
-    expect(names).toContain("read");
-    expect(names).toContain("read_files");
-    expect(names).toContain("search");
-    expect(names).toContain("repo_map");
-    expect(names).toContain("symbol");
+    // v3: only inspect + skill are registered (read/read_files/search/repo_map/symbol
+    // are consolidated into inspect modes).
+    expect(names).toContain("inspect");
     expect(names).toContain("skill");
+    expect(names).not.toContain("read");
+    expect(names).not.toContain("read_files");
+    expect(names).not.toContain("search");
+    expect(names).not.toContain("repo_map");
+    expect(names).not.toContain("symbol");
     expect(names).not.toContain("intent_read");
     expect(names).not.toContain("find_symbol");
     expect(names).not.toContain("symbol_info");
@@ -55,6 +58,9 @@ describe("index extension wiring", () => {
   });
 
   it("guards large deep search tool results", () => {
+    // v3: deep search runs as inspect { query, depth: "deep" }.
+    // The bash-context-guard should still cap oversized tool_result content for the
+    // `inspect` tool name (which replaced `search` in v3).
     const registered: { name: string; execute: unknown }[] = [];
     const handlers: Record<string, (...args: any[]) => any> = {};
 
@@ -69,17 +75,18 @@ describe("index extension wiring", () => {
 
     registerExtension(api);
 
-    const text = Array.from({ length: 3000 }, (_, i) => `line ${i}`).join("\n");
+    const text = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
     const result = handlers.tool_result!({
-      toolName: "search",
+      toolName: "inspect",
       toolCallId: "deep-search-1",
       input: { query: "architecture", depth: "deep" },
+      details: { mode: "query" },
       content: [{ type: "text", text }],
     });
 
     expect(result.content[0].text).toContain("[Bash context guard: preview]");
     expect(result.content[0].text).toContain(GUARD_HINT_DEEP_SEARCH);
-    expect(result.details.bashContextGuard.toolName).toBe("search");
+    expect(result.details.bashContextGuard.toolName).toBe("inspect");
   });
 
   it("applies bash context guard AFTER doom-loop warning injection (ordering fix)", () => {
@@ -95,30 +102,32 @@ describe("index extension wiring", () => {
 
     // Large output that triggers doom-loop identical-tail AND exceeds guard thresholds
     const largeText = Array.from({ length: 4000 }, (_, i) => `line ${i}`).join("\n");
+    // v3: `read` is replaced by `inspect`; large `inspect` results are still
+    // capped by the bash context guard.
     const input = { path: "/large.ts" };
     for (let i = 1; i <= 3; i++) {
       handlers.tool_call!({
-        toolName: "read",
-        toolCallId: `read-${i}`,
+        toolName: "inspect",
+        toolCallId: `inspect-${i}`,
         input,
       });
     }
     // First two: side effects only (build doom-loop state)
     handlers.tool_result!({
-      toolName: "read",
-      toolCallId: "read-1",
+      toolName: "inspect",
+      toolCallId: "inspect-1",
       input,
       content: [{ type: "text", text: largeText }],
     });
     handlers.tool_result!({
-      toolName: "read",
-      toolCallId: "read-2",
+      toolName: "inspect",
+      toolCallId: "inspect-2",
       input,
       content: [{ type: "text", text: largeText }],
     });
     const result3 = handlers.tool_result!({
-      toolName: "read",
-      toolCallId: "read-3",
+      toolName: "inspect",
+      toolCallId: "inspect-3",
       input,
       content: [{ type: "text", text: largeText }],
     });
@@ -132,8 +141,9 @@ describe("index extension wiring", () => {
       expect(text).toContain("[Bash context guard: preview]");
       // Should still contain the doom-loop warning (preserved notice)
       expect(text).toContain("⚠ REPEATED-CALL WARNING:");
-      // Should NOT contain all 3000 lines (trimmed)
-      expect(text).not.toContain("line 2999");
+      // Should NOT contain lines from the omitted middle section (headLines=120,
+      // tailLines=160 for inspect profile; line 2000 falls in the omitted range)
+      expect(text).not.toContain("line 2000");
     }
   });
 

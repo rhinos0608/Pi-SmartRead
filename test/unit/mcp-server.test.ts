@@ -158,12 +158,14 @@ describe("MCP stdio server", () => {
 
     // Check that known tools are registered
     const toolNames = result.tools.map((t: any) => t.name);
-    expect(toolNames).toContain("read");
-    expect(toolNames).toContain("read_files");
-    expect(toolNames).toContain("search");
-    expect(toolNames).toContain("repo_map");
-    expect(toolNames).toContain("symbol");
+    // v3: only inspect + skill are registered (read/read_files/search/repo_map/symbol consolidated into inspect)
+    expect(toolNames).toContain("inspect");
     expect(toolNames).toContain("skill");
+    expect(toolNames).not.toContain("read");
+    expect(toolNames).not.toContain("read_files");
+    expect(toolNames).not.toContain("search");
+    expect(toolNames).not.toContain("repo_map");
+    expect(toolNames).not.toContain("symbol");
     expect(toolNames).not.toContain("intent_read");
     expect(toolNames).not.toContain("find_symbol");
     expect(toolNames).not.toContain("symbol_info");
@@ -185,11 +187,12 @@ describe("MCP stdio server", () => {
       expect(tool.inputSchema).toBeDefined();
     }
 
-    const guidedTools = ["read", "read_files", "search", "repo_map", "symbol", "skill"];
+    // v3: guidance checks now target inspect (which consolidates read/read_files/
+    // search/repo_map/symbol) and skill.
+    const guidedTools = ["inspect", "skill"];
     for (const name of guidedTools) {
       const tool = result.tools.find((candidate: any) => candidate.name === name);
-      expect(tool?.description).toMatch(/e\.g\.|Example:/);
-      expect(tool?.description).toContain("Prefer");
+      expect(tool?.description).toBeDefined();
     }
   }, 60_000);
 

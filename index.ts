@@ -3,10 +3,10 @@ import { registerSessionHooks } from "./hook.js";
 import { coerceText, ensureHashlineReady } from "./utils.js";
 import { initHandlers } from "./read-many.js";
 import { invalidateFsScanCache } from "./fs-scan-cache.js";
-import { ToolRegistry } from "./tool-registry.js";
+import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
-import { registerSymbolTool } from "./find-symbol-tool.js";
-import "./mcp-registry.js"; // registers read, search, repo_map with ToolRegistry
+import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
+import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver } from "./mcp-registry.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
@@ -35,9 +35,6 @@ export type { FileSnapshot, SearchMatchEntry } from "./file-read-cache.js";
 // ── Code summary API ───────────────────────────────────────────────
 export { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
 export type { SummaryOptions, SummarySegment, SummaryResult } from "./code-summary.js";
-
-// Ensure all tools are registered with the central registry
-registerSymbolTool();
 
 // Context hygiene — tracks tool results and marks stale reads after mutations
 import {
@@ -71,11 +68,7 @@ import {
 } from "./bash-context-guard.js";
 
 const SMARTREAD_GUARD_TOOLS = new Set([
-  "read",
-  "read_files",
-  "search",
-  "repo_map",
-  "symbol",
+  "inspect",
   "git_notes_read",
 ]);
 
@@ -281,6 +274,7 @@ export default async function (pi: ExtensionAPI) {
             text: textContent,
             command: undefined,
             toolName,
+            details: outputEvent.details,
             config: {
               enabled: true,
               maxLines: profile.maxLines,
@@ -391,9 +385,27 @@ export default async function (pi: ExtensionAPI) {
     }) as ExtensionAPI["on"],
   } as ExtensionAPI);
 
-  // 2. Core tools: the loop iterates all tools from ToolRegistry.getAll()
-  //    and registers each via pi.registerTool (covers unified read, search, repo_map,
-  //    symbol, and any other registered tools).
+  // 2. Inspect tool: registered synchronously into the central registry before
+  //    the tool-registration loop so it's included in pi.registerTool calls.
+  if (!ToolRegistry.getInstance().has("inspect")) {
+    const def = buildInspectTool(() => {
+      // Default resolver: extension has no live bus, return null.
+      // The publish path is wired only when installInspectAndResolver is
+      // called from the events bus.
+      return null;
+    });
+    ToolRegistry.getInstance().register({
+      name: "inspect",
+      description: def.description,
+      inputSchema: def.parameters as Record<string, unknown>,
+      execute: def.execute,
+      category: ToolCategory.READ,
+    });
+  }
+
+  // 3. Core tools: the loop iterates all tools from ToolRegistry.getAll()
+  //    and registers each via pi.registerTool (covers inspect, skill, and any
+  //    other registered tools).
   const reg = ToolRegistry.getInstance();
   for (const tool of reg.getAll()) {
     pi.registerTool(toToolDefinition({
@@ -405,18 +417,17 @@ export default async function (pi: ExtensionAPI) {
     }));
   }
 
-  // 3. Inspect tool + versioned evidence RPC resolver. The `inspect` tool
-  //    is additive and registered into the same central registry so it
-  //    follows the same registration path as the other tools. The resolver
-  //    subscribes to `pi.events` for the protocol RPC channel.
-  try {
-    if (pi.events && typeof pi.events.on === "function") {
-      const bus = pi.events as { emit: (c: string, d: unknown) => void; on: (c: string, h: (d: unknown) => void) => () => void };
-      const { installInspectAndResolver } = await import("./mcp-registry.js");
-      await installInspectAndResolver(bus);
-    }
-  } catch (err) {
-    // Resolver install is non-fatal — the extension still works without it.
-    try { (pi as any).ui?.notify?.(`pi-workspace-protocol resolver unavailable: ${(err as Error).message}`); } catch { /* ignore */ }
+  // 4. Versioned evidence RPC resolver install: best-effort, runs in the
+  //    background. The extension still works without it — inspect just
+  //    doesn't publish envelopes for patch to resolve.
+  if (pi.events && typeof pi.events.on === "function") {
+    void (async () => {
+      try {
+        const bus = pi.events as { emit: (c: string, d: unknown) => void; on: (c: string, h: (d: unknown) => void) => () => void };
+        await installInspectAndResolver(bus);
+      } catch (err) {
+        try { (pi as any).ui?.notify?.(`pi-workspace-protocol resolver unavailable: ${(err as Error).message}`); } catch { /* ignore */ }
+      }
+    })();
   }
 }

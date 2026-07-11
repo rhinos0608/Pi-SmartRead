@@ -163,7 +163,7 @@ function buildNamePath(defNode: Parser.SyntaxNode, name: string): string {
 
 // ── Handlers ───────────────────────────────────────────────────────
 
-async function handleSymbol(
+export async function handleSymbol(
   query: string,
   maxResults: number,
   includeBody: boolean,
@@ -835,6 +835,7 @@ function formatDeclarationResult(data: any, _query: string, startTime: number): 
     }
   } else {
     lines.push(`  [No declaration found]`);
+    lines.push(`  > Try \`symbol\` action=find query="${data.symbol}" to locate candidates first.`);
   }
   lines.push("");
   return lines.join("\n");
@@ -847,6 +848,8 @@ function formatImplementationsResult(data: any, _query: string, startTime: numbe
   ];
   if (data.implementors.length === 0) {
     lines.push(`  [No implementors found]`, "");
+    lines.push(`> Try \`symbol\` action=find query="${data.symbol}" to locate candidates first.`);
+    lines.push("");
     return lines.join("\n");
   }
   for (const impl of data.implementors) {

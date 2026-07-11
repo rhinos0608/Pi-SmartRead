@@ -10,10 +10,6 @@
  * extension API.
  */
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
-import { registerSymbolTool } from "./find-symbol-tool.js";
-import { createReadTool, createReadFilesTool } from "./unified-read.js";
-import createSearchTool from "./search-tool.js";
-import { createRepoTool } from "./repomap-tool.js";
 import { createGraphMutateTool } from "./graph-mutate.js";
 import { createGitNotesTools } from "./git-notes-tool.js";
 import { createSkillTool } from "./skill-tool.js";
@@ -26,11 +22,9 @@ import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
 
 // ── Register all tools with the central registry ───────────────────
 
-// Explicitly initialize registry before calling registerSymbolTool()
-// (it depends on ToolRegistry.getInstance() being available)
+// Explicitly initialize registry before declaring tools.
+// Inspect is registered at extension activation time via installInspectAndResolver.
 const registry = ToolRegistry.getInstance();
-
-registerSymbolTool();
 
 // Shared evidence resolver. Created lazily because the event bus
 // is only available at extension runtime. The factory is stored on
@@ -110,11 +104,14 @@ function reg(name: string, factory: () => ToolDefinition, category: ToolCategory
     registry.register({ name, description: def.description, inputSchema: def.parameters as Record<string, unknown>, execute: def.execute, category, experimental });
 }
 
-reg("read", () => toToolDefinition(createReadTool()), ToolCategory.READ);
-reg("read_files", () => toToolDefinition(createReadFilesTool()), ToolCategory.READ);
-reg("search", () => toToolDefinition(createSearchTool()), ToolCategory.SEARCH);
-reg("repo_map", () => toToolDefinition(createRepoTool()), ToolCategory.MAP);
 reg("skill", () => toToolDefinition(createSkillTool()), ToolCategory.SKILL);
+
+// Standalone MCP stdio server has no live event bus, so `inspect` is
+// registered with a null session-file resolver here. The Pi extension
+// path (buildInspectToolForExtension / registerInspectToolWithBus) always
+// takes precedence when a live bus is available; `reg()` is a no-op if
+// the tool is already present in the registry.
+reg("inspect", () => buildInspectToolForExtension(() => null), ToolCategory.READ);
 
 // Inspect tool is registered at extension activation time so it can use
 // the live event bus. We expose a helper that the extension calls to add

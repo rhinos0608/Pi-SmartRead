@@ -213,7 +213,7 @@ describe("registerSessionHooks", () => {
     expect(promptText).toContain("Repository Map");
     expect(promptText).toContain("SmartRead Tool Guide");
     expect(promptText).toContain('depth: "deep"');
-    expect(promptText).toContain("- symbol:");
+    expect(promptText).toContain("inspect { symbol }:");
   }, 15_000);
 
   it("before_agent_start returns undefined for subsequent turns", async () => {

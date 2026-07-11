@@ -261,8 +261,8 @@ describe("MCP advanced capabilities", () => {
     expect(msg.content.type).toBe("text");
     expect(msg.content.text).toContain("find all usages of Authenticator");
     expect(msg.content.text).toContain('depth: "deep"');
-    expect(msg.content.text).toContain("- symbol:");
-    expect(msg.content.text).toContain("repo_map");
+    expect(msg.content.text).toContain("inspect { symbol }:");
+    expect(msg.content.text).toContain('inspect { action: "map" }');
   }, 60_000);
 
   it("throws for unknown prompt", async () => {

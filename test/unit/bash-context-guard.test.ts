@@ -415,11 +415,12 @@ describe("applyBashContextGuard", () => {
   });
 
   describe("tool-specific guidance", () => {
-    it("uses deep-search hint for the search tool", () => {
+    it("uses deep-search hint for inspect query mode", () => {
       const text = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
       const result = applyBashContextGuard({
         text,
-        toolName: "search",
+        toolName: "inspect",
+        details: { mode: "query" },
         config: { enabled: true, maxLines: 5, maxBytes: 1024 * 1024, headLines: 2, tailLines: 2 },
       });
 
