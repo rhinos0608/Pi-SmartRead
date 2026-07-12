@@ -29,11 +29,12 @@ describe("index extension wiring", () => {
     registerExtension(api);
 
     const names = registered.map((t) => t.name);
-    // v3: only inspect + skill are registered (read/read_files/search/repo_map/symbol
-    // are consolidated into inspect modes).
+    // v3: inspect + skill + read (re-registered for evidence + enrichment)
+    // are registered. read_files/search/repo_map/symbol remain consolidated
+    // into inspect modes.
     expect(names).toContain("inspect");
     expect(names).toContain("skill");
-    expect(names).not.toContain("read");
+    expect(names).toContain("read");
     expect(names).not.toContain("read_files");
     expect(names).not.toContain("search");
     expect(names).not.toContain("repo_map");

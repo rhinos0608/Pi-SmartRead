@@ -56,8 +56,8 @@ export async function installInspectAndResolver(bus: {
             category: ToolCategory.READ,
         });
     }
-    // Listen for inspect tool_result events to re-index envelopes
-    const offInspect = bus.on("pi.tool_result.inspect", (raw) => {
+    // Listen for inspect/read tool_result events to re-index envelopes
+    const reindex = (raw: unknown) => {
         try {
             if (!raw || typeof raw !== "object") return;
             const ev = raw as { details?: { workspaceEvidence?: unknown }; sessionFilePath?: unknown; workspaceRoot?: unknown };
@@ -69,10 +69,13 @@ export async function installInspectAndResolver(bus: {
         } catch {
             /* ignore re-index errors silently */
         }
-    });
+    };
+    const offInspect = bus.on("pi.tool_result.inspect", reindex);
+    const offRead = bus.on("pi.tool_result.read", reindex);
     const offRpc = await resolver.install();
     return () => {
         offInspect();
+        offRead();
         offRpc();
         resolver.dispose();
     };

@@ -6,8 +6,9 @@ import { invalidateFsScanCache } from "./fs-scan-cache.js";
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
-import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver } from "./mcp-registry.js";
-import { getLSPBridge } from "./lsp-bridge.js";
+import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver } from "./mcp-registry.js";
+import { createReadTool } from "./unified-read.js";
+import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
   isInternalUrl,
@@ -85,6 +86,14 @@ export default async function (pi: ExtensionAPI) {
   const hygieneTracker = resetContextHygieneTracker();
   const doomLoopState = createDoomLoopState();
   const bashContextGuardConfig = resolveBashContextGuardConfig();
+
+  // Language servers are long-lived during an interactive session, but must
+  // be stopped when Pi closes (especially in --print mode) or their child
+  // processes keep the harness alive after the tool result has returned.
+  pi.on("session_shutdown", async () => {
+    await shutdownAllManagers();
+    resetLSPBridge();
+  });
 
   // ── Helper: extract resources from tool params for context hygiene ──
   function resourcesForTool(_toolName: string, input: Record<string, unknown>): ContextHygieneResource[] {
@@ -416,6 +425,15 @@ export default async function (pi: ExtensionAPI) {
       execute: tool.execute,
     }));
   }
+
+  // 3.5 Read: override the builtin read with the enriched, evidence-emitting
+  // wrapper. Publishes envelopes into the shared resolver so patch can
+  // resolve an evidenceRef produced by a plain read.
+  pi.registerTool(createReadTool({
+    publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
+      getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
+    },
+  }));
 
   // 4. Versioned evidence RPC resolver install: best-effort, runs in the
   //    background. The extension still works without it — inspect just

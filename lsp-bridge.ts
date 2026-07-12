@@ -486,28 +486,30 @@ class LSPManager {
   }
 
   private async _doStartAll(): Promise<void> {
-    // Deduplicate language IDs across configs
-    const started = new Set<string>();
-    // Group configs by their first language ID to avoid redundant starts
-    const configsByLang = new Map<string, ServerConfig>();
+    // Pick one server config per language, then start each selected command
+    // once and share that connection across every language it supports.
+    const configForLanguage = new Map<string, ServerConfig>();
     for (const cfg of this.availableConfigs) {
       for (const langId of cfg.languageIds) {
-        if (!configsByLang.has(langId)) {
-          configsByLang.set(langId, cfg);
+        if (!configForLanguage.has(langId)) {
+          configForLanguage.set(langId, cfg);
         }
       }
     }
 
+    const selectedConfigs = [...new Set(configForLanguage.values())];
     const promises: Promise<void>[] = [];
-    for (const [langId, config] of configsByLang) {
-      if (started.has(langId)) continue;
-      started.add(langId);
+    for (const config of selectedConfigs) {
       promises.push((async () => {
         try {
           const conn = new LSPConnection();
           conn.languageIds = config.languageIds;
           await conn.start(config.command, config.args, this.rootUri);
-          this.connections.set(langId, conn);
+          for (const langId of config.languageIds) {
+            if (configForLanguage.get(langId) === config) {
+              this.connections.set(langId, conn);
+            }
+          }
         } catch {
           // Server unavailable for this language — next bridge call can retry
         }
@@ -613,7 +615,7 @@ class LSPManager {
   }
 
   async shutdown(): Promise<void> {
-    for (const conn of this.connections.values()) conn.shutdown();
+    for (const conn of new Set(this.connections.values())) conn.shutdown();
     this.connections.clear();
   }
 }

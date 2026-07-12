@@ -18,26 +18,23 @@ import { createReadToolDefinition } from "@mariozechner/pi-coding-agent";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { RepoMap } from "./repomap.js";
-import { ContextGraph } from "./context-graph.js";
-import { isRecentlyModified } from "./git-history.js";
 import {
    autoPopulateEdgeStore,
    buildStartupGitContext,
    findGitRoot as findGitRootAsync,
-   getFileCommitContext,
 } from "./git-context.js";
 import { loadGitContextConfig } from "./config.js";
 import { formatBranchNotes, scanBranchNotes } from "./git-notes.js";
 import {
-   LruCache,
    ensureHashlineReady,
    isUrlLikePath,
    prefixLinesWithAnchors,
    selectorToOffsetLimit,
    splitPathAndSelector,
 } from "./utils.js";
+import { buildFileContextLines } from "./file-context.js";
+import { computePathEvidence } from "./path-evidence.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
-import { getLSPBridge } from "./lsp-bridge.js";
 import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./tool-guidance.js";
 import { startResourceDiagnostics, stopResourceDiagnostics } from "./resource-diagnostics.js";
 import {
@@ -46,10 +43,6 @@ import {
   renderMicroagentContext,
   type Microagent,
 } from "./microagents.js";
-
-// ── Shared ContextGraph cache (module-level) ──
-// Build once per repo, reuse across reads. Prevents O(repo_files * read_calls) parsing.
-const contextualGraphCache = new LruCache<ContextGraph>(3);
 
 // ── Key computation ───────────────────────────────────────────────
 
@@ -349,6 +342,36 @@ interface HookResponse {
    details: Record<string, unknown>;
 }
 
+// ── Evidence comparison helper ────────────────────────────────────
+
+/**
+ * The builtin read appends a continuation note ONLY for user-limited,
+ * non-truncated reads that stop before EOF (see pi-coding-agent
+ * dist/core/tools/read.js). Rather than stripping note-shaped suffixes
+ * (which could eat genuine file content), reconstruct the exact expected
+ * note from the evidence-read state and accept only exact matches.
+ * Any other shape → mismatch → the caller skips evidence (fail safe).
+ */
+export function shownMatchesAttested(args: {
+   builtinText: string;
+   truncationContent: string | undefined;
+   sliceText: string;
+   totalLines: number;
+   evidenceOffset: number | undefined;
+   evidenceLimit: number | undefined;
+}): boolean {
+   const { builtinText, truncationContent, sliceText, totalLines, evidenceOffset, evidenceLimit } = args;
+   if (typeof truncationContent === "string") return truncationContent === sliceText;
+   if (builtinText === sliceText) return true;
+   if (evidenceLimit === undefined) return false;
+   const startLine = evidenceOffset ?? 1;
+   const endLine = Math.min(totalLines, startLine + evidenceLimit - 1);
+   const remaining = totalLines - endLine;
+   if (remaining <= 0) return false;
+   const note = `\n\n[${remaining} more lines in file. Use offset=${endLine + 1} to continue.]`;
+   return builtinText === sliceText + note;
+}
+
 // ── Contextual read enrichment ────────────────────────────────────
 
 /**
@@ -374,6 +397,7 @@ async function interceptContextualRead(
    signal: AbortSignal | undefined,
    onUpdate: unknown,
    ctx: ExtensionContext,
+   opts?: WrapReadToolOptions,
 ): Promise<unknown> {
    const filePath = params.path as string;
    if (!filePath) {
@@ -416,136 +440,77 @@ async function interceptContextualRead(
 
    if (!existsSync(fullPath)) return result;
 
-   const contextLines: string[] = ["", "---", `🔍 Context for ${targetPath}:`];
-
-   try {
-      // 1. Structural context via shared cached ContextGraph
-      let graph = contextualGraphCache.get(cwd);
-      if (!graph) {
-         graph = new ContextGraph(cwd);
-         contextualGraphCache.set(cwd, graph);
-      }
-      await graph.buildContextGraph({
-         forceRefresh: false,
-         includeSymbols: true,
-         includeCalls: false,
-      });
-
-      const neighbours = await graph.getFileNeighbours(fullPath, {
-         includeSymbols: false,
-         includeCalls: false,
-      });
-
-      const importedBy = neighbours
-         .filter((n) => n.provenance.type === "imported_by")
-         .map((n) => path.relative(cwd, n.path));
-      const imports = neighbours
-         .filter((n) => n.provenance.type === "imports")
-         .map((n) => path.relative(cwd, n.path));
-
-      if (importedBy.length > 0)
-         contextLines.push(
-            `• Imported by: ${importedBy.slice(0, 8).join(", ")}${importedBy.length > 8 ? "…" : ""}`,
-         );
-      if (imports.length > 0)
-         contextLines.push(
-            `• Imports: ${imports.slice(0, 8).join(", ")}${imports.length > 8 ? "…" : ""}`,
-         );
-
-      // 2. Git recency
-      if (await isRecentlyModified(cwd, fullPath)) {
-         contextLines.push("• Recently modified (last day).");
-      }
-
+   // ── Workspace evidence ────────────────────────────────────────────
+   // Emit the same strong path-mode envelope inspect produces so patch
+   // can accept an evidenceRef from a plain read. Best-effort: never
+   // blocks the read. Three review-blocker rules are enforced:
+   //   1. Binding root: resolve targetPath against ctx.cwd, not the
+   //      params.directory-derived cwd used for enrichment.
+   //   2. Revalidation (TOCTOU): skip evidence when the attested slice
+   //      (evidence.sliceText) differs from what the model was shown.
+   //   3. Zero shown lines: firstLineExceedsLimit / invalid offset/limit
+   //      → no evidence.
+   const isImageResult = result.content.some((c: { type: string }) => c.type === "image");
+   const sessionFilePath = sessionFileFromCtx(ctx);
+   const builtinText = (result.content.find((c: { type: string }) => c.type === "text") as
+      | { type: "text"; text: string }
+      | undefined)?.text;
+   if (sessionFilePath && !isImageResult && typeof builtinText === "string") {
       try {
-         // Use session cache if available for the same repo key, otherwise fall back to per-read calls
-         const repoKey = computeRepoKey(cwd);
-         let gitConfig: ReturnType<typeof loadGitContextConfig>;
-         let gitRoot: string | null;
-         if (sessionGitCacheKey === repoKey && sessionGitCache) {
-            gitConfig = sessionGitCache.gitConfig;
-            gitRoot = sessionGitCache.gitRoot;
-         } else {
-            gitConfig = loadGitContextConfig(cwd);
-            gitRoot = gitConfig.enabled ? await findGitRootAsync(cwd) : null;
+         const truncation = (result.details as Record<string, unknown> | undefined)?.truncation as
+            | { truncated?: boolean; outputLines?: number; firstLineExceedsLimit?: boolean; content?: string }
+            | undefined;
+         if (truncation?.firstLineExceedsLimit) throw new Error("zero lines shown");
+         let evidenceOffset = typeof normalizedParams.offset === "number" ? normalizedParams.offset : undefined;
+         let evidenceLimit = typeof normalizedParams.limit === "number" ? normalizedParams.limit : undefined;
+         if (truncation?.truncated && typeof truncation.outputLines === "number") {
+            // Truncated output must not claim full-file coverage: clamp the
+            // evidence range to the lines the model actually saw.
+            evidenceOffset = displayStartLine;
+            evidenceLimit = truncation.outputLines;
          }
-         if (gitRoot) {
-            const relPath = path.relative(gitRoot, fullPath);
-            const commits = await getFileCommitContext(gitRoot, relPath, gitConfig.readEnrichmentCommits);
-            if (commits.length > 0) {
-               contextLines.push("• Recent commits:");
-               for (const commit of commits) {
-                  contextLines.push(`  ${commit.hash} (${commit.relativeDate}) ${commit.subject}`);
-                  for (const trailer of commit.trailers) {
-                     if (gitConfig.showTrailerKeys.includes(trailer.key)) {
-                        contextLines.push(`    ${trailer.key}: ${trailer.value}`);
-                     }
-                  }
-               }
-            }
-         }
-      } catch {
-         // File commit context is best-effort
-      }
-
-      // 3. Graphify enrichment (uses graphify-out/graph.json when available).
-      // Shows related files via calls, references, conceptual edges — not just imports.
-      try {
-         const enricher = getGraphifyEnricher(cwd);
-         if (enricher.isAvailable) {
-            const related = enricher.getRelatedFilesForPath(fullPath);
-            if (related.length > 0) {
-               const grouped = new Map<string, string[]>();
-               for (const r of related) {
-                  const relKey = r.relation;
-                  let list = grouped.get(relKey);
-                  if (!list) {
-                     list = [];
-                     grouped.set(relKey, list);
-                  }
-                  list.push(r.targetLabel);
-               }
-               for (const [relType, labels] of grouped) {
-                  const shown = labels.slice(0, 6).join(", ");
-                  contextLines.push(`• Graph: ${relType} ${shown}${labels.length > 6 ? "…" : ""}`);
-               }
-            }
-
-            const community = enricher.getFileCommunity(fullPath);
-            if (community !== undefined) {
-               const communitySize = enricher.getCommunityFiles(community).length;
-               contextLines.push(`• Community ${community} (${communitySize} files)`);
-            }
-
-            const centrality = enricher.getFileCentrality(fullPath);
-            if (centrality > 0) {
-               contextLines.push(`• Graph centrality: ${centrality} connections`);
-            }
-         }
-      } catch {
-         // Graphify enrichment is best-effort
-      }
-      // 4. LSP enrichment: document outline + type hints
-      try {
-        const bridge = await getLSPBridge();
-        if (bridge && bridge.isAvailable()) {
-          const symbols = await bridge.getDocumentSymbols(fullPath, cwd);
-          if (symbols.length > 0) {
-            const topLevel = symbols.filter(
-              (s) => !s.children || s.children.length === 0 || s.name === s.name,
+         const evidence = computePathEvidence({
+            path: targetPath,
+            ...(evidenceOffset !== undefined ? { offset: evidenceOffset } : {}),
+            ...(evidenceLimit !== undefined ? { limit: evidenceLimit } : {}),
+            cwd: ctx.cwd,
+            sessionFilePath,
+         });
+         // Revalidate: only attest content the model actually saw. The
+         // builtin read and computePathEvidence hit the disk at different
+         // instants — if the file changed in between, skip evidence.
+         const matches = shownMatchesAttested({
+            builtinText,
+            truncationContent: truncation?.truncated && typeof truncation.content === "string"
+               ? truncation.content
+               : undefined,
+            sliceText: evidence.sliceText,
+            totalLines: evidence.totalLines,
+            evidenceOffset,
+            evidenceLimit,
+         });
+         if (!matches) throw new Error("shown/attested content mismatch");
+         if (!result.details || typeof result.details !== "object") result.details = {};
+         (result.details as Record<string, unknown>).workspaceEvidence = evidence.workspaceEvidence;
+         try {
+            opts?.publishInspection?.(
+               evidence.workspaceEvidence,
+               sessionFilePath,
+               evidence.workspaceEvidence.canonicalWorkspaceRoot,
             );
-            const shown = topLevel.slice(0, 10).map(
-              (s) => `${s.name}${s.children?.length ? ` (${s.children.length} members)` : ""}`,
-            );
-            contextLines.push(
-              `• LSP symbols: ${shown.join(", ")}${topLevel.length > 10 ? "…" : ""}`,
-            );
-          }
-        }
-      } catch { /* LSP enrichment is best-effort */ }
-   } catch (err) {
-      contextLines.push(`• Context unavailable: ${(err as Error).message}`);
+         } catch { /* publish is best-effort */ }
+      } catch { /* evidence is best-effort */ }
    }
+
+   // Enrichment footer: imports, git history, git notes, graph, LSP
+   const repoKeyForGit = computeRepoKey(cwd);
+   const contextLines = await buildFileContextLines({
+      fullPath,
+      cwd,
+      ...(sessionGitCacheKey === repoKeyForGit && sessionGitCache
+         ? { gitConfig: sessionGitCache.gitConfig, gitRoot: sessionGitCache.gitRoot }
+         : {}),
+   });
 
    // Find text content for anchor embedding and context appending
    const textContent = result.content.find(
@@ -571,7 +536,7 @@ async function interceptContextualRead(
       }
 
       // Append contextual annotations
-      if (contextLines.length > 2) {
+      if (contextLines.length > 0) {
          textContent.text += contextLines.join("\n");
       }
    }
@@ -579,11 +544,33 @@ async function interceptContextualRead(
    return result;
 }
 
+// ── WrapReadToolOptions ──────────────────────────────────────────
+
+export interface WrapReadToolOptions {
+   readonly publishInspection?: (envelope: unknown, sessionFilePath: string, workspaceRoot: string) => void;
+}
+
+/**
+ * Local helper: extract the canonical session file path from context.
+ * Duplicated rather than imported from inspect-tool.ts to avoid the
+ * import cycle (search-tool.ts ⟶ hook.ts ⟶ … ⟶ inspect-tool.ts ⟶ inspect.ts).
+ */
+function sessionFileFromCtx(ctx: ExtensionContext): string | null {
+   try {
+      const sm = (ctx as { sessionManager?: { getSessionFile?: () => string | undefined } }).sessionManager;
+      if (!sm || typeof sm.getSessionFile !== "function") return null;
+      const p = sm.getSessionFile();
+      return typeof p === "string" && p.length > 0 ? p : null;
+   } catch {
+      return null;
+   }
+}
+
 // ── Built-in read override ────────────────────────────────────────
 
 /**
  * Factory for a `read` tool that overrides the built-in read with
- * contextual enrichment.
+ * contextual enrichment and workspace evidence emission.
  *
  * The returned ToolDefinition:
  *   - Preserves the built-in read's name, label, promptSnippet,
@@ -591,10 +578,12 @@ async function interceptContextualRead(
  *   - Delegates dynamically to createReadToolDefinition(ctx.cwd) so
  *     the correct working directory is used at execution time
  *   - Wraps every read with contextual annotations (imports, git recency)
+ *     and emits a details.workspaceEvidence envelope (schema v3) that
+ *     authorizes patch — same strength as inspect path mode.
  *
  * No first-read repo-map intercept — that is handled by registerSessionHooks().
  */
-export function wrapBuiltinReadTool(): ToolDefinition {
+export function wrapBuiltinReadTool(opts?: WrapReadToolOptions): ToolDefinition {
    const baseDef = createReadToolDefinition(".");
 
    // Build the original execute delegate that creates a fresh
@@ -621,7 +610,7 @@ export function wrapBuiltinReadTool(): ToolDefinition {
    return {
       name: baseDef.name,
       label: baseDef.label,
-      description: "Read the contents of a file at a known path, including images, with optional line windows or raw mode. Use when you already know the exact path, e.g. { path: \"src/auth.ts\", offset: 40, limit: 80 } or { path: \"src/auth.ts:120-180\" }. Prefer read_files for several known files (or with query: \"...\" for natural-language file discovery), search/symbol when the path is unknown, and repo_map for orientation.",
+      description: "Read the contents of a file at a known path, including images, with optional line windows, e.g. { path: \"src/auth.ts\", offset: 40, limit: 80 } or { path: \"src/auth.ts:120-180\" }. Appends contextual enrichment (imports, git history, git notes, graph, LSP) and returns a details.workspaceEvidence envelope (schemaVersion 3) that authorizes patch — same strength as inspect path mode. Use inspect { query } / { symbol } / { action: \"map\" } when the path is unknown.",
       promptSnippet: baseDef.promptSnippet,
       promptGuidelines: baseDef.promptGuidelines,
       parameters: baseDef.parameters,
@@ -643,6 +632,7 @@ export function wrapBuiltinReadTool(): ToolDefinition {
             signal,
             onUpdate,
             ctx,
+            opts,
          );
       },
    } as unknown as ToolDefinition;

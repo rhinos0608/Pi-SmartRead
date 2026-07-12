@@ -15,7 +15,7 @@
  */
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { computeInspectDetails, executeInspectDetails, resolveMode } from "./inspect.js";
+import { executeInspectDetails } from "./inspect.js";
 
 const InspectSchema = Type.Object({
     path: Type.Optional(Type.String({ description: "File path to inspect (relative or absolute). Path mode when set." })),
@@ -67,7 +67,7 @@ export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
             if (typeof sessionFilePath !== "string" || sessionFilePath.length === 0) {
                 throw new Error("inspect: no real session file (in-memory/ephemeral identity rejected)");
             }
-            const mode = resolveMode({
+            const details = await executeInspectDetails({
                 path: params.path,
                 query: params.query,
                 symbol: params.symbol,
@@ -78,34 +78,8 @@ export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
                 directory: params.directory,
                 cwd: ctx.cwd,
                 sessionFilePath,
+                signal,
             });
-            const details =
-                mode === "path"
-                    ? computeInspectDetails({
-                          path: params.path,
-                          query: params.query,
-                          symbol: params.symbol,
-                          action: params.action,
-                          offset: params.offset,
-                          limit: params.limit,
-                          depth: params.depth,
-                          directory: params.directory,
-                          cwd: ctx.cwd,
-                          sessionFilePath,
-                      })
-                    : await executeInspectDetails({
-                          path: params.path,
-                          query: params.query,
-                          symbol: params.symbol,
-                          action: params.action,
-                          offset: params.offset,
-                          limit: params.limit,
-                          depth: params.depth,
-                          directory: params.directory,
-                          cwd: ctx.cwd,
-                          sessionFilePath,
-                          signal,
-                      });
 
             // Publish into the resolver so patch can request it via RPC.
             // Publishing is best-effort: a resolver failure must not prevent

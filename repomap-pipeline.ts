@@ -177,7 +177,7 @@ export function flattenLSPDocumentSymbols(
  */
 async function augmentWithLspSymbols(
   allTags: Tag[],
-  allFiles: string[],
+  candidateFiles: string[],
   root: string,
   verbose: boolean,
 ): Promise<void> {
@@ -192,17 +192,30 @@ async function augmentWithLspSymbols(
       tagsByFile.set(tag.relFname, arr);
     }
 
-    for (const absFile of allFiles) {
+    // LSP is a targeted fallback, not another whole-repository indexer.
+    // Query only explicitly focused/priority files and cap the fan-out so a
+    // non-responsive language server cannot stall a generic repo map.
+    const sparseCandidates = [...new Set(candidateFiles)].filter((absFile) => {
       const relFname = path.relative(root, absFile);
       const fileTags = tagsByFile.get(relFname) ?? [];
-      if (fileTags.length >= 5) continue;
+      if (fileTags.length >= 5) return false;
 
       const lang = filenameToLang(absFile);
-      if (!lang) continue;
+      return Boolean(lang);
+    }).slice(0, 12);
 
+    await Promise.all(sparseCandidates.map(async (absFile) => {
+      const relFname = path.relative(root, absFile);
+      const fileTags = tagsByFile.get(relFname) ?? [];
       try {
-        const symbols = await lspBridge.getDocumentSymbols(absFile, root);
-        if (!symbols || symbols.length === 0) continue;
+        const symbols = await Promise.race([
+          lspBridge.getDocumentSymbols(absFile, root),
+          new Promise<never>((_, reject) => {
+            const timer = setTimeout(() => reject(new Error("LSP repo-map fallback timed out")), 1_000);
+            timer.unref?.();
+          }),
+        ]);
+        if (!symbols || symbols.length === 0) return;
 
         const lspTags = flattenLSPDocumentSymbols(symbols, relFname, absFile);
         allTags.push(...lspTags);
@@ -215,7 +228,7 @@ async function augmentWithLspSymbols(
       } catch {
         // Best-effort per file
       }
-    }
+    }));
   } catch {
     // Best-effort — LSP bridge not available
   }
@@ -526,9 +539,14 @@ export class RepoMap {
             }
           }
 
+          const lspFallbackFiles = [
+            ...focusFiles,
+            ...additionalFiles,
+            ...priorityFiles,
+          ];
           await augmentWithLspSymbols(
             allTags,
-            allFiles,
+            lspFallbackFiles,
             this.root,
             this.verbose,
           );

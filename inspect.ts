@@ -1,5 +1,9 @@
 /**
- * Compute the inspect tool's `details.workspaceEvidence` envelope.
+ * Sync envelope-only variant for path mode — returns numbered lines + evidence
+ * envelope WITHOUT the enrichment footer. Use `executeInspectDetails` for the
+ * async path that appends enrichment (imports, git history, git notes, graph,
+ * LSP) via the shared `file-context.ts` module. Query/symbol/map modes are
+ * async-only and throw from this function.
  *
  * v3 multi-mode: path/query/symbol/map. Each mode produces an envelope
  * with the appropriate `mode` field. The path-mode behavior is the v1
@@ -18,9 +22,9 @@
  * - `map` mode: repo structure. Resources are an empty set; the envelope
  *   is a marker that no file-level authorization was issued.
  */
-import { realpathSync, statSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { resolve as pathResolve, relative as pathRelative } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { relative as pathRelative, resolve as pathResolve } from "node:path";
 import {
     PROTOCOL_SCHEMA_VERSION,
     hashSessionFilePath,
@@ -31,6 +35,8 @@ import {
     type InspectedResource,
     type InspectMode,
 } from "@rhinos0608/pi-workspace-protocol";
+import { computePathEvidence } from "./path-evidence.js";
+import { buildFileContextLines } from "./file-context.js";
 import { handleGrep, handleCode } from "./search-tool.js";
 import { createRepoTool } from "./repomap-tool.js";
 import { handleSymbol } from "./find-symbol-tool.js";
@@ -103,7 +109,8 @@ export async function executeInspectDetails(
         if (typeof input.path !== "string" || input.path.length === 0) {
             throw new Error("inspect path mode requires a non-empty `path` argument");
         }
-        return computePathInspectDetails(input);
+        const base = computePathInspectDetails(input);
+        return enrichPathInspectDetails(base, input);
     }
     if (mode === "query") {
         return executeQueryInspectDetails(input);
@@ -130,118 +137,44 @@ function computePathInspectDetails(input: ComputeInspectDetailsInput): InspectDe
     if (typeof input.sessionFilePath !== "string" || input.sessionFilePath.length === 0) {
         throw new Error("inspect requires a real session file path (in-memory/ephemeral identity is rejected)");
     }
-
-    const cwd = realpathSync(input.cwd);
-    const absolutePath = pathResolve(cwd, input.path!);
-    let canonicalFile: string;
-    try {
-        const stat = statSync(absolutePath);
-        if (!stat.isFile()) {
-            throw new Error(`inspect target is not a regular file: ${input.path}`);
-        }
-        canonicalFile = realpathSync(absolutePath);
-    } catch (err) {
-        const e = err as NodeJS.ErrnoException;
-        if (e.code === "ENOENT") {
-            throw new Error(`file not found: ${input.path}`);
-        }
-        throw err;
-    }
-
-    const raw = readFileSync(canonicalFile);
-    const fullContent = raw.toString("utf8");
-    const fullFileSha256 = sha256OfString(fullContent);
-    const allLines = fullContent.split("\n");
-    const totalLines = allLines.length;
-    const totalBytes = Buffer.byteLength(fullContent, "utf8");
-
-    const canonicalRoot = canonicalizeWorkspaceRoot(cwd);
-    const sessionId = hashSessionFilePath(input.sessionFilePath);
-
-    // Determine resource kind/coverage
-    const offset = input.offset;
-    const limit = input.limit;
-    const hasRange = typeof offset === "number" || typeof limit === "number";
-    let resource: InspectedResource;
-    let renderedLines: string[];
-    let truncated = false;
-
-    if (!hasRange) {
-        resource = {
-            resourceId: resourceIdFor({ canonicalPath: canonicalFile, kind: "full" }),
-            canonicalPath: canonicalFile,
-            kind: "full",
-            coverage: "full-file",
-            allowedRanges: [{ startLine: 1, endLine: totalLines }],
-            fullFileSha256,
-            fresh: true,
-            byteLength: totalBytes,
-            lineCount: totalLines,
-        };
-        renderedLines = allLines;
-    } else {
-        const startLine = Math.max(1, Math.floor(offset ?? 1));
-        const endLine =
-            typeof limit === "number" && Number.isInteger(limit) && limit > 0
-                ? Math.min(totalLines, startLine + limit - 1)
-                : totalLines;
-        if (endLine < startLine) {
-            throw new Error(`inspect: limit/offset produces an empty range (startLine=${startLine}, endLine=${endLine})`);
-        }
-        const slice = allLines.slice(startLine - 1, endLine).join("\n");
-        const rangeSliceSha = sha256OfString(slice);
-        const rangeResourceId = resourceIdFor({
-            canonicalPath: canonicalFile,
-            kind: "range",
-            range: { startLine, endLine },
-        });
-        resource = {
-            resourceId: rangeResourceId,
-            canonicalPath: canonicalFile,
-            kind: "range",
-            coverage: "line-range",
-            allowedRanges: [{ startLine, endLine }],
-            fullFileSha256,
-            fresh: true,
-            byteLength: Buffer.byteLength(slice, "utf8"),
-            lineCount: endLine - startLine + 1,
-        };
-        renderedLines = slice.split("\n");
-        truncated = startLine > 1 || endLine < totalLines;
-        void rangeSliceSha;
-    }
-
-    const inspectionId = inspectionIdFor({
-        sessionId,
-        workspaceRoot: canonicalRoot,
-        resources: [{ canonicalPath: canonicalFile, ...(resource.kind === "range" ? { range: { startLine: resource.allowedRanges[0]!.startLine, endLine: resource.allowedRanges[0]!.endLine } } : {}) }],
+    const r = computePathEvidence({
+        path: input.path!,
+        ...(input.offset !== undefined ? { offset: input.offset } : {}),
+        ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        cwd: input.cwd,
+        sessionFilePath: input.sessionFilePath,
     });
-
-    const envelope: WorkspaceEvidenceEnvelope = {
-        schemaVersion: PROTOCOL_SCHEMA_VERSION,
-        inspectionId,
-        sessionId,
-        workspaceRoot: cwd,
-        canonicalWorkspaceRoot: canonicalRoot,
-        createdAt: new Date().toISOString(),
-        resources: [resource],
-        mode: "path",
-    };
-
-    const startLine = resource.allowedRanges[0]!.startLine;
-    const contentText = renderedLines
-        .map((line, i) => `${startLine + i}: ${line}`)
-        .join("\n");
-
     return {
         tool: "inspect",
         mode: "path",
-        workspaceEvidence: envelope,
-        contentText,
-        lineCount: resource.lineCount ?? renderedLines.length,
-        byteLength: resource.byteLength ?? Buffer.byteLength(contentText, "utf8"),
-        truncated,
+        workspaceEvidence: r.workspaceEvidence,
+        contentText: r.contentText,
+        lineCount: r.lineCount,
+        byteLength: r.byteLength,
+        truncated: r.truncated,
     };
+}
+
+/**
+ * Parity with the wrapped read tool: append the shared enrichment footer
+ * (imports, git history, git notes, graph, LSP) to path-mode content.
+ * Best-effort — enrichment failures return the base details unchanged.
+ * The evidence envelope is never affected by enrichment.
+ */
+async function enrichPathInspectDetails(
+    base: InspectDetails,
+    input: ComputeInspectDetailsInput,
+): Promise<InspectDetails> {
+    try {
+        const cwd = realpathSync(input.cwd);
+        const canonicalPath = base.workspaceEvidence.resources[0]?.canonicalPath;
+        if (!canonicalPath) return base;
+        const contextLines = await buildFileContextLines({ fullPath: canonicalPath, cwd });
+        if (contextLines.length === 0) return base;
+        return { ...base, contentText: base.contentText + contextLines.join("\n") };
+    } catch {
+        return base;
+    }
 }
 
 // ── Query mode ─────────────────────────────────────────────────────
