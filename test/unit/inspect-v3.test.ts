@@ -15,8 +15,8 @@ import {
     computeInspectDetails,
     executeInspectDetails,
     resolveMode,
-} from "../../inspect.js";
-import { createInspectTool } from "../../inspect-tool.js";
+} from "../../src/inspect.js";
+import { createInspectTool } from "../../src/inspect-tool.js";
 import {
     PROTOCOL_SCHEMA_VERSION,
     validateInspectionEnvelope,
@@ -88,6 +88,20 @@ describe("resolveMode", () => {
         expect(() =>
             resolveMode({ cwd: workdir, sessionFilePath: "/s.jsonl" }),
         ).toThrow();
+    });
+});
+
+describe("createInspectTool", () => {
+    it("describes deep query mode as grep + AST plus deep-only channels", () => {
+        const tool = createInspectTool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        const schema = tool.parameters as { properties?: Record<string, any> };
+        const depthDescription = schema.properties?.depth?.description ?? "";
+
+        expect(depthDescription).toMatch(/grep/i);
+        expect(depthDescription).toMatch(/AST/);
+        expect(depthDescription).toMatch(/semantic/i);
+        expect(tool.description).toMatch(/grep/i);
+        expect(tool.description).toMatch(/AST/);
     });
 });
 
@@ -309,6 +323,14 @@ describe("createInspectTool (schema)", () => {
         expect(tool.description).toContain("query");
         expect(tool.description).toContain("symbol");
         expect(tool.description).toContain("map");
+    });
+
+    it("path schema directs directory inspection to map mode", () => {
+        const tool = createInspectTool({ getSessionFilePath: () => null });
+        const schema = tool.parameters as Record<string, any>;
+        const props = schema.properties ?? schema;
+        expect(props.path.description).toMatch(/regular file/i);
+        expect(props.path.description).toContain('action: "map"');
     });
 
     it("execute() with path returns path-mode envelope", async () => {

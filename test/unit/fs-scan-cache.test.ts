@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { FsScanCache, invalidateFsScanCache, getFsScanCache } from "../../fs-scan-cache.js"
+import { FsScanCache, invalidateFsScanCache, getFsScanCache } from "../../src/fs-scan-cache.js"
 
 describe("FsScanCache", () => {
 	let tmpDir: string

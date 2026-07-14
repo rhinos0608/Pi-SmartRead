@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { leidenCommunities } from "../../graphify-enricher.js";
+import { leidenCommunities } from "../../src/graphify-enricher.js";
 
 describe("leidenCommunities", () => {
   it("returns empty map for empty adjacency", () => {

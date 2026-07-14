@@ -8,7 +8,7 @@ import {
   extractCoCommitPairs,
   parseCommitTrailers,
   parseStructuredLogOutput,
-} from "../../git-context.js";
+} from "../../src/git-context.js";
 
 function git(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readCoverage, recordCoverage, summarizeCoverage, writeCoverage } from "../../index-coverage.js";
+import { readCoverage, recordCoverage, summarizeCoverage, writeCoverage } from "../../src/index-coverage.js";
 
 let root: string;
 

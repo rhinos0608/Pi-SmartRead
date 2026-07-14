@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { createIntentReadTool } from "../../intent-read.js";
+import { createIntentReadTool } from "../../src/intent-read.js";
 import { SCENARIOS, createRetrievalFixture, cleanupFixture, RetrievalFixture } from "../helpers/retrieval-fixtures.js";
-import type { EmbedRequest, EmbedResult } from "../../embedding.js";
+import type { EmbedRequest, EmbedResult } from "../../src/embedding.js";
 
 
 // Stub fetchEmbeddings: returns unit vectors based on keywords to simulate perfect semantic match

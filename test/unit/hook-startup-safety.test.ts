@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-vi.mock("../../lsp-bridge.js", () => ({
+vi.mock("../../src/lsp-bridge.js", () => ({
   getLSPBridge: vi.fn(() => new Promise(() => {})),
 }));
 
-import { registerSessionHooks, resetSessionState } from "../../hook.js";
+import { registerSessionHooks, resetSessionState } from "../../src/hook.js";
 
 function makeMockAPI(): {
   api: ExtensionAPI;

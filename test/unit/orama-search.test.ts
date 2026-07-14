@@ -6,7 +6,7 @@ import {
   saveCodeIndex,
   loadCodeIndex,
   CodeSearchDB,
-} from '../../orama-search.js';
+} from '../../src/orama-search.js';
 
 const DIM = 4; // small dimension for tests
 

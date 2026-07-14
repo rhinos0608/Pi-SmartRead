@@ -8,12 +8,12 @@ const mocks = vi.hoisted(() => ({
   getTagsBatch: vi.fn(async () => [] as never[]),
 }));
 
-vi.mock("../../tags.js", () => ({
+vi.mock("../../src/tags.js", () => ({
   initParser: mocks.initParser,
   getTagsBatch: mocks.getTagsBatch,
 }));
 
-import { RepoMap } from "../../repomap.js";
+import { RepoMap } from "../../src/repomap.js";
 
 describe("RepoMap.searchIdentifiers fallback", () => {
   let root: string;

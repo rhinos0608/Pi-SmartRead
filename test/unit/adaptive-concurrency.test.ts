@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chooseConcurrency } from "../../adaptive-concurrency.js";
+import { chooseConcurrency } from "../../src/adaptive-concurrency.js";
 
 describe("adaptive concurrency", () => {
   it("returns one worker for tiny jobs", () => {

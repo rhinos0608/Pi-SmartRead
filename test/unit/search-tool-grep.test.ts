@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import createSearchTool from "../../search-tool.js";
+import createSearchTool from "../../src/search-tool.js";
 
 function writeProjectFile(root: string, path: string, content: string | Buffer): void {
   mkdirSync(join(root, dirname(path)), { recursive: true });

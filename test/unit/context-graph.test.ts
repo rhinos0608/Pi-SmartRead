@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { ContextGraph } from "../../context-graph.js";
+import { ContextGraph } from "../../src/context-graph.js";
 
 describe("ContextGraph", () => {
   let root: string;

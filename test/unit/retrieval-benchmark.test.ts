@@ -12,13 +12,13 @@
  * These metrics track retrieval quality over time and catch regressions.
  */
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { createIntentReadTool } from "../../intent-read.js";
+import { createIntentReadTool } from "../../src/intent-read.js";
 import {
   createRetrievalFixture,
   cleanupFixture,
   RetrievalFixture,
 } from "../helpers/retrieval-fixtures.js";
-import type { EmbedRequest, EmbedResult } from "../../embedding.js";
+import type { EmbedRequest, EmbedResult } from "../../src/embedding.js";
 
 // ── Metric helpers ────────────────────────────────────────────────
 

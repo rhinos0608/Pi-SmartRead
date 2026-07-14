@@ -1,0 +1,942 @@
+export interface ChunkResult {
+  text: string;
+  chunkIndex: number;
+  startChar: number;
+  endChar: number;
+  estimatedTokens: number;
+  wasHardSplit: boolean;
+  contextHeader?: string;
+  embeddingText?: string;
+  /** Non-whitespace character count (present when using cAST chunking) */
+  nwsChars?: number;
+  /** Present when using symbol-boundary chunking */
+  symbolBoundary?: {
+    type: "function" | "method" | "class" | "interface" | "enum" | "type_alias" | "variable" | "export";
+    name: string;
+    startLine: number;
+    endLine: number;
+  };
+}
+
+export interface ChunkOptions {
+  chunkSizeChars?: number;
+  chunkOverlapChars?: number;
+  maxChunksPerFile?: number;
+  minChunkChars?: number;
+  filePath?: string;
+  compressForEmbedding?: boolean;
+  /** Use tree-sitter symbol boundaries (functions, classes, methods) instead of character-based splitting */
+  useSymbolBoundaries?: boolean;
+  /** Use cAST (Chunking via Abstract Syntax Trees) algorithm — recursive split-then-merge with NWS metric */
+  useCAST?: boolean;
+  /** Maximum non-whitespace characters per chunk (default 2000, optimal range 2000-2500) */
+  maxNwsChars?: number;
+}
+
+export interface CompressSnippetOptions {
+  maxChars?: number;
+}
+
+const IMPORT_LINE_RE = /^\s*import(?:\s.+?\sfrom\s+)?["'][^"']+["'];?\s*$/gm;
+const REQUIRE_LINE_RE = /^\s*(?:const|let|var)\s+[^=]+?=\s*require\(["'][^"']+["']\);?\s*$/gm;
+const DEFAULT_COMPRESSED_SNIPPET_CHARS = 1000;
+const NON_METHOD_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "function"]);
+
+// ── Symbol boundary extraction (lightweight AST) ─────────────────
+
+interface SymbolSpan {
+  type: "function" | "method" | "class" | "interface" | "enum" | "type_alias" | "variable" | "export";
+  name: string;
+  startByte: number;
+  endByte: number;
+}
+
+/**
+ * Extract symbol boundaries from source text using lightweight regex + brace matching.
+ *
+ * This is a pure-text approach (no tree-sitter dependency) that works for
+ * TypeScript, JavaScript, and similar C-family languages. It identifies:
+ *   - function declarations/expressions
+ *   - class declarations
+ *   - interface declarations
+ *   - method definitions (within classes)
+ *   - enum declarations
+ *   - type alias declarations
+ *   - const/let/var exports at file scope
+ *
+ * More accurate than character-based chunking, lighter than full tree-sitter parse.
+ */
+/**
+ * Extract symbol boundaries from source text using lightweight regex + brace matching.
+ *
+ * This is a pure-text approach (no tree-sitter dependency) that works for
+ * TypeScript, JavaScript, and similar C-family languages.
+ *
+ * Exported for use by ast-chunker.ts as fallback when web-tree-sitter WASM is unavailable.
+ * Prefer ast-chunker.ts::extractSymbolBoundaries for AST-accurate results.
+ */
+export function extractSymbolBoundaries(text: string): SymbolSpan[] {
+  const spans: SymbolSpan[] = [];
+
+  // Match major declarations with their starting positions
+  const declPatterns: { re: RegExp; type: SymbolSpan["type"]; nameGroup: number }[] = [
+    { re: /(?:^|\n)(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm, type: "function", nameGroup: 1 },
+    { re: /(?:^|\n)(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/gm, type: "class", nameGroup: 1 },
+    { re: /(?:^|\n)(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)/gm, type: "interface", nameGroup: 1 },
+    { re: /(?:^|\n)(?:export\s+)?enum\s+([A-Za-z_$][\w$]*)/gm, type: "enum", nameGroup: 1 },
+    { re: /(?:^|\n)(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/gm, type: "type_alias", nameGroup: 1 },
+    { re: /(?:^|\n)(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm, type: "variable", nameGroup: 1 },
+  ];
+
+  for (const { re, type, nameGroup } of declPatterns) {
+    // Reset lastIndex since we iterate per pattern
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const name = match[nameGroup]!;
+      const declStart = match.index;
+      const endByte = findMatchingBrace(text, declStart) ?? Math.min(declStart + 2000, text.length);
+
+      // Avoid duplicating spans from different patterns
+      const duplicate = spans.find(
+        (s) => s.startByte === declStart || s.name === name && Math.abs(s.startByte - declStart) < 50,
+      );
+      if (!duplicate) {
+        spans.push({ type, name, startByte: declStart, endByte });
+      }
+    }
+  }
+
+  // Sort by position
+  spans.sort((a, b) => a.startByte - b.startByte);
+
+  // Merge overlapping spans (keep the larger one)
+  const merged: SymbolSpan[] = [];
+  for (const span of spans) {
+    const prev = merged[merged.length - 1];
+    if (prev && span.startByte < prev.endByte) {
+      // Overlapping — extend the previous span
+      prev.endByte = Math.max(prev.endByte, span.endByte);
+    } else {
+      merged.push({ ...span });
+    }
+  }
+
+  return merged;
+}
+
+/**
+ * Find the matching closing brace for an opening brace, respecting nesting.
+ * Returns the byte offset after the closing brace, or null if unmatched.
+ *
+ * Known limitations:
+ * - The escape check (`prev !== "\\"`) does not correctly handle double-escaped
+ *   backslashes (e.g., `"\\\\"` before a quote) because it only inspects the
+ *   immediately preceding character.
+ * - Template literal `${...}` interpolations are not fully supported — expressions
+ *   containing strings or braces can confuse the state machine.
+ * A full parser (e.g., tree-sitter) would be needed to handle these scenarios.
+ *
+ * Exported for use by ast-chunker.ts as fallback when web-tree-sitter is unavailable.
+ */
+export function findMatchingBrace(text: string, startPos: number): number | null {
+  // Find the first { after startPos
+  const openIdx = text.indexOf("{", startPos);
+  if (openIdx === -1) return null;
+
+  let depth = 0;
+  let inString: string | null = null;
+  let inComment: "line" | "block" | null = null;
+
+  for (let i = openIdx; i < text.length; i++) {
+    const ch = text[i];
+    const prev = i > 0 ? text[i - 1] : "";
+
+    // Handle string boundaries
+    if (inComment === null) {
+      if (inString) {
+        if (ch === inString && prev !== "\\") inString = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        inString = ch;
+        continue;
+      }
+    }
+
+    // Handle comment boundaries
+    if (inComment === "line") {
+      if (ch === "\n") inComment = null;
+      continue;
+    }
+    if (inComment === "block") {
+      if (ch === "/" && prev === "*") inComment = null;
+      continue;
+    }
+    if (inString === null) {
+      if (ch === "/" && text[i + 1] === "/") { inComment = "line"; i++; continue; }
+      if (ch === "/" && text[i + 1] === "*") { inComment = "block"; i++; continue; }
+    }
+
+    // Track brace depth
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+
+  return null;
+}
+
+const DEFAULT_CHUNK_SIZE_CHARS = 4096;
+const DEFAULT_CHUNK_OVERLAP_CHARS = 512;
+const DEFAULT_MAX_CHUNKS_PER_FILE = 12;
+const DEFAULT_MIN_CHUNK_CHARS = 200;
+const CHARS_PER_TOKEN = 4;
+const DEFAULT_MAX_NWS_CHARS = 2000;
+
+/**
+ * Count non-whitespace characters in text.
+ * Used by cAST chunking as the size metric.
+ */
+export function nwsChars(text: string): number {
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v") {
+      count++;
+    }
+  }
+  return count;
+}
+
+export function compressSnippet(text: string, options: CompressSnippetOptions = {}): string {
+  const maxChars = options.maxChars ?? DEFAULT_COMPRESSED_SNIPPET_CHARS;
+  const withoutImports = text
+    .replace(IMPORT_LINE_RE, "")
+    .replace(REQUIRE_LINE_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (withoutImports.length <= maxChars) return withoutImports;
+
+  const headChars = Math.ceil(maxChars * 0.6);
+  const tailChars = Math.max(0, maxChars - headChars);
+  return `${withoutImports.slice(0, headChars)}\n// ... (truncated)\n${withoutImports.slice(-tailChars)}`;
+}
+
+function getStructuralContext(text: string): string | undefined {
+  const classMatch = text.match(/\bclass\s+([A-Za-z_$][\w$]*)/);
+  const functionMatch = text.match(/\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/);
+  const methodMatch = text.match(/^\s*(?:public\s+|private\s+|protected\s+|async\s+|static\s+)*(?:[A-Za-z_$][\w$]*)\s*\(/m);
+
+  if (classMatch && functionMatch) return `Class: ${classMatch[1]} > Function: ${functionMatch[1]}`;
+  if (functionMatch) return `Function: ${functionMatch[1]}`;
+  if (classMatch) return `Class: ${classMatch[1]}`;
+  if (methodMatch) {
+    const raw = methodMatch[0].trim().replace(/\($/, "");
+    const methodName = raw.split(/\s+/).pop()!;
+    if (!NON_METHOD_KEYWORDS.has(methodName)) return `Method: ${methodName}`;
+  }
+  return undefined;
+}
+
+function enrichChunk(chunk: ChunkResult, options: ChunkOptions): void {
+  if (!options.filePath && !options.compressForEmbedding) return;
+
+  const parts = options.filePath ? [`File: ${options.filePath}`] : [];
+  const structuralContext = getStructuralContext(chunk.text);
+  if (structuralContext) parts.push(structuralContext);
+
+  const contextHeader = parts.join(" > ");
+  if (contextHeader) chunk.contextHeader = contextHeader;
+
+  const body = options.compressForEmbedding ? compressSnippet(chunk.text) : chunk.text;
+  chunk.embeddingText = contextHeader ? `${contextHeader}\n${body}` : body;
+}
+
+// ── cAST (Chunking via Abstract Syntax Trees) ────────────────────
+
+/**
+ * Internal node for cAST tree representation.
+ */
+interface CASTNode {
+  startByte: number;
+  endByte: number;
+  type?: string;
+  name?: string;
+  children: CASTNode[];
+}
+
+/**
+ * Internal segment produced by the cAST splitting algorithm.
+ * Each segment covers a contiguous byte range of the source text.
+ * Concatenating all segments in order reproduces the original text.
+ */
+interface CASTSegment {
+  startByte: number;
+  endByte: number;
+}
+
+/**
+ * Build a hierarchical tree from flat symbol spans.
+ * Spans are nested by containment: if span B is fully inside span A,
+ * B becomes a child of A. The root encompasses the entire text.
+ */
+function spansToTree(text: string, spans: SymbolSpan[]): CASTNode {
+  const root: CASTNode = {
+    startByte: 0,
+    endByte: text.length,
+    children: [],
+  };
+
+  if (spans.length === 0) return root;
+
+  // Sort by start, then by end descending (parents before children)
+  const sorted = [...spans].sort((a, b) => a.startByte - b.startByte || (b.endByte - b.startByte) - (a.endByte - a.startByte));
+
+  function attach(parent: CASTNode, candidates: SymbolSpan[], depth: number): void {
+    let i = 0;
+    while (i < candidates.length) {
+      const span = candidates[i]!;
+      if (span.startByte < parent.startByte || span.endByte > parent.endByte) {
+        i++;
+        continue;
+      }
+
+      // Collect candidates nested strictly inside this span
+      const nested: SymbolSpan[] = [];
+      let j = i + 1;
+      while (j < candidates.length && candidates[j]!.startByte < span.endByte) {
+        if (candidates[j]!.startByte >= span.startByte && candidates[j]!.endByte <= span.endByte) {
+          nested.push(candidates[j]!);
+        }
+        j++;
+      }
+
+      const node: CASTNode = {
+        startByte: span.startByte,
+        endByte: span.endByte,
+        type: span.type,
+        name: span.name,
+        children: [],
+      };
+
+      attach(node, nested, depth + 1);
+      parent.children.push(node);
+      i = j;
+    }
+  }
+
+  attach(root, sorted, 0);
+  return root;
+}
+
+/**
+ * Hard-split a contiguous text segment into fixed-size NWS chunks.
+ * Used when a leaf segment (no children) exceeds maxNwsChars.
+ */
+function cASTHardSplit(
+  text: string,
+  startByte: number,
+  endByte: number,
+  maxNws: number,
+): CASTSegment[] {
+  const segments: CASTSegment[] = [];
+  let chunkStart = startByte;
+  let nwsAccum = 0;
+
+  for (let i = startByte; i < endByte; i++) {
+    const ch = text[i]!;
+    const isNws = ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v";
+
+    if (isNws) {
+      if (nwsAccum >= maxNws) {
+        segments.push({ startByte: chunkStart, endByte: i });
+        chunkStart = i;
+        nwsAccum = 0;
+      }
+      nwsAccum++;
+    }
+  }
+
+  // Emit remaining
+  if (chunkStart < endByte) {
+    segments.push({ startByte: chunkStart, endByte });
+  }
+
+  return segments;
+}
+
+/**
+ * Merge adjacent small segments whose combined NWS count is ≤ maxNws.
+ * Prevents over-fragmentation from greedy splitting.
+ */
+function mergeAdjacentSmall(segments: CASTSegment[], text: string, maxNws: number): CASTSegment[] {
+  if (segments.length <= 1) return segments;
+
+  const merged: CASTSegment[] = [];
+  let pending = segments[0]!;
+
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i]!;
+    const combinedText = text.slice(pending.startByte, seg.endByte);
+    const combinedNws = nwsChars(combinedText);
+
+    if (combinedNws <= maxNws) {
+      pending = { startByte: pending.startByte, endByte: seg.endByte };
+    } else {
+      merged.push(pending);
+      pending = seg;
+    }
+  }
+
+  merged.push(pending);
+  return merged;
+}
+
+/**
+ * Recursive split-then-merge for the cAST algorithm.
+ *
+ * Given a parent range and its children (from tree/span analysis),
+ * splits the text into contiguous segments covering the entire parent range.
+ * Children serve as split hints — gaps between children are treated as atomic segments.
+ *
+ * Algorithm (adapted from arXiv 2506.15655v1):
+ *   1. If node fits in maxNws, keep as one segment.
+ *   2. Otherwise, iterate children: pack fitting children into current batch,
+ *      recursively split oversized children.
+ *   3. After initial pass, merge adjacent small siblings to avoid over-fragmentation.
+ */
+function cASTSplitSegments(
+  parentStart: number,
+  parentEnd: number,
+  text: string,
+  children: CASTNode[],
+  maxNws: number,
+): CASTSegment[] {
+  const parentText = text.slice(parentStart, parentEnd);
+  if (nwsChars(parentText) <= maxNws) {
+    return [{ startByte: parentStart, endByte: parentEnd }];
+  }
+
+  if (children.length === 0) {
+    return cASTHardSplit(text, parentStart, parentEnd, maxNws);
+  }
+
+  // ── First pass: split at child boundaries into contiguous segments ──
+  const segments: { startByte: number; endByte: number; children?: CASTNode[] }[] = [];
+
+  // Ensure children are sorted
+  const sorted = [...children].sort((a, b) => a.startByte - b.startByte);
+  let cursor = parentStart;
+
+  for (const child of sorted) {
+    // Gap before this child
+    if (child.startByte > cursor) {
+      segments.push({ startByte: cursor, endByte: child.startByte });
+    }
+    // The child itself
+    segments.push({
+      startByte: child.startByte,
+      endByte: child.endByte,
+      children: child.children.length > 0 ? child.children : undefined,
+    });
+    cursor = child.endByte;
+  }
+
+  // Trailing gap
+  if (cursor < parentEnd) {
+    segments.push({ startByte: cursor, endByte: parentEnd });
+  }
+
+  // ── Second pass: apply split-then-merge with greedy packing ──
+  const packed: CASTSegment[] = [];
+  let currentBatch: { startByte: number; endByte: number }[] = [];
+  let currentNws = 0;
+
+  for (const seg of segments) {
+    let segSegments: CASTSegment[];
+
+    if (seg.children && seg.children.length > 0 && nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
+      // Child has internal structure and exceeds limit — recursively split
+      segSegments = cASTSplitSegments(seg.startByte, seg.endByte, text, seg.children, maxNws);
+    } else if (nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
+      // Over-large atomic segment with no internal structure — hard split
+      segSegments = cASTHardSplit(text, seg.startByte, seg.endByte, maxNws);
+    } else {
+      segSegments = [{ startByte: seg.startByte, endByte: seg.endByte }];
+    }
+
+    // Try to pack sub-segments into current batch
+    for (const sub of segSegments) {
+      const subNws = nwsChars(text.slice(sub.startByte, sub.endByte));
+
+      if (currentNws + subNws <= maxNws) {
+        // Add to current batch
+        if (currentBatch.length === 0) {
+          currentBatch.push(sub);
+        } else {
+          // Extend the end of the batch to include this sub
+          currentBatch[currentBatch.length - 1]!.endByte = sub.endByte;
+        }
+        currentNws += subNws;
+      } else {
+        // Flush current batch
+        if (currentBatch.length > 0) {
+          packed.push({
+            startByte: currentBatch[0]!.startByte,
+            endByte: currentBatch[currentBatch.length - 1]!.endByte,
+          });
+        }
+        currentBatch = [{ startByte: sub.startByte, endByte: sub.endByte }];
+        currentNws = subNws;
+      }
+    }
+  }
+
+  // Flush remaining batch
+  if (currentBatch.length > 0) {
+    packed.push({
+      startByte: currentBatch[0]!.startByte,
+      endByte: currentBatch[currentBatch.length - 1]!.endByte,
+    });
+  }
+
+  // ── Third pass: merge adjacent small segments ──
+  return mergeAdjacentSmall(packed, text, maxNws);
+}
+
+/**
+ * Convert cAST segments to ChunkResult array.
+ */
+function segmentsToChunks(
+  segments: CASTSegment[],
+  text: string,
+  maxChunksPerFile: number,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  const results: ChunkResult[] = [];
+
+  for (let i = 0; i < Math.min(segments.length, maxChunksPerFile); i++) {
+    const seg = segments[i]!;
+    const chunkTextContent = text.slice(seg.startByte, seg.endByte);
+    const chunkNws = nwsChars(chunkTextContent);
+
+    results.push({
+      text: chunkTextContent,
+      chunkIndex: i,
+      startChar: seg.startByte,
+      endChar: seg.endByte,
+      estimatedTokens: Math.ceil(chunkTextContent.length / CHARS_PER_TOKEN),
+      wasHardSplit: false,
+      nwsChars: chunkNws,
+    });
+  }
+
+  // Enrich with context headers and embedding text
+  for (const chunk of results) {
+    enrichChunk(chunk, options ?? {});
+  }
+
+  // Re-assign chunk indices after potential removals from enrichChunk
+  for (let i = 0; i < results.length; i++) {
+    results[i]!.chunkIndex = i;
+  }
+
+  return results;
+}
+
+/**
+ * Main cAST entry point (sync).
+ *
+ * Extracts symbol boundaries via lightweight regex AST, builds a tree,
+ * and applies the recursive split-then-merge cAST algorithm.
+ * Falls back to character-based splitting when no symbols are found.
+ *
+ * @param text - Source code text
+ * @param options - Chunking options
+ * @returns Array of ChunkResults covering the entire text contiguously
+ */
+export function cASTChunkText(
+  text: string,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
+
+  const maxNws = options?.maxNwsChars ?? DEFAULT_MAX_NWS_CHARS;
+  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
+
+  // Extract symbol boundaries (lightweight regex-based)
+  const spans = extractSymbolBoundaries(text);
+
+  // Build tree from spans
+  const root = spansToTree(text, spans);
+
+  // If tree has no children (no symbols found), use hard NWS split
+  if (root.children.length === 0) {
+    const segments = cASTHardSplit(text, 0, text.length, maxNws);
+    return segmentsToChunks(segments, text, maxChunksPerFile, options);
+  }
+
+  // Apply cAST recursive split-then-merge
+  const segments = cASTSplitSegments(
+    root.startByte,
+    root.endByte,
+    text,
+    root.children,
+    maxNws,
+  );
+
+  return segmentsToChunks(segments, text, maxChunksPerFile, options);
+}
+
+// ── Main chunking entry point ────────────────────────────────────
+
+/**
+ * Splits text into chunks by preference:
+ *   - Symbol boundaries (functions, classes, methods) when useSymbolBoundaries is set
+ *   - Otherwise: double newline > single newline > whitespace > hard split
+ *
+ * Walks backward from target position to find a boundary.
+ * Chunks may overlap by `chunkOverlapChars` characters.
+ */
+export function chunkText(
+  text: string,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  const useSymbolBoundaries = options?.useSymbolBoundaries ?? false;
+  const useCast = options?.useCAST ?? false;
+
+  if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
+
+  if (useCast) {
+    return cASTChunkText(text, options);
+  }
+
+  if (useSymbolBoundaries) {
+    return chunkBySymbolBoundaries(text, options);
+  }
+
+  return chunkByCharacterSize(text, options);
+}
+
+/**
+ * Chunk text using symbol boundaries (function, class, method declarations).
+ *
+ * Strategy:
+ *   1. Extract symbol spans from source
+ *   2. Split at nearest symbol boundary
+ *   3. Merge small adjacent chunks when possible
+ *   4. Hard-split only for very large symbols
+ */
+function chunkBySymbolBoundaries(
+  text: string,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
+  const minChunkChars = options?.minChunkChars ?? DEFAULT_MIN_CHUNK_CHARS;
+  const chunkSizeChars = options?.chunkSizeChars ?? DEFAULT_CHUNK_SIZE_CHARS;
+
+  const spans = extractSymbolBoundaries(text);
+
+  if (spans.length === 0) {
+    // No symbols found — fall back to character-based
+    return chunkByCharacterSize(text, options);
+  }
+
+  // First pass: create initial chunks at symbol boundaries
+  const chunks: { text: string; startChar: number; endChar: number; span?: SymbolSpan }[] = [];
+
+  // Add text before first symbol if significant
+  if (spans[0]!.startByte > 0) {
+    const preamble = text.slice(0, spans[0]!.startByte).trim();
+    if (preamble.length >= minChunkChars) {
+      chunks.push({ text: preamble, startChar: 0, endChar: spans[0]!.startByte });
+    }
+  }
+
+  for (let i = 0; i < spans.length; i++) {
+    const span = spans[i]!;
+    const chunkText2 = text.slice(span.startByte, span.endByte);
+
+    if (chunkText2.length === 0) continue;
+
+    // For very large symbols, sub-split at logical boundaries within the symbol
+    if (chunkText2.length > chunkSizeChars * 2) {
+      const subChunks = chunkByCharacterSize(chunkText2, {
+        ...options,
+        chunkSizeChars,
+        maxChunksPerFile: 4,
+      });
+      for (const sc of subChunks) {
+        chunks.push({
+          text: sc.text,
+          startChar: span.startByte + sc.startChar,
+          endChar: span.startByte + sc.endChar,
+          span,
+        });
+      }
+    } else {
+      chunks.push({
+        text: chunkText2,
+        startChar: span.startByte,
+        endChar: span.endByte,
+        span,
+      });
+    }
+  }
+
+  // Merge small adjacent chunks
+  const merged: typeof chunks = [];
+  for (const chunk of chunks) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.text.length + chunk.text.length < chunkSizeChars) {
+      // Merge with previous
+      prev.text += "\n" + chunk.text;
+      prev.endChar = chunk.endChar;
+      prev.span = prev.span ?? chunk.span;
+    } else {
+      merged.push({ ...chunk });
+    }
+  }
+
+  // Build final ChunkResult array with line-aware metadata
+  const results: ChunkResult[] = [];
+  for (let i = 0; i < Math.min(merged.length, maxChunksPerFile); i++) {
+    const chunk = merged[i]!;
+    const startLine = text.slice(0, chunk.startChar).split("\n").length;
+    const endLine = text.slice(0, chunk.endChar).split("\n").length;
+
+    results.push({
+      text: chunk.text,
+      chunkIndex: i,
+      startChar: chunk.startChar,
+      endChar: chunk.endChar,
+      estimatedTokens: Math.ceil(chunk.text.length / CHARS_PER_TOKEN),
+      wasHardSplit: false,
+      symbolBoundary: chunk.span ? {
+        type: chunk.span.type,
+        name: chunk.span.name,
+        startLine,
+        endLine,
+      } : undefined,
+    });
+  }
+
+  // Recompute indices and enrich
+  for (let i = 0; i < results.length; i++) {
+    results[i]!.chunkIndex = i;
+    enrichChunk(results[i]!, options ?? {});
+  }
+
+  return results;
+}
+
+// ── AST-aware chunking (async, uses web-tree-sitter) ────────────
+
+/**
+ * Result of AST-aware chunking with diagnostics for observability.
+ */
+export interface AstChunkResult {
+  chunks: ChunkResult[];
+  diagnostics: {
+    usedAst: boolean;
+    wasmAvailable: boolean;
+    parseTimeMs: number;
+    symbolCount: number;
+    grammarExtension: string;
+    wasmFile: string | null;
+  };
+}
+
+/**
+ * Chunk text using AST-accurate symbol boundaries via web-tree-sitter.
+ *
+ * This is an async alternative to chunkText() that uses the same WASM
+ * infrastructure as smart-edit's ast-resolver for precise AST boundary
+ * detection. Falls back to regex-based symbol chunking when web-tree-sitter
+ * is unavailable or the language isn't supported.
+ *
+ * Integration note: shares @vscode/tree-sitter-wasm with smart-edit extension.
+ * WASM grammars are cached in-process, so loading is lazy per-grammar.
+ *
+ * @param text - Source code text
+ * @param options - Chunking options (must include filePath for language detection)
+ * @returns AstChunkResult with chunks and detailed diagnostics
+ */
+export async function chunkTextAst(
+  text: string,
+  options?: ChunkOptions,
+): Promise<AstChunkResult> {
+  if (!text || text.length === 0 || /^\s*$/.test(text)) {
+    return { chunks: [], diagnostics: {
+      usedAst: false, wasmAvailable: false, parseTimeMs: 0,
+      symbolCount: 0, grammarExtension: "", wasmFile: null,
+    }};
+  }
+
+  const filePath = options?.filePath ?? "";
+  const startTime = Date.now();
+
+  // Route to cAST when useCAST is set
+  if (options?.useCAST) {
+    try {
+      const { cASTChunkByAstBoundaries } = await import("./ast-chunker.js");
+      const { chunks, diagnostics } = await cASTChunkByAstBoundaries(text, filePath, options);
+      return {
+        chunks,
+        diagnostics: {
+          usedAst: !diagnostics.usedFallback,
+          wasmAvailable: diagnostics.wasmAvailable,
+          parseTimeMs: diagnostics.parseTimeMs,
+          symbolCount: diagnostics.symbolCount,
+          grammarExtension: diagnostics.grammarExtension,
+          wasmFile: diagnostics.wasmFile ?? null,
+        },
+      };
+    } catch {
+      // cAST failed — fall through to symbol-boundary chunking
+    }
+  }
+
+  // Only use AST chunking when useSymbolBoundaries is set
+  if (!options?.useSymbolBoundaries) {
+    return {
+      chunks: chunkText(text, options),
+      diagnostics: {
+        usedAst: false, wasmAvailable: false, parseTimeMs: 0,
+        symbolCount: 0, grammarExtension: "", wasmFile: null,
+      },
+    };
+  }
+
+  try {
+    const { chunkByAstBoundaries } = await import("./ast-chunker.js");
+    const { chunks, diagnostics } = await chunkByAstBoundaries(text, filePath, options);
+
+    return {
+      chunks,
+      diagnostics: {
+        usedAst: !diagnostics.usedFallback,
+        wasmAvailable: diagnostics.wasmAvailable,
+        parseTimeMs: diagnostics.parseTimeMs,
+        symbolCount: diagnostics.symbolCount,
+        grammarExtension: diagnostics.grammarExtension,
+        wasmFile: diagnostics.wasmFile ?? null,
+      },
+    };
+  } catch {
+    // Async AST chunking failed — fall back to sync symbol-boundary chunking
+    const chunks = chunkBySymbolBoundaries(text, options);
+    return {
+      chunks,
+      diagnostics: {
+        usedAst: false, wasmAvailable: false,
+        parseTimeMs: Date.now() - startTime,
+        symbolCount: 0, grammarExtension: "", wasmFile: null,
+      },
+    };
+  }
+}
+
+/**
+ * Character-size-based chunking (existing behavior).
+ */
+function chunkByCharacterSize(
+  text: string,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  const chunkSizeChars = options?.chunkSizeChars ?? DEFAULT_CHUNK_SIZE_CHARS;
+  const chunkOverlapChars = options?.chunkOverlapChars ?? DEFAULT_CHUNK_OVERLAP_CHARS;
+  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
+  const minChunkChars = options?.minChunkChars ?? DEFAULT_MIN_CHUNK_CHARS;
+
+  if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
+
+  const results: ChunkResult[] = [];
+  let offset = 0;
+
+  while (offset < text.length && results.length < maxChunksPerFile) {
+    const remaining = text.length - offset;
+    const targetEnd = offset + chunkSizeChars;
+
+    if (remaining <= chunkSizeChars) {
+      const chunk = text.slice(offset);
+      results.push({
+        text: chunk,
+        chunkIndex: results.length,
+        startChar: offset,
+        endChar: text.length,
+        estimatedTokens: Math.ceil(chunk.length / CHARS_PER_TOKEN),
+        wasHardSplit: false,
+      });
+      break;
+    }
+
+    let splitPos: number | undefined = targetEnd;
+    let wasHardSplit = true;
+
+    let bestPos = -1;
+    for (let i = targetEnd - 1; i >= offset + 1; i--) {
+      if (text[i] === '\n' && text[i - 1] === '\n') {
+        bestPos = i + 1;
+        break;
+      }
+    }
+    if (bestPos >= 0) {
+      splitPos = bestPos;
+      wasHardSplit = false;
+    } else {
+      bestPos = -1;
+      for (let i = targetEnd - 1; i >= offset + 1; i--) {
+        if (text[i] === '\n') {
+          bestPos = i + 1;
+          break;
+        }
+      }
+      if (bestPos >= 0) {
+        splitPos = bestPos;
+        wasHardSplit = false;
+      } else {
+        bestPos = -1;
+        for (let i = targetEnd - 1; i >= offset + 1; i--) {
+          if (/\s/.test(text[i]!)) {
+            bestPos = i + 1;
+            break;
+          }
+        }
+        if (bestPos >= 0) {
+          splitPos = bestPos;
+          wasHardSplit = false;
+        }
+      }
+    }
+
+    const chunk = text.slice(offset, splitPos!);
+    const endChar = splitPos;
+
+    if (chunk.length >= minChunkChars || results.length === 0) {
+      results.push({
+        text: chunk,
+        chunkIndex: results.length,
+        startChar: offset,
+        endChar,
+        estimatedTokens: Math.ceil(chunk.length / CHARS_PER_TOKEN),
+        wasHardSplit,
+      });
+    }
+
+    const nextOffset = Math.max(offset + 1, splitPos - chunkOverlapChars);
+    if (nextOffset <= offset) break;
+    offset = nextOffset;
+  }
+
+  for (let i = 0; i < results.length; i++) {
+    results[i]!.chunkIndex = i;
+    enrichChunk(results[i]!, options ?? {});
+  }
+
+  return results;
+}

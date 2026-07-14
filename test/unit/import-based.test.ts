@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { RepoMap } from "../../repomap.js";
+import { RepoMap } from "../../src/repomap.js";
 
 describe("RepoMap — import-based fallback", () => {
   let tmpDir: string;

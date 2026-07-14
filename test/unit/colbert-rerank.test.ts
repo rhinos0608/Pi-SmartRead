@@ -6,19 +6,19 @@ import {
   computeMaxSim,
   colbertRerank,
   type ColbertRerankerInput,
-} from "../../rerank.js";
+} from "../../src/rerank.js";
 
 // Mock the embedding and provider modules so colbertRerank's dynamic imports
 // don't hit real @huggingface/transformers.
-vi.mock("../../embedding.js", () => ({
+vi.mock("../../src/embedding.js", () => ({
   fetchLocalEmbeddings: vi.fn(),
 }));
-vi.mock("../../local-embedding-provider.js", () => ({
+vi.mock("../../src/local-embedding-provider.js", () => ({
   isLocalEmbeddingAvailable: vi.fn(),
 }));
 
-import { fetchLocalEmbeddings } from "../../embedding.js";
-import { isLocalEmbeddingAvailable } from "../../local-embedding-provider.js";
+import { fetchLocalEmbeddings } from "../../src/embedding.js";
+import { isLocalEmbeddingAvailable } from "../../src/local-embedding-provider.js";
 
 // ── segmentText ───────────────────────────────────────────────────
 

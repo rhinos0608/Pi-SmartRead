@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { discoverFiles, findSearchableTextFiles, findSrcFiles } from "../../file-discovery.js";
+import { discoverFiles, findSearchableTextFiles, findSrcFiles } from "../../src/file-discovery.js";
 
 describe("findSrcFiles", () => {
   let tmpDir: string;

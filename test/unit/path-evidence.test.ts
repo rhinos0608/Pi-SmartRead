@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { computePathEvidence } from "../../path-evidence.js";
+import { computePathEvidence } from "../../src/path-evidence.js";
 
 describe("computePathEvidence", () => {
   let dir: string;
@@ -59,5 +59,11 @@ describe("computePathEvidence", () => {
   it("rejects missing files and empty session paths", () => {
     expect(() => computePathEvidence({ path: "nope.ts", cwd: dir, sessionFilePath: session })).toThrow(/not found/);
     expect(() => computePathEvidence({ path: "x.ts", cwd: dir, sessionFilePath: "" })).toThrow(/session/);
+  });
+
+  it("directs directory inputs to inspect map mode", () => {
+    expect(() =>
+      computePathEvidence({ path: ".", cwd: dir, sessionFilePath: session }),
+    ).toThrow(/action:\s*"map"/);
   });
 });

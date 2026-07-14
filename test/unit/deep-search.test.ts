@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { executeDeepSearch } from "../../deep-search.js";
+import { executeDeepSearch } from "../../src/deep-search.js";
 
 let root: string;
 
@@ -79,6 +79,12 @@ describe("executeDeepSearch", () => {
 
     expect(result.content[0]!.text).toContain("auth.ts");
     expect(result.content[0]!.text).toContain("requireAuth");
+    const details = result.details as any;
+    expect(
+      details.matches.some((match: any) =>
+        match.provenance.some((signal: any) => signal.channel === "structural"),
+      ),
+    ).toBe(true);
   });
 
   it("respects directory parameter", async () => {
@@ -126,9 +132,15 @@ describe("executeDeepSearch", () => {
       mockContext(),
     );
 
-    // Docs scope should ideally find doc files (may be degraded in some environments)
-    // Just verify the query ran successfully
-    expect(docsResult.content[0]!.text).toContain("Deep Search");
+    expect(docsResult.content[0]!.text).toContain("guide.md");
+    const docsDetails = docsResult.details as any;
+    expect(
+      docsDetails.matches.some(
+        (match: any) =>
+          match.file === "docs/guide.md" &&
+          match.provenance.some((signal: any) => signal.channel === "structural"),
+      ),
+    ).toBe(true);
   });
 
   it("returns config/text hits when the only match is outside code definitions", async () => {

@@ -2,11 +2,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import createSearchTool from "../../search-tool.js";
+import createSearchTool from "../../src/search-tool.js";
 import {
   parseBooleanQuery,
   evaluateBooleanExpression,
-} from "../../search-tool.js";
+} from "../../src/search-tool.js";
 
 const ml = (query: string, line: string, caseSensitive = false): boolean =>
   evaluateBooleanExpression(parseBooleanQuery(query), line, caseSensitive);

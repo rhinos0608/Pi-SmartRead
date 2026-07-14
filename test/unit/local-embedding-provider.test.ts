@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { LocalEmbeddingProvider, tensorToVectors, isLocalEmbeddingAvailable } from "../../local-embedding-provider.js";
+import { LocalEmbeddingProvider, tensorToVectors, isLocalEmbeddingAvailable } from "../../src/local-embedding-provider.js";
 
 /** Check if an optional package is importable */
 function canImport(name: string): boolean {

@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 // Mock discovery helpers
-vi.mock("../../file-discovery.js", () => ({
+vi.mock("../../src/file-discovery.js", () => ({
   findSrcFiles: vi.fn().mockResolvedValue(["/fake/repo/test.ts"]),
   discoverFiles: vi.fn().mockResolvedValue({
     files: ["/fake/repo/test.ts"],
@@ -24,7 +24,7 @@ vi.mock("../../file-discovery.js", () => ({
 }));
 
 // Mock resolveSymbol
-vi.mock("../../symbol-resolver.js", () => ({
+vi.mock("../../src/symbol-resolver.js", () => ({
   resolveSymbol: vi.fn().mockResolvedValue({
     symbol: "TestSymbol",
     contextFile: "(none)",
@@ -38,11 +38,11 @@ vi.mock("../../symbol-resolver.js", () => ({
 }));
 
 // Mock findCallers
-vi.mock("../../callgraph.js", () => ({
+vi.mock("../../src/callgraph.js", () => ({
   findCallers: vi.fn().mockResolvedValue([]),
 }));
 
-import registerRepoTools from "../../repomap-tool.js";
+import registerRepoTools from "../../src/repomap-tool.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 
 function makeExtensionAPI(): {
@@ -104,7 +104,7 @@ describe("search tool (consolidated)", () => {
   // ── Execution: default mode (grep) ──
 
   it("default mode returns no-defs message when no files match", async () => {
-    const { discoverFiles } = await import("../../file-discovery.js");
+    const { discoverFiles } = await import("../../src/file-discovery.js");
     vi.mocked(discoverFiles).mockResolvedValue({
       files: [],
       diagnostics: {
@@ -149,7 +149,7 @@ describe("search tool (consolidated)", () => {
   // ── Execution: empty results ──
 
   it('returns no-matches message when no files match', async () => {
-    const { discoverFiles } = await import("../../file-discovery.js");
+    const { discoverFiles } = await import("../../src/file-discovery.js");
     vi.mocked(discoverFiles).mockResolvedValue({
       files: [],
       diagnostics: {

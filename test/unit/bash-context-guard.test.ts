@@ -12,7 +12,7 @@ import {
   GUARD_HINT_DEEP_SEARCH,
   TOOL_GUARD_PROFILES,
   type BashContextGuardConfig,
-} from "../../bash-context-guard.js";
+} from "../../src/bash-context-guard.js";
 
 describe("resolveBashContextGuardConfig", () => {
   it("defaults enabled=true when env var not set", () => {

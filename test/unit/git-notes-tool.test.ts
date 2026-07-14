@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { tmpdir } from "node:os";
-import { createGitNotesTools } from "../../git-notes-tool.js";
+import { createGitNotesTools } from "../../src/git-notes-tool.js";
 
 describe("git notes tools", () => {
   it("creates two tools: git_notes_read and git_notes_write", () => {

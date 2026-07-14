@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
-import { beforeAll, describe, expect, it } from "vitest";
-import { __test, createReadManyTool } from "../../read-many.js";
-import { ensureHashlineReady } from "../../utils.js";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { __test, createReadManyTool } from "../../src/read-many.js";
+import { ensureHashlineReady } from "../../src/utils.js";
 
 beforeAll(async () => {
   await ensureHashlineReady();
@@ -458,5 +458,165 @@ describe("read_files: execute behavior", () => {
 		expect(posA).toBeGreaterThanOrEqual(0);
 		expect(posB).toBeGreaterThan(posA);
 		expect(posC).toBeGreaterThan(posB);
+	});
+});
+
+describe("read_files: batch workspace evidence", () => {
+	function makeEnvelopeFor(path: string, inspectionId: string, resourceId: string) {
+		return {
+			schemaVersion: 3,
+			inspectionId,
+			sessionId: "deadbeef".repeat(8),
+			workspaceRoot: "/",
+			canonicalWorkspaceRoot: "/",
+			createdAt: new Date().toISOString(),
+			mode: "path",
+			resources: [
+				{
+					resourceId,
+					canonicalPath: path,
+					kind: "full",
+					coverage: "full-file",
+					allowedRanges: [{ startLine: 1, endLine: 1 }],
+					fullFileSha256: "a".repeat(64),
+					fresh: true,
+				},
+			],
+		};
+	}
+
+	it("attaches a merged schema-3 envelope and publishes it when reads emit per-file evidence", async () => {
+		const publish: ReturnType<typeof vi.fn> = vi.fn();
+		const envA = makeEnvelopeFor("/a", "1".repeat(64), "a".repeat(64));
+		const envB = makeEnvelopeFor("/b", "2".repeat(64), "b".repeat(64));
+		const readTool = {
+			execute: async (
+				_toolCallId: string,
+				input: { path: string; offset?: number; limit?: number },
+			) => {
+				if (input.path === "/a") {
+					return {
+						content: [{ type: "text", text: "aaa" }],
+						details: { workspaceEvidence: envA },
+					};
+				}
+				if (input.path === "/b") {
+					return {
+						content: [{ type: "text", text: "bbb" }],
+						details: { workspaceEvidence: envB },
+					};
+				}
+				throw new Error(`No stub for path: ${input.path}`);
+			},
+		};
+		const session = "/tmp/session.jsonl";
+		const tool = createReadManyTool(() => readTool as any, { publishInspection: publish });
+		const ctx = {
+			cwd: "/",
+			sessionManager: { getSessionFile: () => session },
+		} as any;
+
+		const result = await tool.execute(
+			"call-ev-1",
+			{ files: [{ path: "/a" }, { path: "/b" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const batch = (result.details as any).workspaceEvidence;
+		expect(batch).toBeDefined();
+		expect(batch.schemaVersion).toBe(3);
+		expect(batch.mode).toBe("path");
+		// Two per-file resources merged into one envelope.
+		expect(batch.resources).toHaveLength(2);
+		const ids = batch.resources.map((r: any) => r.canonicalPath).sort();
+		expect(ids).toEqual(["/a", "/b"]);
+		// Merged inspectionId is recomputed across the combined resource set
+		// — it must be a 64-char hex string and must NOT equal any of the
+		// per-file inspectionIds verbatim (the protocol hashes the resource
+		// set into the id, so the combined id is its own value).
+		expect(batch.inspectionId).toMatch(/^[0-9a-f]{64}$/);
+		// Best-effort publish was called with the batch envelope and the
+		// session file path.
+		expect(publish).toHaveBeenCalledTimes(1);
+		const call = publish.mock.calls[0] as [unknown, string, string];
+		const [publishedEnv, publishedSession, publishedRoot] = call;
+		expect(publishedEnv).toBe(batch);
+		expect(publishedSession).toBe(session);
+		expect(publishedRoot).toBe(batch.canonicalWorkspaceRoot);
+	});
+
+	it("does not attach a batch envelope when no per-file evidence is emitted", async () => {
+		const publish = vi.fn();
+		const readTool = {
+			execute: async () => ({
+				content: [{ type: "text", text: "x" }],
+				// No workspaceEvidence on details
+			}),
+		};
+		const tool = createReadManyTool(() => readTool as any, { publishInspection: publish });
+		const ctx = {
+			cwd: "/",
+			sessionManager: { getSessionFile: () => "/tmp/s.jsonl" },
+		} as any;
+		const result = await tool.execute(
+			"call-ev-2",
+			{ files: [{ path: "/a" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect((result.details as any).workspaceEvidence).toBeUndefined();
+		expect(publish).not.toHaveBeenCalled();
+	});
+
+	it("does not attach a batch envelope when no session file is available", async () => {
+		const publish = vi.fn();
+		const env = makeEnvelopeFor("/a", "1".repeat(64), "a".repeat(64));
+		const readTool = {
+			execute: async () => ({
+				content: [{ type: "text", text: "x" }],
+				details: { workspaceEvidence: env },
+			}),
+		};
+		const tool = createReadManyTool(() => readTool as any, { publishInspection: publish });
+		// No sessionManager → sessionFileFromContext returns null
+		const ctx = { cwd: "/" } as any;
+		const result = await tool.execute(
+			"call-ev-3",
+			{ files: [{ path: "/a" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect((result.details as any).workspaceEvidence).toBeUndefined();
+		expect(publish).not.toHaveBeenCalled();
+	});
+
+	it("publish failure never blocks the batch read", async () => {
+		const env = makeEnvelopeFor("/a", "1".repeat(64), "a".repeat(64));
+		const readTool = {
+			execute: async () => ({
+				content: [{ type: "text", text: "ok" }],
+				details: { workspaceEvidence: env },
+			}),
+		};
+		const tool = createReadManyTool(() => readTool as any, {
+			publishInspection: () => { throw new Error("boom"); },
+		});
+		const ctx = {
+			cwd: "/",
+			sessionManager: { getSessionFile: () => "/tmp/s.jsonl" },
+		} as any;
+		const result = await tool.execute(
+			"call-ev-4",
+			{ files: [{ path: "/a" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect((result.content[0] as any).text).toContain("ok");
+		// The envelope is still attached even when publish throws.
+		expect((result.details as any).workspaceEvidence).toBeDefined();
 	});
 });

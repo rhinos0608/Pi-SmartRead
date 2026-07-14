@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { executeInspectDetails } from "../../inspect.js";
-import { computePathEvidence } from "../../path-evidence.js";
+import { executeInspectDetails } from "../../src/inspect.js";
+import { computePathEvidence } from "../../src/path-evidence.js";
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });

@@ -2,9 +2,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { MCP_RESOURCES, resolveResource } from "../../mcp-resources.js";
-import { recordCoverage } from "../../index-coverage.js";
-import { writeAdr } from "../../adr-store.js";
+import { MCP_RESOURCES, resolveResource } from "../../src/mcp-resources.js";
+import { recordCoverage } from "../../src/index-coverage.js";
+import { writeAdr } from "../../src/adr-store.js";
 
 let root: string;
 let oldCwd: string;

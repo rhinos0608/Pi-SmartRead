@@ -13,5 +13,10 @@
     "downlevelIteration": true,
     "types": ["node"]
   },
-  "include": ["*.ts", "*.d.ts", "test/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "test/**/*.ts",
+    "vitest.config.ts"
+  ]
 }

@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { CommitRecord } from "../../git-context.js";
-import { PI_NOTES_REF, formatBranchNotes, readNote, scanBranchNotes, writeNote } from "../../git-notes.js";
+import type { CommitRecord } from "../../src/git-context.js";
+import { PI_NOTES_REF, formatBranchNotes, readNote, scanBranchNotes, writeNote } from "../../src/git-notes.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();

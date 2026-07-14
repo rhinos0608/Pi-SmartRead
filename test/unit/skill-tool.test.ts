@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { createSkillTool } from "../../skill-tool.js";
-import { toExtensionContext } from "../../types.js";
+import { createSkillTool } from "../../src/skill-tool.js";
+import { toExtensionContext } from "../../src/types.js";
 
 async function makeProjectSkill(): Promise<{ root: string; skillDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "smartread-skill-"));

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { getTagsRaw } from "../../tags.js";
+import { getTagsRaw } from "../../src/tags.js";
 
 describe("tags extraction", () => {
   let root: string;

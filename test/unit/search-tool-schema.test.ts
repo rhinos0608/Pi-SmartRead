@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import createSearchTool from "../../search-tool.js";
-import { resetSessionState } from "../../hook.js";
+import createSearchTool from "../../src/search-tool.js";
+import { resetSessionState } from "../../src/hook.js";
 
 describe("search tool schema", () => {
   beforeEach(() => {
@@ -29,6 +29,10 @@ describe("search tool schema", () => {
     const depth = schema.properties?.depth;
     expect(depth).toBeDefined();
     expect(depth.anyOf?.map((v: any) => v.const) ?? depth.enum).toEqual(["quick", "deep"]);
+    expect(depth.description).toMatch(/grep/i);
+    expect(depth.description).toMatch(/AST/);
+    expect(tool.description).toMatch(/grep/i);
+    expect(tool.description).toMatch(/AST/);
     expect(schema.properties).toHaveProperty("scope");
   });
 

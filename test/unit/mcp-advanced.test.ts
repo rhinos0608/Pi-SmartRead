@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const MCP_SERVER_PATH = join(__dirname, "../../mcp-server.ts");
+const MCP_SERVER_PATH = join(__dirname, "../../src/mcp-server.ts");
 
 // ── Test helpers ───────────────────────────────────────────────────────────────
 
@@ -433,7 +433,7 @@ describe("MCP advanced capabilities", () => {
 
   it("maybeResourceLink returns inline text for small content", async () => {
     // Import helper directly to unit-test
-    const { maybeResourceLink } = await import("../../mcp-resources.js");
+    const { maybeResourceLink } = await import("../../src/mcp-resources.js");
 
     const small = "Hello, world!";
     const result = maybeResourceLink("test", small);
@@ -447,7 +447,7 @@ describe("MCP advanced capabilities", () => {
   }, 60_000);
 
   it("maybeResourceLink returns resource_link for large content", async () => {
-    const { maybeResourceLink, LARGE_RESULT_THRESHOLD } = await import("../../mcp-resources.js");
+    const { maybeResourceLink, LARGE_RESULT_THRESHOLD } = await import("../../src/mcp-resources.js");
 
     // Build a string larger than 8 KB
     const large = "x".repeat(LARGE_RESULT_THRESHOLD + 1);
@@ -461,7 +461,7 @@ describe("MCP advanced capabilities", () => {
   }, 60_000);
 
   it("maybeResourceLink is inclusive on the 8KB boundary", async () => {
-    const { maybeResourceLink, LARGE_RESULT_THRESHOLD } = await import("../../mcp-resources.js");
+    const { maybeResourceLink, LARGE_RESULT_THRESHOLD } = await import("../../src/mcp-resources.js");
 
     // Exactly at threshold should remain inline
     const exact = "y".repeat(LARGE_RESULT_THRESHOLD);

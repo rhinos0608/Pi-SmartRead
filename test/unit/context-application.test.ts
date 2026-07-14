@@ -5,12 +5,12 @@
 import { describe, expect, it } from "vitest";
 import {
   applyContextHygieneStaleContext,
-} from "../../context-application.js";
+} from "../../src/context-application.js";
 import {
   buildStaleContextRecord,
   buildRetiredContextRecord,
   type ContextHygieneReport,
-} from "../../context-hygiene.js";
+} from "../../src/context-hygiene.js";
 
 describe("applyContextHygieneStaleContext", () => {
   describe("returns unchanged messages when no stale/retired records", () => {

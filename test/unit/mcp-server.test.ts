@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const MCP_SERVER_PATH = join(__dirname, "../../mcp-server.ts");
+const MCP_SERVER_PATH = join(__dirname, "../../src/mcp-server.ts");
 
 function mcpInitialize(): Record<string, unknown> {
   return {

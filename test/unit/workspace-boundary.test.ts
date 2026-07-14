@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalPath, resolveWorkspacePath } from "../../workspace-boundary.js";
+import { canonicalPath, resolveWorkspacePath } from "../../src/workspace-boundary.js";
 
 const roots: string[] = [];
 

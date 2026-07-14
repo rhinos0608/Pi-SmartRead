@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { TagsCache, type Tag } from "../../cache.js";
+import { TagsCache, type Tag } from "../../src/cache.js";
 
 describe("TagsCache", () => {
   let tmpDir: string;

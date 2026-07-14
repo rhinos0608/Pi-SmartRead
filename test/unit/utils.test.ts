@@ -17,7 +17,7 @@ import {
   selectorToOffsetLimit,
   selectorToStartLine,
   splitPathAndSelector,
-} from "../../utils.js";
+} from "../../src/utils.js";
 
 beforeAll(async () => {
   await ensureHashlineReady();

@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest"
-import { summarizeCode, renderSummary, canSummarize } from "../../code-summary.js"
+import { summarizeCode, renderSummary, canSummarize } from "../../src/code-summary.js"
 
 describe("canSummarize", () => {
 	test("returns true for supported extensions within limits", () => {

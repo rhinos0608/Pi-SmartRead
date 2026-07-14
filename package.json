@@ -38,9 +38,8 @@
     "node": ">=20"
   },
   "files": [
-    "*.ts",
-    "*.d.ts",
-    "queries/**",
+    "src/**/*.ts",
+    "src/queries/**/*.scm",
     "README.md",
     "LICENSE",
     "package.json"
@@ -48,7 +47,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "mcp-server": "node --import tsx mcp-server.ts",
+    "mcp-server": "node --import tsx src/mcp-server.ts",
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "peerDependencies": {
@@ -87,7 +86,7 @@
   },
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./src/index.ts"
     ]
   }
 }

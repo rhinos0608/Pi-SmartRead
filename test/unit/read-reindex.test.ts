@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { installInspectAndResolver, getSharedEvidenceResolver } from "../../mcp-registry.js";
-import { computePathEvidence } from "../../path-evidence.js";
+import { installInspectAndResolver, getSharedEvidenceResolver } from "../../src/mcp-registry.js";
+import { computePathEvidence } from "../../src/path-evidence.js";
 
 function makeFakeBus() {
   const handlers = new Map<string, Array<(d: unknown) => void>>();

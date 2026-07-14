@@ -18,6 +18,7 @@ understand-anything.config.json
 test/unit/CLAUDE.md
 .subagent-work/
 research/
-dump.ts
+/dump.ts
 config.enc
 bun.lock
+.vscode/

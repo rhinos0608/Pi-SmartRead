@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { rerank, externalRerank, rerankWithExternal, type RerankerInput } from "../../rerank.js";
+import { rerank, externalRerank, rerankWithExternal, type RerankerInput } from "../../src/rerank.js";
 
 describe("rerank", () => {
   it("returns empty array for empty input", () => {

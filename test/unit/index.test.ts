@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it, beforeEach } from "vitest";
-import { resetSessionState } from "../../hook.js";
-import { GUARD_HINT_DEEP_SEARCH } from "../../bash-context-guard.js";
+import { resetSessionState } from "../../src/hook.js";
+import { GUARD_HINT_DEEP_SEARCH } from "../../src/bash-context-guard.js";
 
 // Import after resetting module state to avoid cross-test contamination
 let registerExtension: (pi: ExtensionAPI) => void;
@@ -9,7 +9,7 @@ let registerExtension: (pi: ExtensionAPI) => void;
 beforeEach(async () => {
   resetSessionState();
   // Dynamic import to get fresh module reference
-  registerExtension = (await import("../../index.js")).default;
+  registerExtension = (await import("../../src/index.js")).default;
 });
 
 describe("index extension wiring", () => {

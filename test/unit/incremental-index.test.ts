@@ -30,9 +30,9 @@ import {
   createIncrementalIndex,
   getIncrementalIndex,
   clearIncrementalIndexInstance,
-} from "../../incremental-index.js";
+} from "../../src/incremental-index.js";
 
-import type { FileHashCache } from "../../incremental-index.js";
+import type { FileHashCache } from "../../src/incremental-index.js";
 
 describe("hashFileSync", () => {
   it("produces a deterministic 64-char hex hash", () => {

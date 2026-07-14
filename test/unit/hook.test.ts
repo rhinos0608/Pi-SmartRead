@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { wrapBuiltinReadTool, registerSessionHooks, resetSessionState } from "../../hook.js";
+import { wrapBuiltinReadTool, registerSessionHooks, resetSessionState } from "../../src/hook.js";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -193,27 +193,37 @@ describe("registerSessionHooks", () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
-    // First trigger session_start to prime the cache
-    await handlers.session_start!(
-      { type: "session_start", reason: "startup" },
-      makeMockContext(process.cwd()),
-    );
+    const projectDir = mkdtempSync(join(tmpdir(), "hook-map-test-"));
+    writeFileSync(join(projectDir, "package.json"), '{"name":"hook-map-test"}\n');
+    writeFileSync(join(projectDir, "index.ts"), "export const ready = true;\n");
 
-    // Then trigger before_agent_start
-    const result = await handlers.before_agent_start!(
-      { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
-      makeMockContext(process.cwd()),
-    );
+    try {
+      // First trigger session_start to prime the cache with a deliberately
+      // tiny project. Using the whole checkout makes this latency-bound test
+      // race the 750ms production startup budget under full-suite load.
+      await handlers.session_start!(
+        { type: "session_start", reason: "startup" },
+        makeMockContext(projectDir),
+      );
 
-    // Should have appended repo map
-    const typed = result as { systemPrompt?: string } | undefined;
-    expect(typed).toBeDefined();
-    expect(typeof typed!.systemPrompt).toBe("string");
-    const promptText = typed!.systemPrompt;
-    expect(promptText).toContain("Repository Map");
-    expect(promptText).toContain("SmartRead Tool Guide");
-    expect(promptText).toContain('depth: "deep"');
-    expect(promptText).toContain("inspect { symbol }:");
+      // Then trigger before_agent_start
+      const result = await handlers.before_agent_start!(
+        { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
+        makeMockContext(projectDir),
+      );
+
+      // Should have appended repo map
+      const typed = result as { systemPrompt?: string } | undefined;
+      expect(typed).toBeDefined();
+      expect(typeof typed!.systemPrompt).toBe("string");
+      const promptText = typed!.systemPrompt;
+      expect(promptText).toContain("Repository Map");
+      expect(promptText).toContain("SmartRead Tool Guide");
+      expect(promptText).toContain('depth: "deep"');
+      expect(promptText).toContain("inspect { symbol }:");
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   }, 15_000);
 
   it("before_agent_start returns undefined for subsequent turns", async () => {

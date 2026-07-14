@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { PersistentEmbeddingCache } from "../../persistent-embedding-cache.js";
+import { PersistentEmbeddingCache } from "../../src/persistent-embedding-cache.js";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";

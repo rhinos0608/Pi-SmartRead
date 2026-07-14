@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
     createEvidenceResolver,
     type ResolverBus,
-} from "../../workspace-evidence-resolver.js";
+} from "../../src/workspace-evidence-resolver.js";
 import {
     PROTOCOL_SCHEMA_VERSION,
     validateInspectionEnvelope,
@@ -51,7 +51,6 @@ describe("createEvidenceResolver", () => {
         const resolver = createEvidenceResolver({
             bus,
             channel: "test.rpc",
-            timeoutMs: 200,
         });
         await resolver.install();
         resolver.publishInspection(
@@ -94,7 +93,7 @@ describe("createEvidenceResolver", () => {
 
     it("resolves published inspection on matching session and workspace", async () => {
         const { bus } = makeBus();
-        const resolver = createEvidenceResolver({ bus, channel: "test.rpc", timeoutMs: 200 });
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc" });
         await resolver.install();
         const inspectionId = "b".repeat(64);
         resolver.publishInspection(
@@ -138,7 +137,7 @@ describe("createEvidenceResolver", () => {
 
     it("overwrites (does not throw) when the same session re-publishes the same inspectionId with different content (re-inspect after change)", async () => {
         const { bus } = makeBus();
-        const resolver = createEvidenceResolver({ bus, channel: "test.rpc", timeoutMs: 200 });
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc" });
         await resolver.install();
         const inspectionId = "c".repeat(64);
         const base = envelopeFor(inspectionId, [
@@ -161,7 +160,7 @@ describe("createEvidenceResolver", () => {
 
     it("rejects the same inspectionId re-published from a different session (genuine identity conflict)", async () => {
         const { bus } = makeBus();
-        const resolver = createEvidenceResolver({ bus, channel: "test.rpc", timeoutMs: 200 });
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc" });
         await resolver.install();
         const inspectionId = "c".repeat(64);
         const base = envelopeFor(inspectionId, [
@@ -187,7 +186,7 @@ describe("createEvidenceResolver", () => {
 
     it("rejects unknown inspectionId", async () => {
         const { bus } = makeBus();
-        const resolver = createEvidenceResolver({ bus, channel: "test.rpc", timeoutMs: 200 });
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc" });
         await resolver.install();
         const request = {
             kind: "request" as const,
@@ -213,7 +212,102 @@ describe("createEvidenceResolver", () => {
 
     it("rejects envelope that fails schema validation", () => {
         const { bus } = makeBus();
-        const resolver = createEvidenceResolver({ bus, channel: "test.rpc", timeoutMs: 200 });
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc" });
         expect(() => resolver.publishInspection({ schemaVersion: 99 } as any, SESSION_FILE, CANONICAL_WS)).toThrow();
+    });
+
+    it("evicts oldest entries when publish would exceed the cache cap", () => {
+        const { bus } = makeBus();
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc" });
+        // Publish one more than the cap, oldest should be gone.
+        const cap = 200;
+        for (let i = 0; i < cap + 1; i++) {
+            const inspectionId = i.toString(16).padStart(64, "0");
+            const resourceId = (i + 0x1000).toString(16).padStart(64, "0");
+            resolver.publishInspection(
+                envelopeFor(inspectionId, [
+                    {
+                        resourceId,
+                        canonicalPath: `/ws/file-${i}.ts`,
+                        kind: "full",
+                        coverage: "full-file",
+                        allowedRanges: [{ startLine: 1, endLine: 1 }],
+                        fullFileSha256: "f".repeat(64),
+                        fresh: true,
+                    },
+                ]),
+                SESSION_FILE,
+                CANONICAL_WS,
+            );
+        }
+        // Cap must be honored.
+        expect(resolver.size()).toBe(cap);
+        // Oldest (i=0) must be evicted; newest (i=200) must remain.
+        const oldest = "0".repeat(64);
+        const newest = (cap).toString(16).padStart(64, "0");
+        expect(resolver.getEnvelope(oldest)).toBeNull();
+        expect(resolver.getEnvelope(newest)).not.toBeNull();
+    });
+
+    it("promotes the entry on successful resolve (LRU-by-recency)", () => {
+        const { bus } = makeBus();
+        const resolver = createEvidenceResolver({ bus, channel: "test.rpc" });
+        const cap = 200;
+        // Fill the cache with cap entries.
+        for (let i = 0; i < cap; i++) {
+            const inspectionId = i.toString(16).padStart(64, "0");
+            const resourceId = (i + 0x2000).toString(16).padStart(64, "0");
+            resolver.publishInspection(
+                envelopeFor(inspectionId, [
+                    {
+                        resourceId,
+                        canonicalPath: `/ws/lru-${i}.ts`,
+                        kind: "full",
+                        coverage: "full-file",
+                        allowedRanges: [{ startLine: 1, endLine: 1 }],
+                        fullFileSha256: "9".repeat(64),
+                        fresh: true,
+                    },
+                ]),
+                SESSION_FILE,
+                CANONICAL_WS,
+            );
+        }
+        // Resolve the oldest entry directly. This must promote it to the
+        // tail of the Map.
+        const oldestId = "0".repeat(64);
+        const promoted = resolver.getEnvelope(oldestId);
+        expect(promoted).not.toBeNull();
+        // After promoting, a single new publish must NOT evict the
+        // just-resolved oldest — the just-published entry becomes the new
+        // oldest instead.
+        const newInspectionId = "f".repeat(64);
+        const newResourceId = "e".repeat(64);
+        resolver.publishInspection(
+            envelopeFor(newInspectionId, [
+                {
+                    resourceId: newResourceId,
+                    canonicalPath: "/ws/lru-new.ts",
+                    kind: "full",
+                    coverage: "full-file",
+                    allowedRanges: [{ startLine: 1, endLine: 1 }],
+                    fullFileSha256: "a".repeat(64),
+                    fresh: true,
+                },
+            ]),
+            SESSION_FILE,
+            CANONICAL_WS,
+        );
+        expect(resolver.size()).toBe(cap);
+        // The promoted entry is still there.
+        expect(resolver.getEnvelope(oldestId)).not.toBeNull();
+        // After promoting entry 0 to the tail, entry 1 became the head
+        // (oldest). One publish above cap must evict entry 1, not the
+        // promoted entry.
+        const secondId = "1".padStart(64, "0");
+        expect(resolver.getEnvelope(secondId)).toBeNull();
+        // The previously-newest entry (i=199) is still there.
+        const secondToLastId = (cap - 1).toString(16).padStart(64, "0");
+        expect(resolver.getEnvelope(secondToLastId)).not.toBeNull();
     });
 });

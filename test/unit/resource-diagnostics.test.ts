@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { collectResourceDiagnosticSample, startResourceDiagnostics, stopResourceDiagnostics, writeResourceDiagnosticSample } from "../../resource-diagnostics.js";
+import { collectResourceDiagnosticSample, startResourceDiagnostics, stopResourceDiagnostics, writeResourceDiagnosticSample } from "../../src/resource-diagnostics.js";
 
 let root: string;
 

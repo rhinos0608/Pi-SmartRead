@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { findCallers, buildCallGraph } from "../../callgraph.js";
+import { findCallers, buildCallGraph } from "../../src/callgraph.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -42,7 +42,7 @@ describe("callgraph", () => {
         }
       `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const files = [join(tmpDir, "a.ts"), join(tmpDir, "b.ts")];
@@ -59,7 +59,7 @@ describe("callgraph", () => {
     it("returns empty array when no callers exist", async () => {
       makeFile("a.ts", `function unused() { return 42; }`);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const callers = await findCallers([join(tmpDir, "a.ts")], "nonexistent");
@@ -78,7 +78,7 @@ describe("callgraph", () => {
         }
       `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const callers = await findCallers([join(tmpDir, "a.ts")], "createUser");
@@ -93,7 +93,7 @@ describe("callgraph", () => {
       makeFile("a.md", "# Markdown file");
       makeFile("b.txt", "some text");
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const callers = await findCallers([join(tmpDir, "a.md"), join(tmpDir, "b.txt")], "anything");
@@ -113,7 +113,7 @@ def setup_logging():
     get_config()
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const files = [join(tmpDir, "a.py")];
@@ -143,7 +143,7 @@ func setupLogging() {
 }
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const files = [join(tmpDir, "main.go")];
@@ -171,7 +171,7 @@ fn setup_logging() {
 }
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const files = [join(tmpDir, "main.rs")];
@@ -197,7 +197,7 @@ def main():
     svc.get_user(1)
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const callers = await findCallers([join(tmpDir, "service.py")], "get_user");
@@ -217,7 +217,7 @@ func main() {
 }
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const callers = await findCallers([join(tmpDir, "service.go")], "GetUser");
@@ -244,7 +244,7 @@ fn main() {
 }
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const callers = await findCallers([join(tmpDir, "service.rs")], "get_user");
@@ -257,7 +257,7 @@ fn main() {
     it("handles malformed files gracefully", async () => {
       makeFile("broken.ts", "import { } from } ;;; // not valid");
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const callers = await findCallers([join(tmpDir, "broken.ts")], "anything");
@@ -277,7 +277,7 @@ fn main() {
         function qux() { foo(); bar(); }
       `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const result = await buildCallGraph([
@@ -312,7 +312,7 @@ def qux():
     bar()
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const result = await buildCallGraph([
@@ -331,7 +331,7 @@ func bar() { baz() }
 func baz() {}
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const result = await buildCallGraph([join(tmpDir, "a.go")]);
@@ -347,7 +347,7 @@ fn bar() { baz(); }
 fn baz() {}
 `);
 
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const result = await buildCallGraph([join(tmpDir, "a.rs")]);
@@ -358,7 +358,7 @@ fn baz() {}
     });
 
     it("returns empty graph for no files", async () => {
-      const { initParser } = await import("../../tags.js");
+      const { initParser } = await import("../../src/tags.js");
       await initParser();
 
       const result = await buildCallGraph([]);

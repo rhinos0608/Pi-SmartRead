@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { computeSourceHash, readSnapshot, snapshotPath, verifySnapshot, writeSnapshot } from "../../index-snapshot.js";
+import { computeSourceHash, readSnapshot, snapshotPath, verifySnapshot, writeSnapshot } from "../../src/index-snapshot.js";
 
 let root: string;
 

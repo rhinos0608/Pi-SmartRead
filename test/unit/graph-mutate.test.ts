@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createGraphMutateTool } from "../../graph-mutate.js";
-import { ContextGraph } from "../../context-graph.js";
+import { createGraphMutateTool } from "../../src/graph-mutate.js";
+import { ContextGraph } from "../../src/context-graph.js";
 
 describe("graph_mutate", () => {
   it("records absolute edge paths outside the selected root", async () => {

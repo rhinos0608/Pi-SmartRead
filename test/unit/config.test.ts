@@ -1,5 +1,5 @@
 import { afterEach as _afterEach, beforeEach, describe, expect, it } from "vitest";
-import { validateEmbeddingConfig } from "../../config.js";
+import { validateEmbeddingConfig } from "../../src/config.js";
 
 /** A cwd that has no pi-smartread.config.json in any ancestor directory. */
 const SAFE_CWD = "/tmp";

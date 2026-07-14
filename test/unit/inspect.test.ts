@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { computeInspectDetails } from "../../inspect.js";
+import { computeInspectDetails } from "../../src/inspect.js";
 import {
     PROTOCOL_SCHEMA_VERSION,
     validateInspectionEnvelope,

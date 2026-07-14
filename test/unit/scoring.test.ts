@@ -5,7 +5,7 @@ import {
   computeRanks,
   computeRrfScores,
   tokenize,
-} from "../../scoring.js";
+} from "../../src/scoring.js";
 
 describe("tokenize", () => {
   describe("full-token behavior (preserve existing tests)", () => {
