@@ -10,12 +10,11 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 
 | Tool | What it does |
 |---|---|
-| `read` | Single-file read with contextual enrichment (imports, git, graphify) |
-| `read_files` | Multi-file batch read with adaptive output packing; `query` mode ranks candidates with hybrid RRF retrieval (BM25 + embeddings) |
-| `search` | Unified text + code search: grep-style matches plus AST-aware code definitions; `depth: "deep"` keeps both and adds semantic, symbol, graph, and LSP signals |
-| `repo_map` | PageRank-ranked repository map from native tree-sitter AST tags |
-| `symbol` | Symbol-level exploration: name search (default), file outline, declaration, references, implementations |
-| `graph_mutate` | [experimental] Records semantic coupling observations (breakage edges, co-change edges) into the context graph |
+| `read` | Single-file read with contextual enrichment (imports, git, graphify). |
+| `inspect` | Multi-mode retrieval: `path` (file read + evidence), `query` (intent search; `depth: "deep"` enables semantic/symbol/graph/LSP channels), `symbol` (symbol lookup), and `map` (repo map). |
+| `graph_mutate` | [experimental] Records semantic coupling observations into the context graph. |
+
+Experimental tools (`graph_mutate` and git-notes tools) are opt-in via `pi-smartread.config.json` and only register when enabled.
 
 ### Cross-cutting features
 
@@ -63,203 +62,72 @@ On the first read-like call in a repo, may return a compact repo map — simply 
 
 ---
 
-## `read_files`
+## `inspect`
 
-Read up to 20 files in one call with adaptive output packing.
+Multi-mode retrieval tool. One mode per call, selected by the input shape. Every mode returns a `details.workspaceEvidence` envelope; path mode produces **strong** evidence that authorizes patch, while query/symbol/map modes produce weak (search-match) evidence and are meant for discovery.
 
-**Key behavior:**
-- Reads files in request order
-- Supports per-file `offset` and `limit`
-- Continues on errors by default (`stopOnError: false`)
-- Uses adaptive packing under pi output limits
-- Returns stable per-file heredoc blocks
+### Path mode
+
+Single-file read with evidence. Same enrichment as `read`.
+
+Accepted params: `path`, `offset`, `limit`.
 
 ```json
 {
-  "files": [
-    { "path": "src/a.ts" },
-    { "path": "src/b.ts", "offset": 40, "limit": 120 }
-  ],
-  "stopOnError": false
+  "path": "src/auth.ts",
+  "offset": 40,
+  "limit": 120
 }
 ```
 
-`details.packing` includes `strategy`, `switchedForCoverage`, `fullIncludedCount`, `fullIncludedSuccessCount`, `partialIncludedPath`, and `omittedPaths`.
+### Query mode
 
----
+Intent-based search. Default depth is `"quick"` (grep + AST). Use `depth: "deep"` to also run semantic, symbol, graph, and LSP channels with RRF fusion.
 
-## `read_files` query mode
+Accepted params: `query`, `depth` (`"quick"` or `"deep"`), `directory`.
 
-Find the most relevant files for a query using hybrid retrieval (`read_files { query: "..." }`).
-
-**How it works:**
-1. Resolves candidates from explicit files or a non-recursive directory scan
-2. Augments candidates with direct in-workspace relative import neighbours
-3. Reads candidate files and chunks content with overlap
-4. Builds compressed embedding text with structural headers
-5. Ranks files using **BM25 + semantic similarity**
-6. Fuses ranks with **Reciprocal Rank Fusion (RRF, k=60)**
-7. Returns top-K files with scores and provenance metadata
-
-**Retrieval features:**
-- **BM25 keyword ranking** — exact identifier and API name matching
-- **Embedding cosine similarity** — conceptual matching via OpenAI-compatible endpoint
-- **RRF fusion** — parameter-free rank combination
-- **HyDE query expansion** — hypothetical document embedding for better semantic matching (opt-in)
-- **Graph-aware candidate expansion** — import neighbours, symbol neighbours, call graph neighbours
-- **Query probing** — extracts identifiers from query and resolves definition files (opt-in)
-- **Structural reranker** — reorders results using graph distance, probe confidence, temporal signals (opt-in)
-- **External reranker** — optional Cohere/Jina-compatible reranking endpoint
-- **Persistent embedding cache** — disk-backed (`.pi-smartread.embeddings.cache/`) with in-memory LRU layer
-- **BM25-only degradation** — graceful fallback when embedding config is missing or unreachable
+`scope`, `limit`, `maxSnippetChars`, `outputBudget`, and `includeRelationships` are internal engine defaults — they are not exposed tool params.
 
 ```json
 {
   "query": "authentication middleware",
-  "files": [
-    { "path": "src/auth.ts" },
-    { "path": "src/middleware.ts" }
-  ],
-  "topK": 2
+  "directory": "src"
 }
 ```
 
-The output includes framed heredoc blocks plus ranking metadata in `details.files` with path, relevance scores, and inclusion status.
-
----
-
-## `search`
-
-Unified search: runs both text grep and AST-aware code search, returning combined results.
-
-### Options
-
-| Parameter | Description |
-|---|---|
-| `query` (required) | Search term, identifier, or regex pattern |
-| `directory` | Root directory to search (default: working dir) |
-| `maxResults` | Max results per channel (default: 30) |
-| `matchMode` | `literal` (default) or `regex` |
-| `caseSensitive` | Auto-detected by default (mixed-case = sensitive) |
-| `contextLines` | Surrounding lines for grep hits (default: 3) |
-
-Results include both code definitions (AST-ranked) and grep text matches. `depth: "deep"` retains both channels while adding semantic, symbol, graph, and LSP evidence.
-
-### Examples
-
-**Text + code search:**
-
-```json
-{
-  "query": "JWT_SECRET",
-  "contextLines": 1
-}
-```
-
-**Regex pattern search:**
-
-```json
-{
-  "query": "plugin-[a-z]+",
-  "matchMode": "regex",
-  "caseSensitive": false
-}
-```
-
-**Deep search (dedicated tool):**
+Deep search:
 
 ```json
 {
   "query": "how does JWT token validation work?",
-  "depth": "standard",
-  "scope": "code",
-  "directory": "src",
-  "limit": 15,
-  "maxSnippetChars": 400,
-  "includeRelationships": true
+  "depth": "deep",
+  "directory": "src"
 }
 ```
 
-### Deep search options
+### Symbol mode
 
-| Option | Default | Meaning |
-|---|---|---|
-| `depth` | `standard` | `quick` (code+symbols), `standard` (+semantic+graph), `thorough` (+caller enrichment) |
-| `scope` | `all` | Filter to `code`, `docs`, `tests`, or `all` |
-| `directory` / `folder` | working directory | Root directory to search |
-| `limit` | 15 | Maximum matches (1–50) |
-| `maxSnippetChars` | 400 | Max chars per snippet (100–1000) |
-| `outputBudget` | 4096 | Approximate output token budget (1k–16k) |
-| `includeRelationships` | false | Include caller/callee/import hints for top matches |
+Symbol lookup: name search, file outline, declaration, references, implementations.
 
----
-
-## `repo_map`
-
-Generate a repository map using **native tree-sitter AST extraction** by default, with an **import-based fallback** when needed.
-
-### What it does
-
-- Scans source files across 41 supported languages
-- Extracts definitions and references via native tree-sitter parsers
-- Ranks files using PageRank with optional personalization
-- Renders a token-budgeted map for agent orientation
-
-### Example
+Accepted params: `symbol`, `directory`.
 
 ```json
 {
-  "directory": ".",
-  "mapTokens": 4096,
-  "focus": ["repomap.ts"],
-  "compact": false
+  "symbol": "AuthService.login",
+  "directory": "src"
 }
 ```
 
-### Options
+### Map mode
 
-| Option | Default | Meaning |
-|---|---|---|
-| `mapTokens` | 4096 | Token budget (256–32768) |
-| `focus` | `[]` | Files or symbols to personalize PageRank toward |
-| `compact` | false | Terse single-line-per-file view |
+Repository structure and PageRank-ranked symbol map.
 
----
-
-## `symbol`
-
-Symbol-level code exploration.
-
-### Actions
-
-| Action | What it does |
-|---|---|
-| `find` (default) | Find symbols by name/pattern via AST + LSP. Supports qualified paths (`ClassName.methodName`). |
-| `outline` | File outline via AST analysis — all top-level symbols with types and line ranges. |
-| `declaration` | Find the canonical definition of a symbol with optional context file. |
-| `references` | All reference locations for a symbol across the codebase. |
-| `implementations` | Find types that implement an interface or extend a class. |
-
-### Examples
+Accepted params: `action: "map"`, `directory`.
 
 ```json
 {
-  "query": "UserService.create"
-}
-```
-
-```json
-{
-  "action": "outline",
-  "path": "src/services/auth.ts"
-}
-```
-
-```json
-{
-  "action": "references",
-  "query": "Authenticator",
-  "path": "src/middleware/auth.ts"
+  "action": "map",
+  "directory": "."
 }
 ```
 
@@ -289,7 +157,7 @@ When editing file A causes type-checking errors in file B:
 }
 ```
 
-The next `read_files` query touching A will automatically include B as a candidate.
+The next `inspect { query }` touching A will automatically include B as a candidate.
 
 ### Co-change
 
@@ -373,6 +241,8 @@ All retrieval modes degrade gracefully. Only config authoring errors (e.g. `chun
 ---
 
 ## Advanced retrieval features
+
+> The old standalone `read_files` tool wrapper (`createReadFilesTool` / `src/read-many.ts`) is no longer registered. Its retrieval engine lives on inside `inspect { query, depth: "deep" }`.
 
 ### HyDE query expansion
 
@@ -458,9 +328,38 @@ Pi-SmartRead includes a standalone **MCP (Model Context Protocol) stdio server**
 npm run mcp-server
 ```
 
-Exposes: `read`, `read_files`, `search`, `repo_map`, `symbol`, and (if experimental features are enabled) `graph_mutate` and git notes tools.
+The MCP server exposes the shared `ToolRegistry` tools:
 
-Prompts include `smartread-tool-guide`, which returns task-specific guidance for choosing between `read`, `read_files`, `search`, `symbol`, and `repo_map`.
+| Tool | Notes |
+|---|---|
+| `inspect` | Path, query, symbol, and map modes. |
+| `skill` | Skill invocations. |
+| `graph_mutate` | Only when `experimental.graphMutate: true`. |
+| git-notes tools | Only when `experimental.gitNotes: true`. |
+
+`read` is **not** exposed over MCP — it is registered directly on the Pi extension API only. Use `inspect { path }` for single-file reads through MCP.
+
+### Resources
+
+The server exposes `smartread://` resources:
+
+| URI | Description |
+|---|---|
+| `smartread://config` | Current SmartRead configuration (embedding, search, git context, experimental features) |
+| `smartread://repo-map` | Latest repository symbol map (PageRank + tree-sitter) |
+| `smartread://status` | Server version, tool count, and runtime status |
+| `smartread://repo/stats` | Repository file count, language breakdown, and source-file statistics |
+| `smartread://repo/graph/summary` | Knowledge graph summary — nodes, edges, communities, and file coverage |
+| `smartread://repo/graph/communities` | Detected architectural clusters with file counts and sample filenames |
+| `smartread://repo/graph/god-nodes` | Highest-centrality graph nodes (core abstractions), sorted by connection count |
+| `smartread://repo/index/status` | Knowledge graph index — file count, last modified, and pending changes |
+| `smartread://repo/index/coverage` | Index coverage records: indexed, ignored, unsupported, binary, partial, parse/read errors |
+| `smartread://repo/adrs` | Project ADRs stored under `.pi-smartread/adrs` |
+| `smartread://repo/near-clones` | MinHash+LSH near-clone pairs for source files |
+
+### Prompts
+
+The server exposes prompts for `explain-code`, `review-diff`, `architectural-analysis`, and `smartread-tool-guide`.
 
 See **[docs/mcp-quickstart.md](docs/mcp-quickstart.md)** for full setup instructions.
 
@@ -513,38 +412,42 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 
 **Semantic ranking is not working** — Check `pi-smartread.config.json` or the `PI_SMARTREAD_EMBEDDING_*` environment variables. BM25-only ranking will still work.
 
-**I only want a quick structure overview** — Call `repo_map` with `compact: true`.
+**I only want a quick structure overview** — Call `inspect { action: "map" }`.
 
-**Doom-loop warning appears** — The LLM repeated identical tool calls 3+ times. Try a different search query or use `repo_map` to get oriented.
+**Doom-loop warning appears** — The LLM repeated identical tool calls 3+ times. Try a different search query or use `inspect { action: "map" }` to get oriented.
 
 ---
 
 ## Migration
 
-### `query` is now required (v2.0.0)
+### v3 tool consolidation
 
-The `query` parameter for the `search` tool is now required. Previously it was optional in some contexts.
+The standalone `read_files`, `search`, `repo_map`, and `symbol` tools have been consolidated into the `inspect` tool. Update existing calls:
 
-To migrate:
+| Old call | New call |
+|---|---|
+| `read_files { files: [...] }` | Use `read` for single files. Batch multi-file reads are no longer exposed as a registered tool; use `inspect { query }` or `inspect { path }` calls as needed. |
+| `search { query }` | `inspect { query }` (default quick) or `inspect { query, depth: "deep" }` |
+| `repo_map { ... }` | `inspect { action: "map" }` |
+| `symbol { ... }` | `inspect { symbol }` |
 
-1. Ensure all `search` tool calls include a non-empty `query` string.
-2. If you previously omitted `query`, add it explicitly.
-3. Missing or empty `query` now throws a descriptive error.
+`read` is unchanged.
 
 ---
 
 ## Related docs
 
-- `docs/research-deep-dive.md` — Design research, ecosystem analysis, and roadmap (some sections predate consolidation)
-- `docs/advanced-retrieval-spec.md` — Proposed architecture for graph-aware retrieval
-- `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan
-- `docs/advanced-retrieval-research.md` — Academic and industry research survey
-- `docs/pi-hashline-readmap-research.md` — Cross-extension integration analysis
-- `docs/deep-search-spec.md` — Deep search specification
-- `docs/deep-search-implementation.md` — Deep search implementation plan
-- `docs/phase-6-8-implementation-notes.md` — Notes on external reranker, MCP server, HyDE, benchmarks, multi-language call graphs
+- `docs/research-deep-dive.md` — Design research, ecosystem analysis, and roadmap (predates consolidation; historical)
+- `docs/advanced-retrieval-spec.md` — Proposed architecture for graph-aware retrieval (historical / superseded)
+- `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan (historical / superseded)
+- `docs/advanced-retrieval-research.md` — Academic and industry research survey (historical / superseded)
+- `docs/pi-hashline-readmap-research.md` — Cross-extension integration analysis (historical / superseded)
+- `docs/deep-search-spec.md` — Deep search specification (historical / superseded)
+- `docs/deep-search-implementation.md` — Deep search implementation plan (historical / superseded)
+- `docs/phase-6-8-implementation-notes.md` — Notes on external reranker, MCP server, HyDE, benchmarks, multi-language call graphs (historical / superseded)
+- `docs/tool-consolidation-plan.md` — Pre-v3 tool-consolidation design (historical / superseded)
+- `docs/plans/2026-05-03-search-tool-consolidation-design.md` — Pre-v3 search-tool consolidation design (historical / superseded)
 - `docs/mcp-quickstart.md` — MCP server setup for Claude Desktop, Cursor, and generic clients
-- `progress.md` — Implementation snapshot
 
 ---
 

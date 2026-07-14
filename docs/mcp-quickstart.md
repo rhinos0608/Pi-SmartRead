@@ -26,11 +26,45 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 
 | MCP Tool | Description |
 |---|---|
-| `read` | Unified reader: single-file (`file`), intent-based hybrid RRF retrieval (`intent`), multi-file batch (`multiple`) |
-| `search` | Consolidated search: AST-aware grep (`grep`), BM25+embedding code search (`code`), agentic deep search (`deep`) |
-| `repo_map` | PageRank-ranked repository map from tree-sitter ASTs |
-| `find_symbol` | Symbol-level exploration: name search, outline, references, declaration, implementations, workspace LSP search, hover |
-| `graph_mutate` | [experimental] Record semantic coupling edges (breakage, co-change) into the context graph |
+| `inspect` | Multi-mode code intelligence: `{ path }` path read, `{ query }` search, `{ query, depth: "deep" }` deep search, `{ symbol }` symbol exploration, `{ action: "map" }` repo map |
+| `skill` | Run named skills declared in `.pi-smartread/skills/` |
+| `graph_mutate` | [experimental] Record semantic coupling edges — requires `experimental.graphMutate: true` |
+| git-notes tools | [experimental] Read/write git notes — requires `experimental.gitNotes: true` |
+
+> **Note:** `read` is Pi-extension-only and is **not** exposed over MCP. For single or multi-file reads from an MCP client, use `inspect { path }`.
+
+---
+
+## Resources
+
+The server exposes these `smartread://` URIs as MCP resources:
+
+| Resource URI | Description |
+|---|---|
+| `smartread://config` | Current config (embedding, search, git context, experimental) |
+| `smartread://repo-map` | Latest repo symbol map |
+| `smartread://status` | Server version, tool count, runtime status |
+| `smartread://repo/stats` | File count, language breakdown |
+| `smartread://repo/graph/summary` | Knowledge graph summary |
+| `smartread://repo/graph/communities` | Detected architectural clusters |
+| `smartread://repo/graph/god-nodes` | Highest-centrality graph nodes |
+| `smartread://repo/index/status` | Index file count, pending changes |
+| `smartread://repo/index/coverage` | Coverage records (indexed/ignored/unsupported/binary/partial/errors) |
+| `smartread://repo/adrs` | ADRs under `.pi-smartread/adrs` |
+| `smartread://repo/near-clones` | MinHash+LSH near-clone pairs |
+
+---
+
+## Prompts
+
+The server exposes these MCP prompts:
+
+| Prompt | Description |
+|---|---|
+| `explain-code` | Explain how a piece of code works |
+| `review-diff` | Review a git diff for potential issues, bugs, and style concerns |
+| `architectural-analysis` | Perform architectural analysis of a file or module |
+| `smartread-tool-guide` | Guide for selecting the right SmartRead retrieval tool for a task |
 
 ---
 
@@ -208,7 +242,7 @@ Or in `.mcp.json`:
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
 | **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
 | **Install** | `pi install git:...` | `npx tsx src/mcp-server.ts` |
-| **Same tools?** | Yes — same underlying implementations |  |
+| **Same tools?** | `read`, `inspect`, `skill`, and optional experimental tools | `inspect`, `skill`, and optional experimental tools only — `read` is not exposed |
 
 ---
 
@@ -222,7 +256,7 @@ Or in `.mcp.json`:
 
 **No semantic ranking** — The MCP server uses the same embedding config as the Pi extension. Set `PI_SMARTREAD_EMBEDDING_BASE_URL` and `PI_SMARTREAD_EMBEDDING_MODEL`, or place a `pi-smartread.config.json` in the working directory.
 
-**Tool returns "Error: Embedding baseUrl is required"** — Use `read` or `search` for config-free operation, or configure embeddings.
+**Tool returns "Error: Embedding baseUrl is required"** — Use `inspect { query }` for config-free search, or configure embeddings.
 
 **Configuration changes not taking effect** — Restart Claude Code (or the respective MCP client) after changing config. Run `claude mcp list` to verify connected servers.
 
@@ -238,11 +272,10 @@ Or in `.mcp.json`:
 │  Cursor, etc.)  │   stdout (JSON-RPC)     │                      │
 └─────────────────┘                         │  Tool Registry       │
                                             │  ┌────────────────┐ │
-                                            │  │ read (unified)  │ │
-                                            │  │ search          │ │
-                                            │  │ repo_map        │ │
-                                            │  │ find_symbol     │ │
+                                            │  │ inspect         │ │
+                                            │  │ skill           │ │
                                             │  │ graph_mutate*   │ │
+                                            │  │ git-notes*      │ │
                                             │  └────────────────┘ │
                                             └──────────────────────┘
                                             * experimental

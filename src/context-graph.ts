@@ -885,6 +885,10 @@ export class EdgeStore {
     }
 
     const line = JSON.stringify(event) + "\n";
-    appendFileSync(logPath, line, "utf-8");
+    try {
+      appendFileSync(logPath, line, "utf-8");
+    } catch {
+      // Silently ignore write failures — edge recording is advisory
+    }
   }
 }
