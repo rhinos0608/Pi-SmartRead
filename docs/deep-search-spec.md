@@ -48,11 +48,12 @@ The returned result also includes machine-readable `details` with matches, chann
 
 ## Ranking model
 
-`deep_search` produces candidates from four channels:
+`deep_search` produces candidates from five channel groups:
 
+- **grep/text channel**: exact text retrieval across searchable files, including docs;
+- **structural/code channel**: AST/BM25/embedding definition search;
 - **semantic/file channel**: `intent_read` file-level hybrid retrieval when embedding config is available;
-- **structural/code channel**: `search(mode="code")` AST/BM25/embedding definition search;
-- **symbol channel**: `search(mode="symbols")` exact or fuzzy symbol hits;
+- **symbol channel**: exact or fuzzy symbol hits;
 - **graph channel**: bounded import adjacency plus persisted `graph_mutate` breakage/co-change edges from files found by earlier channels.
 
 MVP fusion uses reciprocal rank fusion (RRF) across candidate channel ranks with `k=60`, then applies a small focus-file boost. Candidates deduplicate by `file + line + name`, falling back to `file + name`.
@@ -61,9 +62,9 @@ MVP fusion uses reciprocal rank fusion (RRF) across candidate channel ranks with
 
 | Depth | Channels | Relationship enrichment | Target latency |
 |---|---|---|---:|
-| `quick` | structural + symbol | none | <3s on medium repos |
-| `standard` | structural + symbol + semantic fallback + graph | caller count for top matches when requested | <6s |
-| `thorough` | all available channels, including graph | caller lookups for top matches | <10s |
+| `quick` | grep + AST structural + symbol | none | <3s on medium repos |
+| `standard` | grep + AST structural + symbol + semantic fallback + graph | caller count for top matches when requested | <6s |
+| `thorough` | all available channels, including grep, AST structural, semantic, symbol, graph, and LSP | caller lookups for top matches | <10s |
 
 All expensive phases are best-effort. A failed channel is recorded in `details.degraded` and does not fail the entire search unless no channel can produce output.
 

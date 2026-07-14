@@ -7,10 +7,10 @@ Pi-SmartRead ships an **MCP (Model Context Protocol) stdio server** that exposes
 ## One-liner for Claude Code
 
 ```bash
-claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts
+claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/src/mcp-server.ts
 ```
 
-The project lives in a nested `Pi-SmartRead/Pi-SmartRead/` structure. The server file is at the inner level. Run this from your project directory — the server uses that `cwd` for file operations.
+The repository root is `Pi-SmartRead/`, with the server under `src/`. Run this from your project directory — the server uses that `cwd` for file operations.
 
 To verify it's connected:
 
@@ -48,13 +48,13 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 ### Preferred: CLI one-liner
 
 ```bash
-claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/mcp-server.ts
+claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/src/mcp-server.ts
 ```
 
 Add `--scope project` to share the config with your team via `.mcp.json` (committed to version control):
 
 ```bash
-claude mcp add pi-smartread --scope project -- npx tsx /path/to/Pi-SmartRead/mcp-server.ts
+claude mcp add pi-smartread --scope project -- npx tsx /path/to/Pi-SmartRead/src/mcp-server.ts
 ```
 
 ### Alternative: `.mcp.json` (project-scoped, team-shared)
@@ -66,7 +66,7 @@ Place a `.mcp.json` at your project root:
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/path/to/Pi-SmartRead/mcp-server.ts"]
+      "args": ["tsx", "/path/to/Pi-SmartRead/src/mcp-server.ts"]
     }
   }
 }
@@ -83,7 +83,7 @@ Edit your Claude Code user config:
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/path/to/Pi-SmartRead/mcp-server.ts"]
+      "args": ["tsx", "/path/to/Pi-SmartRead/src/mcp-server.ts"]
     }
   }
 }
@@ -108,7 +108,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/absolute/path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts"],
+      "args": ["tsx", "/absolute/path/to/Pi-SmartRead/src/mcp-server.ts"],
       "cwd": "/path/to/your/project"
     }
   }
@@ -128,7 +128,7 @@ Add to `.cursor/mcp.json` in your project root:
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/path/to/Pi-SmartRead/mcp-server.ts"]
+      "args": ["tsx", "/path/to/Pi-SmartRead/src/mcp-server.ts"]
     }
   }
 }
@@ -145,13 +145,13 @@ Add to `.cursor/mcp.json` in your project root:
 npm run mcp-server
 
 # Or directly
-node --import tsx mcp-server.ts
+node --import tsx src/mcp-server.ts
 ```
 
 ### From anywhere (absolute path)
 
 ```bash
-npx tsx /path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts
+npx tsx /path/to/Pi-SmartRead/src/mcp-server.ts
 ```
 
 The server reads JSON-RPC 2.0 messages from **stdin** and writes responses to **stdout**. Logs and errors go to **stderr**.
@@ -178,7 +178,7 @@ To pass environment variables to an MCP server in Claude Code, use the `--env` f
 claude mcp add pi-smartread \
   --env PI_SMARTREAD_EMBEDDING_BASE_URL=http://localhost:11434/v1 \
   --env PI_SMARTREAD_EMBEDDING_MODEL=nomic-embed-text \
-  -- npx tsx /path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts
+  -- npx tsx /path/to/Pi-SmartRead/src/mcp-server.ts
 ```
 
 Or in `.mcp.json`:
@@ -188,7 +188,7 @@ Or in `.mcp.json`:
   "mcpServers": {
     "pi-smartread": {
       "command": "npx",
-      "args": ["tsx", "/path/to/Pi-SmartRead/Pi-SmartRead/mcp-server.ts"],
+      "args": ["tsx", "/path/to/Pi-SmartRead/src/mcp-server.ts"],
       "env": {
         "PI_SMARTREAD_EMBEDDING_BASE_URL": "http://localhost:11434/v1",
         "PI_SMARTREAD_EMBEDDING_MODEL": "nomic-embed-text"
@@ -207,7 +207,7 @@ Or in `.mcp.json`:
 | **Transport** | Pi's internal tool API | MCP stdio (via `@modelcontextprotocol/sdk`) |
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
 | **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
-| **Install** | `pi install git:...` | `npx tsx mcp-server.ts` |
+| **Install** | `pi install git:...` | `npx tsx src/mcp-server.ts` |
 | **Same tools?** | Yes — same underlying implementations |  |
 
 ---

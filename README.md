@@ -12,7 +12,7 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 |---|---|
 | `read` | Single-file read with contextual enrichment (imports, git, graphify) |
 | `read_files` | Multi-file batch read with adaptive output packing; `query` mode ranks candidates with hybrid RRF retrieval (BM25 + embeddings) |
-| `search` | Unified text + code search: grep-style matches plus AST-aware code definitions; `depth: "deep"` adds multi-channel structural, semantic, symbol, graph, and LSP signals |
+| `search` | Unified text + code search: grep-style matches plus AST-aware code definitions; `depth: "deep"` keeps both and adds semantic, symbol, graph, and LSP signals |
 | `repo_map` | PageRank-ranked repository map from native tree-sitter AST tags |
 | `symbol` | Symbol-level exploration: name search (default), file outline, declaration, references, implementations |
 | `graph_mutate` | [experimental] Records semantic coupling observations (breakage edges, co-change edges) into the context graph |
@@ -143,7 +143,7 @@ Unified search: runs both text grep and AST-aware code search, returning combine
 | `caseSensitive` | Auto-detected by default (mixed-case = sensitive) |
 | `contextLines` | Surrounding lines for grep hits (default: 3) |
 
-Results include both code definitions (AST-ranked) and grep text matches.
+Results include both code definitions (AST-ranked) and grep text matches. `depth: "deep"` retains both channels while adding semantic, symbol, graph, and LSP evidence.
 
 ### Examples
 
@@ -471,11 +471,11 @@ See **[docs/mcp-quickstart.md](docs/mcp-quickstart.md)** for full setup instruct
 Pi-SmartRead uses **native tree-sitter bindings** (not WASM) for all AST operations:
 
 - Native parsers: `tree-sitter`, `tree-sitter-javascript`, `tree-sitter-typescript`, `tree-sitter-python`, `tree-sitter-go`, `tree-sitter-rust`
-- Query files from the bundled `queries/` directory
+- Query files from the bundled `src/queries/` directory
 - Chunked callback parsing for large files
 - Text fallback when AST tags are unavailable
 
-A **WASM grammar loader** (`grammar-loader.ts`) provides additional language support via `@vscode/tree-sitter-wasm` for AST-boundary chunking.
+A **WASM grammar loader** (`src/grammar-loader.ts`) provides additional language support via `@vscode/tree-sitter-wasm` for AST-boundary chunking.
 
 ---
 
@@ -490,7 +490,7 @@ npm test
 For local one-off loading:
 
 ```bash
-pi -e ./index.ts
+pi -e ./src/index.ts
 ```
 
 If Pi is already running:
