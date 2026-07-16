@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 export const ALLOWED_ROOT_ENV = "PI_SMARTREAD_ALLOWED_ROOT";
@@ -50,10 +50,7 @@ export function resolveWorkspacePath(
     throw new Error("Path must not be empty");
   }
 
-  const allowedRoot = getAllowedRoot(cwd, options.env);
   const resolved = resolve(cwd, requestedPath);
-  if (!allowedRoot) return resolved;
-
   const mustExist = options.mustExist ?? true;
   const canonical = canonicalPath(resolved);
 
@@ -62,8 +59,15 @@ export function resolveWorkspacePath(
   }
 
   const target = canonical ?? resolved;
-  if (!isWithinRoot(allowedRoot, target)) {
-    throw new Error(`Path is outside allowed root: ${requestedPath}`);
+
+  if (canonical && options.kind && options.kind !== "path") {
+    const stat = statSync(canonical);
+    if (options.kind === "file" && !stat.isFile()) {
+      throw new Error(`Path is not a regular file: ${requestedPath}`);
+    }
+    if (options.kind === "directory" && !stat.isDirectory()) {
+      throw new Error(`Path is not a directory: ${requestedPath}`);
+    }
   }
 
   return target;
