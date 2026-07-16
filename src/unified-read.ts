@@ -1,17 +1,13 @@
 /**
  * Read tool factories — each exported separately for registration.
  *
- * Previously a single unified-read tool with mode dispatch; now split
- * into three independent tools for simpler schemas.
+ * The extended read tool supports single file, multiple files, and
+ * semantic search modes. read-many.ts and intent-read.ts are internal
+ * engines consumed by the dispatch.
  */
-import { wrapBuiltinReadTool, type WrapReadToolOptions } from "./hook.js";
-import { createReadManyTool } from "./read-many.js";
+import { createExtendedReadTool, type WrapReadToolOptions } from "./hook.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 
 export function createReadTool(opts?: WrapReadToolOptions): ToolDefinition {
-  return wrapBuiltinReadTool(opts);
-}
-
-export function createReadFilesTool(): ToolDefinition {
-  return createReadManyTool();
+  return createExtendedReadTool(opts);
 }

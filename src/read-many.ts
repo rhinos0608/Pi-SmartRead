@@ -1,6 +1,38 @@
+/**
+ * Direct canonical resolver for explicit file paths in batch/paths context.
+ *
+ * Bypasses the workspace boundary / allowed-root layer: explicit reads
+ * must succeed for paths outside cwd and outside PI_SMARTREAD_ALLOWED_ROOT
+ * (permission is handled externally). Existence is best-effort (matches the
+ * previous utils.resolveWorkspacePath mustExist:false behaviour) but the
+ * regular-file kind check is preserved.
+ */
+function resolveExplicitFile(cwd: string, requestedPath: string): string {
+	if (!requestedPath || !requestedPath.trim()) {
+		throw new Error("Path must not be empty");
+	}
+	const absolutePath = pathResolve(cwd, requestedPath);
+	let stat;
+	try {
+		stat = statSync(absolutePath);
+	} catch {
+		// ENOENT etc. are surfaced by the downstream read; the batch
+		// resolver itself stays presence-tolerant like the previous
+		// mustExist:false behaviour.
+		return absolutePath;
+	}
+	if (!stat.isFile()) {
+		throw new Error(`Path is not a regular file: ${requestedPath}`);
+	}
+	try {
+		return realpathSync(absolutePath);
+	} catch {
+		return absolutePath;
+	}
+}
+
 import { Type, type Static } from "@sinclair/typebox";
 import type {
-	ExtensionAPI,
 	ExtensionContext,
 	ReadToolDetails,
 	ReadToolInput,
@@ -28,10 +60,11 @@ import {
 		selectorToOffsetLimit,
 			splitPathAndSelector,
 			resolveReadPath,
-			resolveWorkspacePath,
 			formatRecoveryHint,
 			WRAPPER_LINES,
 	} from "./utils.js";
+import { realpathSync, statSync } from "node:fs";
+import { resolve as pathResolve } from "node:path";
 import { registerHandler, resolveUrl, isInternalUrl } from "./internal-url-router.js";
 import { createIntentReadTool } from "./intent-read.js";
 import { skillHandler } from "./skill-protocol.js";
@@ -72,8 +105,8 @@ const ReadManySchema = Type.Object({
 	files: Type.Optional(Type.Array(
 		Type.Object({
 			path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-			offset: Type.Optional(Type.Number({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
-			limit: Type.Optional(Type.Number({ minimum: 1, description: "Maximum number of lines to read" })),
+			offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
 		}),
 		{
 			minItems: 1,
@@ -83,7 +116,7 @@ const ReadManySchema = Type.Object({
 	)),
 	query: Type.Optional(Type.String({ description: "Natural-language intent. When set, candidate files (from files, directory, or cwd) are ranked by hybrid BM25 + semantic relevance and only the most relevant are packed. Use when you know the goal but not the exact files." })),
 	directory: Type.Optional(Type.String({ description: "Directory to scan for candidates (only valid with query; default: cwd)." })),
-	topK: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: "Max files to pack when query is set (default: 20)." })),
+	topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to pack when query is set (default: 20)." })),
 	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)" })),
 });
 
@@ -203,7 +236,7 @@ export function createReadManyTool(
 			toolCallId: string,
 			params: ReadManyInput,
 			signal: AbortSignal | undefined,
-			_onUpdate: unknown,
+			onUpdate: unknown,
 			ctx: ExtensionContext,
 		) {
 			if (params.query?.trim()) {
@@ -215,7 +248,7 @@ export function createReadManyTool(
 					topK: params.topK,
 					stopOnError: params.stopOnError,
 					defaultToCwd: true,
-				}, signal, undefined, ctx);
+				}, signal, onUpdate as never, ctx);
 			}
 			if (params.directory || params.topK !== undefined) {
 				throw new Error("directory/topK are only valid together with query");
@@ -234,6 +267,7 @@ export function createReadManyTool(
 	// successful per-file read's `details.workspaceEvidence`. Aggregated into
 	// a single batch envelope after the read loop completes.
 	const perFileEvidenceByIndex = new Map<number, WorkspaceEvidenceEnvelope>();
+	const summarizedIndexes = new Set<number>();
 	const largeRequest = params.files.length > LARGE_REQUEST_THRESHOLD;
 
 	// Process files in chunks to avoid blocking the event loop on very large requests.
@@ -282,20 +316,29 @@ export function createReadManyTool(
 					if (params.stopOnError && !ok) break;
 					continue;
 				}
-				const resolvedPath = resolveWorkspacePath(ctx.cwd, resolveReadPath(targetPath));
+				const resolvedPath = resolveExplicitFile(ctx.cwd, resolveReadPath(targetPath));
 				const selectorArgs = selectorToOffsetLimit(selector);
 				const rawMode = selectorArgs.raw === true;
-				const input: ReadToolInput = {
+				const input: ReadToolInput & { __smartReadSelector?: string } = {
+					// Preserve selector through internal wrapper without changing the
+					// delegated read path seen by downstream callers.
 					path: resolvedPath,
 					offset: selectorArgs.offset ?? request.offset,
 					limit: selectorArgs.limit ?? request.limit,
 				};
+				if (selector) {
+					Object.defineProperty(input, "__smartReadSelector", {
+						value: selector,
+						enumerable: false,
+					});
+				}
 
 				try {
-					const result = await readTool.execute(`${toolCallId}:${i}`, input, signal, undefined);
+					const result = await readTool.execute(`${toolCallId}:${i}`, input, signal, onUpdate as never);
 					const details = result.details as ReadToolDetails | undefined;
 					const displayContent = (details as { displayContent?: { text?: string; startLine?: number } } | undefined)
 						?.displayContent;
+					const contextFooter = (details as { contextFooter?: string } | undefined)?.contextFooter;
 
 					// Collect per-file workspace evidence (schema v3 envelopes).
 					// The wrapped read tool emits `details.workspaceEvidence` whenever
@@ -335,6 +378,7 @@ export function createReadManyTool(
 									const rendered = renderSummary(summary, resolvedPath);
 									body = rendered.text;
 									summaryApplied = true;
+									summarizedIndexes.add(i);
 								}
 							} catch { /* fall through to raw body */ }
 						}
@@ -345,7 +389,7 @@ export function createReadManyTool(
 					const fullText = formatContentBlock(request.path, body, i + 1, {
 						anchorBody: rawMode ? false : !alreadyAnchored,
 						startLine,
-					});
+					}) + (rawMode || !contextFooter ? "" : contextFooter);
 					candidates.push({
 						index: i,
 						path: resolvedPath,
@@ -552,12 +596,23 @@ export function createReadManyTool(
 			// the batch result is patch-authoritative the same way a single
 			// read is. The merged `inspectionId` is computed across the
 			// combined resource set per the protocol contract.
+			// Only complete file blocks actually rendered receive authority. Partial
+			// blocks are excluded because their packed window is derived after the
+			// original read; no authority is safer than overstated authority.
+			const renderedEvidence = new Map<number, WorkspaceEvidenceEnvelope>();
+			if (!outputTruncation.truncated) {
+				for (const index of plan.fullIncluded) {
+					if (summarizedIndexes.has(index)) continue;
+					const evidence = perFileEvidenceByIndex.get(index);
+					if (evidence) renderedEvidence.set(index, evidence);
+				}
+			}
 			const sessionFilePath = sessionFileFromContext(ctx);
 			const batchEvidence = sessionFilePath
 				? buildBatchWorkspaceEvidence({
 						cwd: ctx.cwd,
 						sessionFilePath,
-						perFile: perFileEvidenceByIndex,
+						perFile: renderedEvidence,
 					})
 				: null;
 			if (batchEvidence) {
@@ -598,8 +653,4 @@ export function initHandlers(): void {
 	registerHandler(skillHandler);
 	registerHandler(memoryHandler);
 	registerHandler(graphHandler);
-}
-
-export default function (pi: ExtensionAPI) {
-	pi.registerTool(createReadManyTool());
 }
