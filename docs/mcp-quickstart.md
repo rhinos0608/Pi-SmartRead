@@ -26,12 +26,13 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 
 | MCP Tool | Description |
 |---|---|
-| `inspect` | Multi-mode code intelligence: `{ path }` path read, `{ query }` search, `{ query, depth: "deep" }` deep search, `{ symbol }` symbol exploration, `{ action: "map" }` repo map |
+| `inspect` | File/directory intelligence: directory → ranked repo map; file → structural facts (callers, children, overrides, re-exports) + quality signals (complexity, public API, reuse, recency, tests, deprecation) |
+| `grep` | Code search — BM25 ranking + symbol matching + semantic fallback behind a grep-shaped interface |
 | `skill` | Run named skills declared in `.pi-smartread/skills/` |
 | `graph_mutate` | [experimental] Record semantic coupling edges — requires `experimental.graphMutate: true` |
 | git-notes tools | [experimental] Read/write git notes — requires `experimental.gitNotes: true` |
 
-> **Note:** `read` is Pi-extension-only and is **not** exposed over MCP. For single or multi-file reads from an MCP client, use `inspect { path }`.
+> **Note:** `read` is Pi-extension-only and is **not** exposed over MCP. MCP `inspect` returns a repo map or structural facts; it does not provide strong file-read provenance. Use `grep` for code search.
 
 ---
 
@@ -242,7 +243,7 @@ Or in `.mcp.json`:
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
 | **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
 | **Install** | `pi install git:...` | `npx tsx src/mcp-server.ts` |
-| **Same tools?** | `read`, `inspect`, `skill`, and optional experimental tools | `inspect`, `skill`, and optional experimental tools only — `read` is not exposed |
+| **Same tools?** | `read`, `inspect`, `grep`, `skill`, and optional experimental tools | `inspect`, `grep`, `skill`, and optional experimental tools only — `read` is not exposed |
 
 ---
 
@@ -256,7 +257,7 @@ Or in `.mcp.json`:
 
 **No semantic ranking** — The MCP server uses the same embedding config as the Pi extension. Set `PI_SMARTREAD_EMBEDDING_BASE_URL` and `PI_SMARTREAD_EMBEDDING_MODEL`, or place a `pi-smartread.config.json` in the working directory.
 
-**Tool returns "Error: Embedding baseUrl is required"** — Use `inspect { query }` for config-free search, or configure embeddings.
+**Tool returns "Error: Embedding baseUrl is required"** — Use `grep { pattern }` for config-free search, or configure embeddings.
 
 **Configuration changes not taking effect** — Restart Claude Code (or the respective MCP client) after changing config. Run `claude mcp list` to verify connected servers.
 
@@ -273,6 +274,7 @@ Or in `.mcp.json`:
 └─────────────────┘                         │  Tool Registry       │
                                             │  ┌────────────────┐ │
                                             │  │ inspect         │ │
+                                            │  │ grep            │ │
                                             │  │ skill           │ │
                                             │  │ graph_mutate*   │ │
                                             │  │ git-notes*      │ │

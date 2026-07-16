@@ -1,6 +1,6 @@
 # Pi-SmartRead
 
-Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — unified file reading, intent-based retrieval, repository mapping, consolidated symbol/code/deep search, cross-file resolution, call graph analysis, and AST-aware code search.
+Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — unified file reading, structural code analysis, quality signals, repository mapping, and hybrid code search.
 
 > Forked from [pi-read-many](https://github.com/Gurpartap/pi-read-many) and evolved into a full code-intelligence toolkit.
 
@@ -10,8 +10,9 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 
 | Tool | What it does |
 |---|---|
-| `read` | Single-file read with contextual enrichment (imports, git, graphify). |
-| `inspect` | Multi-mode retrieval: `path` (file read + evidence), `query` (intent search; `depth: "deep"` enables semantic/symbol/graph/LSP channels), `symbol` (symbol lookup), and `map` (repo map). |
+| `read` | Single-file, multi-file, or query-selected file reads with contextual enrichment and strong evidence. |
+| `inspect` | Two modes — directory (ranked repo map) or file (structural facts + quality signals). |
+| `grep` | Primary code search — BM25 ranking + AST symbol matching + semantic fallback behind a grep-shaped interface. |
 | `graph_mutate` | [experimental] Records semantic coupling observations into the context graph. |
 
 Experimental tools (`graph_mutate` and git-notes tools) are opt-in via `pi-smartread.config.json` and only register when enabled.
@@ -48,88 +49,112 @@ If Pi is already running:
 
 ## `read`
 
-Single-file read with contextual enrichment. Appends import relationships, git recency, branch notes, and graphify knowledge to every read.
+Read files with strong workspace evidence. Supports three modes:
 
-```json
-{
-  "path": "src/auth.ts",
-  "offset": 40,
-  "limit": 120
-}
-```
+- **Single file**: `{ path: "src/auth.ts" }` or `{ path, offset, limit }`
+- **Multiple files**: `{ paths: [{ path: "a.ts" }, { path: "b.ts" }] }`
+- **Query-selected files**: `{ query: "auth flow" }` — ranks the startup index with whole-corpus BM25 + embedding RRF, then reads selected files; grep+AST discovers candidates only when indexed retrieval is unavailable
 
-On the first read-like call in a repo, may return a compact repo map — simply re-issue the read.
+Successful single-file reads and complete file blocks rendered by multi/query reads return strong schema-v3 evidence. Partial and omitted packed blocks are intentionally not authorized.
+
+An aider-style repo map is injected on start up, providing a high-level overview of the repository structure and symbol relationships, does not block start up, runs async and skips in home directories.
 
 ---
 
 ## `inspect`
 
-Multi-mode retrieval tool. One mode per call, selected by the input shape. Every mode returns a `details.workspaceEvidence` envelope; path mode produces **strong** evidence that authorizes patch, while query/symbol/map modes produce weak (search-match) evidence and are meant for discovery.
+Two-mode structural analysis tool. Mode is auto-detected from the input path — directories produce a repo map, files produce structural facts plus quality signals.
 
-### Path mode
+Every mode returns a `details.workspaceEvidence` envelope:
+- **Directory mode**: `mode:"map"`, zero resources (no file authorization)
+- **File mode**: `mode:"symbol"`, per-referenced-symbol `coverage:"search-match"` (weak evidence — use `read` for strong evidence that authorizes patch)
 
-Single-file read with evidence. Same enrichment as `read`.
+### Directory mode
 
-Accepted params: `path`, `offset`, `limit`.
-
-```json
-{
-  "path": "src/auth.ts",
-  "offset": 40,
-  "limit": 120
-}
-```
-
-### Query mode
-
-Intent-based search. Default depth is `"quick"` (grep + AST). Use `depth: "deep"` to also run semantic, symbol, graph, and LSP channels with RRF fusion.
-
-Accepted params: `query`, `depth` (`"quick"` or `"deep"`), `directory`.
-
-`scope`, `limit`, `maxSnippetChars`, `outputBudget`, and `includeRelationships` are internal engine defaults — they are not exposed tool params.
+Pass a directory path to get a ranked repository map with key symbols and architecture overview.
 
 ```json
-{
-  "query": "authentication middleware",
-  "directory": "src"
-}
+{ "path": "src" }
 ```
 
-Deep search:
+Output includes a PageRank-ranked symbol tree, file structure, and optionally graph-knowledge clusters.
+
+### File mode
+
+Pass a file path to get structural facts plus quality signals:
+
+**Structural facts:**
+- Callers — intra-file and cross-file call sites
+- Parent class/module — base class, barrel file in same directory
+- Children — methods, nested classes, interfaces, enums, type aliases, variables
+- Base classes — classes the file extends
+- Interfaces — interfaces the file implements
+- Overrides — methods that override parent methods (explicit with `override` keyword for TS; name-match heuristic for Python)
+- Re-exports — barrel files and `__init__.py` files that re-export symbols
+
+**Quality signals:**
+| Signal | Method | Fallback |
+|---|---|---|
+| Complexity | Tree-sitter AST branch count per function | Regex keyword count (low confidence) |
+| Public API | `export` keyword (TS/JS); `__all__` or underscore convention (Python) | Assume public if no clear private marker |
+| Reuse | ContextGraph imported-by count | "Unknown" |
+| Recency | `git log -1 --format=%ar` | File mtime if <1 day |
+| Tests | Naming-convention candidate paths + `existsSync` | "No tests found" |
+| Deprecation | Regex: `@deprecated`, `#[deprecated]`, `[Obsolete]`, `DeprecationWarning` | "No markers found" |
+
+All signals degrade gracefully — missing git, unsupported language, or parse errors produce partial results with confidence annotations, never hard failures.
 
 ```json
-{
-  "query": "how does JWT token validation work?",
-  "depth": "deep",
-  "directory": "src"
-}
+{ "path": "src/inspect.ts" }
 ```
 
-### Symbol mode
+### Migration from v3
 
-Symbol lookup: name search, file outline, declaration, references, implementations.
+| Old call | New call |
+|---|---|
+| `inspect { query: "auth" }` | `grep { pattern: "auth" }` |
+| `inspect { symbol: "AuthService.login" }` | `grep { pattern: "AuthService.login" }` |
+| `inspect { action: "map" }` | `inspect { path: "dir/" }` |
 
-Accepted params: `symbol`, `directory`.
+---
+
+## `grep`
+
+Primary code search tool. Wraps standard text search with a hybrid cascade — the agent never needs to know which engine answered.
 
 ```json
-{
-  "symbol": "AuthService.login",
-  "directory": "src"
-}
+{ "pattern": "auth middleware" }
 ```
 
-### Map mode
+### Internal cascade (agent never sees)
 
-Repository structure and PageRank-ranked symbol map.
-
-Accepted params: `action: "map"`, `directory`.
-
-```json
-{
-  "action": "map",
-  "directory": "."
-}
 ```
+Layer 1: BM25 lexical — ranked by token overlap (always)
+Layer 2: AST symbol match — tree-sitter name resolution (always)
+    ↓ RRF fusion (k=60), deduplicate by file+symbol
+If zero hits:
+Layer 3: Embedding semantic (when index available)
+If still zero:
+Layer 4: Pass-through to upstream grep (raw text)
+```
+
+Pass `literal: true` to skip the cascade and go straight to raw text search.
+
+### Parameters
+
+| Param | Type | Description |
+|---|---|---|
+| `pattern` | string (required) | Text, symbol name, or concept to search for |
+| `path` | string | Directory or file to scope search (default: cwd) |
+| `glob` | string | File filter, e.g. `*.ts` or `src/**/*.py` |
+| `ignoreCase` | boolean | Case-insensitive search (default: false) |
+| `literal` | boolean | Exact substring match — skip BM25/semantic (default: false) |
+| `limit` | number | Max results (1-100, default: 20) |
+| `contextLines` | number | Lines of context per match (0-10, default: 2) |
+
+### Evidence semantics
+
+Envelope mode `query`, `coverage: "search-match"` per hit with `allowedRanges`. `tool_result.grep` events feed the resolver cache for SmartEdit patch authorization.
 
 ---
 
@@ -157,7 +182,7 @@ When editing file A causes type-checking errors in file B:
 }
 ```
 
-The next `inspect { query }` touching A will automatically include B as a candidate.
+The next `grep` or `inspect` touching A will automatically include B as a candidate.
 
 ### Co-change
 
@@ -183,7 +208,9 @@ Pi-SmartRead supports tree-sitter analysis for **41 languages**:
 
 Bash, C, C#, C++, Clojure, Common Lisp, CSS, D, Dart, Elisp, Elixir, Elm, Fortran, Gleam, Go, Haskell, HCL (Terraform), Java, JavaScript, JSX, Julia, Kotlin, Lua, MATLAB, OCaml, PHP, Pony, Python, QL (CodeQL), R, Racket, Ruby, Rust, Scala, Solidity, Swift, TypeScript, TSX, Udev, Zig
 
-**Call graph support** (for code search enrichment and deep search): TypeScript, JavaScript, TSX, Python, Go, Rust.
+**Structural facts extraction** (for `inspect` file mode): TypeScript, JavaScript, TSX, Python.
+
+**Call graph support** (for code search enrichment): TypeScript, JavaScript, TSX, Python, Go, Rust.
 
 Languages without dedicated tree-sitter parsers still work for file reading and BM25 text ranking.
 
@@ -222,9 +249,7 @@ Create `pi-smartread.config.json` in the current directory or any parent:
 
 ### Caching
 
-Pi-SmartRead uses a **two-tier embedding cache**:
-- **In-memory LRU** (64 entries) — fast repeat lookups within a session
-- **Persistent disk cache** (`.pi-smartread.embeddings.cache/`) — survives restarts, keyed by SHA-256 content hash
+Session startup asynchronously builds a bounded, ignore-aware semantic index under `.pi-smartread/`. File hashes, model/config fingerprint, vector dimension, and SQLite vectors persist across restarts. Only successfully embedded added/modified files advance index state; failures retry on the next warm-up, and deleted files are removed. Query-time retrieval fuses whole-corpus BM25 and vector ranks with RRF.
 
 ### Graceful BM25 degradation
 
@@ -242,7 +267,7 @@ All retrieval modes degrade gracefully. Only config authoring errors (e.g. `chun
 
 ## Advanced retrieval features
 
-> The old standalone `read_files` tool wrapper (`createReadFilesTool` / `src/read-many.ts`) is no longer registered. Its retrieval engine lives on inside `inspect { query, depth: "deep" }`.
+> The old standalone `read_files` tool is no longer registered. Its packing engine is internal to `read { paths: [...] }` and `read { query }`.
 
 ### HyDE query expansion
 
@@ -332,12 +357,13 @@ The MCP server exposes the shared `ToolRegistry` tools:
 
 | Tool | Notes |
 |---|---|
-| `inspect` | Path, query, symbol, and map modes. |
+| `inspect` | Directory → map; file → structural facts + signals. |
+| `grep` | BM25 + symbol + semantic cascade or literal text search. |
 | `skill` | Skill invocations. |
 | `graph_mutate` | Only when `experimental.graphMutate: true`. |
 | git-notes tools | Only when `experimental.gitNotes: true`. |
 
-`read` is **not** exposed over MCP — it is registered directly on the Pi extension API only. Use `inspect { path }` for single-file reads through MCP.
+`read` is **not** exposed over MCP; file reads and strong provenance are available through the Pi extension API. MCP `inspect`/`grep` remain discovery-only.
 
 ### Resources
 
@@ -408,30 +434,36 @@ npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
 
 ## Troubleshooting
 
-**I got a repo map instead of my read result** — Expected on the first read-like call in a repository. Re-issue the read.
-
 **Semantic ranking is not working** — Check `pi-smartread.config.json` or the `PI_SMARTREAD_EMBEDDING_*` environment variables. BM25-only ranking will still work.
 
-**I only want a quick structure overview** — Call `inspect { action: "map" }`.
+**I only want a quick structure overview** — Call `inspect { path: "." }`.
 
-**Doom-loop warning appears** — The LLM repeated identical tool calls 3+ times. Try a different search query or use `inspect { action: "map" }` to get oriented.
+**Doom-loop warning appears** — The LLM repeated identical tool calls 3+ times. Try a different grep pattern or use `inspect { path: "dir/" }` to get oriented.
 
 ---
 
 ## Migration
 
-### v3 tool consolidation
-
-The standalone `read_files`, `search`, `repo_map`, and `symbol` tools have been consolidated into the `inspect` tool. Update existing calls:
+### v3 → v4
 
 | Old call | New call |
 |---|---|
-| `read_files { files: [...] }` | Use `read` for single files. Batch multi-file reads are no longer exposed as a registered tool; use `inspect { query }` or `inspect { path }` calls as needed. |
-| `search { query }` | `inspect { query }` (default quick) or `inspect { query, depth: "deep" }` |
-| `repo_map { ... }` | `inspect { action: "map" }` |
-| `symbol { ... }` | `inspect { symbol }` |
+| `inspect { query: "..." }` | `grep { pattern: "..." }` |
+| `inspect { symbol: "..." }` | `grep { pattern: "..." }` |
+| `inspect { action: "map" }` | `inspect { path: "dir/" }` |
 
-`read` is unchanged.
+### v3 tool consolidation (earlier)
+
+The standalone `read_files`, `search`, `repo_map`, and `symbol` tools had been consolidated into `inspect` in v3. Update existing calls:
+
+| Old call | New call |
+|---|---|
+| `read_files { files: [...] }` | `read { paths: [...] }` |
+| `search { query }` | `grep { pattern }` |
+| `repo_map { ... }` | `inspect { path: "dir/" }` |
+| `symbol { ... }` | `grep { pattern }` |
+
+`read` owns single-file provenance, multi-file packing, and query-selected reads.
 
 ---
 
@@ -453,5 +485,4 @@ The standalone `read_files`, `search`, `repo_map`, and `symbol` tools have been 
 
 ## License
 
-MIT © 2026 Gurpartap Singh
 MIT © 2026 Rhine Sharar
