@@ -3,6 +3,7 @@
 Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — unified file reading, structural code analysis, quality signals, repository mapping, and hybrid code search.
 
 > Forked from [pi-read-many](https://github.com/Gurpartap/pi-read-many) and evolved into a full code-intelligence toolkit.
+> Now standalone repository, original tool surface was one read-many tool with adaptive ascending packing.
 
 ---
 
