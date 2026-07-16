@@ -7,10 +7,11 @@
  *   - Contextual enrichment appends annotations to read results
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { wrapBuiltinReadTool, registerSessionHooks, resetSessionState } from "../../src/hook.js";
+import { execFileSync } from "node:child_process";
+import { createExtendedReadTool, registerSessionHooks, resetSessionState } from "../../src/hook.js";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -34,7 +35,7 @@ function makeMockAPI(): {
 }
 
 
-describe("wrapBuiltinReadTool", () => {
+describe("createExtendedReadTool", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -46,7 +47,7 @@ describe("wrapBuiltinReadTool", () => {
   });
 
   it("returns a ToolDefinition with name 'read'", () => {
-    const tool = wrapBuiltinReadTool();
+    const tool = createExtendedReadTool();
     expect(tool.name).toBe("read");
     expect(typeof tool.execute).toBe("function");
   });
@@ -54,7 +55,7 @@ describe("wrapBuiltinReadTool", () => {
   it("delegates to the underlying read tool", async () => {
     writeFileSync(join(tmpDir, "hello.ts"), "export const x = 1;\n");
 
-    const tool = wrapBuiltinReadTool();
+    const tool = createExtendedReadTool();
     const result = await tool.execute(
       "cid-1",
       { path: "hello.ts" },
@@ -71,7 +72,7 @@ describe("wrapBuiltinReadTool", () => {
   it("anchors reads from selector-based line windows using absolute line numbers", async () => {
     writeFileSync(join(tmpDir, "hello.ts"), "one\ntwo\nthree\n");
 
-    const tool = wrapBuiltinReadTool();
+    const tool = createExtendedReadTool();
     const result = await tool.execute(
       "cid-selector",
       { path: "hello.ts:2-3" },
@@ -88,7 +89,7 @@ describe("wrapBuiltinReadTool", () => {
   it("respects raw reads without injecting anchors or context", async () => {
     writeFileSync(join(tmpDir, "hello.ts"), "one\ntwo\nthree\n");
 
-    const tool = wrapBuiltinReadTool();
+    const tool = createExtendedReadTool();
     const result = await tool.execute(
       "cid-raw",
       { path: "hello.ts:raw" },
@@ -104,14 +105,44 @@ describe("wrapBuiltinReadTool", () => {
   });
 
   it("preserves read metadata (name, label, description)", () => {
-    const tool = wrapBuiltinReadTool();
+    const tool = createExtendedReadTool();
     expect(tool.name).toBe("read");
     expect(tool.label).toBeDefined();
-    expect(tool.description).toContain("Read the contents of a file");
+    expect(tool.description).toContain("Read files with strong workspace evidence");
+  });
+
+  it("does not reuse session git cache for nested project reads", async () => {
+    const outer = realpathSync(tmpDir);
+    writeFileSync(join(outer, "package.json"), '{"name":"outer-project"}\n');
+    const nested = join(outer, "nested");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(nested, "package.json"), '{"name":"nested-project"}\n');
+    writeFileSync(join(nested, "nested.ts"), "export const nested = true;\n");
+    execFileSync("git", ["init"], { cwd: nested, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: nested, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: nested, stdio: "ignore" });
+    execFileSync("git", ["add", "."], { cwd: nested, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "nested project commit"], { cwd: nested, stdio: "ignore" });
+
+    const { api, handlers } = makeMockAPI();
+    registerSessionHooks(api);
+    await handlers.session_start!({ type: "session_start", reason: "startup" }, makeMockContext(outer));
+
+    const result = await createExtendedReadTool().execute(
+      "nested-cache",
+      { path: "nested/nested.ts" },
+      undefined,
+      undefined,
+      makeMockContext(outer),
+    );
+    const text = (result as { content: { type: string; text: string }[] }).content[0]?.text ?? "";
+    expect(text).toContain("Recent commits:");
+    expect(text).toContain("nested project commit");
   });
 
   it("enriches reads with contextual annotations for source files", async () => {
     // Create a minimal repo-like structure with import relationships
+    writeFileSync(join(tmpDir, "package.json"), '{"name":"hook-read-fixture"}\n');
     mkdirSync(join(tmpDir, "src"), { recursive: true });
     writeFileSync(
       join(tmpDir, "src", "a.ts"),
@@ -126,7 +157,7 @@ describe("wrapBuiltinReadTool", () => {
       "export function c() { return 42; }\n",
     );
 
-    const tool = wrapBuiltinReadTool();
+    const tool = createExtendedReadTool();
 
     // Read src/a.ts — should get enrichment showing it imports b.ts
     const result = await tool.execute(
@@ -219,8 +250,8 @@ describe("registerSessionHooks", () => {
       const promptText = typed!.systemPrompt;
       expect(promptText).toContain("Repository Map");
       expect(promptText).toContain("SmartRead Tool Guide");
-      expect(promptText).toContain('depth: "deep"');
-      expect(promptText).toContain("inspect { symbol }:");
+      expect(promptText).toContain("BM25+embedding RRF");
+      expect(promptText).toContain("inspect { path }:");
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }

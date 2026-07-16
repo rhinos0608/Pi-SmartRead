@@ -57,13 +57,13 @@ describe("computePathEvidence", () => {
   });
 
   it("rejects missing files and empty session paths", () => {
-    expect(() => computePathEvidence({ path: "nope.ts", cwd: dir, sessionFilePath: session })).toThrow(/not found/);
+    expect(() => computePathEvidence({ path: "nope.ts", cwd: dir, sessionFilePath: session })).toThrow(/not readable/);
     expect(() => computePathEvidence({ path: "x.ts", cwd: dir, sessionFilePath: "" })).toThrow(/session/);
   });
 
   it("directs directory inputs to inspect map mode", () => {
     expect(() =>
       computePathEvidence({ path: ".", cwd: dir, sessionFilePath: session }),
-    ).toThrow(/action:\s*"map"/);
+    ).toThrow(/not a regular file/);
   });
 });

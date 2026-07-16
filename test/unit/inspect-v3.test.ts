@@ -1,30 +1,26 @@
 /**
- * Multi-mode inspect tests (v3).
+ * Ported inspect v3 → v4 tests.
  *
- * - query mode: delegates to search engine, returns envelope with mode="query"
- * - symbol mode: delegates to symbol engine, returns envelope with mode="symbol"
- * - map mode: delegates to repo engine, returns envelope with mode="map"
- * - path mode: same as v1, unchanged
- * - resolveMode() dispatches correctly from the input shape
+ * - resolveInspectV4Mode dispatches correctly from filesystem
+ * - executeInspectV4 directory/file modes
+ * - Migration errors for legacy params
+ * - createInspectV4Tool schema and execute
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { join } from "node:path";
 import {
-    computeInspectDetails,
-    executeInspectDetails,
-    resolveMode,
+    resolveInspectV4Mode,
+    executeInspectV4,
 } from "../../src/inspect.js";
-import { createInspectTool } from "../../src/inspect-tool.js";
+import { createInspectV4Tool } from "../../src/inspect-tool.js";
 import {
-    PROTOCOL_SCHEMA_VERSION,
     validateInspectionEnvelope,
 } from "@rhinos0608/pi-workspace-protocol";
 
 let workdir: string;
 let file: string;
-let canonicalFile: string;
 
 beforeEach(() => {
     workdir = realpathSync(mkdtempSync(join(tmpdir(), "inspect-v3-")));
@@ -35,326 +31,120 @@ beforeEach(() => {
         "alpha\nbeta\ngamma\ndelta\nrefreshToken = 'abc123'\n",
         "utf8",
     );
-    canonicalFile = realpathSync(file);
 });
 
 afterEach(() => {
     vi.restoreAllMocks();
 });
 
-describe("resolveMode", () => {
-    it("prefers action=map", () => {
-        expect(
-            resolveMode({
-                path: "x",
-                action: "map",
-                cwd: workdir,
-                sessionFilePath: "/s.jsonl",
-            }),
-        ).toBe("map");
+describe("resolveInspectV4Mode", () => {
+    it("returns 'directory' for a directory path", () => {
+        expect(resolveInspectV4Mode({ path: workdir, cwd: workdir, sessionFilePath: "/s.jsonl" })).toBe("directory");
     });
 
-    it("returns symbol when symbol provided", () => {
-        expect(
-            resolveMode({
-                symbol: "Auth.login",
-                cwd: workdir,
-                sessionFilePath: "/s.jsonl",
-            }),
-        ).toBe("symbol");
+    it("returns 'file' for a file path", () => {
+        expect(resolveInspectV4Mode({ path: "hello.ts", cwd: workdir, sessionFilePath: "/s.jsonl" })).toBe("file");
     });
 
-    it("returns path when path provided", () => {
-        expect(
-            resolveMode({
-                path: "x.ts",
-                cwd: workdir,
-                sessionFilePath: "/s.jsonl",
-            }),
-        ).toBe("path");
-    });
-
-    it("returns query when query provided", () => {
-        expect(
-            resolveMode({
-                query: "needle",
-                cwd: workdir,
-                sessionFilePath: "/s.jsonl",
-            }),
-        ).toBe("query");
-    });
-
-    it("throws when no mode is detectable", () => {
-        expect(() =>
-            resolveMode({ cwd: workdir, sessionFilePath: "/s.jsonl" }),
-        ).toThrow();
+    it("throws for nonexistent path", () => {
+        expect(() => resolveInspectV4Mode({ path: "nope.ts", cwd: workdir, sessionFilePath: "/s.jsonl" })).toThrow();
     });
 });
 
-describe("createInspectTool", () => {
-    it("describes deep query mode as grep + AST plus deep-only channels", () => {
-        const tool = createInspectTool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const schema = tool.parameters as { properties?: Record<string, any> };
-        const depthDescription = schema.properties?.depth?.description ?? "";
-
-        expect(depthDescription).toMatch(/grep/i);
-        expect(depthDescription).toMatch(/AST/);
-        expect(depthDescription).toMatch(/semantic/i);
-        expect(tool.description).toMatch(/grep/i);
-        expect(tool.description).toMatch(/AST/);
-    });
-});
-
-describe("computeInspectDetails (path mode — v1 parity)", () => {
-    it("still returns a full-file resource for the whole file", () => {
-        const details = computeInspectDetails({
-            path: "hello.ts",
+describe("executeInspectV4 (modes)", () => {
+    it("directory mode produces envelope with mode='map' and zero resources", async () => {
+        const details = await executeInspectV4({
+            path: ".",
             cwd: workdir,
             sessionFilePath: "/sessions/abc.jsonl",
         });
-        expect(details.mode).toBe("path");
-        expect(details.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
-        const v = validateInspectionEnvelope(details.workspaceEvidence);
-        expect(v.ok).toBe(true);
-        const r = details.workspaceEvidence.resources[0]!;
-        expect(r.kind).toBe("full");
-        expect(r.canonicalPath).toBe(canonicalFile);
-    });
-
-    it("path mode envelope carries mode='path'", () => {
-        const details = computeInspectDetails({
-            path: "hello.ts",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        expect(details.workspaceEvidence.mode).toBe("path");
-    });
-
-    it("computeInspectDetails rejects async modes", () => {
-        expect(() =>
-            computeInspectDetails({
-                query: "x",
-                cwd: workdir,
-                sessionFilePath: "/s.jsonl",
-            }),
-        ).toThrow(/query|async/);
-    });
-});
-
-describe("executeInspectDetails (async modes)", () => {
-    it("query mode produces envelope with mode='query' and range resources", async () => {
-        const details = await executeInspectDetails({
-            query: "refreshToken",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        expect(details.mode).toBe("query");
-        expect(details.workspaceEvidence.mode).toBe("query");
-        // The matches should reference hello.ts and have at least one resource
-        expect(details.workspaceEvidence.resources.length).toBeGreaterThanOrEqual(0);
-        const v = validateInspectionEnvelope(details.workspaceEvidence);
-        expect(v.ok).toBe(true);
-    });
-
-    it("query mode rejects empty query", async () => {
-        await expect(
-            executeInspectDetails({
-                query: "",
-                cwd: workdir,
-                sessionFilePath: "/s.jsonl",
-            }),
-        ).rejects.toThrow(/query/i);
-    });
-
-    it("symbol mode produces envelope with mode='symbol'", async () => {
-        // The fixture file is plain text, so symbol search may return zero matches —
-        // that's fine; the envelope just must have mode="symbol" and validate.
-        const details = await executeInspectDetails({
-            symbol: "hello",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        expect(details.mode).toBe("symbol");
-        expect(details.workspaceEvidence.mode).toBe("symbol");
-        const v = validateInspectionEnvelope(details.workspaceEvidence);
-        expect(v.ok).toBe(true);
-    });
-
-    it("symbol mode rejects empty symbol", async () => {
-        await expect(
-            executeInspectDetails({
-                symbol: "",
-                cwd: workdir,
-                sessionFilePath: "/s.jsonl",
-            }),
-        ).rejects.toThrow(/symbol/i);
-    });
-
-    it("map mode produces envelope with mode='map' and zero resources", async () => {
-        const details = await executeInspectDetails({
-            action: "map",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        expect(details.mode).toBe("map");
+        expect(details.mode).toBe("directory");
         expect(details.workspaceEvidence.mode).toBe("map");
         expect(details.workspaceEvidence.resources).toEqual([]);
         const v = validateInspectionEnvelope(details.workspaceEvidence);
         expect(v.ok).toBe(true);
     });
 
+    it("file mode produces envelope with mode='file'", async () => {
+        const details = await executeInspectV4({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        expect(details.mode).toBe("file");
+        expect(details.workspaceEvidence.mode).toBe("symbol");
+        expect(details.workspaceEvidence.schemaVersion).toBe(3);
+        expect(details.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
+    });
+
     it("rejects ephemeral session identity", async () => {
         await expect(
-            executeInspectDetails({
+            executeInspectV4({
                 path: "hello.ts",
                 cwd: workdir,
                 sessionFilePath: "",
             }),
         ).rejects.toThrow(/session/i);
     });
-});
 
-describe("directory scoping (query/symbol modes)", () => {
-    let subdirIn: string;
-    let subdirOut: string;
-    let fileIn: string;
-    let fileOut: string;
-
-    beforeEach(() => {
-        subdirIn = join(workdir, "scoped");
-        subdirOut = join(workdir, "other");
-        mkdirSync(subdirIn, { recursive: true });
-        mkdirSync(subdirOut, { recursive: true });
-        fileIn = join(subdirIn, "inner.ts");
-        fileOut = join(subdirOut, "outer.ts");
-        writeFileSync(fileIn, "function scopedNeedle() { return 1; }\n", "utf8");
-        writeFileSync(fileOut, "function scopedNeedle() { return 2; }\n", "utf8");
+    it("rejects legacy query param with migration error", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(
+            tool.execute("q1", { query: "refreshToken" } as any, undefined, undefined, { cwd: workdir } as any),
+        ).rejects.toThrow(/grep/);
     });
 
-    it("query mode (quick depth) with directory only matches within that directory", async () => {
-        const details = await executeInspectDetails({
-            query: "scopedNeedle",
-            directory: "scoped",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
-        expect(paths.length).toBeGreaterThan(0);
-        expect(paths.every((p) => p.includes(`${sep}scoped${sep}`))).toBe(true);
-        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(false);
+    it("rejects legacy symbol param with migration error", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(
+            tool.execute("s1", { symbol: "hello" } as any, undefined, undefined, { cwd: workdir } as any),
+        ).rejects.toThrow(/symbol/);
     });
 
-    it("query mode (deep depth) with directory only matches within that directory", async () => {
-        // Deep mode's `matches` shape (file/lines.start) differs from the
-        // quick-path shape (file/line) that the resource-builder expects, so
-        // deep query mode never produces `resources` (pre-existing, out of
-        // scope for the directory-scoping fix) — assert on contentText,
-        // which is what the model actually sees, instead.
-        const details = await executeInspectDetails({
-            query: "scopedNeedle",
-            depth: "deep",
-            directory: "scoped",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        expect(details.contentText).toContain("inner.ts");
-        expect(details.contentText).not.toContain("outer.ts");
-    });
-
-    it("symbol mode with directory only matches within that directory", async () => {
-        const details = await executeInspectDetails({
-            symbol: "scopedNeedle",
-            directory: "scoped",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
-        expect(paths.length).toBeGreaterThan(0);
-        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(false);
-        expect(paths.some((p) => p === realpathSync(fileIn))).toBe(true);
-    });
-
-    it("query mode without directory still searches the whole workspace (regression guard)", async () => {
-        const details = await executeInspectDetails({
-            query: "scopedNeedle",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
-        expect(paths.some((p) => p === realpathSync(fileIn))).toBe(true);
-        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(true);
-    });
-
-    it("symbol mode without directory still searches the whole workspace (regression guard)", async () => {
-        const details = await executeInspectDetails({
-            symbol: "scopedNeedle",
-            cwd: workdir,
-            sessionFilePath: "/sessions/abc.jsonl",
-        });
-        const paths = details.workspaceEvidence.resources.map((r) => r.canonicalPath);
-        expect(paths.some((p) => p === realpathSync(fileIn))).toBe(true);
-        expect(paths.some((p) => p === realpathSync(fileOut))).toBe(true);
+    it("rejects legacy action param with migration error", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(
+            tool.execute("a1", { action: "map" } as any, undefined, undefined, { cwd: workdir } as any),
+        ).rejects.toThrow(/action/);
     });
 });
 
-describe("createInspectTool (schema)", () => {
+describe("createInspectV4Tool (schema)", () => {
     function makeCtx(): any {
         return { cwd: workdir, sessionManager: undefined };
     }
 
     it("registers with the name 'inspect'", () => {
-        const tool = createInspectTool({ getSessionFilePath: () => null });
+        const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         expect(tool.name).toBe("inspect");
     });
 
-    it("exposes path/query/symbol/action/offset/limit/depth in the schema", () => {
-        const tool = createInspectTool({ getSessionFilePath: () => null });
+    it("exposes path param and not query/symbol/action", () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         const schema = tool.parameters as Record<string, any>;
         const props = schema.properties ?? schema;
-        const keys = Object.keys(props);
-        for (const k of ["path", "query", "symbol", "action", "offset", "limit", "depth"]) {
-            expect(keys).toContain(k);
+        expect(props.path).toBeDefined();
+        for (const k of ["query", "symbol", "action"]) {
+            expect(props[k]).toBeUndefined();
         }
     });
 
-    it("description mentions path/query/symbol/map modes", () => {
-        const tool = createInspectTool({ getSessionFilePath: () => null });
-        expect(tool.description).toContain("path");
-        expect(tool.description).toContain("query");
-        expect(tool.description).toContain("symbol");
-        expect(tool.description).toContain("map");
-    });
-
-    it("path schema directs directory inspection to map mode", () => {
-        const tool = createInspectTool({ getSessionFilePath: () => null });
-        const schema = tool.parameters as Record<string, any>;
-        const props = schema.properties ?? schema;
-        expect(props.path.description).toMatch(/regular file/i);
-        expect(props.path.description).toContain('action: "map"');
-    });
-
-    it("execute() with path returns path-mode envelope", async () => {
-        const tool = createInspectTool({
-            getSessionFilePath: () => "/sessions/abc.jsonl",
-        });
-        const result = await tool.execute("c1", { path: "hello.ts" }, undefined, undefined, makeCtx());
-        const text = (result.content[0] as any).text as string;
-        expect(text).toContain("alpha");
-        const details = result.details as any;
-        expect(details.mode).toBe("path");
-        expect(details.workspaceEvidence.mode).toBe("path");
+    it("description mentions structural facts and signals", () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => null });
+        expect(tool.description).toContain("structural facts");
+        expect(tool.description).toContain("signals");
     });
 
     it("execute() rejects when no session file is available", async () => {
-        const tool = createInspectTool({ getSessionFilePath: () => null });
+        const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         await expect(
-            tool.execute("c1", { path: "hello.ts" }, undefined, undefined, makeCtx()),
+            tool.execute("c1", { path: "." }, undefined, undefined, makeCtx()),
         ).rejects.toThrow(/session/i);
     });
 
-    it("execute() with action:map publishes a zero-resource envelope through a real resolver without throwing", async () => {
+    it("execute() with directory publishes a zero-resource envelope", async () => {
         const published: any[] = [];
-        const tool = createInspectTool({
+        const tool = createInspectV4Tool({
             getSessionFilePath: () => "/sessions/abc.jsonl",
             resolver: {
                 publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
@@ -362,32 +152,21 @@ describe("createInspectTool (schema)", () => {
                 },
             },
         });
-        const result = await tool.execute("c1", { action: "map" }, undefined, undefined, makeCtx());
-        const details = result.details as any;
-        expect(details.mode).toBe("map");
+        const result = await tool.execute("c1", { path: "." }, undefined, undefined, makeCtx());
+        const details = (result as any).details;
+        expect(details.mode).toBe("directory");
         expect(details.workspaceEvidence.resources).toEqual([]);
         expect(published).toHaveLength(1);
         expect(published[0].envelope.resources).toEqual([]);
     });
 
-    it("execute() with path mode twice on a changed file re-publishes without throwing (re-inspect after edit)", async () => {
-        const published: any[] = [];
-        const tool = createInspectTool({
+    it("execute() with file mode returns file-mode envelope", async () => {
+        const tool = createInspectV4Tool({
             getSessionFilePath: () => "/sessions/abc.jsonl",
-            resolver: {
-                publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
-                    published.push({ envelope, sessionFilePath, workspaceRoot });
-                },
-            },
         });
-        const first = await tool.execute("c1", { path: "hello.ts" }, undefined, undefined, makeCtx());
-        const { writeFileSync } = await import("node:fs");
-        writeFileSync(file, "alpha\nbeta\ngamma\ndelta\nrefreshToken = 'changed'\n", "utf8");
-        const second = await tool.execute("c2", { path: "hello.ts" }, undefined, undefined, makeCtx());
-        expect(published).toHaveLength(2);
-        const firstDetails = (first.details as any).workspaceEvidence;
-        const secondDetails = (second.details as any).workspaceEvidence;
-        expect(firstDetails.inspectionId).toBe(secondDetails.inspectionId);
-        expect(firstDetails.resources[0].fullFileSha256).not.toBe(secondDetails.resources[0].fullFileSha256);
+        const result = await tool.execute("c1", { path: "hello.ts" }, undefined, undefined, makeCtx());
+        const details = (result as any).details;
+        expect(details.mode).toBe("file");
+        expect(details.workspaceEvidence.mode).toBe("symbol");
     });
 });

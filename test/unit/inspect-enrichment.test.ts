@@ -3,19 +3,26 @@ import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { executeInspectDetails } from "../../src/inspect.js";
+import { createExtendedReadTool } from "../../src/hook.js";
 import { computePathEvidence } from "../../src/path-evidence.js";
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
 }
 
-describe("inspect path mode enrichment", () => {
+function makeCtx(cwd: string, sessionFile: string | null) {
+  return {
+    cwd,
+    sessionManager: sessionFile ? { getSessionFile: () => sessionFile } : undefined,
+  } as any;
+}
+
+describe("read tool enrichment (replaces inspect path mode enrichment)", () => {
   let repo: string;
   const session = "/tmp/fake-session.jsonl";
 
   beforeAll(() => {
-    repo = realpathSync(mkdtempSync(path.join(tmpdir(), "inspect-enrich-")));
+    repo = realpathSync(mkdtempSync(path.join(tmpdir(), "read-enrich-")));
     git(repo, "init");
     git(repo, "config", "user.email", "t@example.com");
     git(repo, "config", "user.name", "t");
@@ -26,41 +33,33 @@ describe("inspect path mode enrichment", () => {
   });
   afterAll(() => rmSync(repo, { recursive: true, force: true }));
 
-  it("appends git context and notes to path-mode content", async () => {
-    const details = await executeInspectDetails({
-      path: "a.ts",
-      cwd: repo,
-      sessionFilePath: session,
-    });
-    expect(details.mode).toBe("path");
-    expect(details.contentText).toContain("1: export const a = 1;");
-    expect(details.contentText).toContain("🔍 Context for a.ts:");
-    expect(details.contentText).toContain("Recent commits:");
-    expect(details.contentText).toContain("Git notes:");
-    expect(details.contentText).toContain("decision: keep a tiny");
+  it("appends git context and notes to read content", async () => {
+    const tool = createExtendedReadTool();
+    const result = await tool.execute("t1", { path: "a.ts" }, undefined, undefined, makeCtx(repo, session));
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain("export const a = 1;");
+    expect(text).toContain("🔍 Context for a.ts:");
+    expect(text).toContain("Recent commits:");
+    expect(text).toContain("Git notes:");
+    expect(text).toContain("decision: keep a tiny");
   });
 
   it("keeps the envelope identical to the unenriched read", async () => {
-    const details = await executeInspectDetails({
-      path: "a.ts",
-      cwd: repo,
-      sessionFilePath: session,
-    });
-    // Compute path evidence independently and verify envelope fields match.
-    const pe = computePathEvidence({ path: "a.ts", cwd: repo, sessionFilePath: session });
-    const resource = pe.workspaceEvidence.resources[0]!;
+    const tool = createExtendedReadTool();
+    const result = await tool.execute("t2", { path: "a.ts" }, undefined, undefined, makeCtx(repo, session));
+    const env = (result.details as any).workspaceEvidence;
+    const resource = env.resources[0];
     expect(resource.canonicalPath).toMatch(/a\.ts$/);
     expect(resource.coverage).toBe("full-file");
     expect(resource.allowedRanges).toEqual([{ startLine: 1, endLine: 2 }]);
     expect(typeof resource.fullFileSha256).toBe("string");
-    // Verify the inspect envelope's resource matches the independent compute.
-    const insResource = details.workspaceEvidence.resources[0]!;
-    expect(insResource.canonicalPath).toBe(resource.canonicalPath);
-    expect(insResource.coverage).toBe(resource.coverage);
-    expect(insResource.allowedRanges).toEqual(resource.allowedRanges);
-    expect(insResource.fullFileSha256).toBe(resource.fullFileSha256);
-    // lineCount/byteLength describe the file resource, not the footer.
-    // "export const a = 1;\n".split("\n") -> 2 lines.
-    expect(details.lineCount).toBe(2);
+
+    // Verify the read envelope's resource matches the independent compute.
+    const pe = computePathEvidence({ path: "a.ts", cwd: repo, sessionFilePath: session });
+    const peResource = pe.workspaceEvidence.resources[0]!;
+    expect(resource.canonicalPath).toBe(peResource.canonicalPath);
+    expect(resource.coverage).toBe(peResource.coverage);
+    expect(resource.allowedRanges).toEqual(peResource.allowedRanges);
+    expect(resource.fullFileSha256).toBe(peResource.fullFileSha256);
   });
 });

@@ -346,6 +346,43 @@ const row = rawDb
     store.close();
   });
 
+  it("treats a path prefix as exact-or-descendant, not a lexical prefix", () => {
+    const dbPath = join(tmpDir, "vectors.db");
+    const store = new SqliteVecStore(dbPath, TEST_DIM);
+
+    store.insertChunks([
+      {
+        id: 351,
+        embedding: makeEmbedding(0.8, 0.2, 0, 0, 0, 0, 0, 0),
+        filePath: "src/foo.ts",
+        symbolKind: "function",
+        language: "typescript",
+        codeSnippet: "// in scope",
+        lineStart: 1,
+        lineEnd: 1,
+      },
+      {
+        id: 352,
+        embedding: makeEmbedding(1, 0, 0, 0, 0, 0, 0, 0),
+        filePath: "src2/bar.ts",
+        symbolKind: "function",
+        language: "typescript",
+        codeSnippet: "// lexical-prefix collision",
+        lineStart: 1,
+        lineEnd: 1,
+      },
+    ]);
+
+    const results = store.search(
+      makeEmbedding(1, 0, 0, 0, 0, 0, 0, 0),
+      1,
+      { filePathPrefix: "src" },
+    );
+
+    expect(results.map((result) => result.filePath)).toEqual(["src/foo.ts"]);
+    store.close();
+  });
+
   it("combines multiple filters", () => {
     const dbPath = join(tmpDir, "vectors.db");
     const store = new SqliteVecStore(dbPath, TEST_DIM);

@@ -159,8 +159,10 @@ describe("MCP stdio server", () => {
     // Check that known tools are registered
     const toolNames = result.tools.map((t: any) => t.name);
     // v3: only inspect + skill are registered (read/read_files/search/repo_map/symbol consolidated into inspect)
+    // v4: grep added
     expect(toolNames).toContain("inspect");
     expect(toolNames).toContain("skill");
+    expect(toolNames).toContain("grep");
     expect(toolNames).not.toContain("read");
     expect(toolNames).not.toContain("read_files");
     expect(toolNames).not.toContain("search");
@@ -189,12 +191,35 @@ describe("MCP stdio server", () => {
 
     // v3: guidance checks now target inspect (which consolidates read/read_files/
     // search/repo_map/symbol) and skill.
-    const guidedTools = ["inspect", "skill"];
+    const guidedTools = ["inspect", "skill", "grep"];
     for (const name of guidedTools) {
       const tool = result.tools.find((candidate: any) => candidate.name === name);
       expect(tool?.description).toBeDefined();
     }
   }, 60_000);
+
+  it("executes standalone inspect map with a real session identity", async () => {
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: {
+          name: "inspect",
+          arguments: { path: "src" },
+        },
+      },
+    ], 60_000);
+
+    expect(response.jsonrpc).toBe("2.0");
+    expect(response.id).toBe(8);
+    const result = response.result as any;
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).not.toMatch(/no real session file|ephemeral identity/i);
+    expect(result.content[0].text.length).toBeGreaterThan(0);
+  }, 90_000);
 
   it("responds to ping", async () => {
     const response = await callMcpServer([

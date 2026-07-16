@@ -313,12 +313,22 @@ describe("utils: resolveWorkspacePath (opt-in boundary)", () => {
 describe("utils: resolveDirectoryParam (opt-in boundary)", () => {
   it("resolves directory without restriction when no env is set", () => {
     const result = resolveDirectoryParam("/tmp", undefined);
-    expect(result).toBe(require("node:path").resolve("/tmp"));
+    // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS)
+    const expected = require("node:fs").realpathSync("/tmp");
+    expect(result).toBe(expected);
   });
 
   it("resolves explicit directory", () => {
-    const result = resolveDirectoryParam("/tmp", "sub");
-    expect(result).toBe(require("node:path").resolve("/tmp", "sub"));
+    const dir = require("node:path").resolve("/tmp", "sub");
+    require("node:fs").mkdirSync(dir, { recursive: true });
+    try {
+      const result = resolveDirectoryParam("/tmp", "sub");
+      // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS)
+      const expected = require("node:fs").realpathSync(dir);
+      expect(result).toBe(expected);
+    } finally {
+      require("node:fs").rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

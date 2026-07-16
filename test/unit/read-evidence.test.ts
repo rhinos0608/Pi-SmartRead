@@ -2,9 +2,12 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { createReadTool } from "../../src/unified-read.js";
 import { shownMatchesAttested } from "../../src/hook.js";
+import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../src/semantic-index-registry.js";
+import { createGrepTool } from "../../src/grep-tool.js";
 
 function makeCtx(cwd: string, sessionFile: string | null) {
   return {
@@ -87,16 +90,218 @@ describe("read tool workspace evidence", () => {
     expect(res.details?.workspaceEvidence).toBeUndefined();
   });
 
-  it("limit: 0 → no evidence (nothing shown, nothing authorized)", async () => {
+  it("rejects non-positive or fractional single-file line positions", async () => {
     const tool = createReadTool();
-    const res: any = await tool.execute("t8", { path: "x.ts", offset: 1, limit: 0 }, undefined, undefined, makeCtx(dir, session));
-    expect(res.details?.workspaceEvidence).toBeUndefined();
+    await expect(tool.execute("t8", { path: "x.ts", offset: 1, limit: 0 } as any, undefined, undefined, makeCtx(dir, session))).rejects.toThrow(/positive integer/i);
+    await expect(tool.execute("fractional", { path: "x.ts", offset: 1.5 } as any, undefined, undefined, makeCtx(dir, session))).rejects.toThrow(/positive integer/i);
   });
 
   it("raw mode emits no evidence", async () => {
     const tool = createReadTool();
     const res: any = await tool.execute("t9", { path: "x.ts:raw" }, undefined, undefined, makeCtx(dir, session));
     expect(res.details?.workspaceEvidence).toBeUndefined();
+  });
+});
+
+describe("extended read modes", () => {
+  let root: string;
+  let session: string;
+
+  beforeAll(() => {
+    root = realpathSync(mkdtempSync(path.join(tmpdir(), "extended-read-")));
+    session = path.join(root, "session.jsonl");
+    writeFileSync(path.join(root, "package.json"), "{}\n");
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: root, stdio: "ignore" });
+    writeFileSync(path.join(root, "a.ts"), "export const semanticNeedle = 'auth token';\n");
+    writeFileSync(path.join(root, "b.ts"), "export const other = true;\n");
+  });
+
+  afterAll(() => {
+    disposeSemanticIndexes();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("includes context enrichment in multi-file output without changing source evidence", async () => {
+    execFileSync("git", ["add", "package.json", "a.ts", "b.ts"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add batch files", "-m", "Constraint: keep batch evidence"], { cwd: root, stdio: "ignore" });
+    const tool = createReadTool();
+    const result: any = await tool.execute(
+      "batch-enrichment",
+      { paths: [{ path: "a.ts" }, { path: "b.ts" }] },
+      undefined,
+      undefined,
+      makeCtx(root, session),
+    );
+    expect(result.content[0].text).toContain("Recent commits:");
+    expect(result.content[0].text).toContain("add batch files");
+    expect(result.content[0].text).toContain("Constraint: keep batch evidence");
+    expect(result.details.workspaceEvidence.resources).toHaveLength(2);
+    expect(result.details.workspaceEvidence.resources.every((resource: any) => resource.coverage === "full-file")).toBe(true);
+  });
+
+  it("keeps raw selectors raw in multi-file output and without evidence", async () => {
+    const tool = createReadTool();
+    const result: any = await tool.execute(
+      "batch-raw",
+      { paths: [{ path: "a.ts:raw" }] },
+      undefined,
+      undefined,
+      makeCtx(root, session),
+    );
+    expect(result.content[0].text).toContain("export const semanticNeedle = 'auth token';");
+    expect(result.content[0].text).not.toMatch(/^\d+[a-z]{0,2}\|/m);
+    expect(result.content[0].text).not.toContain("🔍 Context for");
+    expect(result.details.workspaceEvidence).toBeUndefined();
+  });
+
+  it("returns and publishes real-chain batch evidence for paths", async () => {
+    const publish = vi.fn();
+    const tool = createReadTool({ publishInspection: publish });
+    const result: any = await tool.execute(
+      "batch",
+      { paths: [{ path: "a.ts" }, { path: "b.ts" }] },
+      undefined,
+      undefined,
+      makeCtx(root, session),
+    );
+    expect(result.details.workspaceEvidence.resources).toHaveLength(2);
+    expect(result.details.workspaceEvidence.resources.every((resource: any) => resource.coverage === "full-file")).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish).toHaveBeenCalledWith(
+      result.details.workspaceEvidence,
+      session,
+      result.details.workspaceEvidence.canonicalWorkspaceRoot,
+    );
+  });
+
+  it("returns strong evidence for shared hybrid query and grep+AST fallback query", async () => {
+    disposeSemanticIndexes();
+    const config = { baseUrl: "http://localhost:11434/v1", model: "test" };
+    const index = getOrCreateSemanticIndex(root, {
+      config,
+      discoverFiles: (async () => ({ files: [path.join(root, "a.ts"), path.join(root, "b.ts")], diagnostics: {} as never })) as never,
+      fetchEmbeddings: (async (request: { inputs: string[] }) => ({
+        vectors: request.inputs.map((input) => /auth|semanticNeedle/i.test(input) ? [1, 0, 0, 0, 0] : [0, 1, 0, 0, 0]),
+      })) as never,
+    });
+    await index.initialize();
+    await index.updateIndex();
+
+    const tool = createReadTool();
+    const hybrid: any = await tool.execute("hybrid", { query: "semanticNeedle auth", topK: 1 }, undefined, undefined, makeCtx(root, session));
+    expect(hybrid.details.retrievalStrategy).toBe("hybrid");
+    expect(hybrid.details.workspaceEvidence.resources).toHaveLength(1);
+    expect(hybrid.content[0].text).toContain("semanticNeedle");
+    expect(hybrid.content[0].text).toContain("Recent commits:");
+
+    disposeSemanticIndexes();
+    const fallback: any = await tool.execute("fallback", { query: "semanticNeedle", topK: 1 }, undefined, undefined, makeCtx(root, session));
+    expect(fallback.details.retrievalStrategy).toBe("fallback");
+    expect(fallback.details.workspaceEvidence.resources).toHaveLength(1);
+  });
+
+  it("rejects conflicting and mode-invalid parameters", async () => {
+    const tool = createReadTool();
+    await expect(tool.execute("bad", { path: "a.ts", paths: [{ path: "b.ts" }] }, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/exactly one/i);
+    await expect(tool.execute("bad", { paths: [{ path: "a.ts" }], directory: "." }, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/not valid/i);
+    await expect(tool.execute("bad", { query: "auth", offset: 1 }, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/not valid/i);
+    await expect(tool.execute("fractional-batch", { paths: [{ path: "a.ts", limit: 2.5 }] } as any, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/paths\[0\]\.limit.*positive integer/i);
+    await expect(tool.execute("fractional-topk", { query: "auth", topK: 1.5 } as any, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/topK.*positive integer/i);
+  });
+
+  it("does not authorize structurally summarized files", async () => {
+    const summarized = [
+      "export function hugeFunction() {",
+      ...Array.from({ length: 900 }, (_, index) => `  const value${index} = ${index};`),
+      "  return value899;",
+      "}",
+    ].join("\n");
+    writeFileSync(path.join(root, "summarized.ts"), summarized);
+    const tool = createReadTool();
+    const result: any = await tool.execute(
+      "summarized",
+      { paths: [{ path: "summarized.ts" }] },
+      undefined,
+      undefined,
+      makeCtx(root, session),
+    );
+
+    expect(result.content[0].text).toMatch(/lines 2-902 elided/);
+    expect(result.details.workspaceEvidence).toBeUndefined();
+  });
+
+  it("does not authorize partial or omitted packed files", async () => {
+    const huge = Array.from({ length: 3000 }, (_, index) => `line ${index} ${"x".repeat(40)}`).join("\n");
+    writeFileSync(path.join(root, "huge.ts"), huge);
+    const tool = createReadTool();
+    const result: any = await tool.execute(
+      "partial",
+      { paths: [{ path: "a.ts" }, { path: "huge.ts" }] },
+      undefined,
+      undefined,
+      makeCtx(root, session),
+    );
+    const authorized = result.details.workspaceEvidence.resources.map((resource: any) => resource.canonicalPath);
+    expect(authorized).toContain(realpathSync(path.join(root, "a.ts")));
+    expect(authorized).not.toContain(realpathSync(path.join(root, "huge.ts")));
+    expect(result.details.packing.partialIncludedPath).toContain("huge.ts");
+  });
+});
+
+describe("grep evidence envelopes", () => {
+  let dir: string;
+  let session: string;
+
+  beforeAll(() => {
+    dir = realpathSync(mkdtempSync(path.join(tmpdir(), "grep-evidence-")));
+    session = path.join(dir, "session.jsonl");
+    writeFileSync(path.join(dir, "alpha.ts"), "export function authenticate() { return true; }\n");
+    writeFileSync(path.join(dir, "beta.ts"), "export const auth = authenticate();\n");
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("grep-produced envelope validates with mode query and coverage search-match", async () => {
+    const tool = createGrepTool({});
+    const ctx = {
+      cwd: dir,
+      sessionManager: { getSessionFile: () => session },
+    } as any;
+    const result: any = await tool.execute("g1", { pattern: "authenticate" }, undefined, undefined, ctx);
+    const env = result.details?.workspaceEvidence;
+    expect(env).toBeDefined();
+    expect(validateInspectionEnvelope(env).ok).toBe(true);
+    expect(env.mode).toBe("query");
+    for (const resource of env.resources) {
+      expect(resource.coverage).toBe("search-match");
+    }
+  });
+
+  it("grep literal fallback produces valid envelope", async () => {
+    const tool = createGrepTool({});
+    const ctx = {
+      cwd: dir,
+      sessionManager: { getSessionFile: () => session },
+    } as any;
+    const result: any = await tool.execute("g2", { pattern: "authenticate", literal: true }, undefined, undefined, ctx);
+    const env = result.details?.workspaceEvidence;
+    expect(env).toBeDefined();
+    expect(validateInspectionEnvelope(env).ok).toBe(true);
+    expect(env.mode).toBe("query");
+  });
+
+  it("grep zero matches produces valid envelope with zero resources in query mode", async () => {
+    const tool = createGrepTool({});
+    const ctx = {
+      cwd: dir,
+      sessionManager: { getSessionFile: () => session },
+    } as any;
+    const result: any = await tool.execute("g3", { pattern: "zzz_nonexistent_xyz123" }, undefined, undefined, ctx);
+    const env = result.details?.workspaceEvidence;
+    expect(env).toBeDefined();
+    expect(validateInspectionEnvelope(env).ok).toBe(true);
+    expect(env.mode).toBe("query");
   });
 });
 

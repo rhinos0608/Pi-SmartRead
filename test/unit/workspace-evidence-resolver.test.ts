@@ -1,10 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
     createEvidenceResolver,
     type ResolverBus,
 } from "../../src/workspace-evidence-resolver.js";
 import {
+    getSharedEvidenceResolver,
+    installInspectAndResolver,
+    resetSharedEvidenceResolver,
+} from "../../src/mcp-registry.js";
+import {
     PROTOCOL_SCHEMA_VERSION,
+    RPC_CHANNELS,
     validateInspectionEnvelope,
     validateEventMessage,
     hashSessionFilePath,
@@ -34,6 +40,8 @@ describe("createEvidenceResolver", () => {
     const SESSION_ID = hashSessionFilePath(SESSION_FILE);
     const CANONICAL_WS = "/ws";
 
+    afterEach(() => resetSharedEvidenceResolver());
+
     function envelopeFor(inspectionId: string, resources: any[]): any {
         return {
             schemaVersion: PROTOCOL_SCHEMA_VERSION,
@@ -45,6 +53,47 @@ describe("createEvidenceResolver", () => {
             resources,
         };
     }
+
+    it("rebinds the shared resolver when Pi replaces the extension event bus", async () => {
+        const firstBus = makeBus();
+        await installInspectAndResolver(firstBus.bus);
+
+        const secondBus = makeBus();
+        await installInspectAndResolver(secondBus.bus);
+        const resolver = getSharedEvidenceResolver();
+        const inspectionId = "e".repeat(64);
+        resolver.publishInspection(
+            envelopeFor(inspectionId, [{
+                resourceId: "f".repeat(64),
+                canonicalPath: "/ws/reloaded.ts",
+                kind: "full",
+                coverage: "full-file",
+                allowedRanges: [{ startLine: 1, endLine: 1 }],
+                fullFileSha256: "1".repeat(64),
+                fresh: true,
+            }]),
+            SESSION_FILE,
+            CANONICAL_WS,
+        );
+
+        const replyPromise = new Promise<any>((resolve) => {
+            secondBus.bus.on(RPC_CHANNELS.inspectPatch, (data) => {
+                const message = validateEventMessage(data);
+                if (message.ok && message.value.kind === "reply" && message.value.requestId === "after-reload") {
+                    resolve(message.value);
+                }
+            });
+        });
+        secondBus.bus.emit(RPC_CHANNELS.inspectPatch, {
+            kind: "request",
+            schemaVersion: PROTOCOL_SCHEMA_VERSION,
+            requestId: "after-reload",
+            rpc: "resolve_evidence",
+            payload: { inspectionId, sessionFilePath: SESSION_FILE, workspaceRoot: CANONICAL_WS },
+        });
+
+        await expect(replyPromise).resolves.toMatchObject({ ok: true });
+    });
 
     it("rejects RPC requests on the wrong session", async () => {
         const { bus } = makeBus();
