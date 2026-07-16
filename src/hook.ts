@@ -15,6 +15,7 @@
  */
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { createReadToolDefinition } from "@mariozechner/pi-coding-agent";
+import { Type, type Static } from "@sinclair/typebox";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { RepoMap } from "./repomap.js";
@@ -23,11 +24,10 @@ import {
    buildStartupGitContext,
    findGitRoot as findGitRootAsync,
 } from "./git-context.js";
-import { loadGitContextConfig } from "./config.js";
+import { loadGitContextConfig, validateEmbeddingConfig } from "./config.js";
 import { formatBranchNotes, scanBranchNotes } from "./git-notes.js";
 import {
    ensureHashlineReady,
-   isUrlLikePath,
    prefixLinesWithAnchors,
    selectorToOffsetLimit,
    splitPathAndSelector,
@@ -43,6 +43,10 @@ import {
   renderMicroagentContext,
   type Microagent,
 } from "./microagents.js";
+import { findProjectWorkspace, isProjectWorkspace, projectWorkspaceForFile } from "./workspace-scope.js";
+import { createReadManyTool } from "./read-many.js";
+import { retrieveQuery } from "./query-retrieval.js";
+import { disposeSemanticIndexes, effectiveSemanticRoot, getOrCreateSemanticIndex } from "./semantic-index-registry.js";
 
 // ── Key computation ───────────────────────────────────────────────
 
@@ -64,30 +68,7 @@ function computeRepoKey(cwd: string): string {
 
 // ── Repo map generation (shared by startup hook) ──
 
-const PROJECT_MARKERS = [
-   "package.json",
-   "pyproject.toml",
-   "go.mod",
-   "Cargo.toml",
-   "pom.xml",
-   "build.gradle",
-   "build.gradle.kts",
-] as const;
 const STARTUP_CONTEXT_WAIT_MS = 750;
-
-function isProjectWorkspace(cwd: string): boolean {
-   if (findGitRoot(cwd)) return true;
-
-   let current = path.resolve(cwd);
-   while (true) {
-      if (PROJECT_MARKERS.some((marker) => existsSync(path.join(current, marker)))) {
-         return true;
-      }
-      const parent = path.dirname(current);
-      if (parent === current) return false;
-      current = parent;
-   }
-}
 
 async function settleWithin<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
    let timer: ReturnType<typeof setTimeout> | undefined;
@@ -221,6 +202,7 @@ export function resetSessionState(): void {
    startupRepoMapCache.clear();
    startupGitContextCache.clear();
    stopResourceDiagnostics();
+   disposeSemanticIndexes();
    // ── Microagent cache ──────────────────────────────────────────────
    cachedMicroagents = [];
 }
@@ -273,6 +255,28 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
 
       // Scan microagents and cache them for the session
       cachedMicroagents = doScanMicroagents(ctx.cwd);
+
+      // Start async semantic index warm-up (fire-and-forget, non-blocking).
+      // Only for bounded project workspaces with embedding config.
+      if (isProjectWorkspace(ctx.cwd)) {
+        const projectRoot = findProjectWorkspace(ctx.cwd);
+        const embedConfig = projectRoot ? validateEmbeddingConfig(projectRoot) : null;
+        let semanticRoot: string | null = null;
+        try {
+          semanticRoot = projectRoot ? effectiveSemanticRoot(ctx.cwd, projectRoot) : null;
+        } catch {
+          // Invalid/disjoint boundary: skip advisory semantic warm-up.
+        }
+        if (semanticRoot && embedConfig) {
+          const semIdx = getOrCreateSemanticIndex(semanticRoot, { config: embedConfig });
+          semIdx.initialize().then(() => semIdx.updateIndex()).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!/disposed during update/i.test(message)) {
+              console.warn(`[Pi-SmartRead] semantic index warm-up unavailable: ${message}`);
+            }
+          });
+        }
+      }
    });
 
    pi.on("before_agent_start", async (event, ctx) => {
@@ -332,6 +336,7 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
     sessionGitCache = null;
     sessionGitCacheKey = null;
     stopResourceDiagnostics();
+    disposeSemanticIndexes();
   });
 }
 
@@ -403,10 +408,15 @@ async function interceptContextualRead(
    if (!filePath) {
       return originalExecute(toolCallId, params, signal, onUpdate, ctx);
    }
-   const { path: targetPath, selector } = splitPathAndSelector(filePath);
+   const embeddedSelector = typeof params.__smartReadSelector === "string"
+      ? params.__smartReadSelector
+      : undefined;
+   const { path: targetPath, selector: pathSelector } = splitPathAndSelector(filePath);
+   const selector = embeddedSelector ?? pathSelector;
    const selectorArgs = selectorToOffsetLimit(selector);
    const rawMode = selectorArgs.raw === true;
    const normalizedParams: Record<string, unknown> = { ...params, path: targetPath };
+   delete normalizedParams.__smartReadSelector;
    if (selectorArgs.offset !== undefined) normalizedParams.offset = selectorArgs.offset;
    if (selectorArgs.limit !== undefined) normalizedParams.limit = selectorArgs.limit;
 
@@ -416,7 +426,7 @@ async function interceptContextualRead(
       return originalExecute(toolCallId, normalizedParams, signal, onUpdate, ctx);
    }
 
-   // Execute the original read first
+   // Explicit paths may cross cwd/workspace; external tooling owns permission.
    const result = (await originalExecute(
       toolCallId,
       normalizedParams,
@@ -434,9 +444,7 @@ async function interceptContextualRead(
    await ensureHashlineReady();
 
    const cwd = path.resolve((params.directory as string) ?? ctx.cwd);
-   if (isUrlLikePath(targetPath)) return result;
-
-   const fullPath = path.resolve(cwd, targetPath);
+   const fullPath = path.resolve(ctx.cwd, targetPath);
 
    if (!existsSync(fullPath)) return result;
 
@@ -470,7 +478,7 @@ async function interceptContextualRead(
             evidenceLimit = truncation.outputLines;
          }
          const evidence = computePathEvidence({
-            path: targetPath,
+            path: fullPath,
             ...(evidenceOffset !== undefined ? { offset: evidenceOffset } : {}),
             ...(evidenceLimit !== undefined ? { limit: evidenceLimit } : {}),
             cwd: ctx.cwd,
@@ -504,11 +512,17 @@ async function interceptContextualRead(
 
    // Enrichment footer: imports, git history, git notes, graph, LSP
    const repoKeyForGit = computeRepoKey(cwd);
+   const fileProjectRoot = projectWorkspaceForFile(fullPath);
+   const callerProjectRoot = projectWorkspaceForFile(ctx.cwd);
+   const canReuseSessionGitCache = sessionGitCacheKey === repoKeyForGit
+      && sessionGitCache !== null
+      && fileProjectRoot !== null
+      && fileProjectRoot === callerProjectRoot;
    const contextLines = await buildFileContextLines({
       fullPath,
       cwd,
-      ...(sessionGitCacheKey === repoKeyForGit && sessionGitCache
-         ? { gitConfig: sessionGitCache.gitConfig, gitRoot: sessionGitCache.gitRoot }
+      ...(canReuseSessionGitCache
+         ? { gitConfig: sessionGitCache!.gitConfig, gitRoot: sessionGitCache!.gitRoot }
          : {}),
    });
 
@@ -535,7 +549,14 @@ async function interceptContextualRead(
          textContent.text = prefixLinesWithAnchors(textContent.text, displayStartLine);
       }
 
-      // Append contextual annotations
+      // Preserve footer separately for internal batch reads. Batch packing must
+      // keep source text separate from enrichment so evidence, cache, and line
+      // numbering continue to describe only rendered file content.
+      if (result.details && typeof result.details === "object" && contextLines.length > 0) {
+         (result.details as Record<string, unknown>).contextFooter = contextLines.join("\n");
+      }
+
+      // Append contextual annotations to direct single-file output.
       if (contextLines.length > 0) {
          textContent.text += contextLines.join("\n");
       }
@@ -544,10 +565,173 @@ async function interceptContextualRead(
    return result;
 }
 
+// ── Extended Read Schema ────────────────────────────────────────────
+
+const ReadSchema = Type.Object({
+  path: Type.Optional(Type.String({ description: "Path to a single file (relative or absolute). Use with optional offset/limit." })),
+  offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line. Single file mode only." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read. Single file mode only." })),
+  paths: Type.Optional(Type.Array(
+    Type.Object({
+      path: Type.String({ description: "Path to the file (relative or absolute)" }),
+      offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
+    }),
+    { minItems: 1, maxItems: 10000, description: "Multiple files to read in the exact order listed (max 10000)." },
+  )),
+  query: Type.Optional(Type.String({ description: "Natural-language intent. Ranks and reads most relevant files in cwd/directory. Falls back to grep+AST when semantic search unavailable." })),
+  directory: Type.Optional(Type.String({ description: "Directory to scan (only with query; default: cwd)." })),
+  topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to return when query is set (default: 20)." })),
+  stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)." })),
+});
+
+type ReadInput = Static<typeof ReadSchema>;
+
 // ── WrapReadToolOptions ──────────────────────────────────────────
 
 export interface WrapReadToolOptions {
    readonly publishInspection?: (envelope: unknown, sessionFilePath: string, workspaceRoot: string) => void;
+}
+
+function requirePositiveInteger(value: unknown, name: string): void {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+}
+
+/**
+ * Factory for an extended `read` tool that supports three modes:
+ *   - Single file: { path, offset?, limit? }
+ *   - Multiple files: { paths: [{ path, offset?, limit? }, ...] }
+ *   - Semantic search: { query, directory?, topK? }
+ *
+ * Every mode returns a `details.workspaceEvidence` envelope (schema v3)
+ * that authorizes patch.
+ */
+export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefinition {
+  return {
+    name: "read",
+    label: "read",
+    description: "Read files with strong workspace evidence. Single file: { path: \"src/auth.ts\" } or { path, offset, limit }. Multiple files: { paths: [{ path: \"a.ts\" }, { path: \"b.ts\" }] }. Query: { query: \"auth flow\" } — uses shared indexed BM25+embedding RRF and reads selected files, with grep+AST discovery only when semantic retrieval is unavailable. Batch evidence covers complete file blocks actually rendered; partial or omitted blocks are not authorized.",
+    parameters: ReadSchema as unknown as Record<string, unknown>,
+
+    async execute(
+      toolCallId: string,
+      params: ReadInput,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+      ctx: ExtensionContext,
+    ) {
+      const selectedModes = [params.path !== undefined, params.paths !== undefined, params.query !== undefined]
+        .filter(Boolean).length;
+      if (selectedModes !== 1) {
+        throw new Error("Provide exactly one of: path, paths, or query");
+      }
+
+      const singleReadFactory = createEvidenceReadFactory(ctx);
+      if (params.path !== undefined) {
+        if (!params.path.trim()) throw new Error("path must not be empty");
+        requirePositiveInteger(params.offset, "offset");
+        requirePositiveInteger(params.limit, "limit");
+        if (params.directory !== undefined || params.topK !== undefined || params.stopOnError !== undefined) {
+          throw new Error("directory, topK, and stopOnError are not valid with path mode");
+        }
+        return interceptContextualRead(
+          { path: params.path, offset: params.offset, limit: params.limit } as Record<string, unknown>,
+          createDelegatedExecute(ctx),
+          toolCallId,
+          signal,
+          onUpdate,
+          ctx,
+          opts,
+        );
+      }
+
+      if (params.paths !== undefined) {
+        if (params.paths.length === 0) throw new Error("paths must contain at least one file");
+        for (const [index, request] of params.paths.entries()) {
+          requirePositiveInteger(request.offset, `paths[${index}].offset`);
+          requirePositiveInteger(request.limit, `paths[${index}].limit`);
+        }
+        if (params.offset !== undefined || params.limit !== undefined || params.directory !== undefined || params.topK !== undefined) {
+          throw new Error("offset, limit, directory, and topK are not valid with paths mode");
+        }
+        const manyTool = createReadManyTool(singleReadFactory, { publishInspection: opts?.publishInspection });
+        return manyTool.execute(toolCallId, {
+          files: params.paths,
+          stopOnError: params.stopOnError,
+        } as never, signal, onUpdate as never, ctx);
+      }
+
+      const query = params.query!.trim();
+      if (!query) throw new Error("query must not be empty or whitespace-only");
+      requirePositiveInteger(params.topK, "topK");
+      if (params.offset !== undefined || params.limit !== undefined || params.stopOnError !== undefined) {
+        throw new Error("offset, limit, and stopOnError are not valid with query mode");
+      }
+      const retrieval = await retrieveQuery({
+        query,
+        cwd: ctx.cwd,
+        directory: params.directory,
+        topK: params.topK,
+        signal,
+        toolCallId,
+      });
+      if (retrieval.hits.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: `[No ${retrieval.strategy} matches for "${query}".]` }],
+          details: {
+            query,
+            retrievalStrategy: retrieval.strategy,
+            ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
+            processedCount: 0,
+            successCount: 0,
+            errorCount: 0,
+          },
+        };
+      }
+
+      const manyTool = createReadManyTool(singleReadFactory, { publishInspection: opts?.publishInspection });
+      const result = await manyTool.execute(toolCallId, {
+        files: retrieval.hits.map((hit) => ({ path: hit.absolutePath })),
+        stopOnError: false,
+      } as never, signal, onUpdate as never, ctx);
+      const details = result.details && typeof result.details === "object" ? result.details as Record<string, unknown> : {};
+      return {
+        ...result,
+        details: {
+          ...details,
+          query,
+          retrievalStrategy: retrieval.strategy,
+          ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
+        },
+      };
+    },
+  } as unknown as ToolDefinition;
+}
+
+function createEvidenceReadFactory(
+  ctx: ExtensionContext,
+): typeof import("@mariozechner/pi-coding-agent").createReadTool {
+  return (() => ({
+    execute: (
+      toolCallId: string,
+      params: Record<string, unknown>,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+    ) => interceptContextualRead(
+      params,
+      createDelegatedExecute(ctx),
+      toolCallId,
+      signal,
+      onUpdate,
+      ctx,
+      // Internal reads expose evidence to the batch aggregator but do not publish
+      // per-file envelopes; only the final rendered batch is published.
+      undefined,
+    ),
+  })) as unknown as typeof import("@mariozechner/pi-coding-agent").createReadTool;
 }
 
 /**
@@ -566,76 +750,27 @@ function sessionFileFromCtx(ctx: ExtensionContext): string | null {
    }
 }
 
-// ── Built-in read override ────────────────────────────────────────
-
 /**
- * Factory for a `read` tool that overrides the built-in read with
- * contextual enrichment and workspace evidence emission.
- *
- * The returned ToolDefinition:
- *   - Preserves the built-in read's name, label, promptSnippet,
- *     promptGuidelines, renderCall, and renderResult
- *   - Delegates dynamically to createReadToolDefinition(ctx.cwd) so
- *     the correct working directory is used at execution time
- *   - Wraps every read with contextual annotations (imports, git recency)
- *     and emits a details.workspaceEvidence envelope (schema v3) that
- *     authorizes patch — same strength as inspect path mode.
- *
- * No first-read repo-map intercept — that is handled by registerSessionHooks().
+ * Build the original execute delegate that creates a fresh
+ * definition with the runtime cwd on every call.
  */
-export function wrapBuiltinReadTool(opts?: WrapReadToolOptions): ToolDefinition {
-   const baseDef = createReadToolDefinition(".");
-
-   // Build the original execute delegate that creates a fresh
-   // definition with the runtime cwd on every call.
-   const createDelegatedExecute = (
-      ctx: ExtensionContext,
-   ): ((
-      toolCallId: string,
-      params: Record<string, unknown>,
-      signal: AbortSignal | undefined,
-      onUpdate: unknown,
-      _ctx: ExtensionContext,
-   ) => Promise<unknown>) => {
-      const freshDef = createReadToolDefinition(ctx.cwd);
-      return freshDef.execute.bind(freshDef) as (
-         toolCallId: string,
-         params: Record<string, unknown>,
-         signal: AbortSignal | undefined,
-         onUpdate: unknown,
-         _ctx: ExtensionContext,
-      ) => Promise<unknown>;
-   };
-
-   return {
-      name: baseDef.name,
-      label: baseDef.label,
-      description: "Read the contents of a file at a known path, including images, with optional line windows, e.g. { path: \"src/auth.ts\", offset: 40, limit: 80 } or { path: \"src/auth.ts:120-180\" }. Appends contextual enrichment (imports, git history, git notes, graph, LSP) and returns a details.workspaceEvidence envelope (schemaVersion 3) that authorizes patch — same strength as inspect path mode. Use inspect { query } / { symbol } / { action: \"map\" } when the path is unknown.",
-      promptSnippet: baseDef.promptSnippet,
-      promptGuidelines: baseDef.promptGuidelines,
-      parameters: baseDef.parameters,
-      renderCall: baseDef.renderCall,
-      renderResult: baseDef.renderResult,
-
-      async execute(
-         toolCallId: string,
-         params: Record<string, unknown>,
-         signal: AbortSignal | undefined,
-         onUpdate: unknown,
-         ctx: ExtensionContext,
-      ) {
-         // Wrap with contextual enrichment only
-         return interceptContextualRead(
-            params,
-            createDelegatedExecute(ctx),
-            toolCallId,
-            signal,
-            onUpdate,
-            ctx,
-            opts,
-         );
-      },
-   } as unknown as ToolDefinition;
+function createDelegatedExecute(
+  ctx: ExtensionContext,
+): (
+  toolCallId: string,
+  params: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  onUpdate: unknown,
+  _ctx: ExtensionContext,
+) => Promise<unknown> {
+  const freshDef = createReadToolDefinition(ctx.cwd);
+  return freshDef.execute.bind(freshDef) as (
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    onUpdate: unknown,
+    _ctx: ExtensionContext,
+  ) => Promise<unknown>;
 }
 
 // ── Microagent system ──────────────────────────────────────────────

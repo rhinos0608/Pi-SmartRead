@@ -17,6 +17,7 @@ import { loadExperimentalConfig } from "./config.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition, toToolDefinitions } from "./types.js";
 import { createInspectTool } from "./inspect-tool.js";
+import { createGrepTool } from "./grep-tool.js";
 import { createEvidenceResolver } from "./workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
 
@@ -29,15 +30,21 @@ const registry = ToolRegistry.getInstance();
 // Shared evidence resolver. Created lazily because the event bus
 // is only available at extension runtime. The factory is stored on
 // the registry and consumed by the extension at activation time.
+type EvidenceBus = {
+    emit: (c: string, d: unknown) => void;
+    on: (c: string, h: (d: unknown) => void) => () => void;
+};
+
 let sharedResolver: ReturnType<typeof createEvidenceResolver> | null = null;
+let sharedResolverBus: EvidenceBus | null = null;
 
 /**
  * Install the inspect tool and the versioned evidence RPC resolver on the
  * extension's event bus. Called by the extension at activation time.
  *
- * - Registers `inspect` (additive, single-file, line-range optional).
+ * - Registers `inspect` (query/symbol/map modes).
  * - Subscribes to RPC `resolve_evidence` requests on `RPC_CHANNELS.inspectPatch`.
- * - Rebuilds the resolver cache from any `inspect` tool_result details seen
+ * - Rebuilds the resolver cache from any `inspect`/`read` tool_result details seen
  *   on the bus. The tool result details are the durable source of truth.
  */
 export async function installInspectAndResolver(bus: {
@@ -72,21 +79,30 @@ export async function installInspectAndResolver(bus: {
     };
     const offInspect = bus.on("pi.tool_result.inspect", reindex);
     const offRead = bus.on("pi.tool_result.read", reindex);
+    const offGrep = bus.on("pi.tool_result.grep", reindex);
     const offRpc = await resolver.install();
     return () => {
         offInspect();
         offRead();
+        offGrep();
         offRpc();
         resolver.dispose();
     };
 }
 
-export function getSharedEvidenceResolver(bus?: { emit: (c: string, d: unknown) => void; on: (c: string, h: (d: unknown) => void) => () => void }): ReturnType<typeof createEvidenceResolver> {
-    if (!sharedResolver && bus) {
+export function getSharedEvidenceResolver(bus?: EvidenceBus): ReturnType<typeof createEvidenceResolver> {
+    // Pi can replace its event bus during extension reload/session replacement.
+    // A resolver bound to the previous bus is indistinguishable from a dead
+    // server to SmartEdit, which then waits for its RPC timeout. Rebind eagerly
+    // whenever activation supplies a different live bus; this also replaces a
+    // placeholder created by an early tool-registry import.
+    if (bus && sharedResolverBus !== bus) {
+        sharedResolver?.dispose();
         sharedResolver = createEvidenceResolver({
             bus,
             channel: RPC_CHANNELS.inspectPatch,
         });
+        sharedResolverBus = bus;
     }
     if (!sharedResolver) {
         // Placeholder without bus — used only in MCP-server-only context
@@ -95,8 +111,16 @@ export function getSharedEvidenceResolver(bus?: { emit: (c: string, d: unknown) 
             bus: { emit: () => {}, on: () => () => {} },
             channel: RPC_CHANNELS.inspectPatch,
         });
+        sharedResolverBus = null;
     }
     return sharedResolver;
+}
+
+/** Dispose module-global resolver state for explicit teardown and test isolation. */
+export function resetSharedEvidenceResolver(): void {
+    sharedResolver?.dispose();
+    sharedResolver = null;
+    sharedResolverBus = null;
 }
 
 function reg(name: string, factory: () => ToolDefinition, category: ToolCategory, experimental = false): void {
@@ -113,6 +137,7 @@ reg("skill", () => toToolDefinition(createSkillTool()), ToolCategory.SKILL);
 // takes precedence when a live bus is available; `reg()` is a no-op if
 // the tool is already present in the registry.
 reg("inspect", () => buildInspectToolForExtension(() => null), ToolCategory.READ);
+reg("grep", () => createGrepTool({}), ToolCategory.READ);
 
 // Inspect tool is registered at extension activation time so it can use
 // the live event bus. We expose a helper that the extension calls to add

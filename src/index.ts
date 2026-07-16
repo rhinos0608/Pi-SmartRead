@@ -7,6 +7,7 @@ import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
 import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver } from "./mcp-registry.js";
+import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
 import { createReadTool } from "./unified-read.js";
 import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
@@ -366,6 +367,30 @@ export default async function (pi: ExtensionAPI) {
       }
     }
 
+    // ── Upstream grep low-result hint: suggest wrapped grep for better coverage ──
+    if (toolName === "grep" && !event.isError && grepRegistered) {
+      const textContent = (outputEvent.content ?? [])
+        .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
+        .map((c: any) => coerceText(c.text))
+        .join("\n");
+      const isNoMatch = textContent.trim() === "No matches found";
+      const lineCount = textContent.split("\n").filter((l: string) => l.trim()).length;
+      const lowMatches = isNoMatch || (lineCount > 0 && lineCount < 4);
+      if (lowMatches) {
+        const pattern = typeof event.input?.pattern === "string" ? event.input.pattern : "";
+        const hint = `\n[hint] Try grep("${pattern}") for broader coverage with symbol + semantic search.`;
+        const content = [...(outputEvent.content ?? [])];
+        const textIdx = content.findIndex((c: any) => c.type === "text");
+        if (textIdx >= 0) {
+          content[textIdx] = { ...content[textIdx], text: coerceText((content[textIdx] as any).text) + hint };
+        } else {
+          content.push({ type: "text", text: hint });
+        }
+        outputEvent = { ...outputEvent, content };
+        outputChanged = true;
+      }
+    }
+
     return outputChanged ? outputEvent : undefined;
   });
 
@@ -394,15 +419,10 @@ export default async function (pi: ExtensionAPI) {
     }) as ExtensionAPI["on"],
   } as ExtensionAPI);
 
-  // 2. Inspect tool: registered synchronously into the central registry before
-  //    the tool-registration loop so it's included in pi.registerTool calls.
+  // 2. Inspect v4: directory → map, file → structural facts + signals
+  //    Query mode removed — use grep for code search.
   if (!ToolRegistry.getInstance().has("inspect")) {
-    const def = buildInspectTool(() => {
-      // Default resolver: extension has no live bus, return null.
-      // The publish path is wired only when installInspectAndResolver is
-      // called from the events bus.
-      return null;
-    });
+    const def = buildInspectTool(() => null);
     ToolRegistry.getInstance().register({
       name: "inspect",
       description: def.description,
@@ -410,6 +430,20 @@ export default async function (pi: ExtensionAPI) {
       execute: def.execute,
       category: ToolCategory.READ,
     });
+  }
+
+  // 2.5 Grep: wrap upstream grep with BM25+symbol+semantic
+  let grepRegistered = false;
+  if (!ToolRegistry.getInstance().has("grep")) {
+    const grepDef = createGrepTool({});
+    ToolRegistry.getInstance().register({
+      name: "grep",
+      description: GREP_DESCRIPTION,
+      inputSchema: grepDef.parameters as Record<string, unknown>,
+      execute: grepDef.execute,
+      category: ToolCategory.READ,
+    });
+    grepRegistered = true;
   }
 
   // 3. Core tools: the loop iterates all tools from ToolRegistry.getAll()

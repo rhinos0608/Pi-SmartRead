@@ -5,12 +5,11 @@
  * Exposes SmartRead tools via the official @modelcontextprotocol/sdk
  * over stdio transport.
  *
- * Tools exposed:
- *   - graph_mutate:  Record a single breakage or co-change edge
- *   - read_files:  Multi-file reader with packing (query mode ranks by intent)
- *   - repo_map:  Repository symbol map (PageRank + tree-sitter)
- *   - search:  Unified text + code search (depth: "deep" for multi-channel)
- *   - symbol:  Symbol navigation and metadata
+ * Tools exposed by default:
+ *   - inspect: Directory (repo map) and file (structural facts + signals) retrieval
+ *   - grep:   Primary code search with BM25+symbol+semantic cascade
+ *   - skill:   Run named SmartRead skills
+ * Experimental tools may be enabled through configuration.
  *
  * Usage:
  *   node --import tsx mcp-server.ts    # Run as MCP stdio server
@@ -26,6 +25,9 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Value } from "@sinclair/typebox/value";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildToolRegistry } from "./mcp-registry.js";
 import { MCP_PROMPTS } from "./mcp-prompts.js";
 import { MCP_RESOURCES, resolveResource } from "./mcp-resources.js";
@@ -34,8 +36,22 @@ import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toExtensionContext } from "./types.js";
 import { renderSmartReadToolGuide } from "./tool-guidance.js";
 
-// Capture cwd once at server start
+// Capture cwd once at server start.
 const SERVER_CWD = process.cwd();
+
+// Standalone MCP has no Pi session manager, but inspect envelopes require an
+// actual session-file identity. Keep that identity private to this process and
+// outside the repository; it contains no user or tool content.
+const MCP_SESSION_DIR = mkdtempSync(join(tmpdir(), "pi-smartread-mcp-"));
+const MCP_SESSION_FILE = join(MCP_SESSION_DIR, "session.jsonl");
+writeFileSync(MCP_SESSION_FILE, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
+let mcpSessionCleaned = false;
+function cleanupMcpSession(): void {
+  if (mcpSessionCleaned) return;
+  mcpSessionCleaned = true;
+  try { rmSync(MCP_SESSION_DIR, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+process.once("exit", cleanupMcpSession);
 
 // ── Build Registry ─────────────────────────────────────────────────
 
@@ -93,6 +109,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
     const toolCallId = `mcp-${++toolCallCounter}`;
     const ctx = toExtensionContext(SERVER_CWD);
+    (ctx.sessionManager as unknown as { getSessionFile: () => string }).getSessionFile = () => MCP_SESSION_FILE;
 
     const result = await tool.execute(toolCallId, args ?? {}, extra.signal ?? undefined, undefined, ctx);
 
