@@ -19,8 +19,11 @@
  */
 
 import * as sqliteVec from "sqlite-vec";
+import { createRequire } from "node:module";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+
+const require = createRequire(import.meta.url);
 
 // ── Raw DB handle (any-typed; sqlite-vec interacts with it directly) ────────────
 
@@ -292,59 +295,65 @@ export class SqliteVecStore {
     if (this.closed) throw new Error("Store is closed");
     if (chunks.length === 0) return;
 
-    const { db } = this;
-    db.exec("BEGIN");
-
+    this.db.exec("BEGIN");
     try {
-      // Prepared statements for the two paths.
-      // The WHERE clause in the check query uses the same column name as the insert
-      // (chunk_id) so it works with both vec0 and regular tables.
-      const insertStmt = db.prepare(
-        "INSERT INTO vec_chunks(" +
-        "chunk_id, embedding, file_path, symbol_kind, " +
-        "language, code_snippet, line_start, line_end" +
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-      );
-      const checkStmt = db.prepare(
-        "SELECT 1 FROM vec_chunks WHERE chunk_id = ?"
-      );
-
-      for (const chunk of chunks) {
-        // Only insert if the chunk_id is not already present.
-        // vec0 tables don't support INSERT OR IGNORE or ON CONFLICT DO NOTHING,
-        // so we use a pre-check to achieve idempotent insert behavior.
-        //
-        // vec0 requires BigInt for integer primary key columns.
-        // Using Number directly fails with "Only integers are allowed for primary key values".
-        if (!Number.isSafeInteger(chunk.id) || chunk.id < 0) {
-          throw new Error(`chunk.id must be a non-negative safe integer, got ${chunk.id}`);
-        }
-        const pkId = BigInt(chunk.id);
-        const existing = checkStmt.get(pkId);
-        if (existing) continue;
-
-        insertStmt.run(
-          pkId,
-          // vec0 path: store Float32Array directly (sqlite-vec handles the format).
-          // Fallback path: store only the Float32Array bytes, not the whole buffer.
-          this.vec0Available
-            ? chunk.embedding
-            : chunk.embedding.buffer.slice(
-                chunk.embedding.byteOffset,
-                chunk.embedding.byteOffset + chunk.embedding.byteLength
-              ),
-          chunk.filePath, chunk.symbolKind,
-          chunk.language, chunk.codeSnippet,
-          // vec0 requires BigInt for all integer columns (primary key and metadata).
-          // Fallback uses regular integer binding.
-          this.vec0Available ? BigInt(chunk.lineStart) : chunk.lineStart,
-          this.vec0Available ? BigInt(chunk.lineEnd) : chunk.lineEnd
-        );
-      }
-      db.exec("COMMIT");
+      this.insertChunksWithinTransaction(chunks);
+      this.db.exec("COMMIT");
     } catch (err) {
-      try { db.exec("ROLLBACK"); } catch { /* ignore rollback errors */ }
+      try { this.db.exec("ROLLBACK"); } catch { /* ignore rollback errors */ }
       throw err;
+    }
+  }
+
+  /** Atomically replace every chunk belonging to one file. */
+  replaceFileChunks(filePath: string, chunks: Chunk[]): void {
+    if (this.closed) throw new Error("Store is closed");
+    if (chunks.some((chunk) => chunk.filePath !== filePath)) {
+      throw new Error("replaceFileChunks received a chunk for a different file");
+    }
+
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM vec_chunks WHERE file_path = ?").run(filePath);
+      this.insertChunksWithinTransaction(chunks);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      try { this.db.exec("ROLLBACK"); } catch { /* ignore rollback errors */ }
+      throw err;
+    }
+  }
+
+  private insertChunksWithinTransaction(chunks: Chunk[]): void {
+    const insertStmt = this.db.prepare(
+      "INSERT INTO vec_chunks(" +
+      "chunk_id, embedding, file_path, symbol_kind, " +
+      "language, code_snippet, line_start, line_end" +
+      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    const checkStmt = this.db.prepare("SELECT 1 FROM vec_chunks WHERE chunk_id = ?");
+
+    for (const chunk of chunks) {
+      if (!Number.isSafeInteger(chunk.id) || chunk.id < 0) {
+        throw new Error(`chunk.id must be a non-negative safe integer, got ${chunk.id}`);
+      }
+      const pkId = BigInt(chunk.id);
+      if (checkStmt.get(pkId)) continue;
+
+      insertStmt.run(
+        pkId,
+        this.vec0Available
+          ? chunk.embedding
+          : chunk.embedding.buffer.slice(
+              chunk.embedding.byteOffset,
+              chunk.embedding.byteOffset + chunk.embedding.byteLength
+            ),
+        chunk.filePath,
+        chunk.symbolKind,
+        chunk.language,
+        chunk.codeSnippet,
+        this.vec0Available ? BigInt(chunk.lineStart) : chunk.lineStart,
+        this.vec0Available ? BigInt(chunk.lineEnd) : chunk.lineEnd
+      );
     }
   }
 
@@ -369,7 +378,10 @@ export class SqliteVecStore {
   ): SearchResult[] {
     const { db } = this;
     const predicates: string[] = [];
-    const args: any[] = [queryEmbedding, k];
+    // vec0 applies OR metadata predicates after its k-nearest candidate cut.
+    // Prefix boundary matching needs OR, so search the live corpus then trim.
+    const vecK = filters?.filePathPrefix ? Math.max(k, this.chunkCount) : k;
+    const args: any[] = [queryEmbedding, vecK];
 
     if (filters?.language) {
       predicates.push("language = ?");
@@ -380,8 +392,11 @@ export class SqliteVecStore {
       args.push(filters.symbolKind);
     }
     if (filters?.filePathPrefix) {
-      predicates.push("file_path LIKE ?");
-      args.push(filters.filePathPrefix + "%");
+      const prefix = filters.filePathPrefix.replace(/[\\/]+$/, "");
+      if (prefix) {
+        predicates.push("(file_path = ? OR file_path LIKE ?)");
+        args.push(prefix, `${prefix}/%`);
+      }
     }
 
     const filterExpr = predicates.join(" AND ");
@@ -406,7 +421,7 @@ export class SqliteVecStore {
       lineStart: row.line_start,
       lineEnd: row.line_end,
       distance: row.distance,
-    }));
+    })).slice(0, k);
   }
 
   /**
@@ -436,8 +451,11 @@ export class SqliteVecStore {
       args.push(filters.symbolKind);
     }
     if (filters?.filePathPrefix) {
-      conditions.push("file_path LIKE ?");
-      args.push(filters.filePathPrefix + "%");
+      const prefix = filters.filePathPrefix.replace(/[\\/]+$/, "");
+      if (prefix) {
+        conditions.push("(file_path = ? OR file_path LIKE ?)");
+        args.push(prefix, `${prefix}/%`);
+      }
     }
 
     const whereClause = conditions.length > 0
@@ -455,7 +473,7 @@ export class SqliteVecStore {
       "LIMIT ?",
     ].join(" ");
 
-    const rows = db.prepare(sql).all(queryEmbedding.buffer, k, ...args) as any[];
+    const rows = db.prepare(sql).all(queryEmbedding.buffer, ...args, k) as any[];
     return rows.map((row) => ({
       id: row.id,
       filePath: row.file_path,
@@ -474,6 +492,44 @@ export class SqliteVecStore {
     this.db
       .prepare("DELETE FROM vec_chunks WHERE file_path = ?")
       .run(filePath);
+  }
+
+  /**
+   * Return all chunks (without embeddings) for BM25 corpus access.
+   * Used by SemanticIndex for hybrid BM25+semantic RRF search.
+   */
+  getAllChunks(): Array<{
+    id: number;
+    filePath: string;
+    symbolKind: string;
+    language: string;
+    codeSnippet: string;
+    lineStart: number;
+    lineEnd: number;
+  }> {
+    if (this.closed) throw new Error("Store is closed");
+    const rows = this.db
+      .prepare(
+        "SELECT chunk_id as id, file_path, symbol_kind, language, " +
+        "code_snippet, line_start, line_end FROM vec_chunks"
+      )
+      .all() as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      filePath: row.file_path,
+      symbolKind: row.symbol_kind,
+      language: row.language,
+      codeSnippet: row.code_snippet,
+      lineStart: row.line_start,
+      lineEnd: row.line_end,
+    }));
+  }
+
+  /** Return the number of chunks in the store. */
+  get chunkCount(): number {
+    if (this.closed) return 0;
+    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM vec_chunks").get() as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
   }
 
   close(): void {
