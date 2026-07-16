@@ -5,7 +5,6 @@
  * - `repo_map` — generate a PageRank-ranked map of the repo
  * - `search` — consolidated search (symbols, callers, resolve, code)
  */
-import { resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionAPI,
@@ -15,6 +14,7 @@ import type {
 import { RepoMap } from "./repomap.js";
 import createSearchTool from "./search-tool.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
+import { resolve as pathResolve } from "node:path";
 
 // ── Tool: repo_map ────────────────────────────────────────────────
 
@@ -178,7 +178,9 @@ export function createRepoTool(): ToolDefinition {
 }
 
 function resolveDirParam(cwd: string, directory: string | undefined): string {
-  return directory ? resolve(cwd, directory) : resolve(cwd);
+  // Direct resolve — explicit directories are allowed outside cwd and
+  // outside PI_SMARTREAD_ALLOWED_ROOT (external permission system).
+  return pathResolve(cwd, directory ?? ".");
 }
 
 // ── Registration ──────────────────────────────────────────────────
