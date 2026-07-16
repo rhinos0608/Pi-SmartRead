@@ -1,6 +1,6 @@
 /**
- * Shared per-file contextual enrichment footer — used by the wrapped
- * builtin read tool (hook.ts) and inspect path mode (inspect.ts).
+ * Shared per-file contextual enrichment footer used by the wrapped
+ * builtin read tool (hook.ts).
  * Every channel is best-effort: failures append a warning line or are
  * skipped; this function never throws.
  *
@@ -22,6 +22,7 @@ import { scanBranchNotes } from "./git-notes.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { LruCache } from "./utils.js";
+import { projectWorkspaceForFile } from "./workspace-scope.js";
 
 // ── Shared ContextGraph cache (module-level) ──
 // Build once per repo, reuse across reads. Prevents O(repo_files * read_calls) parsing.
@@ -51,52 +52,70 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
 
   const relPath = path.relative(cwd, fullPath);
   const contextLines: string[] = ["", "---", `🔍 Context for ${relPath}:`];
+  const projectRoot = projectWorkspaceForFile(fullPath);
+  // Reading a loose file from a broad cwd such as $HOME must stay a plain
+  // file read. Every enrichment channel below assumes a bounded project root
+  // and can otherwise start repo scans, git probes, or language servers at
+  // home-directory scope.
+  if (!projectRoot) return [];
+  const analysisRoot = projectRoot;
+
+  // 1. Structural context via shared cached ContextGraph
+  // A non-project cwd (notably $HOME) must never become an implicit repo.
+  // For files inside a nested project, scope the graph to that project;
+  // for loose files, skip structural indexing entirely.
+  // Isolated in its own try/catch so a structural failure cannot suppress
+  // later channels (git recency, recent commits, git notes, graphify, LSP).
+  try {
+    if (projectRoot) {
+      let graph = contextualGraphCache.get(projectRoot);
+      if (!graph) {
+        graph = new ContextGraph(projectRoot);
+        contextualGraphCache.set(projectRoot, graph);
+      }
+      await graph.buildContextGraph({
+        forceRefresh: false,
+        includeSymbols: true,
+        includeCalls: false,
+      });
+
+      const neighbours = await graph.getFileNeighbours(fullPath, {
+        includeSymbols: false,
+        includeCalls: false,
+      });
+
+      const importedBy = neighbours
+        .filter((n) => n.provenance.type === "imported_by")
+        .map((n) => path.relative(projectRoot, n.path));
+      const imports = neighbours
+        .filter((n) => n.provenance.type === "imports")
+        .map((n) => path.relative(projectRoot, n.path));
+
+      if (importedBy.length > 0)
+        contextLines.push(
+          `• Imported by: ${importedBy.slice(0, 8).join(", ")}${importedBy.length > 8 ? "…" : ""}`,
+        );
+      if (imports.length > 0)
+        contextLines.push(
+          `• Imports: ${imports.slice(0, 8).join(", ")}${imports.length > 8 ? "…" : ""}`,
+        );
+    }
+  } catch {
+    // Structural context is best-effort; do not let it suppress later channels.
+  }
 
   try {
-    // 1. Structural context via shared cached ContextGraph
-    let graph = contextualGraphCache.get(cwd);
-    if (!graph) {
-      graph = new ContextGraph(cwd);
-      contextualGraphCache.set(cwd, graph);
-    }
-    await graph.buildContextGraph({
-      forceRefresh: false,
-      includeSymbols: true,
-      includeCalls: false,
-    });
-
-    const neighbours = await graph.getFileNeighbours(fullPath, {
-      includeSymbols: false,
-      includeCalls: false,
-    });
-
-    const importedBy = neighbours
-      .filter((n) => n.provenance.type === "imported_by")
-      .map((n) => path.relative(cwd, n.path));
-    const imports = neighbours
-      .filter((n) => n.provenance.type === "imports")
-      .map((n) => path.relative(cwd, n.path));
-
-    if (importedBy.length > 0)
-      contextLines.push(
-        `• Imported by: ${importedBy.slice(0, 8).join(", ")}${importedBy.length > 8 ? "…" : ""}`,
-      );
-    if (imports.length > 0)
-      contextLines.push(
-        `• Imports: ${imports.slice(0, 8).join(", ")}${imports.length > 8 ? "…" : ""}`,
-      );
-
     // 2. Git recency
-    if (await isRecentlyModified(cwd, fullPath)) {
+    if (await isRecentlyModified(analysisRoot, fullPath)) {
       contextLines.push("• Recently modified (last day).");
     }
 
     // 2b. Recent commits + git notes
     try {
-      const gitConfig = opts.gitConfig ?? loadGitContextConfig(cwd);
+      const gitConfig = opts.gitConfig ?? loadGitContextConfig(analysisRoot);
       const gitRoot = opts.gitRoot !== undefined
         ? opts.gitRoot
-        : (gitConfig.enabled ? await findGitRoot(cwd) : null);
+        : (gitConfig.enabled ? await findGitRoot(analysisRoot) : null);
       if (gitRoot && gitConfig.enabled) {
         const relToGitRoot = path.relative(gitRoot, fullPath);
         const commits = await getFileCommitContext(gitRoot, relToGitRoot, gitConfig.readEnrichmentCommits);
@@ -144,7 +163,7 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
 
     // 3. Graphify enrichment (uses graphify-out/graph.json when available).
     try {
-      const enricher = getGraphifyEnricher(cwd);
+      const enricher = getGraphifyEnricher(analysisRoot);
       if (enricher.isAvailable) {
         const related = enricher.getRelatedFilesForPath(fullPath);
         if (related.length > 0) {
@@ -183,7 +202,7 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
     try {
       const bridge = await getLSPBridge();
       if (bridge && bridge.isAvailable()) {
-        const symbols = await bridge.getDocumentSymbols(fullPath, cwd);
+        const symbols = await bridge.getDocumentSymbols(fullPath, analysisRoot);
         if (symbols.length > 0) {
           const topLevel = symbols.filter(
             (s) => !s.children || s.children.length === 0 || s.name === s.name,

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { isAbsolute, relative, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -133,4 +133,55 @@ export async function isRecentlyModified(cwd: string, targetPath: string, since 
   const relTarget = relative(gitRoot, fullPath);
 
   return cacheEntry.files.has(relTarget);
+}
+
+/**
+ * Get the last modification time of a file as both ISO string and relative string.
+ * Uses `git log -1 --format=%ar` when git root is available, falls back to
+ * file mtime ("today" if <1 day, "Unknown" otherwise).
+ * Returns null if neither git nor stat succeeds.
+ */
+export async function fileLastModifiedRelative(
+  absolutePath: string,
+  cwd: string,
+): Promise<{ iso: string; relative: string } | null> {
+  const gitRoot = await findGitRoot(cwd);
+  if (gitRoot) {
+    try {
+      const relPath = relative(gitRoot, absolutePath);
+      const { stdout } = await execFileAsync(
+        "git",
+        ["log", "-1", "--format=%ar", "--", relPath],
+        { cwd: gitRoot, encoding: "utf-8" },
+      );
+      const relativeTime = stdout.trim();
+      if (relativeTime) {
+        const { stdout: isoOut } = await execFileAsync(
+          "git",
+          ["log", "-1", "--format=%aI", "--", relPath],
+          { cwd: gitRoot, encoding: "utf-8" },
+        );
+        const iso = isoOut.trim();
+        if (iso) return { iso, relative: relativeTime };
+      }
+    } catch {
+      // git unavailable or file has no history — fall through to mtime
+    }
+  }
+
+  // Fallback: file mtime
+  try {
+    const st = statSync(absolutePath);
+    const iso = new Date(st.mtimeMs).toISOString();
+    const now = Date.now();
+    const diffMs = now - st.mtimeMs;
+    const diffDays = diffMs / (24 * 60 * 60 * 1000);
+    if (diffDays < 1) {
+      return { iso, relative: "today" };
+    }
+    // Old mtime → no reliable relative string
+    return null;
+  } catch {
+    return null;
+  }
 }

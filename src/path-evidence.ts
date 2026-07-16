@@ -1,10 +1,10 @@
 /**
- * Path-mode workspace-evidence builder — shared by the `inspect` tool's
- * path mode and the wrapped builtin `read` tool. Dependency-free by
+ * File-read workspace-evidence builder used by the wrapped builtin `read`
+ * tool. Dependency-free by
  * design: importing this module must never pull in the search/symbol
  * engines (avoids the search-tool → hook import cycle).
  */
-import { realpathSync, statSync, readFileSync } from "node:fs";
+import { realpathSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve as pathResolve } from "node:path";
 import {
@@ -65,13 +65,13 @@ export function computePathEvidence(input: PathEvidenceInput): PathEvidenceResul
             const guidance = stat.isDirectory()
                 ? ' Use inspect with { action: "map", directory: "<path>" } for directories.'
                 : "";
-            throw new Error(`inspect target is not a regular file: ${input.path}.${guidance}`);
+            throw new Error(`Path is not a regular file: ${input.path}.${guidance}`);
         }
         canonicalFile = realpathSync(absolutePath);
     } catch (err) {
         const e = err as NodeJS.ErrnoException;
         if (e.code === "ENOENT") {
-            throw new Error(`file not found: ${input.path}`);
+            throw new Error(`Path does not exist or is not readable: ${input.path}`);
         }
         throw err;
     }

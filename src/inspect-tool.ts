@@ -1,36 +1,26 @@
 /**
- * SmartRead `inspect` tool — multi-mode v3.
+ * SmartRead `inspect` tool — v4 path-based mode detection.
  *
- * Modes (one per call, dispatched by input shape):
- *  - path  (default): `{ path }` or `{ path, offset, limit }` — single file + evidence
- *  - query:          `{ query }` or `{ query, depth: "deep" }` — intent-based search + evidence
- *  - symbol:         `{ symbol }` — symbol lookup + evidence
- *  - map:            `{ action: "map" }` — repo structure + evidence
- *
- * Every mode returns a `details.workspaceEvidence` envelope (schema v3)
- * with the appropriate `mode` field. Use this envelope to authorize
- * subsequent patch calls. Query/symbol modes carry weak ("search-match")
- * coverage that patch will reject — the model must path-mode inspect a
- * file before mutating it.
+ * Directory → ranked repo map. File → structural facts + quality signals.
+ * Query/symbol/action params removed — use grep for code search.
  */
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { executeInspectDetails } from "./inspect.js";
+import { executeInspectV4 } from "./inspect.js";
+import type { InspectV4Input } from "./inspect-types.js";
 
-const InspectSchema = Type.Object({
-    path: Type.Optional(Type.String({ description: 'Regular file path to inspect (relative or absolute). For a directory, use { action: "map", directory: "<path>" } instead.' })),
-    offset: Type.Optional(Type.Number({ minimum: 1, description: "1-based start line. Path mode only." })),
-    limit: Type.Optional(Type.Number({ minimum: 1, description: "Maximum number of lines to read. Path mode only." })),
-    query: Type.Optional(Type.String({ description: "Search intent. Query mode when set (use depth: \"deep\" for multi-channel evidence)." })),
-    depth: Type.Optional(Type.Union([Type.Literal("quick"), Type.Literal("deep")], {
-        description: "Query depth. \"quick\" (default): grep + AST. \"deep\": grep + AST + semantic + symbol + graph + LSP. Query mode only.",
-    })),
-    symbol: Type.Optional(Type.String({ description: "Symbol name or qualified path. Symbol mode when set." })),
-    action: Type.Optional(Type.Union([Type.Literal("map")], { description: "Specialised action. action: \"map\" produces a repo map (map mode)." })),
-    directory: Type.Optional(Type.String({ description: "Optional directory scope (relative to cwd). Used by map mode, and narrows the search root for query mode (both quick and deep depth) and symbol mode." })),
+const InspectV4Schema = Type.Object({
+    path: Type.String({ description: "File or directory path. Directory → repo map. File → structural facts + signals." }),
+    signals: Type.Optional(Type.Array(
+        Type.Union([Type.Literal("complexity"), Type.Literal("public-api"), Type.Literal("reuse"), Type.Literal("recency"), Type.Literal("tests"), Type.Literal("deprecation")]),
+        { description: "Signals to compute (default: all)." },
+    )),
+    mapTokens: Type.Optional(Type.Number({ description: "Token budget for directory mode (256-32768, default 4096)." })),
+    focus: Type.Optional(Type.Array(Type.String(), { description: "Files/symbols to boost in directory mode." })),
+    compact: Type.Optional(Type.Boolean({ description: "Compact output (default true for directory, false for file)." })),
 });
 
-type InspectInput = Static<typeof InspectSchema>;
+type InspectV4ToolInput = Static<typeof InspectV4Schema>;
 
 export interface InspectToolOptions {
     /** Resolver to publish envelopes into on successful execution. */
@@ -41,45 +31,52 @@ export interface InspectToolOptions {
     readonly getSessionFilePath: () => string | null | undefined;
 }
 
-const INSPECT_DESCRIPTION =
-    "Multi-mode inspect. " +
-    "Path mode: { path: \"src/auth.ts\" } or { path, offset, limit } — full/range file read + evidence. " +
-    "Query mode: { query: \"refreshToken\" } (default quick: grep + AST) or { query, depth: \"deep\" } (grep + AST + semantic + symbol + graph + LSP). " +
-    "Symbol mode: { symbol: \"AuthService.login\" } — symbol lookup + evidence. " +
-    "Map mode: { action: \"map\" } — repository structure + evidence. " +
-    "Every mode returns a details.workspaceEvidence envelope (schemaVersion 3) with the canonical path, allowed ranges, coverage kind, and (for path mode) SHA-256 freshness. " +
-    "Path mode produces strong evidence that authorizes patch. Query and symbol modes produce weak (search-match) evidence — they help you find files, but you must path-mode inspect a file before patch will accept edits to it.";
+const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality.
+- Pass a directory to get a ranked repository map with key symbols and architecture.
+- Pass a file to get structural facts: callers, parent class, children, base classes, overrides, re-exports, plus quality signals (complexity, public API, deprecation, test presence, reuse breadth, recency).
 
-export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
+Every mode returns a details.workspaceEvidence envelope (schemaVersion 3).
+File mode produces weak (search-match) evidence — you must read a file before editing it. Map mode produces no file authorization.`;
+
+function legacyParamError(params: Record<string, unknown>): string | undefined {
+    if (params.query !== undefined) return "inspect no longer supports query mode. Use grep('pattern').";
+    if (params.symbol !== undefined) return "inspect no longer supports symbol mode. Symbol lookup folded into wrapped grep's AST layer.";
+    if (params.action !== undefined) return "inspect action param removed. Use inspect { path: 'some/dir' } for repo map.";
+    return undefined;
+}
+
+export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
     return {
         name: "inspect",
         label: "inspect",
-        description: INSPECT_DESCRIPTION,
-        parameters: InspectSchema as unknown as Record<string, unknown>,
+        description: INSPECT_V4_DESCRIPTION,
+        parameters: InspectV4Schema as unknown as Record<string, unknown>,
         async execute(
             toolCallId: string,
-            params: InspectInput,
+            params: InspectV4ToolInput & Record<string, unknown>,
             signal: AbortSignal | undefined,
             _onUpdate: unknown,
             ctx: ExtensionContext,
         ) {
+            // Migration errors for legacy params
+            const legacyErr = legacyParamError(params);
+            if (legacyErr) throw new Error(legacyErr);
+
             const sessionFilePath = opts.getSessionFilePath() ?? sessionFileFromContext(ctx);
             if (typeof sessionFilePath !== "string" || sessionFilePath.length === 0) {
                 throw new Error("inspect: no real session file (in-memory/ephemeral identity rejected)");
             }
-            const details = await executeInspectDetails({
+            const inspectInput: InspectV4Input = {
                 path: params.path,
-                query: params.query,
-                symbol: params.symbol,
-                action: params.action,
-                offset: params.offset,
-                limit: params.limit,
-                depth: params.depth,
-                directory: params.directory,
+                signals: params.signals,
+                mapTokens: params.mapTokens,
+                focus: params.focus,
+                compact: params.compact,
                 cwd: ctx.cwd,
                 sessionFilePath,
                 signal,
-            });
+            };
+            const details = await executeInspectV4(inspectInput);
 
             // Publish into the resolver so patch can request it via RPC.
             // Publishing is best-effort: a resolver failure must not prevent
@@ -115,6 +112,9 @@ export function createInspectTool(opts: InspectToolOptions): ToolDefinition {
         },
     };
 }
+
+/** @deprecated Use createInspectV4Tool. Kept for backward compat until callers update. */
+export const createInspectTool = createInspectV4Tool;
 
 /**
  * Default factory: get session file path from a ExtensionAPI + ctx.
