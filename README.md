@@ -11,9 +11,9 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 
 | Tool | What it does |
 |---|---|
-| `read` | Single-file, multi-file, or query-selected file reads with contextual enrichment and strong evidence. |
-| `inspect` | Two modes — directory (ranked repo map) or file (structural facts + quality signals). |
-| `grep` | Primary code search — BM25 ranking + AST symbol matching + semantic fallback behind a grep-shaped interface. |
+| `read` | Single-file, multi-file, query-selected file reads, or symbol-resolved code (via `symbol` param) with contextual enrichment and strong evidence. |
+| `inspect` | Two modes — directory (ranked repo map + clusters, layers, boundaries, routes) or file (structural facts + quality signals + call graph traversal, impact analysis, dead code detection, diff mapping). |
+| `grep` | Primary code search — BM25 ranking + AST symbol matching + semantic fallback behind a grep-shaped interface, plus graph-aware filtering (`graphFilter`). |
 | `graph_mutate` | [experimental] Records semantic coupling observations into the context graph. |
 
 Experimental tools (`graph_mutate` and git-notes tools) are opt-in via `pi-smartread.config.json` and only register when enabled.
@@ -54,6 +54,7 @@ Read files with strong workspace evidence. Supports three modes:
 
 - **Single file**: `{ path: "src/auth.ts" }` or `{ path, offset, limit }`
 - **Multiple files**: `{ paths: [{ path: "a.ts" }, { path: "b.ts" }] }`
+- **Symbol lookup**: `{ symbol: "AuthService.login" }` — resolves a qualified symbol name via LSP or the context graph and reads its definition file
 - **Query-selected files**: `{ query: "auth flow" }` — ranks the startup index with whole-corpus BM25 + embedding RRF, then reads selected files; grep+AST discovers candidates only when indexed retrieval is unavailable
 
 Successful single-file reads and complete file blocks rendered by multi/query reads return strong schema-v3 evidence. Partial and omitted packed blocks are intentionally not authorized.
@@ -80,9 +81,13 @@ Pass a directory path to get a ranked repository map with key symbols and archit
 
 Output includes a PageRank-ranked symbol tree, file structure, and optionally graph-knowledge clusters.
 
+**Additional params (all optional, directory mode):** `clusters` (Louvain community detection on import graph), `layers` (architectural layer inference), `boundaries` (service boundary detection via monorepo config), `routes` (HTTP route extraction), `hotspots` (fan-in ranked functions), `graphSchema` (graph structure summary), `deadCode` (zero-caller functions).
+
 ### File mode
 
-Pass a file path to get structural facts plus quality signals:
+Pass a file path to get structural facts plus quality signals, plus optional analysis:
+
+**Additional file-mode params:** `callDepth` + `callDirection` (BFS call graph, depth 1–5), `impact` (blast radius via call+import graph), `deadCode` (zero-caller functions), `diff` (git diff → affected symbols with risk), `hotspots` (fan-in ranked functions), `routes` (HTTP route → handler), `graphSchema` (node/edge counts).
 
 **Structural facts:**
 - Callers — intra-file and cross-file call sites
@@ -152,6 +157,7 @@ Pass `literal: true` to skip the cascade and go straight to raw text search.
 | `literal` | boolean | Exact substring match — skip BM25/semantic (default: false) |
 | `limit` | number | Max results (1-100, default: 20) |
 | `contextLines` | number | Lines of context per match (0-10, default: 2) |
+| `graphFilter` | string | Graph edge filter, e.g. `"CALLS->auth.login"` or `"IMPORTED_BY->src/core"`. Filters results to files/symbols reachable via the specified relationship. Requires context graph to be built. |
 
 ### Evidence semantics
 
