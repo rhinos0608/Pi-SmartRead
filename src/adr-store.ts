@@ -77,6 +77,24 @@ export function writeAdr(root: string, input: Omit<AdrRecord, "id" | "date"> & {
   return path;
 }
 
+export interface AdrFilter {
+  status?: AdrStatus;
+  tags?: string[];
+}
+
+/** Filtered ADR accessor — returns only records matching all provided filters. */
+export function listAdrs(root: string, filter?: AdrFilter): AdrRecord[] {
+  let records = readAdrs(root);
+  if (filter?.status) {
+    records = records.filter((r) => r.status === filter.status);
+  }
+  if (filter?.tags && filter.tags.length > 0) {
+    const requiredTags = new Set(filter.tags);
+    records = records.filter((r) => r.tags.some((t) => requiredTags.has(t)));
+  }
+  return records;
+}
+
 const MAX_ADR_FILE_BYTES = 2_000_000;
 
 export function readAdrs(root: string): AdrRecord[] {
