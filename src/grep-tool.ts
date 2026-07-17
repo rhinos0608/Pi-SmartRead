@@ -21,6 +21,8 @@ import { handleGrep } from "./search-tool.js";
 import { handleSymbol } from "./find-symbol-tool.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
 import { pathPrefixForDirectory } from "./semantic-index.js";
+import type { ContextGraph } from "./context-graph.js";
+import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -32,6 +34,7 @@ const GrepSchema = Type.Object({
     literal: Type.Optional(Type.Boolean({ description: "Exact substring match — skip BM25/semantic (default: false)." })),
     limit: Type.Optional(Type.Number({ description: "Max results (default: 20, max: 100).", default: 20, minimum: 1, maximum: 100 })),
     contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 10).", default: 2, minimum: 0, maximum: 10 })),
+    graphFilter: Type.Optional(Type.String({ description: 'Filter results by graph relationship. Format: "EDGE_TYPE->target" e.g. "CALLS->auth.login" or "IMPORTED_BY->src/core".' })),
 });
 
 type GrepInput = Static<typeof GrepSchema>;
@@ -43,7 +46,11 @@ Example: grep('auth middleware') finds authentication code even if the
 function is named validateToken.
 
 Parameters: pattern (required), path (scope directory/file), glob (file filter),
-ignoreCase, literal, contextLines. Results are ranked and deduplicated.`;
+ignoreCase, literal, contextLines, graphFilter. Results are ranked and deduplicated.
+
+graphFilter: filter results by graph relationship. Format "EDGE_TYPE->target",
+e.g. "CALLS->auth.login" (only files that call auth.login) or
+"IMPORTED_BY->src/core" (only files imported by src/core).`;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -66,6 +73,8 @@ export interface GrepToolOptions {
         publishInspection(envelope: unknown, sessionFilePath: string, workspaceRoot: string): void;
     };
     readonly getSessionFilePath?: () => string | null | undefined;
+    /** ContextGraph instance for graphFilter edge checks (WP-5 DI). */
+    readonly contextGraph?: ContextGraph;
 }
 
 export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
@@ -113,11 +122,26 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                 hits = hits.filter((h) => minimatch(h.relFile, glob));
             }
 
+            // ── Graph filter (WP-5 wiring) ──────────────────────────────
+            let graphFilterNotes: string[] = [];
+            if (params.graphFilter !== undefined) {
+                if (!opts.contextGraph) {
+                    throw new Error("graphFilter requires an indexed context graph");
+                }
+                // Validate format — throws spec error for invalid format
+                if (!parseGraphFilter(params.graphFilter)) {
+                    throw new Error('Invalid graphFilter: expected "EDGE_TYPE->target" format');
+                }
+                const result = await applyGraphFilter(hits, params.graphFilter, opts.contextGraph);
+                hits = result.hits;
+                graphFilterNotes = result.notes;
+            }
+
             const shown = hits.slice(0, topK);
             const truncated = hits.length > topK;
 
             const elapsed = Date.now() - startTime;
-            const text = formatOutput(params.pattern, shown, hits.length, engines, truncated, elapsed);
+            const text = formatOutput(params.pattern, shown, hits.length, engines, truncated, elapsed, graphFilterNotes);
             const evidence = buildEvidence(shown, cwd, opts);
 
             // Publish into the resolver (best-effort).
@@ -442,6 +466,7 @@ function formatOutput(
     engines: string[],
     truncated: boolean,
     elapsedMs: number,
+    graphFilterNotes?: string[],
 ): string {
     const engineStr = engines.join(" + ");
     const lines: string[] = [
@@ -461,6 +486,12 @@ function formatOutput(
 
     if (truncated) {
         lines.push(`(truncated: ${shown.length} of ${totalHits}, narrow search for more)`);
+    }
+
+    if (graphFilterNotes && graphFilterNotes.length > 0) {
+        for (const note of graphFilterNotes) {
+            lines.push(`graphFilter note: ${note}`);
+        }
     }
 
     return lines.join("\n");

@@ -109,6 +109,34 @@ describe("grep tool — literal mode", () => {
     });
 });
 
+// ── WP-2: graphFilter schema ───────────────────────────────────────
+
+describe("grep tool — graphFilter schema (WP-2)", () => {
+    it("accepts valid graphFilter param in schema", () => {
+        const tool = createGrepTool(makeOpts());
+        const schema = tool.parameters as any;
+        expect(schema.properties.graphFilter).toBeDefined();
+        expect(schema.properties.graphFilter.type).toBe("string");
+    });
+
+    it("graphFilter is optional in schema", () => {
+        const tool = createGrepTool(makeOpts());
+        const schema = tool.parameters as any;
+        // graphFilter should not be in required array
+        const required: string[] = schema.required ?? [];
+        expect(required).not.toContain("graphFilter");
+    });
+
+    it("graphFilter description mentions EDGE_TYPE->target format", () => {
+        const tool = createGrepTool(makeOpts());
+        const schema = tool.parameters as any;
+        const desc = schema.properties.graphFilter.description;
+        expect(desc).toContain("EDGE_TYPE->target");
+        expect(desc).toContain("CALLS");
+        expect(desc).toContain("IMPORTED_BY");
+    });
+});
+
 // ── Non-literal / cascade ───────────────────────────────────────────
 
 describe("grep tool — non-literal cascade", () => {
@@ -337,5 +365,45 @@ describe("grep tool — resolver publish", () => {
         expect(published).toBe(true);
         expect(publishedEnvelope).toBeDefined();
         expect(publishedEnvelope.mode).toBe("query");
+    });
+});
+
+// ── WP-5: graphFilter wiring ─────────────────────────────────────
+
+describe("grep tool — graphFilter wiring (WP-5)", () => {
+    it("throws when graphFilter is provided but no contextGraph", async () => {
+        const tool = createGrepTool(makeOpts());
+        await expect(
+            tool.execute(
+                "t-gf-no-graph",
+                { pattern: "authenticate", graphFilter: "CALLS->auth.login" },
+                undefined,
+                undefined,
+                makeCtx(workdir),
+            ),
+        ).rejects.toThrow("graphFilter requires an indexed context graph");
+    });
+
+    it("rejects invalid graphFilter format with spec error", async () => {
+        const { ContextGraph } = await import("../../src/context-graph.js");
+        const graph = new ContextGraph(workdir);
+        const tool = createGrepTool(makeOpts({ contextGraph: graph }));
+        // Invalid edge type "INVALID" should throw spec error
+        await expect(
+            tool.execute(
+                "t-gf-invalid",
+                { pattern: "authenticate", graphFilter: "INVALID->target" },
+                undefined,
+                undefined,
+                makeCtx(workdir),
+            ),
+        ).rejects.toThrow('Invalid graphFilter: expected "EDGE_TYPE->target" format');
+    });
+
+    it("contextGraph is accepted as a valid option", async () => {
+        const { ContextGraph } = await import("../../src/context-graph.js");
+        const graph = new ContextGraph(workdir);
+        const tool = createGrepTool(makeOpts({ contextGraph: graph }));
+        expect(tool).toBeDefined();
     });
 });
