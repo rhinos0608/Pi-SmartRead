@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -271,5 +271,28 @@ describe("SemanticIndex", () => {
     await expect(index.search("query", { pathPrefix: "missing" })).resolves.toEqual([]);
     failQuery = true;
     await expect(index.search("query")).rejects.toBeInstanceOf(SemanticUnavailableError);
+  });
+
+  it("markFilesStale removes file entries and sets completed=false", async () => {
+    writeFileSync(join(root, "a.ts"), "export const auth = true;\n");
+    writeFileSync(join(root, "b.ts"), "export const database = true;\n");
+    const { index } = makeIndex(root);
+    await index.updateIndex();
+
+    expect(index.getStats().indexedFileCount).toBe(2);
+
+    const cacheDir = join(root, ".pi-smartread");
+    const metaPath = readdirSync(cacheDir)
+      .map((name) => join(cacheDir, name))
+      .find((p) => p.endsWith(".json"));
+    expect(metaPath).toBeDefined();
+    expect(JSON.parse(readFileSync(metaPath!, "utf-8")).completed).toBe(true);
+
+    index.markFilesStale(["a.ts"]);
+
+    expect(index.getStats().indexedFileCount).toBe(1);
+    expect(JSON.parse(readFileSync(metaPath!, "utf-8")).completed).toBe(false);
+
+    index.dispose();
   });
 });

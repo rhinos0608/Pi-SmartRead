@@ -452,6 +452,23 @@ export class SemanticIndex {
     });
   }
 
+  /**
+   * Mark one or more files as stale so the next updateIndex() re-indexes them.
+   * Removes cached file state and vector chunks for the given paths (relative to this.root).
+   * Safe to call when the index is warming or unavailable (no-op).
+   */
+  markFilesStale(relPaths: string[]): void {
+    if (this.disposed) return;
+    for (const relPath of relPaths) {
+      delete this.metadata.files[relPath];
+      this.store?.deleteByFilePath(relPath);
+    }
+    if (relPaths.length > 0) {
+      this.metadata.completed = false;
+      this.writeMetadata();
+    }
+  }
+
   dispose(): void {
     this.disposed = true;
     this.initialized = false;
