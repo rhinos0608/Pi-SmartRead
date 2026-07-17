@@ -20,8 +20,35 @@ import { createInspectTool } from "./inspect-tool.js";
 import { createGrepTool } from "./grep-tool.js";
 import { createEvidenceResolver } from "./workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
+import { ContextGraph } from "./context-graph.js";
 
-// ── Register all tools with the central registry ───────────────────
+// ── Shared ContextGraph (lazy) ─────────────────────────────────────
+// Module-level singleton. Built lazily on first access. Rebuilt when
+// the watcher marks it dirty. Passed to inspect/grep via DI — never
+// imported into hook.ts to avoid cycles.
+let sharedContextGraph: ContextGraph | null = null;
+let sharedContextGraphRoot: string | null = null;
+
+/**
+ * Get or create the shared ContextGraph for the given root.
+ * When dirty is true, forces a full rebuild.
+ */
+export function getSharedContextGraph(
+    root: string,
+    dirty?: boolean,
+): ContextGraph {
+    if (!sharedContextGraph || sharedContextGraphRoot !== root || dirty) {
+        sharedContextGraph = new ContextGraph(root);
+        sharedContextGraphRoot = root;
+    }
+    return sharedContextGraph;
+}
+
+/** Dispose the shared ContextGraph (for test isolation / shutdown). */
+export function resetSharedContextGraph(): void {
+    sharedContextGraph = null;
+    sharedContextGraphRoot = null;
+}
 
 // Explicitly initialize registry before declaring tools.
 // Inspect is registered at extension activation time via installInspectAndResolver.
@@ -137,7 +164,7 @@ reg("skill", () => toToolDefinition(createSkillTool()), ToolCategory.SKILL);
 // takes precedence when a live bus is available; `reg()` is a no-op if
 // the tool is already present in the registry.
 reg("inspect", () => buildInspectToolForExtension(() => null), ToolCategory.READ);
-reg("grep", () => createGrepTool({}), ToolCategory.READ);
+reg("grep", () => createGrepTool({ contextGraph: getSharedContextGraph(process.cwd()) }), ToolCategory.READ);
 
 // Inspect tool is registered at extension activation time so it can use
 // the live event bus. We expose a helper that the extension calls to add
@@ -152,6 +179,7 @@ export function registerInspectToolWithBus(bus: { emit: (c: string, d: unknown) 
             },
         },
         getSessionFilePath: () => null, // Overridden by extension
+        contextGraph: getSharedContextGraph(process.cwd()),
     });
     // Override the tool factory in the extension path: see registerInspectToolExtension below
     registry.register({
@@ -175,6 +203,7 @@ export function buildInspectToolForExtension(getSessionFilePath: () => string | 
             },
         },
         getSessionFilePath,
+        contextGraph: getSharedContextGraph(process.cwd()),
     });
 }
 
