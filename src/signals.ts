@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { relative, resolve, dirname, extname } from "node:path";
+import { relative, resolve, dirname, basename, extname, join } from "node:path";
 import { createRequire } from "node:module";
 import type { SignalName, SignalResult, FileSignals } from "./signals-types.js";
 import type { TestLinkage } from "./signals-types.js";
@@ -507,11 +507,10 @@ export function detectDeprecation(
  */
 export function findTestLinkage(
   absolutePath: string,
-  _cwd: string,
+  cwd: string,
 ): TestLinkage[] {
-  const basename_ = absolutePath.split("/").pop() ?? absolutePath.split("\\").pop() ?? "";
+  const basenameNoExt = basename(absolutePath).replace(/\.[^.]+$/, "");
   const dir = dirname(absolutePath);
-  const filenameNoExt = basename_.replace(/\.[^.]+$/, "");
   const isPy = isPythonFile(absolutePath);
   const exts = isPy ? [".py"] : [".ts", ".tsx", ".js", ".jsx"];
 
@@ -520,17 +519,19 @@ export function findTestLinkage(
   const testDir = resolve(dir, "..", "test");
   const testsDir = resolve(dir, "..", "tests");
   const srcTestDir = resolve(dir, "__tests__");
-  const repoTestDir = resolve(dir, "..", "..", "test");
+  const repoTestDir = resolve(cwd, "test");
+  const repoTestsDir = resolve(cwd, "tests");
 
   for (const ext of exts) {
-    testCandidates.add(resolve(testDir, `${filenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(testDir, `${filenameNoExt}.spec${ext}`));
-    testCandidates.add(resolve(testsDir, `test_${filenameNoExt}${ext}`));
-    testCandidates.add(resolve(srcDir, `${filenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(srcDir, `${filenameNoExt}.spec${ext}`));
-    testCandidates.add(resolve(srcTestDir, `${filenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(repoTestDir, `${filenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(repoTestDir, `${filenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(testDir, `${basenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(testDir, `${basenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(testsDir, `test_${basenameNoExt}${ext}`));
+    testCandidates.add(resolve(srcDir, `${basenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(srcDir, `${basenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(srcTestDir, `${basenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(repoTestDir, `${basenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(repoTestDir, `${basenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(repoTestsDir, `test_${basenameNoExt}${ext}`));
   }
 
   const results: TestLinkage[] = [];
@@ -540,9 +541,44 @@ export function findTestLinkage(
         let coverage: "direct" | "indirect" = "indirect";
         try {
           const testContent = readFileSync(candidate, "utf-8");
-          const sourceRel = relative(dirname(candidate), absolutePath).replace(/\\/g, "/");
-          const sourceBaseNoExt = basename_.replace(/\.[^.]+$/, "");
-          if (testContent.includes(sourceRel) || testContent.includes(sourceBaseNoExt)) {
+          // Parse import/require specifiers and resolve relative paths
+          const specifierRe = /(?:from\s+['"]([^'"]+)['"])|(?:require\s*\(\s*['"]([^'"]+)['"]\s*\))/g;
+          const candidateDir = dirname(candidate);
+          let m: RegExpExecArray | null;
+          let found = false;
+          while ((m = specifierRe.exec(testContent)) !== null) {
+            const specifier = m[1] ?? m[2];
+            if (!specifier) continue;
+            // Only resolve relative or root-relative imports
+            if (!specifier.startsWith(".") && !specifier.startsWith("/")) continue;
+            try {
+              const resolved = resolve(candidateDir, specifier);
+              // Try exact path
+              let match = resolved === absolutePath;
+              // Try extension resolution (.ts, .tsx, .js, .jsx, .mjs, .cjs)
+              if (!match) {
+                for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]) {
+                  if (resolved + ext === absolutePath) {
+                    match = true;
+                    break;
+                  }
+                }
+              }
+              // Try index-file resolution (directory → index.*)
+              if (!match) {
+                for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]) {
+                  if (join(resolved, `index${ext}`) === absolutePath) {
+                    match = true;
+                    break;
+                  }
+                }
+              }
+              if (match) { found = true; break; }
+            } catch {
+              // Path resolution failed, skip
+            }
+          }
+          if (found) {
             coverage = "direct";
           }
         } catch {
@@ -557,7 +593,7 @@ export function findTestLinkage(
 
   return results;
 }
-
+/** Escape special regex characters in a string for use in RegExp constructor. */
 // ── Orchestrator ───────────────────────────────────────────────────────
 
 const ALL_SIGNALS: SignalName[] = [

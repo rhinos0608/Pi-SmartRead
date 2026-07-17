@@ -122,12 +122,12 @@ export interface AstProfileResult {
 }
 
 const BRANCHING_TYPES = new Set([
-  "if_statement", "else_clause",
+  "if_statement",
   "for_statement", "for_in_statement", "for_of_statement",
   "while_statement", "do_statement",
-  "switch_statement", "case_clause", "switch_case",
+  "case_clause", "switch_case",
   "conditional_expression", "ternary_expression",
-  "try_statement", "catch_clause", "finally_clause",
+  "catch_clause",
   "logical_expression",
 ]);
 

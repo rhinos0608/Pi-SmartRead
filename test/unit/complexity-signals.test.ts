@@ -169,20 +169,24 @@ describe("computeHalsteadLite", () => {
 
   it("counts operators and operands from a simple if-AST", () => {
     const r = computeHalsteadLite(simpleIf);
-    // operators: > (binary_expression), return
-    expect(r.operatorCount).toBeGreaterThanOrEqual(1);
-    // operands: identifier, number
-    expect(r.operandCount).toBeGreaterThanOrEqual(2);
-    expect(r.vocabulary).toBeGreaterThanOrEqual(3);
-    expect(r.volume).toBeGreaterThan(0);
+    // operators: > only; operands: identifier×2, number×1
+    expect(r.operatorCount).toBe(1);
+    expect(r.operandCount).toBe(3);
+    // unique operators: ">"; unique operands: "identifier", "number"
+    expect(r.vocabulary).toBe(3);
+    // volume = 4 * log2(3) ≈ 6.34
+    expect(r.volume).toBeCloseTo(4 * Math.log2(3), 5);
   });
 
   it("produces higher volume for more complex AST", () => {
     const simple = computeHalsteadLite(simpleIf);
     const complex = computeHalsteadLite(nestedIfs);
-    // nestedIfs has more operators/operands → higher volume
-    expect(complex.volume).toBeGreaterThanOrEqual(simple.volume);
-    expect(complex.operatorCount).toBeGreaterThanOrEqual(simple.operatorCount);
+    // nestedIfs: operators ">","==="; operands identifier×3, number×2
+    expect(complex.operatorCount).toBe(2);
+    expect(complex.operandCount).toBe(5);
+    // volume = 7 * log2(4) = 14
+    expect(complex.volume).toBe(14);
+    expect(complex.volume).toBeGreaterThan(simple.volume);
   });
 });
 
@@ -191,9 +195,9 @@ describe("computeHalsteadLite", () => {
 describe("computeAstProfile", () => {
   it("computes depth correctly for flat AST", () => {
     const r = computeAstProfile(simpleIf);
-    // program → if_statement → block → return_statement = depth 3
-    expect(r.depth).toBeGreaterThanOrEqual(3);
-    expect(r.nodeCount).toBeGreaterThan(0);
+    // program(0) → if_statement(1) → block(2) → return_statement(3) → identifier(4)
+    expect(r.depth).toBe(4);
+    expect(r.nodeCount).toBe(9);
   });
 
   it("nested ASTs have greater depth", () => {
@@ -205,7 +209,9 @@ describe("computeAstProfile", () => {
   it("cyclomatic complexity increases with branching", () => {
     const simple = computeAstProfile(simpleIf);
     const nested = computeAstProfile(nestedIfs);
-    // simpleIf has 1 decision point → CC = 2; nestedIfs has 2 → CC = 3
+    // simpleIf: 1 if_statement → CC=2; nestedIfs: 2 if_statements → CC=3
+    expect(simple.cyclomaticComplexity).toBe(2);
+    expect(nested.cyclomaticComplexity).toBe(3);
     expect(nested.cyclomaticComplexity).toBeGreaterThan(simple.cyclomaticComplexity);
   });
 
