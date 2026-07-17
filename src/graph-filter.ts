@@ -115,6 +115,16 @@ export function parseGraphFilter(
   return { edgeType, target };
 }
 
+/** A target file resolved from the filter target, optionally carrying provenance type from findSymbolFiles. */
+interface ResolvedTarget {
+  path: string;
+  /** Provenance type from findSymbolFiles ("defines" or "references"), absent for file targets. */
+  provenanceType?: string;
+}
+
+/** Edge types where symbol provenance type should be used directly instead of re-querying neighbours. */
+const SYMBOL_EDGE_TYPES = new Set(["defines", "references", "defined_in", "referenced_by"]);
+
 // ── Graph filtering ───────────────────────────────────────────────
 
 /**
@@ -144,7 +154,7 @@ export async function applyGraphFilter(
   const isInverse = INVERSE_EDGE_TYPES.has(edgeType);
   const notes: string[] = [];
 
-  // Resolve target to file paths
+  // Resolve target to file paths (with optional provenance type for symbol targets)
   const targetFiles = await resolveTargetFiles(contextGraph, target, edgeType, notes);
 
   if (targetFiles.length === 0) {
@@ -159,12 +169,17 @@ export async function applyGraphFilter(
     for (const targetFile of targetFiles) {
       let hasEdge = false;
 
-      if (isInverse) {
+      // When target resolved via findSymbolFiles with provenance type,
+      // use direct provenance matching for symbol edge types.
+      // This avoids re-querying getFileNeighbours which gives wrong semantics.
+      if (targetFile.provenanceType && SYMBOL_EDGE_TYPES.has(edgeType)) {
+        hasEdge = checkSymbolProvenance(hit.file, targetFile.path, targetFile.provenanceType, edgeType);
+      } else if (isInverse) {
         // Inverse: targetFile should have edge TO hit.file
-        hasEdge = await checkFileEdge(contextGraph, targetFile, hit.file, edgeType, notes);
+        hasEdge = await checkFileEdge(contextGraph, targetFile.path, hit.file, edgeType, notes);
       } else {
         // Forward: hit.file should have edge TO targetFile
-        hasEdge = await checkFileEdge(contextGraph, hit.file, targetFile, edgeType, notes);
+        hasEdge = await checkFileEdge(contextGraph, hit.file, targetFile.path, edgeType, notes);
       }
 
       if (hasEdge) {
@@ -189,19 +204,26 @@ async function resolveTargetFiles(
   target: string,
   _edgeType: string,
   notes: string[],
-): Promise<string[]> {
+): Promise<ResolvedTarget[]> {
   if (isFilePath(target)) {
-    return [target];
+    return [{ path: target }];
   }
 
-  // Symbol target
+  // Symbol target — preserve provenance type from findSymbolFiles
   try {
     const resolved: GraphNeighbour[] = await graph.findSymbolFiles(target);
-    const paths = resolved.map((n) => n.path);
-    if (paths.length === 0) {
+    if (resolved.length === 0) {
       notes.push(`graphFilter: symbol "${target}" not found in workspace`);
     }
-    return paths;
+    const pairSeen = new Set<string>();
+    return resolved.reduce<ResolvedTarget[]>((acc, n) => {
+      const key = `${n.path}::${n.provenance.type}`;
+      if (!pairSeen.has(key)) {
+        pairSeen.add(key);
+        acc.push({ path: n.path, provenanceType: n.provenance.type });
+      }
+      return acc;
+    }, []);
   } catch {
     notes.push(`graphFilter: could not resolve symbol "${target}"`);
     return [];
@@ -209,6 +231,38 @@ async function resolveTargetFiles(
 }
 
 // ── Edge checking helpers ─────────────────────────────────────────
+
+/**
+ * Directly match a hit file against a symbol-resolved target using provenance type.
+ *
+ * When findSymbolFiles resolves a symbol, it returns files with provenance type
+ * indicating whether the file defines or references the symbol. For symbol edge
+ * types (defines/references/defined_in/referenced_by), we match directly against
+ * this provenance info instead of re-querying getFileNeighbours.
+ */
+function checkSymbolProvenance(
+  hitFile: string,
+  resolvedFile: string,
+  provenanceType: string,
+  edgeType: string,
+): boolean {
+  switch (edgeType) {
+    case "defines":
+      // hit file defines the symbol → hit file must be the file with "defines" provenance
+      return provenanceType === "defines" && isPathMatch(hitFile, resolvedFile);
+    case "defined_in":
+      // hit file is defined_in the symbol → inverse of defines, same directionality for symbol targets
+      return provenanceType === "defines" && isPathMatch(hitFile, resolvedFile);
+    case "references":
+      // hit file references the symbol → hit file must be the file with "references" provenance
+      return provenanceType === "references" && isPathMatch(hitFile, resolvedFile);
+    case "referenced_by":
+      // hit file is referenced_by the symbol → inverse of references, same directionality for symbol targets
+      return provenanceType === "references" && isPathMatch(hitFile, resolvedFile);
+    default:
+      return false;
+  }
+}
 
 /**
  * Check if `fromFile` has an edge of the given type to `toFile`.
@@ -314,22 +368,25 @@ async function checkFileEdge(
 // ── Path matching ─────────────────────────────────────────────────
 
 /**
- * Loose path matching: match by suffix or relative path.
- * Handles absolute vs relative path comparison.
+ * Path matching with segment-boundary-aware suffix comparison.
+ * Handles absolute vs relative path comparison without false-positives
+ * on non-boundary substrings (e.g. "src_auth.ts" should NOT match "src/auth.ts").
  */
 function isPathMatch(a: string, b: string): boolean {
   if (a === b) return true;
-  // Check if one is a suffix of the other
   const aNorm = a.replace(/\\/g, "/");
   const bNorm = b.replace(/\\/g, "/");
-  if (aNorm.endsWith(bNorm) || bNorm.endsWith(aNorm)) return true;
-  // Check relative matching
-  const aParts = aNorm.split("/").filter(Boolean);
-  const bParts = bNorm.split("/").filter(Boolean);
-  if (aParts.length > 0 && bParts.length > 0) {
-    const aTail = aParts.slice(-Math.min(3, aParts.length)).join("/");
-    const bTail = bParts.slice(-Math.min(3, bParts.length)).join("/");
-    return aTail === bTail;
+
+  // Segment-boundary-aware suffix match:
+  // the shorter path must match at a "/" boundary (or be the full path).
+  if (aNorm.endsWith(bNorm)) {
+    const prefixLen = aNorm.length - bNorm.length;
+    if (prefixLen === 0 || aNorm[prefixLen - 1] === "/") return true;
   }
+  if (bNorm.endsWith(aNorm)) {
+    const prefixLen = bNorm.length - aNorm.length;
+    if (prefixLen === 0 || bNorm[prefixLen - 1] === "/") return true;
+  }
+
   return false;
 }

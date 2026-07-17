@@ -114,6 +114,13 @@ export class ContextGraph {
   private mutationEdges: Map<string, Provenance[]> = new Map();
   private static readonly MUTATION_EDGES_MAX = 10_000;
 
+  /**
+   * Dedicated import adjacency edges, populated during buildContextGraph().
+   * Replaces the mixed provenances cache for buildImportEdges consumers.
+   * Each entry is a directed { from: importer, to: imported } pair.
+   */
+  private importEdges: Array<{ from: string; to: string }> = [];
+
   private lastBuildFilesLength: number = -1;
 
   constructor(private root: string) {
@@ -167,6 +174,7 @@ export class ContextGraph {
     // Always compute the current source-file set so the file-count safety
     // net below can detect divergence from the previous build (F-2 fix).
     const allFiles = await findSrcFiles(this.root);
+    this.importEdges = [];
 
     // When incremental indexing is enabled, query it for content-level changes.
     // The incremental index is the primary signal; the file-count delta below
@@ -276,6 +284,19 @@ export class ContextGraph {
 
     this.symbolIndex = index;
     this.fileIndex = fileIdx;
+
+    // ── Build import edges from actual import adjacency data ───
+    // Scan all source files and extract import relationships.
+    // This produces typed IMPORT edges for buildImportEdges consumers
+    // (community detection, layer analysis), replacing the earlier
+    // mixed-provenance approach that conflated imports/symbols/calls.
+    this.importEdges = [];
+    for (const file of allFiles) {
+      const neighbours = this.getImportNeighbours(file);
+      for (const n of neighbours) {
+        this.importEdges.push({ from: file, to: n });
+      }
+    }
   }
 
   /**
@@ -354,9 +375,10 @@ export class ContextGraph {
       const tags = index.get(queryOrIdentifier);
       if (tags) {
         for (const tag of tags) {
-          if (seen.has(tag.fname)) continue;
-          seen.add(tag.fname);
           const type: EdgeType = tag.kind === "def" ? "defines" : "references";
+          const pairKey = `${tag.fname}::${type}`;
+          if (seen.has(pairKey)) continue;
+          seen.add(pairKey);
           results.push({
             path: tag.fname,
             provenance: { from: queryOrIdentifier, to: tag.fname, type, confidence: 0.9 },
@@ -378,8 +400,9 @@ export class ContextGraph {
 
       for (const def of resolution.definitions) {
         const fullPath = resolve(this.root, def.file);
-        if (seen.has(fullPath)) continue;
-        seen.add(fullPath);
+        const pairKey = `${fullPath}::defines`;
+        if (seen.has(pairKey)) continue;
+        seen.add(pairKey);
         results.push({
           path: fullPath,
           provenance: { from: queryOrIdentifier, to: fullPath, type: "defines", confidence: 0.9 },
@@ -388,8 +411,9 @@ export class ContextGraph {
 
       for (const ref of resolution.references) {
         const fullPath = resolve(this.root, ref.file);
-        if (seen.has(fullPath)) continue;
-        seen.add(fullPath);
+        const pairKey = `${fullPath}::references`;
+        if (seen.has(pairKey)) continue;
+        seen.add(pairKey);
         results.push({
           path: fullPath,
           provenance: { from: queryOrIdentifier, to: fullPath, type: "references", confidence: 0.8 },
@@ -403,9 +427,10 @@ export class ContextGraph {
 
       for (const tag of tags) {
         if (tag.name === queryOrIdentifier) {
-          if (seen.has(tag.fname)) continue;
-          seen.add(tag.fname);
           const type: EdgeType = tag.kind === "def" ? "defines" : "references";
+          const pairKey = `${tag.fname}::${type}`;
+          if (seen.has(pairKey)) continue;
+          seen.add(pairKey);
           const provenance: Provenance = { from: queryOrIdentifier, to: tag.fname, type, confidence: 0.8 };
           results.push({ path: tag.fname, provenance });
         }
@@ -618,16 +643,13 @@ export class ContextGraph {
   }
 
   /**
-   * Return all recorded provenance edges as {from, to} pairs.
+   * Return all recorded import edges as {from, to} pairs.
    * Used by buildImportEdges for community detection / layer analysis.
-   * Returns a subset of total edges — only the first-recorded provenance per target path.
+   * Sources edges from actual import adjacency data (buildImportEdges step),
+   * filtering to only pairs of type imports.
    */
   getProvenanceEdges(): Array<{ from: string; to: string }> {
-    const edges: Array<{ from: string; to: string }> = [];
-    for (const prov of this.provenances.values()) {
-      edges.push({ from: prov.from, to: prov.to });
-    }
-    return edges;
+    return this.importEdges;
   }
 
   /** Return capacity stats for monitoring memory caps. */

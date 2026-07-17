@@ -37,6 +37,7 @@ interface MutationEdge {
 function makeMockGraph(opts: {
   mutationEdges?: Map<string, MutationEdge[]>;
   importEdges?: Map<string, string[]>;
+  importedByEdges?: Map<string, string[]>;
   callEdges?: Map<string, string[]>;
   symbolResolutions?: Map<string, string[]>;
 } = {}) {
@@ -57,13 +58,23 @@ function makeMockGraph(opts: {
     getFileNeighbours: async (path: string, options?: { includeCalls?: boolean }) => {
       const neighbours: Array<{ path: string; provenance: { type: string; from: string; to: string; confidence: number } }> = [];
 
-      // Import neighbours
+      // Import neighbours (forward: this file imports target)
       const imports = opts.importEdges ?? new Map<string, string[]>();
       const importTargets = imports.get(path) ?? [];
       for (const target of importTargets) {
         neighbours.push({
           path: target,
           provenance: { from: path, to: target, type: "imports" as const, confidence: 1.0 },
+        });
+      }
+
+      // Imported-by neighbours (reverse: this file is imported by source)
+      const importedBy = opts.importedByEdges ?? new Map<string, string[]>();
+      const importedBySources = importedBy.get(path) ?? [];
+      for (const source of importedBySources) {
+        neighbours.push({
+          path: source,
+          provenance: { from: path, to: source, type: "imported_by" as const, confidence: 1.0 },
         });
       }
 
@@ -278,8 +289,12 @@ describe("applyGraphFilter", () => {
       ["/workspace/src/server.ts", ["/workspace/src/db.ts"]],
       ["/workspace/src/user.ts", []],
     ]);
+    // db.ts has incoming import edge from server.ts (db.ts is imported_by server.ts)
+    const importedByEdges = new Map([
+      ["/workspace/src/db.ts", ["/workspace/src/server.ts"]],
+    ]);
 
-    const graph = makeMockGraph({ importEdges });
+    const graph = makeMockGraph({ importEdges, importedByEdges });
     const result = await applyGraphFilter(hits, "IMPORTS->src/db.ts", graph);
     expect(result.hits).toHaveLength(1);
     expect(result.hits[0]!.relFile).toBe("src/server.ts");
@@ -335,5 +350,135 @@ describe("applyGraphFilter", () => {
     expect(result.hits).toHaveLength(0);
     expect(result.notes.length).toBeGreaterThan(0);
     expect(result.notes[0]).toContain('graphFilter: symbol "unknown.symbol" not found');
+  });
+
+  // ── Edge type directionality tests ─────────────────────────────
+
+  it("filters by IMPORTED_BY: hit file is imported by the target file", async () => {
+    // server.ts imports db.ts. "IMPORTED_BY->db.ts" should match server.ts
+    const hits = [
+      makeHit({ file: "/workspace/src/server.ts", relFile: "src/server.ts" }),
+      makeHit({ file: "/workspace/src/user.ts", relFile: "src/user.ts" }),
+    ];
+    const importEdges = new Map([
+      ["/workspace/src/server.ts", ["/workspace/src/db.ts"]],
+      ["/workspace/src/user.ts", []],
+    ]);
+    const graph = makeMockGraph({ importEdges });
+    const result = await applyGraphFilter(hits, "IMPORTED_BY->src/db.ts", graph);
+    // Inverse: db.ts has edge TO server.ts via imported_by. So server.ts should match.
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]!.relFile).toBe("src/server.ts");
+  });
+
+  it("filters by CALLED_BY: hit file is called by the target file", async () => {
+    // auth.ts calls tokens.ts. "CALLED_BY->tokens.ts" should match auth.ts
+    const hits = [
+      makeHit({ file: "/workspace/src/auth.ts", relFile: "src/auth.ts" }),
+      makeHit({ file: "/workspace/src/user.ts", relFile: "src/user.ts" }),
+    ];
+    const callEdges = new Map([
+      ["/workspace/src/auth.ts", ["/workspace/src/tokens.ts"]],
+      ["/workspace/src/user.ts", []],
+    ]);
+    const graph = makeMockGraph({ callEdges });
+    const result = await applyGraphFilter(hits, "CALLED_BY->src/tokens.ts", graph);
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]!.relFile).toBe("src/auth.ts");
+  });
+
+  it("filters by DEFINES with symbol provenance: hit file defines the symbol", async () => {
+    // auth.login resolves to tokens.ts with provenance type "defines"
+    const hits = [
+      makeHit({ file: "/workspace/src/tokens.ts", relFile: "src/tokens.ts" }),
+      makeHit({ file: "/workspace/src/user.ts", relFile: "src/user.ts" }),
+    ];
+    const symbolResolutions = new Map([
+      ["auth.login", ["/workspace/src/tokens.ts"]],
+    ]);
+    const graph = makeMockGraph({ symbolResolutions });
+    const result = await applyGraphFilter(hits, "DEFINES->auth.login", graph);
+    // Direct provenance: tokens.ts has "defines" provenance, so tokens.ts matches
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]!.relFile).toBe("src/tokens.ts");
+  });
+
+  it("filters by REFERENCES with symbol provenance: hit file references the symbol", async () => {
+    // auth.login resolves to user.ts with provenance type "references"
+    const hits = [
+      makeHit({ file: "/workspace/src/user.ts", relFile: "src/user.ts" }),
+      makeHit({ file: "/workspace/src/tokens.ts", relFile: "src/tokens.ts" }),
+    ];
+    // Override findSymbolFiles to return "references" provenance
+    const graph = makeMockGraph({ symbolResolutions: new Map() });
+    (graph as any).findSymbolFiles = async (query: string) => {
+      if (query === "auth.login") {
+        return [{
+          path: "/workspace/src/user.ts",
+          provenance: { from: query, to: "/workspace/src/user.ts", type: "references" as const, confidence: 0.9 },
+        }];
+      }
+      return [];
+    };
+    const result = await applyGraphFilter(hits, "REFERENCES->auth.login", graph);
+    // Direct provenance: user.ts has "references" provenance, so user.ts matches
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]!.relFile).toBe("src/user.ts");
+  });
+
+  it("filters by DEFINED_IN with symbol provenance (inverse of defines)", async () => {
+    const hits = [
+      makeHit({ file: "/workspace/src/tokens.ts", relFile: "src/tokens.ts" }),
+      makeHit({ file: "/workspace/src/user.ts", relFile: "src/user.ts" }),
+    ];
+    const symbolResolutions = new Map([
+      ["auth.login", ["/workspace/src/tokens.ts"]],
+    ]);
+    const graph = makeMockGraph({ symbolResolutions });
+    const result = await applyGraphFilter(hits, "DEFINED_IN->auth.login", graph);
+    // Inverse of defines, but for symbol targets: tokens.ts defines auth.login → tokens.ts matches
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]!.relFile).toBe("src/tokens.ts");
+  });
+
+  it("filters by REFERENCED_BY with symbol provenance (inverse of references)", async () => {
+    const hits = [
+      makeHit({ file: "/workspace/src/user.ts", relFile: "src/user.ts" }),
+      makeHit({ file: "/workspace/src/tokens.ts", relFile: "src/tokens.ts" }),
+    ];
+    const graph = makeMockGraph({ symbolResolutions: new Map() });
+    (graph as any).findSymbolFiles = async (query: string) => {
+      if (query === "auth.login") {
+        return [{
+          path: "/workspace/src/user.ts",
+          provenance: { from: query, to: "/workspace/src/user.ts", type: "references" as const, confidence: 0.9 },
+        }];
+      }
+      return [];
+    };
+    const result = await applyGraphFilter(hits, "REFERENCED_BY->auth.login", graph);
+    // Inverse of references, but for symbol targets: user.ts references auth.login → user.ts matches
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]!.relFile).toBe("src/user.ts");
+  });
+
+  it("does not false-positive DEFINES when provenance is references", async () => {
+    // auth.login resolves to user.ts with provenance type "references"
+    const hits = [
+      makeHit({ file: "/workspace/src/user.ts", relFile: "src/user.ts" }),
+    ];
+    const graph = makeMockGraph({ symbolResolutions: new Map() });
+    (graph as any).findSymbolFiles = async (query: string) => {
+      if (query === "auth.login") {
+        return [{
+          path: "/workspace/src/user.ts",
+          provenance: { from: query, to: "/workspace/src/user.ts", type: "references" as const, confidence: 0.9 },
+        }];
+      }
+      return [];
+    };
+    const result = await applyGraphFilter(hits, "DEFINES->auth.login", graph);
+    // Should NOT match: provenance is "references" but filter asks for "defines"
+    expect(result.hits).toHaveLength(0);
   });
 });
