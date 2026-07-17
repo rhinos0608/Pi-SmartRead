@@ -28,8 +28,9 @@ All tools are registered via `src/tool-registry.ts` (singleton `ToolRegistry`) a
 - `topK: number` — Max files for query mode (default 20, max 100)
 - `offset: number`, `limit: number` — Line range (single-file mode)
 - `stopOnError: boolean`
+- `symbol: string` — Resolve qualified name (e.g. `AuthService.login`) to file+line via LSP, then read surrounding code
 
-Behavior: Wraps the built-in read tool. Single-file mode enriches output with imports, git history, graph context, structural context. Query mode uses shared semantic index for ranked retrieval, then reads files. Batch mode uses `src/read-many.ts` for packing. Emits `details.workspaceEvidence` envelope on every invocation.
+Behavior: Wraps the built-in read tool. Single-file mode enriches output with imports, git history, graph context, structural context. Query mode uses shared semantic index for ranked retrieval, then reads files. Batch mode uses `src/read-many.ts` for packing. Symbol mode resolves via LSP bridge or ContextGraph fallback, then delegates to single-file path with offset. Emits `details.workspaceEvidence` envelope on every invocation.
 
 **`inspect`** (`src/inspect-tool.ts:12-21`)
 - `path: string` (required) — File or directory path
@@ -48,8 +49,9 @@ Behavior: Directory mode returns a ranked repo map (PageRank + import-based). Fi
 - `literal: boolean` — Exact substring, skip BM25/semantic
 - `limit: number` — Max results (default 20, max 100)
 - `contextLines: number` — Lines per match (default 2, max 10)
+- `graphFilter: string` — Filter results by graph relationship (format: `EDGE_TYPE->target`, e.g. `CALLS->auth.login`)
 
-Behavior: Smart cascade: Layer1 BM25 lexical → Layer2 AST symbol → RRF fusion + dedup → embedding retry (wider topK) → lexical grep passthrough fallback. literal:true bypasses cascade. Emits evidence envelope with `coverage: "search-match"` per hit.
+Behavior: Smart cascade: Layer1 BM25 lexical → Layer2 AST symbol → RRF fusion + dedup → embedding retry (wider topK) → lexical grep passthrough fallback. literal:true bypasses cascade. graphFilter post-filters hits via `src/graph-filter.ts` against the ContextGraph edge index. Emits evidence envelope with `coverage: "search-match"` per hit.
 
 **`graph_mutate`** (`src/graph-mutate.ts:15-29`)
 - `from: string` — Modified file/symbol
@@ -490,7 +492,7 @@ Key files referenced in this document:
 | `src/repomap-render.ts` | — | Token-budgeted rendering |
 | `src/inspect.ts` | — | Inspect V4 execution logic |
 | `src/lsp-bridge.ts` | 874 | LSP client for symbol queries |
-| `src/graphify-enricher.ts` | 12| `src/graphify-enricher.ts` | 1259 | External knowledge graph enricher |
+| `src/graphify-enricher.ts` | 1259 | External knowledge graph enricher |
 | `src/hyde.ts` | 233 | HyDE query expansion |
 | `src/rerank.ts` | 815 | Structural reranker |
 | `src/scoring.ts` | — | BM25 + RRF scoring |

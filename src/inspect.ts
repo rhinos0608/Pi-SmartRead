@@ -279,7 +279,22 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
         try {
             const lines: string[] = ["## Graph Schema", ""];
             if (input.contextGraph) {
-                lines.push("Context graph: available (node/edge introspection pending full index)");
+                try {
+                    const provenanceEdges = input.contextGraph.getProvenanceEdges?.() ?? [];
+                    const capacityStats = input.contextGraph.getCapacityStats?.();
+                    const sampleEdges = provenanceEdges.slice(0, 8).map(e => `${e.from} → ${e.to}`);
+                    const nodeCount = capacityStats?.symbolIndex.entries ?? 0;
+                    const edgeCount = provenanceEdges.length;
+                    lines.push(`Context graph: nodes=${nodeCount}, edges=${edgeCount}`);
+                    if (sampleEdges.length > 0) {
+                        lines.push("Sample edges:");
+                        for (const se of sampleEdges) {
+                            lines.push(`  ${se}`);
+                        }
+                    }
+                } catch {
+                    lines.push("Context graph: available (introspection failed)");
+                }
             } else {
                 lines.push('contextGraph: "not built"');
             }
@@ -293,7 +308,7 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
     // diff (directory scope)
     if (input.diff) {
         try {
-            const section = await renderDiffSection(input.diff, cwd);
+            const section = await renderDiffSection(input.diff, cwd, callGraph);
             extraSections.push(section);
         } catch {
             extraSections.push("## Diff Impact\n\n(computation failed)");
@@ -463,12 +478,13 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
     let callGraph: CallGraphResult | null = null;
 
     // Lazy build call graph if needed
-    if (input.callDepth || input.deadCode || input.hotspots) {
+    if (input.callDepth || input.deadCode || input.hotspots || input.impact) {
         callGraph = await ensureCallGraph(input, null);
     }
 
     // ── Compute extra sections ──────────────────────────────────
     const extraSections: string[] = [];
+    const sectionResources: Map<string, InspectedResource>[] = [];
 
     // callDepth + callDirection (file mode only)
     if (input.callDepth) {
@@ -477,15 +493,37 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
             const direction = input.callDirection ?? "both";
             const section = renderCallGraphSection(callGraph, relativePath, facts, depth, direction, cwd);
             extraSections.push(section);
-            addResource(resourcesByPath, absolutePath, cwd);
+            const sr = new Map<string, InspectedResource>();
+            addResource(sr, absolutePath, cwd);
+            // Add referenced caller/callee files from the rendered call graph
+            if (callGraph) {
+                const fileFns = callGraph.functions.filter(f => f.file === relativePath);
+                const refFiles = new Set<string>();
+                for (const fn of fileFns.slice(0, 5)) {
+                    for (const calleeStr of fn.calls) {
+                        const parts = calleeStr.split(":");
+                        if (parts.length === 2 && parts[0]) refFiles.add(parts[0]!);
+                    }
+                    for (const callerStr of fn.calledBy) {
+                        const parts = callerStr.split(":");
+                        if (parts.length === 2 && parts[0]) refFiles.add(parts[0]!);
+                    }
+                }
+                for (const refFile of refFiles) {
+                    addResource(sr, refFile, cwd);
+                }
+            }
+            sectionResources.push(sr);
         } catch {
             extraSections.push("## Call Graph\n\n(computation failed)");
+            sectionResources.push(new Map());
         }
     }
 
     // impact (file mode)
     if (input.impact) {
         try {
+            const sr = new Map<string, InspectedResource>();
             if (input.contextGraph) {
                 const blastRadius = await expandBlastRadius(absolutePath, input.contextGraph, 3);
                 const affectedFiles: Array<{ path: string; risk: string; fanIn: number; depth: number }> = [];
@@ -496,8 +534,9 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
                         : 0;
                     const risk = classifyFileRisk({ filePath: fp, pageRank: 0, fanIn, blastRadiusDepth: d });
                     affectedFiles.push({ path: pathRelative(cwd, fp), risk, fanIn, depth: d });
-                    addResource(resourcesByPath, fp, cwd);
+                    addResource(sr, fp, cwd);
                 }
+                sectionResources.push(sr);
                 affectedFiles.sort((a, b) => riskOrder(a.risk) - riskOrder(b.risk) || b.fanIn - a.fanIn);
                 const lines: string[] = [
                     `## Impact Analysis: ${relativePath}`,
@@ -516,6 +555,7 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
                 extraSections.push(lines.join("\n"));
             } else {
                 // No contextGraph — run standalone computeImpact
+                sectionResources.push(new Map());
                 const { computeImpact } = await import("./impact-analysis.js");
                 const impact = await computeImpact({
                     targetFile: pathRelative(cwd, absolutePath),
@@ -536,16 +576,19 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
             }
         } catch {
             extraSections.push("## Impact Analysis\n\n(computation failed)");
+            sectionResources.push(new Map());
         }
     }
 
     // diff (file scope)
     if (input.diff) {
         try {
-            const section = await renderDiffSection(input.diff, cwd);
+            const section = await renderDiffSection(input.diff, cwd, callGraph);
             extraSections.push(section);
+            sectionResources.push(new Map());
         } catch {
             extraSections.push("## Diff Impact\n\n(computation failed)");
+            sectionResources.push(new Map());
         }
     }
 
@@ -563,14 +606,19 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
                     }
                     lines.push("");
                 }
-                addResource(resourcesByPath, absolutePath, cwd);
+                const sr2 = new Map<string, InspectedResource>();
+                addResource(sr2, absolutePath, cwd);
+                sectionResources.push(sr2);
                 extraSections.push(lines.join("\n"));
             } else {
-                addResource(resourcesByPath, absolutePath, cwd);
+                const sr3 = new Map<string, InspectedResource>();
+                addResource(sr3, absolutePath, cwd);
+                sectionResources.push(sr3);
                 extraSections.push("## Dead Code\n\n(no zero-caller functions found in this file)");
             }
         } catch {
             extraSections.push("## Dead Code\n\n(detection failed)");
+            sectionResources.push(new Map());
         }
     }
 
@@ -584,13 +632,17 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
                     const handler = r.handler ?? "(handler)";
                     lines.push(`  ${r.method.padEnd(7)} ${r.path.padEnd(30)} → ${handler}  L${r.line}`);
                 }
-                addResource(resourcesByPath, absolutePath, cwd);
+                const sr4 = new Map<string, InspectedResource>();
+                addResource(sr4, absolutePath, cwd);
+                sectionResources.push(sr4);
                 extraSections.push(lines.join("\n"));
             } else {
+                sectionResources.push(new Map());
                 extraSections.push("## HTTP Routes\n\n(no routes found in this file)");
             }
         } catch {
             extraSections.push("## HTTP Routes\n\n(extraction failed)");
+            sectionResources.push(new Map());
         }
     }
 
@@ -609,14 +661,19 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
                     const num = String(i + 1).padStart(2, " ");
                     lines.push(`  ${num}. ${fn.name.padEnd(35)} L${fn.line}  — ${fn.calledBy.length} callers`);
                 }
-                addResource(resourcesByPath, absolutePath, cwd);
+                const sr5 = new Map<string, InspectedResource>();
+                addResource(sr5, absolutePath, cwd);
+                sectionResources.push(sr5);
                 extraSections.push(lines.join("\n"));
             } else {
-                addResource(resourcesByPath, absolutePath, cwd);
+                const sr6 = new Map<string, InspectedResource>();
+                addResource(sr6, absolutePath, cwd);
+                sectionResources.push(sr6);
                 extraSections.push("## Hotspots\n\n(no function data for this file)");
             }
         } catch {
             extraSections.push("## Hotspots\n\n(computation failed)");
+            sectionResources.push(new Map());
         }
     }
 
@@ -625,14 +682,30 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
         try {
             const lines: string[] = ["## Graph Schema", ""];
             if (input.contextGraph) {
-                lines.push("Context graph: available (node/edge introspection pending full index)");
+                try {
+                    const provenanceEdges = input.contextGraph.getProvenanceEdges?.() ?? [];
+                    const capacityStats = input.contextGraph.getCapacityStats?.();
+                    const sampleEdges = provenanceEdges.slice(0, 8).map(e => `${e.from} → ${e.to}`);
+                    const nodeCount = capacityStats?.symbolIndex.entries ?? 0;
+                    const edgeCount = provenanceEdges.length;
+                    lines.push(`Context graph: nodes=${nodeCount}, edges=${edgeCount}`);
+                    if (sampleEdges.length > 0) {
+                        lines.push("Sample edges:");
+                        for (const se of sampleEdges) {
+                            lines.push(`  ${se}`);
+                        }
+                    }
+                } catch {
+                    lines.push("Context graph: available (introspection failed)");
+                }
             } else {
                 lines.push('contextGraph: "not built"');
             }
-            lines.push("");
+            sectionResources.push(new Map());
             extraSections.push(lines.join("\n"));
         } catch {
             extraSections.push("## Graph Schema\n\n(introspection failed)");
+            sectionResources.push(new Map());
         }
     }
 
@@ -640,6 +713,7 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
     const allSectionTexts: string[] = [];
     let omittedSections: string[] = [];
     let budgetExhausted = false;
+    const admittedSectionResources = new Map<string, InspectedResource>();
 
     for (let i = 0; i < extraSections.length; i++) {
         const sectionText = extraSections[i]!;
@@ -647,6 +721,12 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
         if (!budgetExhausted && usedTokens + tokens <= budget) {
             allSectionTexts.push(sectionText);
             usedTokens += tokens;
+            // Merge this section's resources into admitted set
+            for (const [key, val] of sectionResources[i]!) {
+                if (!admittedSectionResources.has(key)) {
+                    admittedSectionResources.set(key, val);
+                }
+            }
         } else {
             budgetExhausted = true;
             const sectionName = findSectionName(extraSections, i);
@@ -669,6 +749,12 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
     }
 
     const contentText = finalParts.join("\n");
+    // Merge structural facts resources with admitted section resources
+    for (const [key, val] of admittedSectionResources) {
+        if (!resourcesByPath.has(key)) {
+            resourcesByPath.set(key, val);
+        }
+    }
     const resources = [...resourcesByPath.values()];
     const inspectionId = inspectionIdFor({
         sessionId,
@@ -768,7 +854,7 @@ function renderCallees(
     cwd: string,
     visited?: Set<string>,
 ): void {
-    if (currentDepth >= maxDepth) return;
+    if (currentDepth > maxDepth) return;
     const visitedSet = visited ?? new Set<string>();
     const indent = "    ".repeat(currentDepth);
     for (const calleeStr of fn.calls.slice(0, 10)) {
@@ -997,7 +1083,7 @@ export async function runGitDiff(
         const unifiedStdout = unifiedResult.stdout;
 
         // Parse hunk headers to get changed line ranges per file
-        const hunkRegex = /@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/;
+        const hunkRegex = /@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/;
         let currentFile = "";
         for (const uline of unifiedStdout.split("\n")) {
             const fileMatch = uline.match(/^\+\+\+\s+b\/(.+)$/);
@@ -1009,10 +1095,12 @@ export async function runGitDiff(
             const hunkMatch = hunkRegex.exec(uline);
             if (hunkMatch) {
                 const startLine = parseInt(hunkMatch[1]!, 10);
+                const hunkLen = hunkMatch[2] ? parseInt(hunkMatch[2]!, 10) : 1;
+                const endLine = startLine + hunkLen - 1;
                 const entry = files.find(f => f.file === currentFile);
                 if (entry) {
-                    entry.addedLines.push(startLine);
-                    entry.changedLineRanges.push({ startLine, endLine: startLine });
+                    entry.addedLines.push(startLine, endLine);
+                    entry.changedLineRanges.push({ startLine, endLine });
                 }
             }
         }
@@ -1029,6 +1117,7 @@ export async function runGitDiff(
 export async function renderDiffSection(
     diffTarget: DiffTarget,
     cwd: string,
+    callGraph?: CallGraphResult | null,
 ): Promise<string> {
     const changes = await runGitDiff(diffTarget, cwd);
 
@@ -1055,26 +1144,53 @@ export async function renderDiffSection(
         lines.push(`  ${change.file}  — ${symbolNote}`);
     }
 
-    // Risk summary (simple heuristic based on number of changes)
-    const criticalFiles = changes.filter(c => c.addedCount > 20).length;
-    const highFiles = changes.filter(c => c.addedCount > 10 || c.deletedLines > 20).length;
-    const mediumFiles = changes.length > 5 ? changes.length - criticalFiles - highFiles : 0;
-    const lowFiles = Math.max(0, changes.length - criticalFiles - highFiles - mediumFiles);
+    // Risk summary: use classifyFileRisk for each changed file.
+    // First-match precedence — only highest risk bucket per file.
+    const riskBuckets = new Map<string, string[]>();
+    riskBuckets.set("critical", []);
+    riskBuckets.set("high", []);
+    riskBuckets.set("medium", []);
+    riskBuckets.set("low", []);
+    const riskOrder = ["critical", "high", "medium", "low"];
+
+    for (const c of changes) {
+        const absPath = pathResolve(cwd, c.file);
+        // Compute fanIn from callGraph if available.
+        let fanIn = 0;
+        if (callGraph) {
+            const normalizedAbs = pathResolve(cwd, c.file);
+            for (const fn of callGraph.functions) {
+                const fnAbs = pathResolve(cwd, fn.file);
+                if (fnAbs === normalizedAbs) fanIn += fn.calledBy.length;
+            }
+        }
+        let risk = classifyFileRisk({
+            filePath: absPath,
+            pageRank: 0,
+            fanIn,
+            blastRadiusDepth: 0,
+        });
+        // Fallback: when no graph-derived risk signal exists, use line-count heuristic
+        if (risk === "low" && c.addedCount > 20) {
+            risk = "critical";
+        } else if (risk === "low" && c.addedCount > 10) {
+            risk = "high";
+        }
+        // Each file classified once by classifyFileRisk — first-match = only highest bucket.
+        const existing = riskBuckets.get(risk);
+        if (existing) {
+            existing.push(c.file);
+        } else {
+            riskBuckets.set(risk, [c.file]);
+        }
+    }
 
     lines.push("", "Risk Summary:");
-    if (criticalFiles > 0) {
-        const names = changes.filter(c => c.addedCount > 20).map(c => c.file);
-        lines.push(`  CRITICAL  ${criticalFiles} file${criticalFiles !== 1 ? "s" : ""}  ${names.join(", ")}`);
-    }
-    if (highFiles > 0) {
-        const names = changes.filter(c => c.addedCount > 10 || c.deletedLines > 20).map(c => c.file);
-        lines.push(`  HIGH      ${highFiles} file${highFiles !== 1 ? "s" : ""}  ${names.join(", ")}`);
-    }
-    if (mediumFiles > 0) {
-        lines.push(`  MEDIUM    ${mediumFiles} files  (import chain)`);
-    }
-    if (lowFiles > 0) {
-        lines.push(`  LOW       ${lowFiles} files  test files`);
+    for (const level of riskOrder) {
+        const names = riskBuckets.get(level) ?? [];
+        if (names.length > 0) {
+            lines.push(`  ${level.toUpperCase().padEnd(10)} ${names.length} file${names.length !== 1 ? "s" : ""}  ${names.join(", ")}`);
+        }
     }
 
     return lines.join("\n");

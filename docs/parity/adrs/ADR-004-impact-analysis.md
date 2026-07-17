@@ -37,11 +37,13 @@ Simple, deterministic, no learned weights:
 3. **Blast radius depth:** Maximum hop distance of affected symbols from changed file
 4. **File tier:** Is the file an entry point, public API export, or test? (from `signals.ts`)
 
-Risk levels:
-- **critical:** PageRank > 0.9 OR fan-in > 50 OR entry point + blast radius ≥ 3
+Risk levels (evaluated top-down; first match wins — precedence: critical > high > medium > low):
+- **critical:** PageRank > 0.9 OR fan-in > 50 OR (entry point AND blast radius ≥ 3)
 - **high:** PageRank > 0.7 OR fan-in > 20 OR public API
 - **medium:** fan-in > 5 OR blast radius ≥ 2
 - **low:** everything else
+
+Strictness: `>` (strict greater-than) for PageRank and fan-in thresholds; `>=` (greater-or-equal) for blast radius depth comparisons.
 
 ### Output shape for impact analysis
 

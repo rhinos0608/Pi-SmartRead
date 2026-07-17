@@ -16,14 +16,14 @@
 ```typescript
 // Added to InspectV4Schema in src/inspect-tool.ts
 callDepth: Type.Optional(Type.Number({
-  minimum: 1, maximum: 5, default: 1,
-  description: "BFS call graph traversal depth (1-5, default 1). File mode."
+  minimum: 1, maximum: 5,
+  description: "BFS call graph traversal depth (1-5). File mode."
 })),
 callDirection: Type.Optional(Type.Union([
   Type.Literal("callers"),
   Type.Literal("callees"),
   Type.Literal("both"),
-], { default: "both", description: "Call graph traversal direction. File mode." })),
+], { description: "Call graph traversal direction. File mode." })),
 deadCode: Type.Optional(Type.Boolean({
   default: false,
   description: "Return zero-caller functions in scope. File or directory mode."
@@ -319,20 +319,20 @@ Behavior identical to `read { path: "src/auth/service.ts", offset: 42, limit: 60
 
 All new params in `inspect` produce the existing evidence modes:
 - File-mode params: `mode: "symbol"`, `coverage: "search-match"`, resources listing affected files
-- Directory-mode params: `mode: "map"`, zero resources (or `mode: "symbol"` with resources where files are concretely referenced — see below)
+- Directory-mode params: `mode: "map"`, zero resources
 
 ### Per-param evidence
 
 | Param | Mode | Resources | Notes |
 |---|---|---|---|
 | `callDepth` | `symbol` | Referenced caller/callee files | search-match |
-| `deadCode` | `symbol` | Files containing dead functions | search-match |
+| `deadCode` | `symbol` (file) / `map` (dir) | Files containing dead functions (file mode) / Zero resources (dir mode) | Directory mode: no file authorization |
 | `impact` | `symbol` | All affected files in blast radius | search-match |
 | `diff` | `symbol` | Changed files + blast radius files | search-match |
 | `clusters` | `map` | Zero resources | Architecture insight, no file authorization |
 | `graphSchema` | `map` | Zero resources | Schema introspection |
-| `hotspots` | `map` | Zero resources (dir mode) / Files (file mode) | Directory mode: no file authorization |
-| `routes` | `map` (dir) / `symbol` (file) | Zero resources (dir mode) / Files (file mode) | Directory mode: no file authorization |
+| `hotspots` | `symbol` (file) / `map` (dir) | Files (file mode) / Zero resources (dir mode) | Directory mode: no file authorization |
+| `routes` | `symbol` (file) / `map` (dir) | Files (file mode) / Zero resources (dir mode) | Directory mode: no file authorization |
 | `layers` | `map` | Zero resources | Architecture insight |
 | `boundaries` | `map` | Zero resources | Architecture insight |
 | `symbol` (read) | Strong evidence (same as normal read) | Read file | File-level authorization |

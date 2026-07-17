@@ -29,6 +29,8 @@ Building a Cypher parser/executor in TypeScript is a large engineering investmen
 | `graphSchema` | boolean | Return graph structure summary (node/edge type counts, sample names) |
 | `hotspots` | boolean | Return top-N functions by fan-in (most called) |
 | `boundaries` | boolean | Detect service boundaries from package.json workspaces, docker-compose |
+| `routes` | boolean | Extract HTTP route → handler mappings (file or directory mode) |
+| `layers` | boolean | Derive architectural layers from import structure (directory mode only) |
 
 ### New `grep` parameters:
 

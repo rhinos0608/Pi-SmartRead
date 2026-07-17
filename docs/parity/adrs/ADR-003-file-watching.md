@@ -32,7 +32,15 @@ Node.js provides `fs.watch` (platform-specific, unreliable for recursive watchin
    - Invalidates `SemanticIndex` file state for affected paths (next query re-indexes)
    - Logs change count at debug level
 4. On session end, call `stopWatching()` to remove all watchers
-5. If `chokidar` is available (optional peer dependency, checked at runtime via `try { require("chokidar") }`), use it for reliable recursive watching on all platforms.
+5. Chokidar auto-detection: on non-Linux platforms (`!IS_LINUX`), `try { require("chokidar") }` is attempted before falling back to native `fs.watch`. If chokidar is found, it handles recursive watching reliably on all platforms. **Linux is excluded from auto-detection** — the `!IS_LINUX` guard skips the `require("chokidar")` attempt on Linux. Linux users who want chokidar-based watching must install chokidar as a dependency and explicitly configure `mode: 'chokidar'` in `WatcherOptions`. Without that, Linux defaults to non-recursive `fs.watch`.
+
+### Linux non-recursive fallback
+
+When chokidar is unavailable on Linux (`fs.watch` does not support recursive), the fallback:
+- Uses `collectDirectories()` to recursively discover all subdirectories up front (BFS from root)
+- Creates one `fs.watch` per subdirectory (each watches its immediate children)
+- Caps at `maxWatcherCount=256` directories to prevent FD exhaustion; emits `console.warn` when cap is hit
+- Logs: `[file-watcher] Linux non-recursive mode: watching N directories. Install chokidar for recursive support.`
 
 ### Rationale
 

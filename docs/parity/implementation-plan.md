@@ -234,6 +234,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 **Wave:** 2 — Depends on WP-2, WP-3 (needs compute modules available)
 **Scope:** Wire all new inspect params to their compute modules, add `symbol` param to read, render output sections
 **ADR:** ADR-001, ADR-004, ADR-005
+**Status:** ~90% complete — schema, compute wiring, validation, and symbol resolution implemented. Remaining: WP-5 runtime DI wiring for contextGraph (grep graphFilter execution path).
 
 **Inspect DI ownership:** WP-4 extends `InspectV4Input` (src/inspect-types.ts) with an optional `contextGraph?: ContextGraph` field. This is the type-level contract. WP-5 is responsible for populating this field from `inspect-tool.ts` options at runtime.
 
@@ -244,22 +245,20 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
   - Add `ImpactResult`, `DeadCodeResult`, `ClusterResult`, `RouteInfo`, `LayerMap`, `BoundaryResult` type imports/exports
   - Add `GraphSchemaResult` type
 - `src/inspect-tool.ts`:
-  - Extend `InspectV4Schema` with all new TypeBox schemas (see spec §1.1)
-  - Add dir-only param validation in `execute()`: if mode is "file" and params contain `clusters`/`boundaries`/`layers`, throw with descriptive error
-  - Wire `params.symbol` to read-tool redirect (intercept early, redirect to read tool execution path)
-  - Pass new params through to `executeInspectV4()` via extended `InspectV4Input`
+  - Extend `InspectV4Schema` with all new TypeBox schemas (see spec §1.1) ✓
+  - Add mode-only param validation in `execute()`: file-only (`callDepth`, `callDirection`) rejected on dir mode; dir-only (`clusters`, `boundaries`, `layers`) rejected on file mode ✓
+  - Pass new params through to `executeInspectV4()` via extended `InspectV4Input` ✓
 - `src/inspect.ts`:
-  - `executeFileInspect()`: call compute modules for enabled params (impact, deadCode, callDepth, hotspots, routes, graphSchema), append output sections to content text
-  - `executeDirectoryInspect()`: call compute modules for enabled params (clusters, layers, boundaries, deadCode, hotspots, routes), append output sections
-  - Token budget tracking: accumulate rendered line count, stop appending sections when budget exceeded
-  - Evidence envelope: add resources for affected files when impact/deadCode/routes params active
-  - Import new compute modules (impact-analysis.ts, community-detection.ts, route-extraction.ts, layer-analysis.ts) — these are dependency-free, no cycle risk
-  - Use `input.contextGraph` (populated by WP-5) when available for graph-dependent operations; gracefully degrade to no-graph behavior when absent
+  - `executeFileInspect()`: call compute modules for enabled params (impact, deadCode, callDepth, hotspots, routes, graphSchema, diff), append output sections to content text ✓
+  - `executeDirectoryInspect()`: call compute modules for enabled params (clusters, layers, boundaries, deadCode, hotspots, routes, diff), append output sections ✓
+  - Token budget tracking: accumulate rendered line count, stop appending sections when budget exceeded ✓
+  - Evidence envelope: directory mode always `mode:"map"` with `resources:[]`; file mode `mode:"symbol"` with per-param resources ✓
+  - Import new compute modules (impact-analysis.ts, community-detection.ts, route-extraction.ts, layer-analysis.ts) — these are dependency-free, no cycle risk ✓
+  - Use `input.contextGraph` (populated by WP-5) when available for graph-dependent operations; gracefully degrade to no-graph behavior when absent ✓
 - `src/hook.ts`:
-  - Add `symbol` param to read tool schema (TypeBox Optional String)
-  - In execute: if `params.symbol`, resolve via `resolveSymbolFromLSP(params.symbol)` → if found, set `params.path` to resolved file, set `params.offset` to resolved line - 5, set `params.limit` to contextLines. If not found, throw error.
-  - Import LSP bridge symbol resolution (already available as `getLSPBridge()` is imported in index.ts — hook.ts would need access)
-  - For import-cycle safety: LSP bridge resolution function must be dependency-injected, not imported directly. Use same pattern as resolver — pass `getLSPClient` in the read tool options.
+  - Add `symbol` param to read tool schema (TypeBox Optional String) ✓
+  - In execute: if `params.symbol`, resolve via DI-injected `resolveSymbol` → if found, delegate to single-file read with offset = line - 5 ✓
+  - Symbol resolution is dependency-injected via `WrapReadToolOptions.resolveSymbol` — no direct LSP import in hook.ts ✓
 
 **Dependencies:** WP-2 (impact-analysis.ts, graph-filter.ts), WP-3 (route-extraction.ts, community-detection.ts, layer-analysis.ts, monorepo-detector.ts, signals.ts extension)
 **Tests:**

@@ -28,6 +28,8 @@ The parity target includes a cross-session graph that does not require full rebu
 4. **Keep ADR store as-is** (markdown files, survives restarts)
 5. **Keep SemanticIndex as-is** (SQLite-vec, survives restarts, model-fingerprinted)
 
+**Edge restoration after restart:** Import and call edges are **not** persisted as a serialized edge set. After restart, `buildContextGraph()` re-derives them lazily from cached tags in `TagsCache` (disk-cached at `.pi-smartread/tags-cache/`). For each file, the tag cache provides pre-parsed AST summaries; `ContextGraph` rebuilds provenance edges (imports, defines, references) by scanning these tags. Call edges are re-derived from the `buildCallGraph()` pass over the same cached tags. Breakage and co-change edges survive via EdgeStore (JSONL log). The net effect: unchanged files contribute their edges from cache (fast ~100ms for 500 files), only modified files trigger re-parsing.
+
 ### Rationale
 
 - ContextGraph is a consumer-facing index optimized for O(1) neighbor lookups, not a storage engine. The durable state is: (a) source files (git), (b) tags cache (disk), (c) edge store (JSONL), (d) semantic index (SQLite). Rebuilding the in-memory graph from these sources is ~100ms for a 500-file repo — negligible vs session-start overhead.

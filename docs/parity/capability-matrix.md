@@ -46,10 +46,10 @@
 | Semantic vector search | Bundled Nomic 768d int8, cosine similarity | Configurable provider, sqlite-vec, RRF fusion | PARITY |
 | BM25 full-text search | FTS5 with camelCase tokenizer | `scoring.ts` BM25 scoring | PARITY |
 | Multi-signal combined scoring | 11 signals (TF-IDF, RRI, API sig, AST, dataflow, Halstead, MinHash, proximity, diffusion, +2) | Multi-signal reranking (graph distance, PageRank, path proximity, temporal) — 4-5 signals | PARTIAL |
-| Structural graph search (regex, label, degree) | `search_graph` with regex name, label filter, degree filter | grep tool (BM25+AST+semantic cascade, no graph-aware filter) | PARTIAL |
+| Structural graph search (regex, label, degree) | `search_graph` with regex name, label filter, degree filter | `grep` tool (BM25+AST+semantic cascade + graph-aware filter via `graphFilter` param) | PARTIAL |
 | Cypher-like graph query language | Full read-only openCypher subset (MATCH, WHERE, aggregates, variable paths) | None | GAP |
-| Graph schema introspection | `get_graph_schema` (labels, counts, patterns) | None | GAP |
-| Code snippet retrieval by qualified name | `get_code_snippet` by `<project>.<path>.<name>` | read tool by file path (no QN-based lookup) | PARTIAL |
+| Graph schema introspection | `get_graph_schema` (labels, counts, patterns) | `inspect { graphSchema: true }` — returns node/edge counts and sample edges | PARTIAL |
+| Code snippet retrieval by qualified name | `get_code_snippet` by `<project>.<path>.<name>` | `read { symbol }` resolves via LSP `workspaceSymbol` + context graph fallback | PARITY |
 | Code text search (grep) | `search_code` graph-augmented grep | `grep` tool with multi-engine cascade | SMARTREAD-ONLY |
 | Glob-filtered search | `file_pattern` param on search_graph | `glob` param on grep | PARITY |
 | Literal (exact substring) search | Implied in search_code | `grep { literal: true }` | PARITY |
@@ -58,11 +58,11 @@
 
 | Capability | Reference | SmartRead | Status |
 |---|---|---|---|
-| BFS call graph traversal (depth-limited) | `trace_path` depth 1–5, direction filter, edge type filter | `ContextGraph.getFileNeighbours()` (no dedicated tool, no depth param) | PARTIAL |
-| Impact analysis / blast radius | `detect_changes` maps diff → affected symbols with risk | None (graph_mutate records edges but no pre-computed blast radius query) | GAP |
-| Git diff → affected symbol mapping | `detect_changes` with auto git-diff | None | GAP |
-| Dead code detection | Cypher EXISTS subqueries (zero-caller functions) | None | GAP |
-| Risk classification (critical/high/medium/low) | Call-graph centrality + hop-depth scoring | None | GAP |
+| BFS call graph traversal (depth-limited) | `trace_path` depth 1–5, direction filter, edge type filter | `inspect { callDepth, callDirection }` — BFS from file symbols via `callgraph.ts` | PARTIAL |
+| Impact analysis / blast radius | `detect_changes` maps diff → affected symbols with risk | `inspect { impact: true }` — blast radius via `impact-analysis.ts` BFS expansion | PARTIAL |
+| Git diff → affected symbol mapping | `detect_changes` with auto git-diff | `inspect { diff: "unstaged"\|"staged"\|"HEAD" }` — maps changed symbols with risk | PARTIAL |
+| Dead code detection | Cypher EXISTS subqueries (zero-caller functions) | `inspect { deadCode: true }` — zero-caller functions via `impact-analysis.ts` | PARTIAL |
+| Risk classification (critical/high/medium/low) | Call-graph centrality + hop-depth scoring | `inspect { diff }` / `inspect { impact }` — risk via `impact-analysis.ts` classifyRisk | PARTIAL |
 | Call graph extraction across files | Multi-file call resolution, import-aware | `callgraph.ts` tree-sitter extraction (6 languages) | PARTIAL |
 | Type-aware call resolution | Hybrid LSP for 12 language families | LSP bridge for TS/JS with goToDefinition/findReferences | PARTIAL |
 
@@ -71,12 +71,12 @@
 | Capability | Reference | SmartRead | Status |
 |---|---|---|---|
 | Architecture overview (languages, packages, routes, hotspots, clusters, layers) | `get_architecture` multi-aspect | Inspect directory mode (repo map) + signals (complexity, public-api, reuse, recency, tests) | PARTIAL |
-| Community detection (Louvain/Leiden) | Leiden algorithm, resolution-tunable | None | GAP |
+| Community detection (Louvain/Leiden) | Leiden algorithm, resolution-tunable | `inspect { clusters: true }` — Louvain via `community-detection.ts` | PARTIAL |
 | Hotspot detection (fan-in ranking) | `get_architecture` hotspots aspect | PageRank-based ranking in repomap (related but different metric) | PARTIAL |
 | Entry point detection | `get_architecture` entry_points aspect | Partial via symbol-resolver (main/export detection) | PARTIAL |
 | Package/module summary | Manifest scanning (8+ ecosystems) | `workspace-scope.ts` project root detection only | PARTIAL |
-| Cross-service boundary detection | `get_architecture` boundaries aspect | None | GAP |
-| Layer analysis | `get_architecture` layers aspect | None | GAP |
+| Cross-service boundary detection | `get_architecture` boundaries aspect | `inspect { boundaries: true }` — service boundaries via `monorepo-detector.ts` | PARTIAL |
+| Layer analysis | `get_architecture` layers aspect | `inspect { layers: true }` — layer derivation via `layer-analysis.ts` | PARTIAL |
 
 ### Memory & Decisions
 
@@ -90,7 +90,7 @@
 
 | Capability | Reference | SmartRead | Status |
 |---|---|---|---|
-| Background file watcher | Git-polling adaptive intervals (5–60s) | None (snapshot-based, compare at query time) | GAP |
+| Background file watcher | Git-polling adaptive intervals (5–60s) | `fs.watch`-based with chokidar opt-in (`file-watcher.ts`); debounced cache invalidation | PARTIAL |
 | Incremental re-indexing (hash comparison) | SHA-256 + mtime + size | `incremental-index.ts` Merkle-tree content-addressable | PARITY |
 | Supervised subprocess indexing (RSS isolation) | Worker subprocess for large repos | Not needed (Node.js process, not C binary) | OUT-OF-SCOPE-CANDIDATE — RSS isolation critical for C static binary; irrelevant for managed runtime |
 | Auto-index on session start | `auto_index` config | Semantic index warmup in `hook.ts` session_start | PARITY |
@@ -192,16 +192,16 @@ For each in-scope gap or partial: capability, agent value, rough size, build-on 
 
 SmartRead achieves agent-facing parity when:
 
-- [ ] Agent can traverse call graphs depth-limited (inspect param or grep extension)
-- [ ] Agent can compute blast radius / impact of a change before editing
-- [ ] Agent can map git diff to affected symbols with risk classification
-- [ ] Agent can detect dead code (zero-caller functions)
-- [ ] Agent can understand module boundaries via community detection
-- [ ] Agent can query graph schema (what nodes/edges exist)
-- [ ] Agent can extract HTTP route → handler mappings for web projects
+- [x] Agent can traverse call graphs depth-limited (inspect `callDepth`/`callDirection` params)
+- [x] Agent can compute blast radius / impact of a change before editing (`inspect { impact: true }`)
+- [x] Agent can map git diff to affected symbols with risk classification (`inspect { diff }`)
+- [x] Agent can detect dead code (zero-caller functions) (`inspect { deadCode: true }`)
+- [x] Agent can understand module boundaries via community detection (`inspect { clusters: true }`)
+- [x] Agent can query graph schema (what nodes/edges exist) (`inspect { graphSchema: true }`)
+- [x] Agent can extract HTTP route → handler mappings for web projects (`inspect { routes: true }`)
 - [ ] Agent can identify test↔source coverage gaps
-- [ ] Agent has background file watching for real-time invalidation
-- [ ] Agent can retrieve code by qualified name (symbol param on read)
+- [x] Agent has background file watching for real-time invalidation (`file-watcher.ts`)
+- [x] Agent can retrieve code by qualified name (symbol param on read)
 - [ ] Agent's multi-signal scoring includes complexity, AST profile, and proximity signals
 - [ ] Cross-session ADRs feed into retrieval ranking
 
