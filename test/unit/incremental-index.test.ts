@@ -32,7 +32,7 @@ import {
   clearIncrementalIndexInstance,
 } from "../../src/incremental-index.js";
 
-import type { FileHashCache } from "../../src/incremental-index.js";
+import type { FileHashCache, FileHashEntry } from "../../src/incremental-index.js";
 
 describe("hashFileSync", () => {
   it("produces a deterministic 64-char hex hash", () => {
@@ -172,10 +172,7 @@ describe("scanTree + detectChanges", () => {
   });
 
   it("detects added files", () => {
-    // Build baseline
     const cache = hashDirectory(tmpDir);
-
-    // Add a file
     writeFileSync(join(tmpDir, "lib", "c.ts"), "export const c = 3;");
 
     const changes = detectChanges(tmpDir, cache);
@@ -198,8 +195,6 @@ describe("scanTree + detectChanges", () => {
 
   it("detects deleted files", () => {
     const cache = hashDirectory(tmpDir);
-
-    // Delete a file
     rmSync(join(tmpDir, "lib", "a.ts"));
 
     const changes = detectChanges(tmpDir, cache);
@@ -238,17 +233,13 @@ describe("scanTree two-pass (directory-level skip)", () => {
   });
 
   it("skips directory subtree when dir mtime matches cache", () => {
-    // Build cache from full scan
     const { currentFiles, currentDirectories } = scanTree(tmpDir, {}, {});
-
-    // Now run with the same cache — should copy forward (no re-scan)
     const { currentFiles: cachedFiles } = scanTree(
       tmpDir,
       currentFiles,
       currentDirectories,
     );
 
-    // Entries should match
     expect(cachedFiles["src/a.ts"]).toEqual(currentFiles["src/a.ts"]);
     expect(cachedFiles["src/deep/b.ts"]).toEqual(currentFiles["src/deep/b.ts"]);
   });
@@ -370,14 +361,12 @@ describe("computeDirtyPropagation", () => {
   });
 
   it("handles diamond dependencies without duplicates", () => {
-    // a → b, a → c, b → d, c → d
     const deps = new Map<string, string[]>([
       ["src/a.ts", ["src/b.ts", "src/c.ts"]],
       ["src/b.ts", ["src/d.ts"]],
       ["src/c.ts", ["src/d.ts"]],
     ]);
     const dirty = computeDirtyPropagation(["src/a.ts"], deps);
-    // Should have 4 unique entries: a, b, c, d
     expect(dirty).toHaveLength(4);
     const paths = dirty.map((d) => d.path);
     expect(paths).toContain("src/d.ts");
@@ -386,7 +375,7 @@ describe("computeDirtyPropagation", () => {
   it("handles cycles gracefully", () => {
     const deps = new Map<string, string[]>([
       ["src/a.ts", ["src/b.ts"]],
-      ["src/b.ts", ["src/a.ts"]], // cycle
+      ["src/b.ts", ["src/a.ts"]],
     ]);
     const dirty = computeDirtyPropagation(["src/a.ts"], deps);
     expect(dirty).toHaveLength(2);
@@ -462,7 +451,7 @@ describe("createIncrementalIndex", () => {
 
   it("forceRebuild treats everything as added", () => {
     const idx = createIncrementalIndex(tmpDir);
-    idx.getChanges(); // first build
+    idx.getChanges();
 
     const rebuild = idx.forceRebuild();
     expect(rebuild.added.length).toBeGreaterThan(0);
@@ -519,11 +508,9 @@ describe("getIncrementalIndex / clearIncrementalIndexInstance", () => {
 
     clearIncrementalIndexInstance(tmpDir1);
 
-    // Should get a new instance for tmpDir1
     const a2 = getIncrementalIndex(tmpDir1);
     expect(a2).not.toBe(a);
 
-    // tmpDir2 should still be cached
     expect(getIncrementalIndex(tmpDir2)).toBe(getIncrementalIndex(tmpDir2));
   });
 
@@ -587,9 +574,71 @@ describe("edge cases", () => {
   });
 
   it("scanTree skips permission-denied directories", () => {
-    // Can't easily test permission errors without root
-    // but verify the graceful skip path works
     const { currentFiles } = scanTree(tmpDir, {}, {});
     expect(Object.keys(currentFiles)).toEqual([]);
+  });
+});
+
+// ── WP-3: diff() with graph stats ─────────────────────────────────
+
+describe("createIncrementalIndex diff()", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "diff-"));
+    mkdirSync(join(tmpDir, "src"), { recursive: true });
+    writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
+    writeFileSync(join(tmpDir, "src", "b.ts"), "export const b = 2;");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("diff() returns graphStats with stale=true for entries lacking new fields", () => {
+    const idx = createIncrementalIndex(tmpDir);
+    idx.getChanges(); // initial build
+
+    const { graphStats } = idx.diff();
+    expect(graphStats.length).toBeGreaterThan(0);
+    // Old entries won't have symbolCount/edgeCount → stale=true
+    for (const gs of graphStats) {
+      expect(gs.stale).toBe(true);
+      expect(gs.symbolCount).toBeUndefined();
+      expect(gs.edgeCount).toBeUndefined();
+    }
+  });
+
+  it("diff() returns both changes and graphStats", () => {
+    const idx = createIncrementalIndex(tmpDir);
+    idx.getChanges();
+
+    const { changes, graphStats } = idx.diff();
+    expect(changes).toBeDefined();
+    expect(Array.isArray(graphStats)).toBe(true);
+  });
+});
+
+describe("FileHashEntry graph stats fields", () => {
+  it("FileHashEntry accepts optional symbolCount and edgeCount", () => {
+    const entry: FileHashEntry = {
+      hash: "abc123",
+      mtimeMs: 1000,
+      size: 42,
+      symbolCount: 15,
+      edgeCount: 8,
+    };
+    expect(entry.symbolCount).toBe(15);
+    expect(entry.edgeCount).toBe(8);
+  });
+
+  it("FileHashEntry works without optional graph stats fields", () => {
+    const entry: FileHashEntry = {
+      hash: "abc123",
+      mtimeMs: 1000,
+      size: 42,
+    };
+    expect(entry.symbolCount).toBeUndefined();
+    expect(entry.edgeCount).toBeUndefined();
   });
 });

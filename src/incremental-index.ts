@@ -32,6 +32,10 @@ export interface FileHashEntry {
   hash: string;
   mtimeMs: number;
   size: number;
+  /** Number of symbols in the file (undefined = unknown, needs rebuild). */
+  symbolCount?: number;
+  /** Number of edges originating from this file (undefined = unknown, needs rebuild). */
+  edgeCount?: number;
 }
 
 /**
@@ -54,6 +58,14 @@ export interface IndexChangeSet {
 export interface DirtyNode {
   path: string;
   reason: "direct_change" | "dependency_changed";
+}
+
+/** Per-file graph stats diff for incremental indexing. */
+export interface GraphStatsDiff {
+  path: string;
+  symbolCount: number | undefined;
+  edgeCount: number | undefined;
+  stale: boolean; // true when old entry lacks new fields (needs rebuild)
 }
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -588,6 +600,48 @@ export function createIncrementalIndex(root: string) {
       cachedDirs = currentDirectories;
 
       return changes;
+    },
+
+    /**
+     * Compute graph stats diff alongside hash changes.
+     * Old entries without symbolCount/edgeCount are marked stale (needs rebuild).
+     */
+    diff(fileFilter?: (p: string) => boolean): {
+      changes: IndexChangeSet;
+      graphStats: GraphStatsDiff[];
+    } {
+      ensureLoaded();
+      const { currentFiles, currentDirectories } = scanTree(
+        resolvedRoot,
+        cachedFiles,
+        cachedDirs,
+        fileFilter ?? defaultFileFilter,
+      );
+
+      const changes = detectChangesFromMaps(cachedFiles, currentFiles);
+
+      // Build graph stats diff
+      const allPaths = new Set([...Object.keys(cachedFiles), ...Object.keys(currentFiles)]);
+      const graphStats: GraphStatsDiff[] = [];
+      for (const fp of allPaths) {
+        const oldEntry = cachedFiles[fp];
+        const newEntry = currentFiles[fp];
+        const entry = newEntry ?? oldEntry;
+        if (!entry) continue;
+        const stale = entry.symbolCount === undefined || entry.edgeCount === undefined;
+        graphStats.push({
+          path: fp,
+          symbolCount: entry.symbolCount,
+          edgeCount: entry.edgeCount,
+          stale,
+        });
+      }
+
+      saveCache(cacheFilePath(resolvedRoot), currentFiles, currentDirectories);
+      cachedFiles = currentFiles;
+      cachedDirs = currentDirectories;
+
+      return { changes, graphStats };
     },
 
     /**
