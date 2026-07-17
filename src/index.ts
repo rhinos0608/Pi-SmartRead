@@ -3,13 +3,16 @@ import { registerSessionHooks } from "./hook.js";
 import { coerceText, ensureHashlineReady } from "./utils.js";
 import { initHandlers } from "./read-many.js";
 import { invalidateFsScanCache } from "./fs-scan-cache.js";
+import { startWatching } from "./file-watcher.js";
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
-import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver } from "./mcp-registry.js";
+import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, resetSharedContextGraph } from "./mcp-registry.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
 import { createReadTool } from "./unified-read.js";
 import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
+import { getSemanticIndex } from "./semantic-index-registry.js";
+import { getIncrementalIndex } from "./incremental-index.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
   isInternalUrl,
@@ -79,6 +82,40 @@ ensureHashlineReady().catch((err) =>
   console.error("[SmartRead] hashline init failed:", err)
 );
 
+// ── Symbol resolution for read { symbol } (WP-5) ────────────────
+/**
+ * Resolve a qualified symbol name to a file path and optional line number.
+ * Resolution order: LSP workspace/symbol first, then ContextGraph.findSymbolFiles() fallback.
+ */
+async function resolveSymbolForReadTool(symbol: string): Promise<{ path: string; line?: number } | null> {
+  const root = process.cwd();
+  try {
+    const bridge = await getLSPBridge();
+    if (bridge?.isAvailable()) {
+      const syms = await bridge.workspaceSymbol(symbol, root);
+      if (syms.length > 0) {
+        const best = syms.find((s) => s.name === symbol) ?? syms[0];
+        if (best) {
+          const { uri, range } = best.location;
+          return { path: uri.replace(/^file:\/\//, ""), line: range.start.line + 1 };
+        }
+      }
+    }
+  } catch {
+    // LSP not available
+  }
+  try {
+    const graph = getSharedContextGraph(root);
+    const files = await graph.findSymbolFiles(symbol);
+    if (files.length > 0) {
+      return { path: files[0]!.path };
+    }
+  } catch {
+    // graph not built
+  }
+  return null;
+}
+
 export default async function (pi: ExtensionAPI) {
   // ── Initialise internal URL handlers (skill://, memory://, graph://) ──
   initHandlers();
@@ -88,10 +125,44 @@ export default async function (pi: ExtensionAPI) {
   const doomLoopState = createDoomLoopState();
   const bashContextGuardConfig = resolveBashContextGuardConfig();
 
+  // ── File watcher: real-time FS change detection ──
+  /** WP-1 writes dirty flag; WP-5 reads it to trigger lazy ContextGraph rebuild. */
+  const watchState = {
+    stop: undefined as (() => void) | undefined,
+    contextGraphDirty: false,
+  };
+
+  try {
+    watchState.stop = startWatching(process.cwd(), (dirtyPaths) => {
+      for (const p of dirtyPaths) {
+        invalidateFsScanCache(p);
+      }
+      // WP-5: invalidate semantic index file states for affected paths
+      try {
+        const semIdx = getSemanticIndex(process.cwd());
+        if (semIdx && typeof semIdx.markFilesStale === "function") {
+          semIdx.markFilesStale(dirtyPaths);
+        }
+      } catch { /* semantic index may not exist */ }
+      // WP-5: invalidate incremental index cache entries
+      try {
+        const incIdx = getIncrementalIndex(process.cwd());
+        incIdx.invalidate();
+      } catch { /* incremental index may not exist */ }
+      watchState.contextGraphDirty = true;
+    });
+  } catch (err) {
+    console.warn(`[SmartRead] File watcher failed to start: ${(err as Error).message}`);
+  }
+
   // Language servers are long-lived during an interactive session, but must
   // be stopped when Pi closes (especially in --print mode) or their child
   // processes keep the harness alive after the tool result has returned.
   pi.on("session_shutdown", async () => {
+    watchState.stop?.();
+    watchState.stop = undefined;
+    watchState.contextGraphDirty = false;
+    try { resetSharedContextGraph(); } catch { /* may not be loaded */ }
     await shutdownAllManagers();
     resetLSPBridge();
   });
@@ -421,7 +492,11 @@ export default async function (pi: ExtensionAPI) {
 
   // 2. Inspect v4: directory → map, file → structural facts + signals
   //    Query mode removed — use grep for code search.
+  //    WP-5: pass ContextGraph for graph-dependent params.
   if (!ToolRegistry.getInstance().has("inspect")) {
+    // Consume the dirty flag — getSharedContextGraph will rebuild if dirty
+    getSharedContextGraph(process.cwd(), watchState.contextGraphDirty);
+    watchState.contextGraphDirty = false;
     const def = buildInspectTool(() => null);
     ToolRegistry.getInstance().register({
       name: "inspect",
@@ -433,9 +508,13 @@ export default async function (pi: ExtensionAPI) {
   }
 
   // 2.5 Grep: wrap upstream grep with BM25+symbol+semantic
+  //    WP-5: pass ContextGraph for graphFilter wiring.
   let grepRegistered = false;
   if (!ToolRegistry.getInstance().has("grep")) {
-    const grepDef = createGrepTool({});
+    const grepDef = createGrepTool({
+      contextGraph: getSharedContextGraph(process.cwd(), watchState.contextGraphDirty),
+    });
+    watchState.contextGraphDirty = false;
     ToolRegistry.getInstance().register({
       name: "grep",
       description: GREP_DESCRIPTION,
@@ -463,10 +542,12 @@ export default async function (pi: ExtensionAPI) {
   // 3.5 Read: override the builtin read with the enriched, evidence-emitting
   // wrapper. Publishes envelopes into the shared resolver so patch can
   // resolve an evidenceRef produced by a plain read.
+  // WP-5: inject LSP bridge symbol resolution for read { symbol: "..." }.
   pi.registerTool(createReadTool({
     publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
       getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
     },
+    resolveSymbol: resolveSymbolForReadTool,
   }));
 
   // 4. Versioned evidence RPC resolver install: best-effort, runs in the
