@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 
 interface MonorepoWorkspace {
   /** Workspace root directory (absolute) */
@@ -203,6 +203,132 @@ function resolveWorkspacePackageRoot(rootDir: string, candidate: string): string
 function isSubpath(parent: string, child: string): boolean {
   const rel = relative(resolve(parent), resolve(child));
   return rel === "" || (!rel.startsWith("..") && rel !== "");
+}
+
+// ── Service Boundary Detection ─────────────────────────────────
+
+export interface ServiceBoundary {
+  name: string;
+  rootPath: string;
+  dependencies: string[];
+}
+
+export interface BoundaryResult {
+  services: ServiceBoundary[];
+  source: string;
+}
+
+/**
+ * Detect service boundaries from monorepo configuration files.
+ * Parses package.json workspaces, docker-compose.yml, nx.json, turbo.json.
+ */
+export function detectServiceBoundaries(rootDir: string): BoundaryResult {
+  const resolved = resolve(rootDir);
+  const services = new Map<string, ServiceBoundary>();
+  let source = "none";
+
+  // 1. Parse package.json workspaces
+  const pkgPath = join(resolved, "package.json");
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+        workspaces?: string[] | { packages?: string[] };
+        dependencies?: Record<string, string>;
+      };
+
+      let globs: string[] = [];
+      if (Array.isArray(pkg.workspaces)) globs = pkg.workspaces;
+      else if (Array.isArray(pkg.workspaces?.packages)) globs = pkg.workspaces.packages;
+
+      if (globs.length > 0) {
+        source = "package.json";
+        const expanded = expandWorkspaceGlobs(resolved, globs);
+        for (const pkgRoot of expanded) {
+          const rp = join(pkgRoot, "package.json");
+          if (existsSync(rp)) {
+            try {
+              const innerPkg = JSON.parse(readFileSync(rp, "utf-8")) as {
+                name?: string;
+                dependencies?: Record<string, string>;
+              };
+              const name = innerPkg.name ?? basename(pkgRoot);
+              const deps = Object.keys(innerPkg.dependencies ?? {});
+              services.set(name, {
+                name,
+                rootPath: relative(resolved, pkgRoot).replace(/\\/g, "/") || ".",
+                dependencies: deps,
+              });
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2. Parse docker-compose.yml
+  const dcPath = join(resolved, "docker-compose.yml");
+  const dcPathAlt = join(resolved, "docker-compose.yaml");
+  const dcFile = existsSync(dcPath) ? dcPath : existsSync(dcPathAlt) ? dcPathAlt : null;
+  if (dcFile && services.size === 0) {
+    try {
+      const content = readFileSync(dcFile, "utf-8");
+      // Simple YAML-ish parse: look for top-level keys under "services:"
+      const servicesMatch = content.match(/^services:\s*$/m);
+      if (servicesMatch && servicesMatch.index !== undefined) {
+        source = "docker-compose";
+        const afterServices = content.slice(servicesMatch.index + servicesMatch[0].length);
+        const serviceEntries = afterServices.match(/^  (\w[\w.-]*):\s*$/gm);
+        if (serviceEntries) {
+          for (const entry of serviceEntries) {
+            const name = entry.match(/^  (\w[\w.-]*):/)?.[1];
+            if (name && !services.has(name)) {
+              services.set(name, { name, rootPath: ".", dependencies: [] });
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 3. Parse nx.json / turbo.json for project names
+  for (const [configFile, sourceLabel] of [["nx.json", "nx"], ["turbo.json", "turbo.json"]] as const) {
+    const configPath = join(resolved, configFile);
+    if (!existsSync(configPath)) continue;
+    try {
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      // nx.json: projects are defined in workspace config
+      // turbo.json: pipeline keys are task names, not project names
+      if (configFile === "nx.json" && config.projects) {
+        source = sourceLabel;
+        const projects: Record<string, string | { root?: string }> = config.projects;
+        for (const [name, val] of Object.entries(projects)) {
+          if (!services.has(name)) {
+            const root = typeof val === "string" ? val : (val?.root ?? ".");
+            services.set(name, { name, rootPath: root, dependencies: [] });
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 4. Cross-reference dependencies: find which workspace names match dependency keys
+  const serviceNames = new Set(services.keys());
+  for (const [, svc] of services) {
+    svc.dependencies = svc.dependencies.filter((d) => serviceNames.has(d));
+  }
+
+  return {
+    services: [...services.values()],
+    source,
+  };
 }
 
 function expandWorkspaceGlobs(rootDir: string, globs: WorkspaceGlob[]): string[] {
