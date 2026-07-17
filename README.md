@@ -3,6 +3,7 @@
 Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-agent) — unified file reading, structural code analysis, quality signals, repository mapping, and hybrid code search.
 
 > Forked from [pi-read-many](https://github.com/Gurpartap/pi-read-many) and evolved into a full code-intelligence toolkit.
+> Maintained by [Rhine Sharar](https://github.com/rhinos0608).
 > Now standalone repository, original tool surface was one read-many tool with adaptive ascending packing.
 
 ---
@@ -37,7 +38,7 @@ Pi-SmartRead also provides passive safety and enrichment that runs across all to
 ## Install
 
 ```bash
-pi install git:https://github.com/rhinos0608/Pi-SmartRead.git
+pi install github:rhinos0608/Pi-SmartRead
 ```
 
 If Pi is already running:
@@ -414,7 +415,9 @@ A **WASM grammar loader** (`src/grammar-loader.ts`) provides additional language
 ## Development
 
 ```bash
-npm install
+git clone https://github.com/rhinos0608/Pi-SmartRead.git
+cd Pi-SmartRead
+npm ci
 npm run typecheck
 npm test
 ```

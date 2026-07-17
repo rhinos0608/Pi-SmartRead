@@ -2,7 +2,7 @@
   "name": "pi-smartread",
   "version": "0.4.0",
   "description": "Code intelligence extension for Pi — unified reading, code search, structural file analysis (callers/inheritance/overrides/signals), hybrid BM25+AST+embedding search, repo mapping, call graph analysis, impact analysis, community detection, layer/route/boundary extraction, and graph-aware filtering",
-  "author": "Pi-SmartRead contributors",
+  "author": "Rhine Sharar",
   "license": "MIT",
   "type": "module",
   "publishConfig": {
