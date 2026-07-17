@@ -583,14 +583,31 @@ const ReadSchema = Type.Object({
   directory: Type.Optional(Type.String({ description: "Directory to scan (only with query; default: cwd)." })),
   topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to return when query is set (default: 20)." })),
   stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)." })),
+  symbol: Type.Optional(Type.String({ description: "Resolve qualified name (e.g. 'AuthService.login') to file+line via LSP, then read surrounding code."
+  })),
 });
 
 type ReadInput = Static<typeof ReadSchema>;
 
 // ── WrapReadToolOptions ──────────────────────────────────────────
 
+/**
+ * Symbol resolution result from LSP or ContextGraph fallback.
+ */
+export interface SymbolResolution {
+   path: string;
+   line?: number;
+}
+
 export interface WrapReadToolOptions {
    readonly publishInspection?: (envelope: unknown, sessionFilePath: string, workspaceRoot: string) => void;
+   /**
+    * Resolve a qualified symbol name to a file path and optional line number.
+    * Injected by WP-5 from LSP bridge + ContextGraph fallback.
+    * Resolution order: LSP exact qualified-name match first, then
+    * ContextGraph.findSymbolFiles() fallback.
+    */
+   readonly resolveSymbol?: (symbol: string) => Promise<SymbolResolution | null>;
 }
 
 function requirePositiveInteger(value: unknown, name: string): void {
@@ -623,6 +640,27 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
       onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
+      // Symbol param takes precedence over path/query (spec §1.3)
+      if (params.symbol !== undefined && params.symbol.trim().length > 0) {
+        if (!opts?.resolveSymbol) {
+          throw new Error(`Symbol "${params.symbol}" not found in workspace`);
+        }
+        const resolution = await opts.resolveSymbol(params.symbol);
+        if (!resolution) {
+          throw new Error(`Symbol "${params.symbol}" not found in workspace`);
+        }
+        const offset = resolution.line ? Math.max(1, resolution.line - 5) : params.offset;
+        return interceptContextualRead(
+          { path: resolution.path, offset, limit: params.limit } as Record<string, unknown>,
+          createDelegatedExecute(ctx),
+          toolCallId,
+          signal,
+          onUpdate,
+          ctx,
+          opts,
+        );
+      }
+
       const selectedModes = [params.path !== undefined, params.paths !== undefined, params.query !== undefined]
         .filter(Boolean).length;
       if (selectedModes !== 1) {
