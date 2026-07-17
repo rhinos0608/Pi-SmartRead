@@ -10,7 +10,7 @@
  *
  * Dependency-free — uses only Node.js built-in fs/path.
  */
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, lstatSync } from "node:fs";
 import { join, relative, resolve, extname } from "node:path";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -69,6 +69,10 @@ function extractExpressFastifyRoutes(source: string, filePath: string): RouteInf
 // ── Next.js App Router ────────────────────────────────────────────
 
 function extractNextAppRouterRoutes(source: string, filePath: string): RouteInfo[] {
+  // Only extract from files matching the app/**/route.ts convention.
+  const normalized = filePath.replace(/\\/g, "/");
+  if (!/(?:^|\/)app(?:\/.+?)?\/?route\.[mc]?tsx?$/.test(normalized)) return [];
+
   const results: RouteInfo[] = [];
   const pattern = /export\s+(?:async\s+)?function\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s*\(/g;
 
@@ -104,7 +108,7 @@ function extractNextPagesRouterRoutes(source: string, filePath: string): RouteIn
   const normalized = filePath.replace(/\\/g, "/");
 
   // Only match files in pages/api/ directories
-  if (!/\/pages\/api\//.test(normalized)) return results;
+  if (!/(^|\/)pages\/api\//.test(normalized)) return results;
 
   const pattern = /export\s+default\s+(?:async\s+)?(?:function\s+)?(\w*)\s*\(/g;
 
@@ -211,10 +215,13 @@ function scanDir(dirAbs: string, rootAbs: string): RouteInfo[] {
 
     let stat;
     try {
-      stat = statSync(absPath);
+      stat = lstatSync(absPath);
     } catch {
       continue;
     }
+
+    // Skip symbolic links to avoid following them.
+    if (stat.isSymbolicLink()) continue;
 
     if (stat.isDirectory()) {
       results.push(...scanDir(absPath, rootAbs));

@@ -68,8 +68,10 @@ router.patch("/items/:id", patchItem);
 // ── Next.js App Router ────────────────────────────────────────────
 
 describe("extractRoutes — Next.js App Router", () => {
-  it("extracts GET/POST exports from route.ts", () => {
-    const fp = join(workdir, "route.ts");
+  it("extracts GET/POST exports from app/**/route.ts", () => {
+    const appDir = join(workdir, "app", "api");
+    mkdirSync(appDir, { recursive: true });
+    const fp = join(appDir, "route.ts");
     writeFileSync(fp, `
 export async function GET(request: Request) {
   return Response.json({ ok: true });
@@ -127,7 +129,7 @@ const userRouter = router({
 });
 `);
     const routes = extractRoutes(fp);
-    expect(routes.length).toBeGreaterThanOrEqual(2);
+    expect(routes).toHaveLength(2);
     const query = routes.find((r) => r.handler === "getById");
     expect(query).toBeDefined();
     expect(query!.method).toBe("GET");

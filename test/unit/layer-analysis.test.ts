@@ -15,6 +15,7 @@ describe("deriveLayers", () => {
     expect(result.layers.has("controller")).toBe(true);
     expect(result.layers.get("controller")).toContain("src/routes.ts");
     expect(result.layers.get("controller")).toContain("src/handler.ts");
+    expect(result.layers.get("controller")).toContain("src/controllers/UserController.ts");
   });
 
   it("classifies service files by name pattern", () => {
@@ -76,6 +77,21 @@ describe("deriveLayers", () => {
     const files = ["src/api/handlers.ts"];
     const edges = [{ from: "src/api/handlers.ts", to: "express" }];
     const result = deriveLayers(edges, files);
+    expect(result.layers.has("controller")).toBe(true);
+  });
+
+  it("classifies controller by rawImportsByFile package specifiers", () => {
+    const files = ["src/api/handlers.ts"];
+    const rawImports = new Map([["src/api/handlers.ts", new Set(["express"])]
+    ]);
+    const result = deriveLayers([], files, rawImports);
+    expect(result.layers.has("controller")).toBe(true);
+    expect(result.layers.get("controller")).toContain("src/api/handlers.ts");
+  });
+
+  it("backwards-compatible: works without rawImportsByFile param", () => {
+    const files = ["src/api/handlers.ts"];
+    const result = deriveLayers([], files);
     expect(result.layers.has("controller")).toBe(true);
   });
 });

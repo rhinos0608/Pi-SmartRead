@@ -153,17 +153,50 @@ function classifyFile(
   return null;
 }
 
+// ── Package Specifier Extraction ────────────────────────────────
+
+/**
+ * Regex matching ES/CJS import specifiers in source text.
+ * Captures the specifier string (group 1) from import/require/export statements.
+ */
+const IMPORT_SPECIFIER_RE = /(?:import\s+(?:[\w$*\s{},]+\s+from\s+)?["']([^"'\n\r]+)["']|import\s*\(["']([^"'\n\r]+)["']\)|(?:const|let|var)\s+[\w$]+\s*=\s*require\(["']([^"'\n\r]+)["']\)|export\s+(?:[\w$*\s{},]+\s+from\s+)["']([^"'\n\r]+)["'])/g;
+
+/**
+ * Extract bare package specifiers from raw source text.
+ * Filters out relative/absolute path imports (those starting with `.` or `/`).
+ */
+export function extractPackageSpecifiers(source: string): Set<string> {
+  const packages = new Set<string>();
+  let m: RegExpExecArray | null;
+  IMPORT_SPECIFIER_RE.lastIndex = 0;
+  while ((m = IMPORT_SPECIFIER_RE.exec(source)) !== null) {
+    const spec = m[1] ?? m[2] ?? m[3] ?? m[4];
+    if (spec && !spec.startsWith(".") && !spec.startsWith("/")) {
+      // Extract the top-level package name (e.g. "express" from "express/lib/router")
+      const pkg = spec.startsWith("@")
+        ? spec.split("/").slice(0, 2).join("/")
+        : spec.split("/")[0]!;
+      packages.add(pkg);
+    }
+  }
+  return packages;
+}
+
 // ── Main API ──────────────────────────────────────────────────────
 
 /**
  * Derive architectural layers from import edges and file paths.
  * @param importEdges - Directed import edges ({from, to}).
  * @param filePaths - All file paths in the directory scope.
+ * @param rawImportsByFile - Optional per-file raw import specifier strings
+ *   (e.g. from scanning source files). Used for import-hint matching when
+ *   importEdges only contain resolved local paths.
  * @returns LayerMap with classified layers and unclassified files.
  */
 export function deriveLayers(
   importEdges: Array<{ from: string; to: string }>,
   filePaths: string[],
+  rawImportsByFile?: Map<string, Set<string>>,
 ): LayerMap {
   // Build per-file import targets for hint matching
   const importsByFile = new Map<string, Set<string>>();
@@ -176,7 +209,12 @@ export function deriveLayers(
   const unclassified: string[] = [];
 
   for (const fp of filePaths) {
-    const importHints = importsByFile.get(fp) ?? new Set<string>();
+    // Merge edge-derived targets with raw package specifiers for hint matching
+    const importHints = new Set<string>(importsByFile.get(fp) ?? []);
+    const rawSpecs = rawImportsByFile?.get(fp);
+    if (rawSpecs) {
+      for (const s of rawSpecs) importHints.add(s);
+    }
     const result = classifyFile(fp, importEdges, importHints);
 
     if (result) {

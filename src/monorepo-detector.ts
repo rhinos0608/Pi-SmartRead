@@ -225,7 +225,7 @@ export interface BoundaryResult {
 export function detectServiceBoundaries(rootDir: string): BoundaryResult {
   const resolved = resolve(rootDir);
   const services = new Map<string, ServiceBoundary>();
-  let source = "none";
+  const sources = new Set<string>();
 
   // 1. Parse package.json workspaces
   const pkgPath = join(resolved, "package.json");
@@ -241,7 +241,7 @@ export function detectServiceBoundaries(rootDir: string): BoundaryResult {
       else if (Array.isArray(pkg.workspaces?.packages)) globs = pkg.workspaces.packages;
 
       if (globs.length > 0) {
-        source = "package.json";
+        sources.add("package.json");
         const expanded = expandWorkspaceGlobs(resolved, globs);
         for (const pkgRoot of expanded) {
           const rp = join(pkgRoot, "package.json");
@@ -269,27 +269,41 @@ export function detectServiceBoundaries(rootDir: string): BoundaryResult {
     }
   }
 
-  // 2. Parse docker-compose.yml
+  // 2. Parse docker-compose.yml — always merge when present
   const dcPath = join(resolved, "docker-compose.yml");
   const dcPathAlt = join(resolved, "docker-compose.yaml");
   const dcFile = existsSync(dcPath) ? dcPath : existsSync(dcPathAlt) ? dcPathAlt : null;
-  if (dcFile && services.size === 0) {
+  if (dcFile) {
     try {
       const content = readFileSync(dcFile, "utf-8");
-      // Simple YAML-ish parse: look for top-level keys under "services:"
-      const servicesMatch = content.match(/^services:\s*$/m);
-      if (servicesMatch && servicesMatch.index !== undefined) {
-        source = "docker-compose";
-        const afterServices = content.slice(servicesMatch.index + servicesMatch[0].length);
-        const serviceEntries = afterServices.match(/^  (\w[\w.-]*):\s*$/gm);
-        if (serviceEntries) {
-          for (const entry of serviceEntries) {
-            const name = entry.match(/^  (\w[\w.-]*):/)?.[1];
-            if (name && !services.has(name)) {
-              services.set(name, { name, rootPath: ".", dependencies: [] });
-            }
+      const lines = content.split("\n");
+      let inServices = false;
+      let foundServiceBlock = false;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        // Top-level key: non-empty line with no leading whitespace
+        if (line.length > 0 && !line.startsWith(" ") && !line.startsWith("\t")) {
+          if (inServices) break; // next top-level key — stop
+          if (/^services\s*:/.test(trimmed)) {
+            inServices = true;
+            foundServiceBlock = true;
+          }
+          continue;
+        }
+        if (!inServices) continue;
+        // 2-space indented key = service name inside the services mapping
+        const svcMatch = line.match(/^  (\w[\w.-]*):\s*$/);
+        if (svcMatch) {
+          const name = svcMatch[1];
+          if (name && !services.has(name)) {
+            services.set(name, { name, rootPath: ".", dependencies: [] });
           }
         }
+      }
+
+      if (foundServiceBlock) {
+        sources.add("docker-compose");
       }
     } catch {
       // ignore
@@ -305,7 +319,7 @@ export function detectServiceBoundaries(rootDir: string): BoundaryResult {
       // nx.json: projects are defined in workspace config
       // turbo.json: pipeline keys are task names, not project names
       if (configFile === "nx.json" && config.projects) {
-        source = sourceLabel;
+        sources.add(sourceLabel);
         const projects: Record<string, string | { root?: string }> = config.projects;
         for (const [name, val] of Object.entries(projects)) {
           if (!services.has(name)) {
@@ -327,7 +341,7 @@ export function detectServiceBoundaries(rootDir: string): BoundaryResult {
 
   return {
     services: [...services.values()],
-    source,
+    source: [...sources].join("+") || "none",
   };
 }
 

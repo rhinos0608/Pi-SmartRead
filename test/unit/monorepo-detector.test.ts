@@ -119,4 +119,32 @@ describe("detectServiceBoundaries", () => {
     expect(result.services).toHaveLength(2);
     expect(result.services.map((s) => s.name).sort()).toEqual(["api", "worker"]);
   });
+
+  it("merges docker-compose services with package.json workspaces", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-smartread-boundary-merge-"));
+    cleanupRoots.push(root);
+    writeProjectFile(root, "package.json",
+      JSON.stringify({ workspaces: ["packages/*"] }),
+    );
+    writeProjectFile(root, "packages/auth/package.json", JSON.stringify({ name: "auth" }));
+    writeProjectFile(root, "docker-compose.yml",
+      "services:\n  api:\n    build: ./api\n  auth:\n    build: ./auth\n\nvolumes:\n  data:\n");
+
+    const result = detectServiceBoundaries(root);
+    expect(result.source).toBe("package.json+docker-compose");
+    // auth from package.json preserved, api added from compose, auth NOT duplicated
+    expect(result.services).toHaveLength(2);
+    expect(result.services.map((s) => s.name).sort()).toEqual(["api", "auth"]);
+  });
+
+  it("stops parsing compose services at next top-level key", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-smartread-boundary-dc-toplevel-"));
+    cleanupRoots.push(root);
+    writeProjectFile(root, "docker-compose.yml",
+      "services:\n  api:\n    build: ./api\n  worker:\n    build: ./worker\nnetworks:\n  default:\n    driver: bridge\n");
+
+    const result = detectServiceBoundaries(root);
+    expect(result.services).toHaveLength(2);
+    expect(result.services.map((s) => s.name).sort()).toEqual(["api", "worker"]);
+  });
 });
