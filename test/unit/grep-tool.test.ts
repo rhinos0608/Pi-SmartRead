@@ -403,7 +403,33 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
     it("contextGraph is accepted as a valid option", async () => {
         const { ContextGraph } = await import("../../src/context-graph.js");
         const graph = new ContextGraph(workdir);
+        // Add a file that imports auth.ts so graphFilter has an edge to check
+        writeFileSync(
+            join(workdir, "src", "importer.ts"),
+            [
+                'import { authenticate } from "./auth";',
+                "export function useAuth() {",
+                "  return authenticate;",
+                "}",
+            ].join("\n"),
+            "utf8",
+        );
+        // Build the context graph so import edges are populated for filtering
+        await graph.buildContextGraph();
         const tool = createGrepTool(makeOpts({ contextGraph: graph }));
         expect(tool).toBeDefined();
+
+        // Execute with graphFilter; only importer.ts imports auth.ts → survives filter
+        const result = await tool.execute(
+            "t-gf-exec",
+            { pattern: "authenticate", literal: true, graphFilter: "IMPORTED_BY->src/auth.ts", limit: 10 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        const details = result.details as any;
+        const resources = details.workspaceEvidence.resources;
+        expect(resources).toHaveLength(1);
+        expect(resources[0].canonicalPath).toContain("importer.ts");
     });
 });

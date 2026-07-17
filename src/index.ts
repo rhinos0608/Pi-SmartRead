@@ -10,6 +10,7 @@ import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with Too
 import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, resetSharedContextGraph } from "./mcp-registry.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
 import { createReadTool } from "./unified-read.js";
+import { fileURLToPath } from "node:url";
 import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
 import { getIncrementalIndex } from "./incremental-index.js";
@@ -87,7 +88,7 @@ ensureHashlineReady().catch((err) =>
  * Resolve a qualified symbol name to a file path and optional line number.
  * Resolution order: LSP workspace/symbol first, then ContextGraph.findSymbolFiles() fallback.
  */
-async function resolveSymbolForReadTool(symbol: string): Promise<{ path: string; line?: number } | null> {
+async function resolveSymbolForReadTool(symbol: string, dirty?: boolean): Promise<{ path: string; line?: number } | null> {
   const root = process.cwd();
   try {
     const bridge = await getLSPBridge();
@@ -97,7 +98,7 @@ async function resolveSymbolForReadTool(symbol: string): Promise<{ path: string;
         const best = syms.find((s) => s.name === symbol) ?? syms[0];
         if (best) {
           const { uri, range } = best.location;
-          return { path: uri.replace(/^file:\/\//, ""), line: range.start.line + 1 };
+          return { path: fileURLToPath(uri), line: range.start.line + 1 };
         }
       }
     }
@@ -105,7 +106,7 @@ async function resolveSymbolForReadTool(symbol: string): Promise<{ path: string;
     // LSP not available
   }
   try {
-    const graph = getSharedContextGraph(root);
+    const graph = getSharedContextGraph(root, dirty);
     const files = await graph.findSymbolFiles(symbol);
     if (files.length > 0) {
       return { path: files[0]!.path };
@@ -494,10 +495,8 @@ export default async function (pi: ExtensionAPI) {
   //    Query mode removed — use grep for code search.
   //    WP-5: pass ContextGraph for graph-dependent params.
   if (!ToolRegistry.getInstance().has("inspect")) {
-    // Consume the dirty flag — getSharedContextGraph will rebuild if dirty
-    getSharedContextGraph(process.cwd(), watchState.contextGraphDirty);
-    watchState.contextGraphDirty = false;
-    const def = buildInspectTool(() => null);
+    // Lazy getter resolves at execute time so file-watcher dirty flags are respected
+    const def = buildInspectTool(() => null, () => getSharedContextGraph(process.cwd(), watchState.contextGraphDirty));
     ToolRegistry.getInstance().register({
       name: "inspect",
       description: def.description,
@@ -512,9 +511,8 @@ export default async function (pi: ExtensionAPI) {
   let grepRegistered = false;
   if (!ToolRegistry.getInstance().has("grep")) {
     const grepDef = createGrepTool({
-      contextGraph: getSharedContextGraph(process.cwd(), watchState.contextGraphDirty),
+      contextGraph: () => getSharedContextGraph(process.cwd(), watchState.contextGraphDirty),
     });
-    watchState.contextGraphDirty = false;
     ToolRegistry.getInstance().register({
       name: "grep",
       description: GREP_DESCRIPTION,
@@ -547,7 +545,7 @@ export default async function (pi: ExtensionAPI) {
     publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
       getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
     },
-    resolveSymbol: resolveSymbolForReadTool,
+    resolveSymbol: (s) => resolveSymbolForReadTool(s, watchState.contextGraphDirty),
   }));
 
   // 4. Versioned evidence RPC resolver install: best-effort, runs in the

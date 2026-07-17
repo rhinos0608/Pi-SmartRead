@@ -24,20 +24,17 @@ const InspectV4Schema = Type.Object({
     callDepth: Type.Optional(Type.Number({
         minimum: 1,
         maximum: 5,
-        default: 1,
         description: "BFS call graph traversal depth (1-5, default 1). File mode.",
     })),
     callDirection: Type.Optional(Type.Union([
         Type.Literal("callers"),
         Type.Literal("callees"),
         Type.Literal("both"),
-    ], { default: "both", description: "Call graph traversal direction. File mode." })),
+    ], { description: "Call graph traversal direction. File mode." })),
     deadCode: Type.Optional(Type.Boolean({
-        default: false,
         description: "Return zero-caller functions in scope. File or directory mode.",
     })),
     impact: Type.Optional(Type.Boolean({
-        default: false,
         description: "Compute blast radius: files/symbols reachable via call+import graph from target.",
     })),
     diff: Type.Optional(Type.Union([
@@ -46,27 +43,21 @@ const InspectV4Schema = Type.Object({
         Type.Literal("HEAD"),
     ], { description: "Map git diff to affected symbols with risk classification." })),
     clusters: Type.Optional(Type.Boolean({
-        default: false,
         description: "Run community detection on import graph. Directory mode only.",
     })),
     graphSchema: Type.Optional(Type.Boolean({
-        default: false,
         description: "Return graph structure summary (node/edge counts, sample names).",
     })),
     hotspots: Type.Optional(Type.Boolean({
-        default: false,
         description: "Top-N functions by fan-in. File or directory mode.",
     })),
     boundaries: Type.Optional(Type.Boolean({
-        default: false,
         description: "Detect service boundaries from monorepo config. Directory mode only.",
     })),
     routes: Type.Optional(Type.Boolean({
-        default: false,
         description: "Extract HTTP route → handler mappings. File or directory mode.",
     })),
     layers: Type.Optional(Type.Boolean({
-        default: false,
         description: "Derive architectural layers. Directory mode only.",
     })),
 });
@@ -80,8 +71,8 @@ export interface InspectToolOptions {
     };
     /** Returns the canonical session file path for the current session, or null if ephemeral. */
     readonly getSessionFilePath: () => string | null | undefined;
-    /** ContextGraph instance for graph-dependent inspect params (WP-5 DI). */
-    readonly contextGraph?: ContextGraph;
+    /** ContextGraph instance or getter for graph-dependent inspect params (WP-5 DI). */
+    readonly contextGraph?: ContextGraph | (() => ContextGraph);
 }
 
 const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality.
@@ -120,7 +111,7 @@ function validateDirOnlyParams(
     if (mode === "file") {
         const dirOnlyParams = ["clusters", "boundaries", "layers"];
         for (const p of dirOnlyParams) {
-            if ((params as Record<string, unknown>)[p] !== undefined) {
+            if ((params as Record<string, unknown>)[p] === true) {
                 return `Error: inspect param "${p}" requires a directory target (got file: ${filePath})`;
             }
         }
@@ -194,8 +185,8 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                 boundaries: params.boundaries,
                 routes: params.routes,
                 layers: params.layers,
-                // WP-5: populate contextGraph from DI
-                contextGraph: opts.contextGraph,
+                // WP-5: populate contextGraph from DI (resolve lazily if getter)
+                contextGraph: typeof opts.contextGraph === "function" ? opts.contextGraph() : opts.contextGraph,
             };
 
             // Mode-specific param validation (spec §4)

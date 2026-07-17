@@ -73,8 +73,8 @@ export interface GrepToolOptions {
         publishInspection(envelope: unknown, sessionFilePath: string, workspaceRoot: string): void;
     };
     readonly getSessionFilePath?: () => string | null | undefined;
-    /** ContextGraph instance for graphFilter edge checks (WP-5 DI). */
-    readonly contextGraph?: ContextGraph;
+    /** ContextGraph instance or getter for graphFilter edge checks (WP-5 DI). */
+    readonly contextGraph?: ContextGraph | (() => ContextGraph);
 }
 
 export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
@@ -94,6 +94,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             const cwd = ctx.cwd;
             const searchDir = params.path ? resolve(cwd, params.path) : cwd;
             const topK = clamp(params.limit ?? 20, 1, 100);
+            const gatherK = Math.min(topK * 2, 200); // expanded pool for graphFilter to work on
             const contextLines = clamp(params.contextLines ?? 2, 0, 10);
             const caseSensitive = !(params.ignoreCase ?? false);
             const startTime = Date.now();
@@ -103,13 +104,13 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
 
             if (params.literal) {
                 const result = await runLiteralGrep(
-                    params.pattern, searchDir, topK, contextLines, caseSensitive, cwd, signal,
+                    params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal,
                 );
                 hits = result.hits;
                 engines = result.engines;
             } else {
                 const result = await runSmartCascade(
-                    params.pattern, searchDir, topK, contextLines, caseSensitive, cwd, signal,
+                    params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal,
                 );
                 hits = result.hits;
                 engines = result.engines;
@@ -125,14 +126,15 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             // ── Graph filter (WP-5 wiring) ──────────────────────────────
             let graphFilterNotes: string[] = [];
             if (params.graphFilter !== undefined) {
-                if (!opts.contextGraph) {
-                    throw new Error("graphFilter requires an indexed context graph");
-                }
-                // Validate format — throws spec error for invalid format
+                // Validate format first — throws spec error for invalid format
                 if (!parseGraphFilter(params.graphFilter)) {
                     throw new Error('Invalid graphFilter: expected "EDGE_TYPE->target" format');
                 }
-                const result = await applyGraphFilter(hits, params.graphFilter, opts.contextGraph);
+                const contextGraph = typeof opts.contextGraph === "function" ? opts.contextGraph() : opts.contextGraph;
+                if (!contextGraph) {
+                    throw new Error("graphFilter requires an indexed context graph");
+                }
+                const result = await applyGraphFilter(hits, params.graphFilter, contextGraph);
                 hits = result.hits;
                 graphFilterNotes = result.notes;
             }
@@ -179,13 +181,13 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
 async function runSmartCascade(
     pattern: string,
     searchDir: string,
-    topK: number,
+    gatherK: number,
     contextLines: number,
     caseSensitive: boolean,
     cwd: string,
     signal: AbortSignal | undefined,
 ): Promise<{ hits: GrepHit[]; engines: string[] }> {
-    const bigK = topK * 2;
+    const bigK = gatherK;
     const bm25Hits = new Map<string, GrepHit>();
     const symbolHits = new Map<string, GrepHit>();
     const engines: string[] = [];
@@ -282,7 +284,7 @@ async function runSmartCascade(
 
     // ── Fallback: lexical grep passthrough ───────────────────────────
     if (fused.length === 0) {
-        const fallback = await runLiteralGrep(pattern, searchDir, topK, contextLines, caseSensitive, cwd, signal);
+        const fallback = await runLiteralGrep(pattern, searchDir, bigK, contextLines, caseSensitive, cwd, signal);
         return { hits: fallback.hits, engines: ["lexical-passthrough"] };
     }
 

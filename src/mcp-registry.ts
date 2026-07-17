@@ -195,7 +195,10 @@ export function registerInspectToolWithBus(bus: { emit: (c: string, d: unknown) 
  * Build a fresh inspect tool definition that uses a real session file accessor.
  * This is the version actually consumed by the pi extension.
  */
-export function buildInspectToolForExtension(getSessionFilePath: () => string | null): ToolDefinition {
+export function buildInspectToolForExtension(
+    getSessionFilePath: () => string | null,
+    contextGraphOverride?: ContextGraph | (() => ContextGraph),
+): ToolDefinition {
     return createInspectTool({
         resolver: {
             publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
@@ -203,7 +206,7 @@ export function buildInspectToolForExtension(getSessionFilePath: () => string | 
             },
         },
         getSessionFilePath,
-        contextGraph: getSharedContextGraph(process.cwd()),
+        contextGraph: contextGraphOverride ?? getSharedContextGraph(process.cwd()),
     });
 }
 
