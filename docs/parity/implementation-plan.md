@@ -104,7 +104,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
   - `extractRoutes(filePath: string): RouteInfo[]`
   - Pattern matching via tree-sitter AST for:
     - Express: `app.get/post/put/delete/patch(path, handler)`
-    - Fastify: `fastify.get/post/...(...)` 
+    - Fastify: `fastify.get/post/...(...)`
     - Next.js App Router: `export async function GET/POST/...` in route.ts files
     - Next.js Pages Router: `export default function handler` in pages/api/
     - tRPC: `.query()`, `.mutation()` on router definitions
