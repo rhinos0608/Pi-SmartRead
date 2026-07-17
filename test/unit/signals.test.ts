@@ -10,6 +10,7 @@ import {
   computeRecency,
   detectTests,
   detectDeprecation,
+  findTestLinkage,
 } from "../../src/signals.js";
 import type { ContextGraph } from "../../src/context-graph.js";
 
@@ -341,5 +342,69 @@ function oldFn() {}
     const result = detectDeprecation(fp);
     expect(result.name).toBe("deprecation");
     expect(result.value).toBe("No markers found");
+  });
+});
+
+// ── Extended Test Linkage (WP-3) ─────────────────────────────────
+
+describe("findTestLinkage", () => {
+  it("finds direct test file in test/ directory", () => {
+    const srcDir = join(workdir, "src");
+    const testDir = join(workdir, "test");
+    mkdirSync(srcDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(join(srcDir, "auth.ts"), "export function auth() {} ");
+    writeFileSync(join(testDir, "auth.test.ts"), "import { auth } from '../src/auth'; test('ok', () => {}); ");
+
+    const result = findTestLinkage(join(srcDir, "auth.ts"), workdir);
+    expect(result.length).toBeGreaterThanOrEqual(1);
+    expect(result[0]!.coverage).toBe("direct");
+    expect(result[0]!.testFile).toContain("auth.test.ts");
+  });
+
+  it("returns indirect for test without direct import", () => {
+    const srcDir = join(workdir, "src");
+    const testDir = join(workdir, "test");
+    mkdirSync(srcDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(join(srcDir, "helper.ts"), "export const x = 1; ");
+    writeFileSync(join(testDir, "helper.test.ts"), "import { something } from './other'; test('ok', () => {}); ");
+
+    const result = findTestLinkage(join(srcDir, "helper.ts"), workdir);
+    expect(result.length).toBe(1);
+    expect(result[0]!.coverage).toBe("indirect");
+  });
+
+  it("returns empty when no test files exist", () => {
+    const srcDir = join(workdir, "lib");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, "util.ts"), "export const y = 2; ");
+
+    const result = findTestLinkage(join(srcDir, "util.ts"), workdir);
+    expect(result).toEqual([]);
+  });
+
+  it("finds test in __tests__ directory", () => {
+    const srcDir = join(workdir, "src");
+    const testsDir = join(srcDir, "__tests__");
+    mkdirSync(testsDir, { recursive: true });
+    writeFileSync(join(srcDir, "foo.ts"), "export const foo = 1; ");
+    writeFileSync(join(testsDir, "foo.test.ts"), "test('foo', () => {}); ");
+
+    const result = findTestLinkage(join(srcDir, "foo.ts"), workdir);
+    expect(result.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("sourceFile is set on each result", () => {
+    const srcDir = join(workdir, "src");
+    const testDir = join(workdir, "test");
+    mkdirSync(srcDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    const srcPath = join(srcDir, "bar.ts");
+    writeFileSync(srcPath, "export const bar = 1; ");
+    writeFileSync(join(testDir, "bar.test.ts"), "test('bar', () => {}); ");
+
+    const result = findTestLinkage(srcPath, workdir);
+    expect(result[0]!.sourceFile).toBe(srcPath);
   });
 });

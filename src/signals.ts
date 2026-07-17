@@ -2,6 +2,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { relative, resolve, dirname, extname } from "node:path";
 import { createRequire } from "node:module";
 import type { SignalName, SignalResult, FileSignals } from "./signals-types.js";
+import type { TestLinkage } from "./signals-types.js";
 import type { ContextGraph } from "./context-graph.js";
 import { filenameToLang, type SupportedLanguage } from "./languages.js";
 import { fileLastModifiedRelative } from "./git-history.js";
@@ -496,6 +497,65 @@ export function detectDeprecation(
     confidence: "medium",
     source: "regex marker detection",
   };
+}
+
+// ── Extended Test Linkage (WP-3) ──────────────────────────────
+
+/**
+ * Find test files that cover a given source file.
+ * Uses file-name matching + import analysis for direct/indirect coverage.
+ */
+export function findTestLinkage(
+  absolutePath: string,
+  _cwd: string,
+): TestLinkage[] {
+  const basename_ = absolutePath.split("/").pop() ?? absolutePath.split("\\").pop() ?? "";
+  const dir = dirname(absolutePath);
+  const filenameNoExt = basename_.replace(/\.[^.]+$/, "");
+  const isPy = isPythonFile(absolutePath);
+  const exts = isPy ? [".py"] : [".ts", ".tsx", ".js", ".jsx"];
+
+  const testCandidates = new Set<string>();
+  const srcDir = dir;
+  const testDir = resolve(dir, "..", "test");
+  const testsDir = resolve(dir, "..", "tests");
+  const srcTestDir = resolve(dir, "__tests__");
+  const repoTestDir = resolve(dir, "..", "..", "test");
+
+  for (const ext of exts) {
+    testCandidates.add(resolve(testDir, `${filenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(testDir, `${filenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(testsDir, `test_${filenameNoExt}${ext}`));
+    testCandidates.add(resolve(srcDir, `${filenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(srcDir, `${filenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(srcTestDir, `${filenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(repoTestDir, `${filenameNoExt}.test${ext}`));
+    testCandidates.add(resolve(repoTestDir, `${filenameNoExt}.spec${ext}`));
+  }
+
+  const results: TestLinkage[] = [];
+  for (const candidate of testCandidates) {
+    try {
+      if (existsSync(candidate) && statSync(candidate).isFile()) {
+        let coverage: "direct" | "indirect" = "indirect";
+        try {
+          const testContent = readFileSync(candidate, "utf-8");
+          const sourceRel = relative(dirname(candidate), absolutePath).replace(/\\/g, "/");
+          const sourceBaseNoExt = basename_.replace(/\.[^.]+$/, "");
+          if (testContent.includes(sourceRel) || testContent.includes(sourceBaseNoExt)) {
+            coverage = "direct";
+          }
+        } catch {
+          // Read failed — default to indirect
+        }
+        results.push({ sourceFile: absolutePath, testFile: candidate, coverage });
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return results;
 }
 
 // ── Orchestrator ───────────────────────────────────────────────────────
