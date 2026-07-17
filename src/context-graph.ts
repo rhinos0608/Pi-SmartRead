@@ -617,6 +617,19 @@ export class ContextGraph {
     return neighbours;
   }
 
+  /**
+   * Return all recorded provenance edges as {from, to} pairs.
+   * Used by buildImportEdges for community detection / layer analysis.
+   * Returns a subset of total edges — only the first-recorded provenance per target path.
+   */
+  getProvenanceEdges(): Array<{ from: string; to: string }> {
+    const edges: Array<{ from: string; to: string }> = [];
+    for (const prov of this.provenances.values()) {
+      edges.push({ from: prov.from, to: prov.to });
+    }
+    return edges;
+  }
+
   /** Return capacity stats for monitoring memory caps. */
   getCapacityStats(): {
     symbolIndex: { entries: number; max: number };
