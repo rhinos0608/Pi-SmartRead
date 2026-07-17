@@ -41,6 +41,7 @@ import {
   type ConfidenceClass,
   type RelevanceClass,
 } from "./classifiers.js";
+import { listAdrs } from "./adr-store.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -68,6 +69,7 @@ type EmbeddingStatus = "ok" | "failed_fallback_bm25";
 const INTENT_READ_CACHE_SIZE = 64;
 const MIN_RELEVANCE_SCORE = 0.05;
 const MAX_INTENT_READ_FILES = 500;
+const ADR_BOOST = 0.3;
 
 const contextGraphCache = new LruCache<ContextGraph>(10);
 
@@ -112,6 +114,8 @@ interface IntentReadFileDetail {
   graphDistance?: number;
   /** Confidence from query probing, bucketed for public output. */
   probeConfidence?: ConfidenceClass;
+  /** Additive boost from cross-session ADRs (accepted → +ADR_BOOST). */
+  adrBoost?: number;
 }
 
 interface WorkingIntentReadFileDetail extends IntentReadFileDetail {
@@ -162,6 +166,7 @@ interface IntentReadDetails {
     strategy: string;
   };
   files: IntentReadFileDetail[];
+  adrBoostedCount: number;
   packing: {
     strategy: string;
     switchedForCoverage: boolean;
@@ -592,6 +597,9 @@ export function createIntentReadTool(
       // HyDE tracking (populated inside the if-block)
       let hydeResult: HydeResult = { document: query, applied: false, pattern: "none", identifiers: [] };
 
+      // WP-8: ADR boost tracking (populated inside the if-block)
+      let adrBoosts: number[] = [];
+
       if (successfulFiles.length > 0) {
         // Chunk each successful file's body
         const chunkSizeChars = embeddingConfig?.chunkSizeChars ?? 4096;
@@ -756,6 +764,28 @@ export function createIntentReadTool(
           rrfRanks = computeRanks(rrfScores, paths);
         }
 
+        // WP-8: ADR boost — additive signal from cross-session ADRs
+        adrBoosts = new Array<number>(successfulFiles.length).fill(0) as number[];
+        try {
+          const adrs = listAdrs(ctx.cwd, { status: "accepted" });
+          if (adrs.length > 0) {
+            for (let i = 0; i < successfulFiles.length; i++) {
+              const fp = paths[i]!;
+              const basename = fp.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
+              for (const adr of adrs) {
+                if (adr.tags.some((t) => fp.includes(t) || basename === t)) {
+                  adrBoosts[i] = ADR_BOOST;
+                  rrfScores[i]! += ADR_BOOST;
+                  break;
+                }
+              }
+            }
+            rrfRanks = computeRanks(rrfScores, paths);
+          }
+        } catch {
+          /* fail-safe: corrupt/missing ADR store leaves ranking unchanged */
+        }
+
         const maxKeywordScore = Math.max(...keywordScoresArr, 0);
         const maxRrfScore = Math.max(...rrfScores, 0);
         for (let i = 0; i < successfulFiles.length; i++) {
@@ -766,6 +796,7 @@ export function createIntentReadTool(
           base.rrfScore = rrfScores[i];
           base.fusedRank = rrfRanks[i]!;
           base.fusedRelevance = classifyRelevanceByScore(base.rrfScore, maxRrfScore);
+          if (adrBoosts[i]! > 0) base.adrBoost = adrBoosts[i];
           if (embeddingStatus === "ok") {
             base.semanticRank = semanticRanks[i]!;
             base.semanticScore = semanticScores[i]!;
@@ -1014,6 +1045,7 @@ export function createIntentReadTool(
           },
         }),
         files: allFileDetails,
+        adrBoostedCount: adrBoosts.filter((b) => b > 0).length,
         packing: {
           strategy: plan.strategy,
           switchedForCoverage,

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { createIntentReadTool } from "../../src/intent-read.js";
 import type { EmbedRequest, EmbedResult } from "../../src/embedding.js";
+import { writeAdr } from "../../src/adr-store.js";
 
 // Stub fetchEmbeddings: returns unit vectors for easy scoring
 function makeEmbedder(vectors: number[][]): (req: EmbedRequest) => Promise<EmbedResult> {
@@ -977,5 +978,145 @@ describe("intent_read: ranking signals metadata", () => {
     const details = result.details as any;
     expect(details.rankingSignals).toEqual({ bm25: true, embeddings: false });
     expect(details.embeddingStatus).toBe("failed_fallback_bm25");
+  });
+});
+
+describe("intent_read: ADR boost (WP-8)", () => {
+  it("no ADRs produces identical ranking to baseline (adrBoostedCount=0)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-adr-empty-"));
+    try {
+      const tool = createIntentReadTool(
+        () => makeReadTool({ "/a": "auth code", "/b": "db code" }) as any,
+        makeEmbedder([[1, 0], [1, 0], [0, 1]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "auth", files: [{ path: "/a" }, { path: "/b" }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.adrBoostedCount).toBe(0);
+      const fileA = details.files.find((f: any) => f.path === "/a");
+      expect(fileA.adrBoost).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepted ADR matching file path boosts ranking", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-adr-boost-"));
+    try {
+      // Create an accepted ADR referencing "db" tag
+      writeAdr(root, {
+        id: "2026-01-01-use-db",
+        title: "Use db module",
+        status: "accepted",
+        tags: ["db"],
+        context: "Need db",
+        decision: "Use db",
+        consequences: "Depend on db",
+      });
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ "/a": "auth code", "/src/db.ts": "db code" }) as any,
+        makeEmbedder([[1, 0], [1, 0], [0, 1]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "auth", files: [{ path: "/a" }, { path: "/src/db.ts" }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.adrBoostedCount).toBe(1);
+      const fileB = details.files.find((f: any) => f.path === "/src/db.ts");
+      expect(fileB.adrBoost).toBe(0.3);
+      const fileA = details.files.find((f: any) => f.path === "/a");
+      expect(fileA.adrBoost).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("only accepted ADRs produce boost; proposed/rejected do not", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-adr-status-"));
+    try {
+      // proposed ADR with matching tag — should NOT boost
+      writeAdr(root, {
+        id: "2026-01-01-proposed-db",
+        title: "Proposed db",
+        status: "proposed",
+        tags: ["db"],
+        context: "c",
+        decision: "d",
+        consequences: "x",
+      });
+      // rejected ADR with matching tag — should NOT boost
+      writeAdr(root, {
+        id: "2026-01-02-rejected-db",
+        title: "Rejected db",
+        status: "rejected",
+        tags: ["db"],
+        context: "c",
+        decision: "d",
+        consequences: "x",
+      });
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ "/a": "auth code", "/src/db.ts": "db code" }) as any,
+        makeEmbedder([[1, 0], [1, 0], [0, 1]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "auth", files: [{ path: "/a" }, { path: "/src/db.ts" }], topK: 2 },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      const details = result.details as any;
+      expect(details.adrBoostedCount).toBe(0);
+      const fileB = details.files.find((f: any) => f.path === "/src/db.ts");
+      expect(fileB.adrBoost).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("corrupt ADR store fails safe — ranking unchanged", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-adr-corrupt-"));
+    try {
+      // Write a corrupt ADR file that parseAdr will fail on
+      const adrsDir = join(root, ".pi-smartread", "adrs");
+      mkdirSync(adrsDir, { recursive: true });
+      writeFileSync(join(adrsDir, "corrupt.md"), "NOT AN ADR");
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ "/a": "auth code" }) as any,
+        makeEmbedder([[1, 0], [1, 0]]),
+      );
+
+      const result = await tool.execute(
+        "id",
+        { query: "auth", files: [{ path: "/a" }] },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      // Should not throw; ranking proceeds normally
+      const details = result.details as any;
+      expect(details.adrBoostedCount).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
