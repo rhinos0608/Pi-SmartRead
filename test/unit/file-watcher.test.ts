@@ -5,10 +5,15 @@
  * Uses vitest fake timers for deterministic debounce testing.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import * as os from "node:os";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 // Mock fs module before importing file-watcher
-const mockClose = vi.fn();
-const mockWatch = vi.fn();
+const { mockClose, mockWatch } = vi.hoisted(() => ({
+  mockClose: vi.fn(),
+  mockWatch: vi.fn(),
+}));
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return {
@@ -24,19 +29,36 @@ const { startWatching } = await import("../../src/file-watcher.js");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/** Get the listener callback passed as 3rd arg to the last fs.watch call. */
+/** Get the listener callback passed as 3rd arg to the last fs.watch call (recursive mode). */
 function getLastWatchListener(): (event: string, filename: string | null) => void {
   const call = mockWatch.mock.calls[mockWatch.mock.calls.length - 1];
   return call![2] as (event: string, filename: string | null) => void;
 }
 
+/** Get the listener callback passed as 2nd arg to the last fs.watch call (non-recursive mode). */
+function getLastNonRecursiveListener(): (event: string, filename: string | null) => void {
+  const call = mockWatch.mock.calls[mockWatch.mock.calls.length - 1];
+  return call![1] as (event: string, filename: string | null) => void;
+}
+
+// Escape special regex characters in a path string
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("file-watcher", () => {
+  let savedNodeEnv: string | undefined;
+  let savedVitest: string | undefined;
+
   beforeEach(() => {
     vi.useFakeTimers();
     mockWatch.mockReset();
     mockClose.mockReset();
+    // Capture originals for safe restore
+    savedNodeEnv = process.env.NODE_ENV;
+    savedVitest = process.env.VITEST;
     // Set test mode to allow watcher to start in test environment
     process.env.NODE_ENV = "test";
   });
@@ -44,19 +66,28 @@ describe("file-watcher", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    // Restore originals
+    if (savedNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = savedNodeEnv;
+    }
+    if (savedVitest === undefined) {
+      delete process.env.VITEST;
+    } else {
+      process.env.VITEST = savedVitest;
+    }
   });
 
   describe("test-mode no-op", () => {
     it("returns no-op stop when VITEST env is set", () => {
       process.env.VITEST = "true";
       const onDirty = vi.fn();
-      const stop = startWatching("/tmp", onDirty, { mode: "none" });
+      // mode:recursive would normally create a watcher, but VITEST guard suppresses
+      const stop = startWatching("/tmp", onDirty, { mode: "recursive" });
       expect(typeof stop).toBe("function");
-      // No watchers should have been created
       expect(mockWatch).not.toHaveBeenCalled();
-      // Calling stop should not throw
       stop();
-      delete process.env.VITEST;
     });
 
     it("returns no-op stop when mode is 'none'", () => {
@@ -179,49 +210,91 @@ describe("file-watcher", () => {
       process.env.NODE_ENV = "development";
       delete process.env.VITEST;
       const onDirty = vi.fn();
-      mockWatch.mockImplementation(() => {
-        throw new Error("EPERM");
-      });
 
-      // Should not throw
+      // First call (recursive) throws, second call (non-recursive fallback) succeeds
+      mockWatch
+        .mockImplementationOnce(() => {
+          throw new Error("EPERM");
+        })
+        .mockImplementation(() => ({ close: vi.fn() }));
+
+      // Should not throw — falls back to non-recursive
       const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const stop = startWatching("/test/root", onDirty, { mode: "recursive" });
 
       expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to start recursive watcher"),
+        expect.stringContaining("falling back to non-recursive"),
       );
+      expect(mockWatch).toHaveBeenCalledTimes(2);
+      expect(mockWatch).toHaveBeenLastCalledWith("/test/root", expect.any(Function));
       stop();
       consoleWarnSpy.mockRestore();
     });
   });
 
   describe("non-recursive mode", () => {
-    it("creates per-directory watchers with cap", () => {
+    let tmpRoot: string;
+
+    beforeEach(() => {
       process.env.NODE_ENV = "development";
       delete process.env.VITEST;
+      // Create real nested dir tree for collectDirectories
+      tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fw-test-"));
+      // root / a / a/b / a/b/c
+      const a = path.join(tmpRoot, "a");
+      const ab = path.join(a, "b");
+      const abc = path.join(ab, "c");
+      for (const d of [a, ab, abc]) {
+        fs.mkdirSync(d, { recursive: true });
+      }
+    });
+
+    afterEach(() => {
+      // Clean up temp dirs
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it("creates one watcher per discovered directory (up to maxWatcherCount)", () => {
       const onDirty = vi.fn();
       mockWatch.mockReturnValue({ close: mockClose });
 
-      const stop = startWatching("/test/root", onDirty, {
+      const stop = startWatching(tmpRoot, onDirty, {
         mode: "non-recursive",
         maxWatcherCount: 3,
       });
 
-      // Should create at least one watcher (the root dir)
-      expect(mockWatch).toHaveBeenCalled();
+      // 4 dirs exist (root, a, a/b, a/b/c), but cap=3 so 3 watchers
+      expect(mockWatch).toHaveBeenCalledTimes(3);
+      // All watched dirs should be within tmpRoot
+      const rootPattern = escapeRegExp(tmpRoot);
+      for (const call of mockWatch.mock.calls) {
+        expect((call[0] as string)).toMatch(new RegExp("^" + rootPattern));
+      }
+      stop();
+    });
+
+    it("creates watchers for all dirs when under cap", () => {
+      const onDirty = vi.fn();
+      mockWatch.mockReturnValue({ close: mockClose });
+
+      const stop = startWatching(tmpRoot, onDirty, {
+        mode: "non-recursive",
+        maxWatcherCount: 100,
+      });
+
+      // 4 dirs (root + 3 nested) — all under cap
+      expect(mockWatch).toHaveBeenCalledTimes(4);
       stop();
     });
 
     it("warns when watcher cap is reached", () => {
-      process.env.NODE_ENV = "development";
-      delete process.env.VITEST;
       const onDirty = vi.fn();
       mockWatch.mockReturnValue({ close: mockClose });
       const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const stop = startWatching("/test/root", onDirty, {
+      const stop = startWatching(tmpRoot, onDirty, {
         mode: "non-recursive",
-        maxWatcherCount: 1, // very low cap
+        maxWatcherCount: 2,
       });
 
       expect(consoleWarnSpy).toHaveBeenCalledWith(
@@ -231,20 +304,46 @@ describe("file-watcher", () => {
       consoleWarnSpy.mockRestore();
     });
 
-    it("stop closes all directory watchers", () => {
-      process.env.NODE_ENV = "development";
-      delete process.env.VITEST;
+    it("stop closes all watchers and cancels pending debounce", () => {
       const onDirty = vi.fn();
       mockWatch.mockReturnValue({ close: mockClose });
 
-      const stop = startWatching("/test/root", onDirty, {
+      const stop = startWatching(tmpRoot, onDirty, {
         mode: "non-recursive",
-        maxWatcherCount: 10,
+        maxWatcherCount: 100,
       });
 
-      // Each directory gets its own close
+      const listener = getLastNonRecursiveListener();
+      listener("rename", "dirty.ts");
+
       stop();
-      expect(mockClose).toHaveBeenCalled();
+
+      // Advance — onDirty should NOT fire (timer cleared)
+      vi.advanceTimersByTime(1000);
+      expect(onDirty).not.toHaveBeenCalled();
+      // close() called for each watcher
+      expect(mockClose).toHaveBeenCalledTimes(4);
+    });
+
+    it("reports dirty paths as relative to root", () => {
+      const onDirty = vi.fn();
+      mockWatch.mockReturnValue({ close: mockClose });
+
+      const stop = startWatching(tmpRoot, onDirty, {
+        mode: "non-recursive",
+        maxWatcherCount: 100,
+      });
+
+      const listener = getLastNonRecursiveListener();
+      listener("rename", "changed.ts");
+      vi.advanceTimersByTime(500);
+
+      expect(onDirty).toHaveBeenCalledTimes(1);
+      const paths = onDirty.mock.calls[0]![0] as string[];
+      expect(paths.length).toBe(1);
+      // Last watched dir is deepest (a/b/c), so relative path includes subdirs
+      expect(paths[0]).toMatch(/changed\.ts$/);
+      stop();
     });
   });
 

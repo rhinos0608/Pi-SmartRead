@@ -106,6 +106,47 @@ function collectDirectories(
   return dirs;
 }
 
+/** Watch directory and all discovered descendants with non-recursive watchers. */
+function watchDirectoryTree(
+  absPath: string,
+  root: string,
+  watchers: FSWatcher[],
+  maxWatcherCount: number,
+  onDirty: (relativePath: string) => void,
+  scheduleFlush: () => void,
+): void {
+  const remaining = maxWatcherCount - watchers.length;
+  if (remaining <= 0) {
+    console.warn(
+      `[file-watcher] Reached watcher cap (${maxWatcherCount}) during dynamic discovery. ` +
+      `Some subdirectories will not be watched.`,
+    );
+    return;
+  }
+
+  const dirs = collectDirectories(absPath, remaining);
+  for (const dir of dirs) {
+    if (watchers.length >= maxWatcherCount) break;
+    try {
+      const watcher = watch(dir, (_event, filename) => {
+        if (filename === null) return;
+        onDirty(relative(root, join(dir, filename)));
+        scheduleFlush();
+      });
+      watchers.push(watcher);
+    } catch {
+      // Ignore per-directory errors during dynamic discovery.
+    }
+  }
+
+  if (watchers.length >= maxWatcherCount) {
+    console.warn(
+      `[file-watcher] Reached watcher cap (${maxWatcherCount}) during dynamic discovery. ` +
+      `Some subdirectories will not be watched.`,
+    );
+  }
+}
+
 // ── Main API ───────────────────────────────────────────────────────────────
 
 /**
@@ -141,7 +182,7 @@ export function startWatching(
 
   // Determine watch mode
   if (SUPPORTS_RECURSIVE && mode !== "non-recursive") {
-    return startRecursiveWatch(resolvedRoot, onDirty, debounceMs);
+    return startRecursiveWatch(resolvedRoot, onDirty, debounceMs, maxWatcherCount);
   }
 
   // Linux non-recursive fallback (or explicit mode)
@@ -203,6 +244,7 @@ function startRecursiveWatch(
   root: string,
   onDirty: (paths: string[]) => void,
   debounceMs: number,
+  maxWatcherCount: number,
 ): () => void {
   let pendingPaths = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -233,8 +275,9 @@ function startRecursiveWatch(
     watchers.push(watcher);
   } catch (err) {
     console.warn(
-      `[file-watcher] Failed to start recursive watcher on ${root}: ${(err as Error).message}`,
+      `[file-watcher] Failed to start recursive watcher on ${root}: ${(err as Error).message} — falling back to non-recursive`,
     );
+    return startNonRecursiveWatch(root, onDirty, debounceMs, maxWatcherCount);
   }
 
   return () => {
@@ -278,6 +321,13 @@ function startNonRecursiveWatch(
     );
   }
 
+  const scheduleFlush = () => {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+    timer = setTimeout(flush, debounceMs);
+  };
+
   for (const dir of dirs) {
     try {
       const watcher = watch(dir, (_event, filename) => {
@@ -285,11 +335,25 @@ function startNonRecursiveWatch(
         const absPath = join(dir, filename);
         const rel = relative(root, absPath);
         pendingPaths.add(rel);
-        // True debounce: reset timer on every new event
-        if (timer !== null) {
-          clearTimeout(timer);
+        scheduleFlush();
+
+        // Dynamic directory discovery: if a rename creates a new dir, watch it
+        if (_event === "rename") {
+          try {
+            if (statSync(absPath).isDirectory()) {
+              watchDirectoryTree(
+                absPath,
+                root,
+                watchers,
+                maxWatcherCount,
+                (path) => pendingPaths.add(path),
+                scheduleFlush,
+              );
+            }
+          } catch (_e) {
+            // statSync failed — not a real path, ignore
+          }
         }
-        timer = setTimeout(flush, debounceMs);
       });
       watchers.push(watcher);
     } catch (err) {
