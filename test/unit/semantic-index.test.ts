@@ -273,13 +273,14 @@ describe("SemanticIndex", () => {
     await expect(index.search("query")).rejects.toBeInstanceOf(SemanticUnavailableError);
   });
 
-  it("markFilesStale removes file entries and sets completed=false", async () => {
+  it("markFilesStale removes file entries, cleans backing store, and sets completed=false", async () => {
     writeFileSync(join(root, "a.ts"), "export const auth = true;\n");
     writeFileSync(join(root, "b.ts"), "export const database = true;\n");
-    const { index } = makeIndex(root);
+    const { index, stores } = makeIndex(root);
     await index.updateIndex();
 
     expect(index.getStats().indexedFileCount).toBe(2);
+    expect(stores[0]!.chunkCount).toBeGreaterThan(0);
 
     const cacheDir = join(root, ".pi-smartread");
     const metaPath = readdirSync(cacheDir)
@@ -292,6 +293,11 @@ describe("SemanticIndex", () => {
 
     expect(index.getStats().indexedFileCount).toBe(1);
     expect(JSON.parse(readFileSync(metaPath!, "utf-8")).completed).toBe(false);
+
+    // Backing store: a.ts vectors gone, b.ts vectors remain.
+    const remainingChunks = [...stores[0]!.chunks.values()];
+    expect(remainingChunks.every((c) => c.filePath !== "a.ts")).toBe(true);
+    expect(remainingChunks.some((c) => c.filePath === "b.ts")).toBe(true);
 
     index.dispose();
   });

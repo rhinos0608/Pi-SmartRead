@@ -161,6 +161,7 @@ export class SemanticIndex {
   private disposed = false;
   private updatePromise: Promise<void> | null = null;
   private lastError: string | undefined;
+  private pendingStalePaths = new Set<string>();
 
   constructor(root: string, options: SemanticIndexOptions = {}) {
     this.root = resolve(root);
@@ -356,6 +357,9 @@ export class SemanticIndex {
     }
 
     if (this.disposed) throw new SemanticUnavailableError("Semantic index was disposed during update");
+    // Drain any files invalidated during this update so the commit
+    // doesn't overwrite markFilesStale() effects.
+    this.applyPendingStale(nextFiles);
     this.metadata = {
       version: METADATA_VERSION,
       fingerprint: this.fingerprint,
@@ -459,14 +463,24 @@ export class SemanticIndex {
    */
   markFilesStale(relPaths: string[]): void {
     if (this.disposed) return;
+    if (relPaths.length === 0) return;
     for (const relPath of relPaths) {
-      delete this.metadata.files[relPath];
+      this.pendingStalePaths.add(relPath);
       this.store?.deleteByFilePath(relPath);
     }
-    if (relPaths.length > 0) {
+    if (!this.updatePromise) {
+      this.applyPendingStale(this.metadata.files);
       this.metadata.completed = false;
       this.writeMetadata();
     }
+  }
+
+  private applyPendingStale(targetFiles: Record<string, FileState>): void {
+    for (const relPath of this.pendingStalePaths) {
+      delete targetFiles[relPath];
+      this.store?.deleteByFilePath(relPath);
+    }
+    this.pendingStalePaths.clear();
   }
 
   dispose(): void {
@@ -474,6 +488,7 @@ export class SemanticIndex {
     this.initialized = false;
     this.ready = false;
     this.updatePromise = null;
+    this.pendingStalePaths.clear();
     this.store?.close();
     this.store = null;
   }

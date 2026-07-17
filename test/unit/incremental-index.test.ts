@@ -596,12 +596,23 @@ describe("createIncrementalIndex diff()", () => {
   });
 
   it("diff() returns graphStats with stale=true for entries lacking new fields", () => {
-    const idx = createIncrementalIndex(tmpDir);
-    idx.getChanges(); // initial build
+    // Manually write a legacy-schema cache (version 1, no symbolCount/edgeCount)
+    const cacheDir = join(tmpDir, ".pi-smartread");
+    mkdirSync(cacheDir, { recursive: true });
+    const legacyCache = {
+      version: 1,
+      files: {
+        "src/a.ts": { hash: "abc123", mtimeMs: 1000, size: 10 },
+        "src/b.ts": { hash: "def456", mtimeMs: 1000, size: 10 },
+      },
+      directories: {},
+    };
+    writeFileSync(join(cacheDir, "file-hashes.json"), JSON.stringify(legacyCache));
 
+    const idx = createIncrementalIndex(tmpDir);
     const { graphStats } = idx.diff();
+
     expect(graphStats.length).toBeGreaterThan(0);
-    // Old entries won't have symbolCount/edgeCount → stale=true
     for (const gs of graphStats) {
       expect(gs.stale).toBe(true);
       expect(gs.symbolCount).toBeUndefined();
@@ -640,5 +651,91 @@ describe("FileHashEntry graph stats fields", () => {
     };
     expect(entry.symbolCount).toBeUndefined();
     expect(entry.edgeCount).toBeUndefined();
+  });
+});
+
+describe("createIncrementalIndex updateGraphStats", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "updstats-"));
+    mkdirSync(join(tmpDir, "src"), { recursive: true });
+    writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
+    writeFileSync(join(tmpDir, "src", "b.ts"), "export const b = 2;");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("updateGraphStats writes values and diff shows stale=false", () => {
+    const idx = createIncrementalIndex(tmpDir);
+    idx.getChanges(); // build initial cache
+
+    idx.updateGraphStats([
+      { path: "src/a.ts", symbolCount: 5, edgeCount: 3 },
+    ]);
+
+    const { graphStats } = idx.diff();
+    const entry = graphStats.find((g) => g.path === "src/a.ts");
+    expect(entry).toBeDefined();
+    expect(entry!.stale).toBe(false);
+    expect(entry!.symbolCount).toBe(5);
+    expect(entry!.edgeCount).toBe(3);
+  });
+
+  it("diff shows stale=true for files not updated", () => {
+    const idx = createIncrementalIndex(tmpDir);
+    idx.getChanges(); // build initial cache
+
+    idx.updateGraphStats([
+      { path: "src/a.ts", symbolCount: 5, edgeCount: 3 },
+    ]);
+
+    const { graphStats } = idx.diff();
+    const bEntry = graphStats.find((g) => g.path === "src/b.ts");
+    expect(bEntry).toBeDefined();
+    expect(bEntry!.stale).toBe(true);
+    expect(bEntry!.symbolCount).toBeUndefined();
+    expect(bEntry!.edgeCount).toBeUndefined();
+  });
+
+  it("updateGraphStats handles empty updates without crashing", () => {
+    const idx = createIncrementalIndex(tmpDir);
+    idx.getChanges();
+    idx.updateGraphStats([]);
+    // no crash = pass
+    const { graphStats } = idx.diff();
+    expect(graphStats.length).toBeGreaterThan(0);
+  });
+
+  it("updateGraphStats persists across index re-creation", () => {
+    const idx = createIncrementalIndex(tmpDir);
+    idx.getChanges(); // build initial cache
+
+    idx.updateGraphStats([
+      { path: "src/a.ts", symbolCount: 7, edgeCount: 2 },
+    ]);
+
+    // Fresh index instance — reads from disk
+    const idx2 = createIncrementalIndex(tmpDir);
+    const { graphStats } = idx2.diff();
+    const aEntry = graphStats.find((g) => g.path === "src/a.ts");
+    expect(aEntry).toBeDefined();
+    expect(aEntry!.stale).toBe(false);
+    expect(aEntry!.symbolCount).toBe(7);
+    expect(aEntry!.edgeCount).toBe(2);
+  });
+
+  it("updateGraphStats skips unknown paths", () => {
+    const idx = createIncrementalIndex(tmpDir);
+    idx.getChanges();
+    // path not in cache should be silently skipped
+    idx.updateGraphStats([
+      { path: "nonexistent.ts", symbolCount: 1, edgeCount: 1 },
+    ]);
+    // no crash = pass; other entries unaffected
+    const { graphStats } = idx.diff();
+    expect(graphStats.length).toBeGreaterThan(0);
   });
 });

@@ -288,18 +288,18 @@ function computeStructuralScore(input: RerankerInput): number {
 
   // ── WP-7: Multi-signal scoring expansion ──────────────────────
   // halsteadComplexity: higher = more complex → penalised (inverted)
-  if (input.halsteadComplexity !== undefined && input.halsteadComplexity > 0) {
-    score += Math.max(0, 1 - Math.min(1, input.halsteadComplexity / 500));
+  if (input.halsteadComplexity !== undefined) {
+    score += Math.max(0, 1 - Math.min(1, Math.max(0, input.halsteadComplexity) / 500));
     signals++;
   }
   // astProfile: cyclomatic-like, 0–1, higher = more branching → penalised
-  if (input.astProfile !== undefined && input.astProfile > 0) {
-    score += Math.max(0, 1 - Math.min(1, input.astProfile));
+  if (input.astProfile !== undefined) {
+    score += Math.max(0, 1 - Math.min(1, Math.max(0, input.astProfile)));
     signals++;
   }
   // minHashProximity: higher = more similar → boosted
-  if (input.minHashProximity !== undefined && input.minHashProximity > 0) {
-    score += input.minHashProximity;
+  if (input.minHashProximity !== undefined) {
+    score += Math.max(0, Math.min(1, input.minHashProximity));
     signals++;
   }
 

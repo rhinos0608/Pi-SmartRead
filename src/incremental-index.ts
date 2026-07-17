@@ -68,6 +68,13 @@ export interface GraphStatsDiff {
   stale: boolean; // true when old entry lacks new fields (needs rebuild)
 }
 
+/** Graph stats update to write back into the cache. */
+export interface GraphStatsUpdate {
+  path: string;
+  symbolCount: number;
+  edgeCount: number;
+}
+
 // ── Constants ─────────────────────────────────────────────────────
 
 const CACHE_VERSION = 1;
@@ -642,6 +649,21 @@ export function createIncrementalIndex(root: string) {
       cachedDirs = currentDirectories;
 
       return { changes, graphStats };
+    },
+
+    /**
+     * Write graph stats (symbolCount, edgeCount) for specific files into the
+     * persisted cache. After this, subsequent diff() calls report stale: false
+     * for those files.
+     */
+    updateGraphStats(updates: GraphStatsUpdate[]): void {
+      ensureLoaded();
+      for (const { path, symbolCount, edgeCount } of updates) {
+        if (cachedFiles[path]) {
+          cachedFiles[path] = { ...cachedFiles[path], symbolCount, edgeCount };
+        }
+      }
+      saveCache(cacheFilePath(resolvedRoot), cachedFiles, cachedDirs);
     },
 
     /**
