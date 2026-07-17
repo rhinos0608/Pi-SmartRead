@@ -17,6 +17,50 @@ export interface ClusterResult {
 
 // ── Helpers ───────────────────────────────────────────────────────
 
+/** Simple seeded PRNG: xorshift32. */
+function createRng(seed: number): () => number {
+  let s = seed >>> 0 || 1;
+  return () => {
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    return (s >>> 0) / 0xffffffff;
+  };
+}
+
+/** Deterministic seed from graph structure via djb2 hash. */
+function seedFrom(
+  nodes: string[],
+  edges: Array<{ from: string; to: string }>,
+): number {
+  let h = 5381;
+  for (const n of nodes) {
+    for (let i = 0; i < n.length; i++) {
+      h = ((h << 5) + h + n.charCodeAt(i)) >>> 0;
+    }
+  }
+  h = ((h << 5) + h + nodes.length) >>> 0;
+  h = ((h << 5) + h + edges.length) >>> 0;
+  for (const e of edges) {
+    for (const ch of e.from + e.to) {
+      h = ((h << 5) + h + ch.charCodeAt(0)) >>> 0;
+    }
+  }
+  return h;
+}
+
+/** Seeded Fisher-Yates shuffle — unbiased, transitive, reproducible. */
+function seededShuffle<T>(arr: T[], rng: () => number): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = a[i]!;
+    a[i] = a[j]!;
+    a[j] = tmp;
+  }
+  return a;
+}
+
 interface LouvainGraph {
   nodes: string[];
   adj: Map<string, Map<string, number>>;
@@ -131,56 +175,199 @@ function louvainPhase1(g: LouvainGraph): Map<string, number> {
   return comm;
 }
 
-function louvain(g: LouvainGraph): ClusterResult {
-  const comm = louvainPhase1(g);
-
-  // Re-index communities to contiguous IDs
-  const idMap = new Map<number, number>();
-  let nextId = 0;
+/**
+ * Collapse a graph according to community assignments: each community becomes
+ * a super-node, inter-community edge weights are summed.
+ * Returns { graph, originalMap } where originalMap maps super-node string IDs
+ * back to arrays of node IDs from the input graph.
+ */
+function collapseGraph(
+  g: LouvainGraph,
+  comm: Map<string, number>,
+): {
+  graph: LouvainGraph;
+  originalMap: Map<string, string[]>;
+} {
+  // Group nodes by community
+  const groups = new Map<number, string[]>();
   for (const n of g.nodes) {
     const c = comm.get(n)!;
-    if (!idMap.has(c)) idMap.set(c, nextId++);
+    if (!groups.has(c)) groups.set(c, []);
+    groups.get(c)!.push(n);
   }
 
-  const clusters = new Map<number, string[]>();
+  const superNodes: string[] = [];
+  const superAdj = new Map<string, Map<string, number>>();
+  const superDegree = new Map<string, number>();
+  const originalMap = new Map<string, string[]>();
+  // Map from original community id to the super-node string id
+  const commToSuper = new Map<number, string>();
+
+  let idx = 0;
+  for (const [c, members] of groups) {
+    const sid = `__sup${idx++}`;
+    commToSuper.set(c, sid);
+    superNodes.push(sid);
+    superAdj.set(sid, new Map());
+    originalMap.set(sid, [...members]);
+  }
+
+  // Accumulate inter-community edge weights
+  let superM = 0;
   for (const n of g.nodes) {
-    const mapped = idMap.get(comm.get(n)!)!;
-    if (!clusters.has(mapped)) clusters.set(mapped, []);
-    clusters.get(mapped)!.push(n);
+    const cN = comm.get(n)!;
+    const sidN = commToSuper.get(cN)!;
+    for (const [nbr, w] of g.adj.get(n)!) {
+      const cNbr = comm.get(nbr)!;
+      if (cN === cNbr) {
+        const sidSelf = commToSuper.get(cN)!;
+        const adjMap = superAdj.get(sidN)!;
+        adjMap.set(sidSelf, (adjMap.get(sidSelf) ?? 0) + w);
+        continue;
+      }
+      const sidNbr = commToSuper.get(cNbr)!;
+      const adjMap = superAdj.get(sidN)!;
+      adjMap.set(sidNbr, (adjMap.get(sidNbr) ?? 0) + w);
+    }
   }
 
-  const modularity = computeModularity(clusters, g);
-  return { clusters, modularity, algorithm: "louvain" };
+  // Recompute degrees from completed adjacency, including self-edges.
+  for (const sid of superNodes) {
+    let degree = 0;
+    for (const w of superAdj.get(sid)!.values()) degree += w;
+    superDegree.set(sid, degree);
+    superM += degree;
+  }
+  // Each undirected edge is represented in both endpoint adjacency lists.
+  superM /= 2;
+
+  return {
+    graph: { nodes: superNodes, adj: superAdj, degree: superDegree, m: superM },
+    originalMap,
+  };
 }
 
-function computeModularity(clusters: Map<number, string[]>, g: LouvainGraph): number {
+function louvain(g: LouvainGraph): ClusterResult {
+  // Track mapping from super-node IDs back to original node names.
+  // Initially each node maps to itself.
+  let currentMap = new Map<string, string[]>(
+    g.nodes.map((n) => [n, [n]]),
+  );
+  let workGraph: LouvainGraph = {
+    nodes: [...g.nodes],
+    adj: new Map([...g.adj.entries()].map(([k, v]) => [k, new Map(v)])),
+    degree: new Map(g.degree),
+    m: g.m,
+  };
+
+  for (let round = 0; round < 10; round++) {
+    const phase1Comm = louvainPhase1(workGraph);
+
+    // Check if any merging happened
+    const commGroups = new Map<number, string[]>();
+    for (const n of workGraph.nodes) {
+      const c = phase1Comm.get(n)!;
+      if (!commGroups.has(c)) commGroups.set(c, []);
+      commGroups.get(c)!.push(n);
+    }
+
+    // No merging → stop
+    if (commGroups.size === workGraph.nodes.length) break;
+
+    // Collapse graph
+    const { graph: collapsed, originalMap: collapsedMap } = collapseGraph(
+      workGraph,
+      phase1Comm,
+    );
+
+    // Merge original maps: collapsedMap gives super-node → nodes of workGraph;
+    // currentMap gives workGraph-node → original nodes
+    const mergedMap = new Map<string, string[]>();
+    for (const [sid, members] of collapsedMap) {
+      const originals: string[] = [];
+      for (const m of members) {
+        originals.push(...(currentMap.get(m) ?? [m]));
+      }
+      mergedMap.set(sid, originals);
+    }
+
+    workGraph = collapsed;
+    currentMap = mergedMap;
+  }
+
+  // Final phase1 on the last working graph
+  const finalComm =
+    workGraph.nodes.length > 0
+      ? louvainPhase1(workGraph)
+      : new Map<string, number>();
+
+  // Expand super-node assignments back to original node IDs
+  const rawClusters = new Map<number, string[]>();
+  for (const sid of workGraph.nodes) {
+    const c = finalComm.get(sid)!;
+    if (!rawClusters.has(c)) rawClusters.set(c, []);
+    rawClusters.get(c)!.push(...(currentMap.get(sid) ?? [sid]));
+  }
+
+  // Re-index to contiguous IDs
+  const reindexed = new Map<number, string[]>();
+  let rid = 0;
+  for (const [, members] of rawClusters) {
+    reindexed.set(rid++, members);
+  }
+
+  const modularity = computeModularity(reindexed, g);
+  return { clusters: reindexed, modularity, algorithm: "louvain" };
+}
+
+/**
+ * Compute Newman modularity Q for the given clustering.
+ * O(sum of adjacency-list lengths) per community — not O(n²).
+ */
+function computeModularity(
+  clusters: Map<number, string[]>,
+  g: LouvainGraph,
+): number {
   const m = g.m;
   if (m === 0) return 0;
 
   let Q = 0;
   for (const [, members] of clusters) {
     const memberSet = new Set(members);
-    const memberArr = [...memberSet];
-    for (const i of memberArr) {
-      for (const j of memberArr) {
-        const aij = g.adj.get(i)?.get(j) ?? 0;
-        Q += aij - (g.degree.get(i)! * g.degree.get(j)!) / (2 * m);
+    let sigmaIn = 0;
+    let sigmaTot = 0;
+    for (const node of members) {
+      const deg = g.degree.get(node)!;
+      sigmaTot += deg;
+      // Accumulate internal edge weight: only neighbors in same community
+      for (const [nbr, w] of g.adj.get(node)!) {
+        if (memberSet.has(nbr)) {
+          sigmaIn += w;
+        }
       }
     }
+    // sigmaIn double-counts each internal edge (once per endpoint)
+    Q += sigmaIn / (2 * m) - (sigmaTot / (2 * m)) * (sigmaTot / (2 * m));
   }
-  return Q / (2 * m);
+  return Q;
 }
 
 // ── Label Propagation Fallback ────────────────────────────────────
 
-function labelPropagation(g: LouvainGraph): ClusterResult {
+function labelPropagation(
+  g: LouvainGraph,
+  edges: Array<{ from: string; to: string }>,
+): ClusterResult {
   const comm = new Map<string, number>();
   g.nodes.forEach((n, i) => comm.set(n, i));
 
+  // Seeded shuffle for reproducibility
+  const rng = createRng(seedFrom(g.nodes, edges));
+
   for (let iter = 0; iter < 30; iter++) {
     let changed = false;
-    // Shuffle nodes for convergence
-    const shuffled = [...g.nodes].sort(() => Math.random() - 0.5);
+    // Seeded Fisher-Yates shuffle
+    const shuffled = seededShuffle(g.nodes, rng);
 
     for (const node of shuffled) {
       const weights = new Map<number, number>();
@@ -266,7 +453,7 @@ export function detectCommunities(
   }
 
   if (g.nodes.length > LOUVAIN_NODE_THRESHOLD) {
-    return labelPropagation(g);
+    return labelPropagation(g, importEdges);
   }
 
   return louvain(g);

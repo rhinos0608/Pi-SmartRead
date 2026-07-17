@@ -11,7 +11,8 @@
  *   low:      everything else
  */
 
-import { type ContextGraph } from "./context-graph.js";
+import { resolve } from "node:path";
+import { type ContextGraph, type GraphNeighbour } from "./context-graph.js";
 import type { CallGraphResult, FunctionInfo } from "./callgraph.js";
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -49,6 +50,8 @@ export interface ImpactParams {
   workspaceRoot?: string;
   /** ContextGraph for graph-aware BFS expansion. When provided, performs real traversal. */
   contextGraph?: ContextGraph;
+  /** Optional pre-built call graph for fan-in / public-API / callGraphSummary computation. */
+  callGraph?: CallGraphResult;
 }
 
 export interface DeadCodeResult {
@@ -127,14 +130,13 @@ function classifyRisk(params: {
   return "low";
 }
 
-function computeFanIn(targetFile: string, callGraph: CallGraphResult | null): number {
+function computeFanIn(targetFile: string, callGraph: CallGraphResult | null, workspaceRoot?: string): number {
   if (!callGraph) return 0;
-  const targetBase = targetFile.split("/").pop() ?? targetFile;
+  const normalizedTarget = workspaceRoot ? resolve(workspaceRoot, targetFile) : resolve(targetFile);
   let count = 0;
   for (const fn of callGraph.functions) {
-    if (fn.file === targetFile) {
-      count += fn.calledBy.length;
-    } else if (fn.name === targetBase) {
+    const normalizedFnFile = workspaceRoot ? resolve(workspaceRoot, fn.file) : resolve(fn.file);
+    if (normalizedFnFile === normalizedTarget) {
       count += fn.calledBy.length;
     }
   }
@@ -146,9 +148,13 @@ function isEntryPoint(filePath: string, _functions: FunctionInfo[]): boolean {
   return ENTRY_POINT_PATTERNS.some((re) => re.test(base));
 }
 
-function isPublicApi(filePath: string, callGraph: CallGraphResult | null): boolean {
+function isPublicApi(filePath: string, callGraph: CallGraphResult | null, workspaceRoot?: string): boolean {
   if (!callGraph) return false;
-  const fns = callGraph.functions.filter((f) => f.file === filePath);
+  const normalized = workspaceRoot ? resolve(workspaceRoot, filePath) : resolve(filePath);
+  const fns = callGraph.functions.filter((f) => {
+    const nf = workspaceRoot ? resolve(workspaceRoot, f.file) : resolve(f.file);
+    return nf === normalized;
+  });
   // If any function in the file is exported and has many callers, treat as public API
   const publicFns = fns.filter((f) => f.calledBy.length > FANIN_MEDIUM);
   return publicFns.length > 0;
@@ -170,11 +176,18 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
     maxDepth = 3,
     pageRankScores,
     contextGraph,
+    workspaceRoot,
   } = params;
+
+  // Normalize target path to absolute for consistent call-graph lookups.
+  const normalizedTarget = workspaceRoot ? resolve(workspaceRoot, targetFile) : resolve(targetFile);
+
+  // Helper: normalize any path (call-graph fn.file or graph edge path) against workspaceRoot.
+  const normalizePath = (p: string): string => workspaceRoot ? resolve(workspaceRoot, p) : resolve(p);
 
   // BFS state
   const visited = new Map<string, { depth: number }>(); // path → depth
-  visited.set(targetFile, { depth: 0 });
+  visited.set(normalizedTarget, { depth: 0 });
 
   // When ContextGraph is available, perform real BFS traversal
   if (contextGraph) {
@@ -187,40 +200,82 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
   const affectedFiles: ImpactResult["affectedFiles"] = [];
   const affectedSymbols: Set<string> = new Set();
 
-  const targetFanIn = computeFanIn(targetFile, null);
-  const targetIsEntryPoint = isEntryPoint(targetFile, []);
-  const targetIsPublicApi = isPublicApi(targetFile, null);
-  const targetPageRank = pageRankScores?.get(targetFile) ?? 0;
+  const { callGraph } = params;
+  const targetFanIn = computeFanIn(normalizedTarget, callGraph ?? null, workspaceRoot);
+  const targetIsEntryPoint = isEntryPoint(normalizedTarget, []);
+  const targetIsPublicApi = isPublicApi(normalizedTarget, callGraph ?? null, workspaceRoot);
+  const targetPageRank = pageRankScores?.get(normalizedTarget) ?? pageRankScores?.get(targetFile) ?? 0;
 
-  const targetRisk = classifyRisk({
-    pageRank: targetPageRank,
-    fanIn: targetFanIn,
-    blastRadiusDepth: 0,
-    isEntryPoint: targetIsEntryPoint,
-    isPublicApi: targetIsPublicApi,
-  });
-
+  // Pre-compute call graph summary for the target file.
   const callGraphSummary: ImpactResult["callGraphSummary"] = {
     directCallers: 0,
     transitiveCallers: 0,
     directCallees: 0,
     transitiveCallees: 0,
   };
+  if (callGraph) {
+    const targetFns = callGraph.functions.filter((f) => normalizePath(f.file) === normalizedTarget);
+    const directCallerSet = new Set<string>();
+    const directCalleeSet = new Set<string>();
+    for (const fn of targetFns) {
+      for (const caller of fn.calledBy) directCallerSet.add(caller);
+      for (const callee of fn.calls) directCalleeSet.add(callee);
+    }
+    callGraphSummary.directCallers = directCallerSet.size;
+    callGraphSummary.directCallees = directCalleeSet.size;
+    // Transitive: BFS through call graph from direct callers/callees.
+    const transCallerSet = new Set<string>(directCallerSet);
+    const transCalleeSet = new Set<string>(directCalleeSet);
+    const callerQueue = [...directCallerSet];
+    const calleeQueue = [...directCalleeSet];
+    while (callerQueue.length > 0) {
+      const name = callerQueue.shift()!;
+      const fn = callGraph.functions.find((f) => f.name === name);
+      if (!fn) continue;
+      for (const caller of fn.calledBy) {
+        if (!transCallerSet.has(caller)) {
+          transCallerSet.add(caller);
+          callerQueue.push(caller);
+        }
+      }
+    }
+    while (calleeQueue.length > 0) {
+      const name = calleeQueue.shift()!;
+      const fn = callGraph.functions.find((f) => f.name === name);
+      if (!fn) continue;
+      for (const callee of fn.calls) {
+        if (!transCalleeSet.has(callee)) {
+          transCalleeSet.add(callee);
+          calleeQueue.push(callee);
+        }
+      }
+    }
+    callGraphSummary.transitiveCallers = transCallerSet.size;
+    callGraphSummary.transitiveCallees = transCalleeSet.size;
+  }
 
   let maxDepthReached = 0;
 
   for (const [path, { depth }] of visited) {
-    if (path === targetFile) continue;
-    const fanIn = computeFanIn(path, null);
+    const normalizedPath = normalizePath(path);
+    if (normalizedPath === normalizedTarget) continue;
+    const fanIn = computeFanIn(normalizedPath, callGraph ?? null, workspaceRoot);
     const risk = classifyRisk({
-      pageRank: pageRankScores?.get(path) ?? 0,
+      pageRank: pageRankScores?.get(normalizedPath) ?? pageRankScores?.get(path) ?? 0,
       fanIn,
       blastRadiusDepth: depth,
       isEntryPoint: isEntryPoint(path, []),
-      isPublicApi: isPublicApi(path, null),
+      isPublicApi: isPublicApi(path, callGraph ?? null, workspaceRoot),
     });
     affectedFiles.push({ path, risk, fanIn, depth });
     if (depth > maxDepthReached) maxDepthReached = depth;
+    // Collect affected symbols from call graph for this file.
+    if (callGraph) {
+      const normalizedPath2 = normalizePath(path);
+      for (const fn of callGraph.functions) {
+        if (normalizePath(fn.file) === normalizedPath2) affectedSymbols.add(fn.name);
+      }
+    }
   }
 
   affectedFiles.sort((a, b) => {
@@ -229,14 +284,51 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
     return b.fanIn - a.fanIn;
   });
 
+  // Reclassify target risk with actual blast-radius depth reached.
+  const targetRisk = classifyRisk({
+    pageRank: targetPageRank,
+    fanIn: targetFanIn,
+    blastRadiusDepth: maxDepthReached,
+    isEntryPoint: targetIsEntryPoint,
+    isPublicApi: targetIsPublicApi,
+  });
+
+  // Final risk: highest severity across target and all affected files.
+  let finalRisk = targetRisk;
+  for (const af of affectedFiles) {
+    if (RISK_ORDER[af.risk] < RISK_ORDER[finalRisk]) {
+      finalRisk = af.risk;
+    }
+  }
+
   return {
     target: targetFile,
-    risk: targetRisk,
+    risk: finalRisk,
     affectedFiles,
     affectedSymbols: [...affectedSymbols],
     blastRadiusDepth: maxDepthReached,
     callGraphSummary,
   };
+}
+
+/**
+ * Build a reverse import index from the context graph's provenance edges.
+ * Maps resolved(to) → resolved(from)[] for files that import a given target.
+ * Best-effort: relies on getProvenanceEdges() availability on ContextGraph.
+ */
+function buildReverseImportIndex(graph: ContextGraph): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  const edges = graph.getProvenanceEdges();
+  for (const { from, to } of edges) {
+    const key = resolve(to);
+    let list = index.get(key);
+    if (!list) {
+      list = [];
+      index.set(key, list);
+    }
+    list.push(resolve(from));
+  }
+  return index;
 }
 
 /**
@@ -255,27 +347,64 @@ export async function expandBlastRadius(
   const queue: Array<{ path: string; depth: number }> = [{ path: targetFile, depth: 0 }];
   visited.set(targetFile, { depth: 0, edgeType: "self" });
 
+  // Lazy-built reverse-import index: resolved(to) → resolved(from)[]
+  // Captures files that import a given file (imported_by edges).
+  let reverseImportIndex: Map<string, string[]> | null = null;
+
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (current.depth >= maxDepth) continue;
 
-    // Expand via file-level neighbours (imports, defines)
+    const nextDepth = current.depth + 1;
+
+    // Forward neighbours (imports/calls/references) via the context graph.
+    let forwardNeighbours: GraphNeighbour[] = [];
     try {
-      const fileNeighbours = await contextGraph.getFileNeighbours(current.path, {
+      forwardNeighbours = await contextGraph.getFileNeighbours(current.path, {
         includeSymbols: true,
         includeCalls: true,
       });
-      for (const neighbour of fileNeighbours) {
-        if (!visited.has(neighbour.path)) {
-          visited.set(neighbour.path, {
-            depth: current.depth + 1,
-            edgeType: neighbour.provenance.type,
-          });
-          queue.push({ path: neighbour.path, depth: current.depth + 1 });
-        }
-      }
     } catch {
       // getFileNeighbours may fail for unreadable files — skip
+    }
+
+    // Reverse-import neighbours (files that import this file).
+    // Best-effort: built lazily from getProvenanceEdges() on first use.
+    let reverseImports: string[] = [];
+    try {
+      if (reverseImportIndex === null) {
+        reverseImportIndex = buildReverseImportIndex(contextGraph);
+      }
+      reverseImports = reverseImportIndex.get(resolve(current.path)) ?? [];
+    } catch {
+      // getProvenanceEdges may fail — skip reverse imports
+    }
+
+    // Combine forward and reverse neighbours
+    const allNeighbours: GraphNeighbour[] = [
+      ...forwardNeighbours,
+      ...reverseImports
+        .filter((p) => !visited.has(p) || (visited.get(p)?.depth ?? Infinity) > nextDepth)
+        .map((p): GraphNeighbour => ({
+          path: p,
+          provenance: { from: p, to: current.path, type: "imported_by", confidence: 1.0 },
+        })),
+    ];
+
+    for (const neighbour of allNeighbours) {
+      if (!visited.has(neighbour.path)) {
+        visited.set(neighbour.path, {
+          depth: nextDepth,
+          edgeType: neighbour.provenance.type,
+        });
+        queue.push({ path: neighbour.path, depth: nextDepth });
+      } else if ((visited.get(neighbour.path)?.depth ?? Infinity) > nextDepth) {
+        visited.set(neighbour.path, {
+          depth: nextDepth,
+          edgeType: neighbour.provenance.type,
+        });
+        queue.push({ path: neighbour.path, depth: nextDepth });
+      }
     }
 
     // Expand via mutation edges (breakage, co-change)
@@ -284,10 +413,16 @@ export async function expandBlastRadius(
       for (const neighbour of mutationNeighbours) {
         if (!visited.has(neighbour.path)) {
           visited.set(neighbour.path, {
-            depth: current.depth + 1,
+            depth: nextDepth,
             edgeType: neighbour.provenance.type,
           });
-          queue.push({ path: neighbour.path, depth: current.depth + 1 });
+          queue.push({ path: neighbour.path, depth: nextDepth });
+        } else if ((visited.get(neighbour.path)?.depth ?? Infinity) > nextDepth) {
+          visited.set(neighbour.path, {
+            depth: nextDepth,
+            edgeType: neighbour.provenance.type,
+          });
+          queue.push({ path: neighbour.path, depth: nextDepth });
         }
       }
     } catch {
