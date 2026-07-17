@@ -19,6 +19,12 @@ export interface RerankerInput {
   pathProximity?: number;
   probeConfidence?: number;
   temporalScore?: number; // Git co-commit correlation
+  /** Halstead-lite volume score — higher means more complex (penalised). */
+  halsteadComplexity?: number;
+  /** AST profile composite (cyclomatic complexity normalised 0–1). */
+  astProfile?: number;
+  /** MinHash proximity to a query-relevant reference AST (0–1, higher = more similar). */
+  minHashProximity?: number;
 }
 
 export interface RerankerResult {
@@ -277,6 +283,23 @@ function computeStructuralScore(input: RerankerInput): number {
   }
   if (input.temporalScore !== undefined && input.temporalScore > 0) {
     score += input.temporalScore; // 0.0 to 1.0 correlation
+    signals++;
+  }
+
+  // ── WP-7: Multi-signal scoring expansion ──────────────────────
+  // halsteadComplexity: higher = more complex → penalised (inverted)
+  if (input.halsteadComplexity !== undefined && input.halsteadComplexity > 0) {
+    score += Math.max(0, 1 - Math.min(1, input.halsteadComplexity / 500));
+    signals++;
+  }
+  // astProfile: cyclomatic-like, 0–1, higher = more branching → penalised
+  if (input.astProfile !== undefined && input.astProfile > 0) {
+    score += Math.max(0, 1 - Math.min(1, input.astProfile));
+    signals++;
+  }
+  // minHashProximity: higher = more similar → boosted
+  if (input.minHashProximity !== undefined && input.minHashProximity > 0) {
+    score += input.minHashProximity;
     signals++;
   }
 
