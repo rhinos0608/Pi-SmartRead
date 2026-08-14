@@ -31,7 +31,6 @@ const MAX_WATCHER_COUNT = parseInt(
 
 // ── Platform detection ──────────────────────────────────────────────────────
 
-const IS_LINUX = process.platform === "linux";
 const SUPPORTS_RECURSIVE = process.platform === "darwin" || process.platform === "win32";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -210,16 +209,25 @@ export function startWatching(
     return () => {};
   }
 
-  // Detect chokidar opt-in
-  if (mode === "chokidar" || (!mode && !IS_LINUX)) {
+  // Chokidar: default tries an installed chokidar on ALL platforms (the
+  // non-recursive fallback recommends installing it, so honor that). Explicit
+  // mode:'chokidar' requires it — if absent, warn then fall back to native.
+  if (mode === "chokidar" || !mode) {
     const chokidar = tryRequireChokidar();
     if (chokidar) {
       return startChokidarWatch(resolvedRoot, onDirty, debounceMs, chokidar);
     }
+    if (mode === "chokidar") {
+      console.warn(
+        `[file-watcher] chokidar not installed — falling back to native fs.watch for ${resolvedRoot}`,
+      );
+    }
   }
 
-  // Determine watch mode
-  if (SUPPORTS_RECURSIVE && mode !== "non-recursive") {
+  // Recursive: default on platforms that support it; explicit mode:'recursive'
+  // attempts recursive everywhere and falls back (with a warning) if the
+  // platform/runtime rejects it.
+  if (mode === "recursive" || (SUPPORTS_RECURSIVE && mode !== "non-recursive")) {
     return startRecursiveWatch(resolvedRoot, onDirty, debounceMs, maxWatcherCount);
   }
 

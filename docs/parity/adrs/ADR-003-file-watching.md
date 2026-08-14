@@ -18,21 +18,23 @@ Node.js provides `fs.watch` (platform-specific, unreliable for recursive watchin
 
 ## Decision
 
-**Use `fs.watch` for the common path, with `chokidar` as an optional opt-in.** The watcher runs during active Pi sessions, not as a persistent daemon.
+**Default to chokidar when available, otherwise native `fs.watch`.** The watcher runs during active Pi sessions, not as a persistent daemon.
 
 ### Strategy
 
 1. Create `src/file-watcher.ts` — new dependency-free module
-2. On session start, call `startWatching(root)` which:
+2. On session start, call `startWatching(root, onDirty, options?)` which returns a stop function:
    - Uses `fs.watch(root, { recursive: true })` on macOS/Windows (both support recursive)
    - Falls back to non-recursive `fs.watch` on Linux with a warning log (Linux recursive is unreliable; users can install chokidar for Linux recursive support)
-3. On file change events (debounced 500ms), the watcher:
+   - Debounce window defaults to 500ms (`DEBOUNCE_MS`, overridable via `FILE_WATCHER_DEBOUNCE_MS`); watcher cap defaults to 256 (`MAX_WATCHER_COUNT`, overridable via `FILE_WATCHER_MAX_COUNT`)
+3. On file change events (debounced), the watcher:
    - Invalidates the FS scan cache for affected paths
    - Marks `ContextGraph` as dirty (next query triggers incremental rebuild)
    - Invalidates `SemanticIndex` file state for affected paths (next query re-indexes)
+   - Invalidates the incremental-index cache for affected paths
    - Logs change count at debug level
-4. On session end, call `stopWatching()` to remove all watchers
-5. Chokidar auto-detection: on non-Linux platforms (`!IS_LINUX`), `try { require("chokidar") }` is attempted before falling back to native `fs.watch`. If chokidar is found, it handles recursive watching reliably on all platforms. **Linux is excluded from auto-detection** — the `!IS_LINUX` guard skips the `require("chokidar")` attempt on Linux. Linux users who want chokidar-based watching must install chokidar as a dependency and explicitly configure `mode: 'chokidar'` in `WatcherOptions`. Without that, Linux defaults to non-recursive `fs.watch`.
+4. On session end, call the stop function returned by `startWatching()` to remove all watchers (there is no separate `stopWatching()` export)
+5. Chokidar auto-detection: the default mode tries an installed chokidar on **all** platforms (including Linux) before falling back to native `fs.watch` — the non-recursive fallback recommends installing chokidar, so the default honors that. Explicit `mode: 'chokidar'` requires chokidar: if it is absent, the watcher warns and falls back to native `fs.watch`. Explicit `mode: 'recursive'` attempts recursive watching everywhere and falls back (with a warning) if the platform/runtime rejects it. Without chokidar, Linux defaults to non-recursive `fs.watch`.
 
 ### Linux non-recursive fallback
 
@@ -44,7 +46,7 @@ When chokidar is unavailable on Linux (`fs.watch` does not support recursive), t
 
 ### Rationale
 
-- Zero added dependencies for the default path (`fs.watch` is built into Node.js).
+- Zero added dependencies — chokidar is optional (used only when installed); the fallback `fs.watch` is built into Node.js.
 - `fs.watch` recursive works on macOS (Pi's primary dev platform) and Windows.
 - Linux recursive watching via `fs.watch` is unreliable (kernel limitation). The fallback to non-recursive with a log warning is acceptable — Linux users can install `chokidar` for full support, or the agent can manually trigger re-indexing by running a query.
 - The watcher is a "hint" layer, not a correctness requirement. Snapshot-based invalidation remains the safety net: even if the watcher misses a change, the next `IncrementalIndex.diff()` catches it.
@@ -81,5 +83,5 @@ The watcher only watches for changes — it does NOT trigger re-indexing. It mar
 - [ ] Debouncing prevents duplicate invalidation within 500ms window
 - [ ] Watcher stops cleanly on session end (no FD leaks)
 - [ ] Linux non-recursive fallback logs warning, does not crash
-- [ ] chokidar opt-in path works when package is installed
+- [ ] chokidar default path works when the package is installed; falls back to native `fs.watch` when absent
 - [ ] No watcher-related flake in test suite (watcher disabled in test env)

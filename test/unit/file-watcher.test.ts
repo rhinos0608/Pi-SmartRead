@@ -24,6 +24,12 @@ vi.mock("node:fs", async () => {
   };
 });
 
+// Deterministically simulate chokidar being unavailable: tryRequireChokidar()
+// must always resolve to null regardless of the repository's installed modules.
+vi.mock("chokidar", () => {
+  throw new Error("Cannot find module 'chokidar'");
+});
+
 // Must import after mocking
 const { startWatching } = await import("../../src/file-watcher.js");
 
@@ -97,6 +103,30 @@ describe("file-watcher", () => {
       const stop = startWatching("/tmp", onDirty, { mode: "none" });
       expect(mockWatch).not.toHaveBeenCalled();
       stop();
+    });
+  });
+
+  describe("chokidar mode contract", () => {
+    it("explicit mode:'chokidar' warns then falls back to native when chokidar is absent", () => {
+      process.env.NODE_ENV = "development";
+      delete process.env.VITEST;
+      const onDirty = vi.fn();
+      mockWatch.mockReturnValue({ close: mockClose });
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      // chokidar is mocked as unavailable, so tryRequireChokidar() returns null.
+      const stop = startWatching("/test/root", onDirty, { mode: "chokidar" });
+
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("chokidar not installed"),
+      );
+      // Falls back to native fs.watch (recursive on darwin/win32).
+      expect(mockWatch).toHaveBeenCalled();
+      expect(typeof stop).toBe("function");
+      stop();
+      // The native watcher must be closed by the returned stop function.
+      expect(mockClose).toHaveBeenCalled();
+      consoleWarnSpy.mockRestore();
     });
   });
 
