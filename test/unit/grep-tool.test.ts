@@ -143,7 +143,8 @@ describe("grep tool — literal mode", () => {
         const text = (result.content[0] as { text: string }).text;
         expect(text).toContain("src/index.ts");
         expect(text).toContain("registerTool(browserTool)");
-        expect((result.details as any).engines).toEqual(["lexical-passthrough"]);
+        // Scoped to a single file: exact phrase plus in-memory BM25 both match.
+        expect((result.details as any).engines).toEqual(["lexical", "bm25"]);
     });
 
     it("auto-detects regex alternation for directory searches", async () => {
@@ -214,7 +215,9 @@ describe("grep tool — batch queries", () => {
         expect(details.queryResults[0].pattern).toBe("DATABASE_URL");
         expect(details.queryResults[1].pattern).toBe("validateToken");
         expect(validateInspectionEnvelope(details.workspaceEvidence).ok).toBe(true);
-        expect(details.workspaceEvidence.resources).toHaveLength(2);
+        // db.ts (query 1 literal) + auth.ts + tokens.ts (query 2: exact/symbol
+        // plus in-memory BM25 also surfacing the token-bearing tokens.ts).
+        expect(details.workspaceEvidence.resources).toHaveLength(3);
     });
 
     it("requires exactly one search mode and bounds direct execute calls", async () => {
@@ -261,7 +264,7 @@ describe("grep tool — graphFilter schema (WP-2)", () => {
 // ── Non-literal / cascade ───────────────────────────────────────────
 
 describe("grep tool — non-literal cascade", () => {
-    it("passes through lexical search while the semantic index is unbuilt", async () => {
+    it("combines exact lexical, BM25, and AST symbol search while the semantic index is unbuilt", async () => {
         const index = getOrCreateSemanticIndex(workdir, {
             config: {
                 baseUrl: "http://localhost:11434/v1",
@@ -284,8 +287,70 @@ describe("grep tool — non-literal cascade", () => {
 
         const text = (result.content[0] as { text: string }).text;
         expect(text).toContain("validateToken");
-        expect((result.details as any).engines).toEqual(["lexical-passthrough"]);
+        // No semantic index: exact lexical + in-memory BM25 + AST symbol are combined.
+        expect((result.details as any).engines).toEqual(["lexical", "bm25", "symbol"]);
     });
+
+    it("returns a BM25 result for a token-overlap query with no exact phrase (no semantic index)", async () => {
+        // "revenue total" never appears as a contiguous substring; only the
+        // tokens total/revenue exist inside totalRevenue. Exact lexical and AST
+        // symbol find nothing, so the in-memory BM25 ranker must surface it.
+        writeFileSync(
+            join(workdir, "src", "orders.ts"),
+            [
+                "export function totalRevenue(orders: Order[]): number {",
+                "  return orders.reduce((sum, o) => sum + o.total, 0);",
+                "}",
+            ].join("\n"),
+            "utf8",
+        );
+
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-bm25-fallback",
+            { pattern: "revenue total" },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const details = result.details as any;
+        expect(details.engines).toContain("bm25");
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain("src/orders.ts");
+    });
+
+    it("returns AST symbol hits even when the exact substring is absent (no semantic index)", async () => {
+    // The queried symbol is a qualified name ("Calculator.computeTotal") that
+    // the AST matcher resolves via the class name path, but the exact literal
+    // never appears in the file — lexical search cannot match it.
+    writeFileSync(
+      join(workdir, "src", "service.ts"),
+      [
+        "export class Calculator {",
+        "  computeTotal(items: number[]): number {",
+        "    return items.reduce((a, b) => a + b, 0);",
+        "  }",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
+    const tool = createGrepTool(makeOpts());
+    const result = await tool.execute(
+      "t-symbol-only",
+      { pattern: "Calculator.computeTotal" },
+      undefined,
+      undefined,
+      makeCtx(workdir),
+    );
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("computeTotal");
+    expect(text).toContain("src/service.ts");
+    expect((result.details as any).engines).toContain("symbol");
+    // The exact literal "Calculator.computeTotal" is absent from the file, so
+    // the lexical engine must not have provided the result.
+    expect((result.details as any).engines).not.toContain("lexical");
+  });
 
     it("returns valid evidence envelope with mode='query'", async () => {
         const tool = createGrepTool(makeOpts());
@@ -753,8 +818,8 @@ describe("grep tool — explicit degradation reasons", () => {
             undefined,
             makeCtx(workdir),
         );
-        // engines contract preserved.
-        expect((result.details as any).engines).toEqual(["lexical-passthrough"]);
+        // No semantic index: exact lexical + in-memory BM25 + AST symbol are combined.
+        expect((result.details as any).engines).toEqual(["lexical", "bm25", "symbol"]);
         // structured, non-secret degradation present.
         const degradation = (result.details as any).degradation;
         expect(Array.isArray(degradation)).toBe(true);

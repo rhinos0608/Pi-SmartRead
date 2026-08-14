@@ -27,6 +27,8 @@ import type { ContextGraph } from "./context-graph.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
 import { sessionFileFromContext } from "./inspect-tool.js";
 import { recordDegradation } from "./runtime-health.js";
+import { bm25Scores, tokenize } from "./scoring.js";
+import { findCodeFiles } from "./file-discovery.js";
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -65,10 +67,22 @@ Example: grep('auth middleware') finds authentication code even if the
 function is named validateToken. Valid regex syntax such as 'TODO|FIXME' is
 auto-detected; set literal:true to search regex metacharacters as plain text.
 
+literal:true is deterministic — the pattern is matched as an exact substring
+(no regex interpretation), so metacharacters like '.' or '*' are literal.
+Regex auto-detection is best-effort: it only recognizes a small set of common
+regex constructs (alternation, anchors, character classes, quantifiers).
+Patterns that are not recognized are treated as literal substrings, so a
+pattern that looks like regex but is not in the recognized set will NOT be
+interpreted as regex. When no semantic index is configured, grep combines
+exact substring matches, an in-memory BM25 lexical ranker (token overlap),
+and AST symbol search.
+
 Provide exactly one of pattern (single search) or queries (1-10 search objects).
 Top-level options are shared defaults for batch queries; per-query options override them.
 Parameters: path (scope directory/file), glob (file filter), ignoreCase, literal,
 limit, contextLines, graphFilter. Results are ranked and deduplicated.
+
+Batch queries are executed sequentially (not in parallel).
 
 graphFilter: filter results by graph relationship. Format "EDGE_TYPE->target",
 e.g. "CALLS->auth.login" (only files that call auth.login) or
@@ -354,7 +368,51 @@ async function runSmartCascade(
     if (!semanticIndex?.isAvailable()) {
         degradation.push({ backend: "semantic", code: "index_unavailable" });
         recordDegradation("index_unavailable", "semantic");
-        return { hits: exactResult.hits, engines: ["lexical-passthrough"], degradation };
+        // No semantic index: keep grep useful by fusing exact lexical, a real
+        // in-memory BM25 ranker (token overlap over the discovered source
+        // corpus), and AST symbol search. Exact hits stay prepended at front.
+        const symbolHits = new Map<string, GrepHit>();
+        let symbolOk = false;
+        try {
+            const symResult = await handleSymbol(pattern, bigK, false, searchDir, cwd, signal, fileGlob);
+            for (const m of symResult.matches) {
+                const absPath = tryCanonical(resolve(cwd, m.relative_path));
+                if (scopedFile && absPath !== scopedFile) continue;
+                const relFile = m.relative_path;
+                const line = m.line;
+                const key = `${absPath}:${line}`;
+                if (!symbolHits.has(key)) {
+                    symbolHits.set(key, {
+                        file: absPath,
+                        relFile,
+                        line,
+                        endLine: m.end_line ?? line,
+                        name: m.name,
+                        kind: "symbol",
+                        snippet: m.body ?? "",
+                        engines: ["symbol"],
+                        score: 1,
+                    });
+                }
+            }
+            if (symbolHits.size > 0) symbolOk = true;
+        } catch {
+            degradation.push({ backend: "symbol", code: "symbol_failed" });
+            recordDegradation("symbol_failed", "symbol");
+        }
+        const bm25Hits = await runFallbackBm25(pattern, searchDir, bigK, contextLines, cwd, signal, scopedFile, fileGlob);
+
+        let combined = fuseAndDedup(bm25Hits, symbolHits);
+        if (exactResult.hits.length > 0) {
+            combined = prependExactHits(exactResult.hits, combined);
+        }
+
+        const engines: string[] = [];
+        if (exactResult.hits.length > 0) engines.push("lexical");
+        if (bm25Hits.size > 0) engines.push("bm25");
+        if (symbolOk) engines.push("symbol");
+        if (engines.length === 0) engines.push("lexical-passthrough");
+        return { hits: combined, engines, degradation };
     }
 
     const bm25Hits = new Map<string, GrepHit>();
@@ -611,6 +669,104 @@ function prependExactHits(exactHits: GrepHit[], rankedHits: GrepHit[]): GrepHit[
         }
     }
     return [...merged.values()];
+}
+
+/**
+ * In-memory BM25 fallback for the no-semantic-index path. Enumerates
+ * ignore-aware source files via file-discovery, reads them (bounded and
+ * cancellation-aware), scores with the shared bm25Scores scorer, and emits
+ * per-file hits with the best query-token-overlap line snippet. No caches or
+ * external dependencies. Returns an empty map when nothing ranks.
+ */
+const MAX_BM25_CANDIDATES = 1000; // ponytail: hard cap on corpus reads; raise if big-repo recall suffers
+// Per-file size cap for the BM25 fallback corpus (matches semantic-index's 2MB limit).
+const MAX_BM25_FILE_BYTES = 2 * 1024 * 1024;
+
+async function runFallbackBm25(
+    pattern: string,
+    searchDir: string,
+    topK: number,
+    contextLines: number,
+    cwd: string,
+    signal: AbortSignal | undefined,
+    scopedFile?: string,
+    fileGlob?: string,
+): Promise<Map<string, GrepHit>> {
+    const hits = new Map<string, GrepHit>();
+    if (signal?.aborted) throw new Error("Operation aborted");
+
+    const fs = await import("node:fs/promises");
+    const { minimatch } = await import("minimatch");
+
+    // Apply fileGlob during discovery (before the candidate cap) so matching
+    // files beyond the first MAX_BM25_CANDIDATES discovered are still considered.
+    const discoveryCap = fileGlob ? 10_000 : MAX_BM25_CANDIDATES;
+    let files = scopedFile
+        ? [scopedFile]
+        : await findCodeFiles(searchDir, discoveryCap, signal);
+    if (fileGlob) {
+        files = files.filter((f) => minimatch(relative(cwd, f).replace(/\\/g, "/"), fileGlob));
+    }
+    files = files.slice(0, MAX_BM25_CANDIDATES);
+
+    const fileList: string[] = [];
+    const contents: string[] = [];
+    for (const f of files) {
+        if (signal?.aborted) throw new Error("Operation aborted");
+        try {
+            const st = await fs.stat(f);
+            if (st.size > MAX_BM25_FILE_BYTES) continue; // skip oversized files
+            contents.push(await fs.readFile(f, "utf-8"));
+            fileList.push(f);
+        } catch {
+            // skip unreadable files
+        }
+    }
+    if (fileList.length === 0) return hits;
+
+    const scores = bm25Scores(pattern, contents);
+    const queryTokens = tokenize(pattern);
+
+    const ranked: Array<{ file: string; score: number; content: string }> = [];
+    for (let i = 0; i < fileList.length; i++) {
+        const score = scores[i] ?? 0;
+        if (score > 0) ranked.push({ file: fileList[i]!, score, content: contents[i]! });
+    }
+    ranked.sort((a, b) => b.score - a.score);
+
+    for (const item of ranked.slice(0, topK)) {
+        const absPath = tryCanonical(item.file);
+        const lines = item.content.split(/\r?\n/);
+        let bestLine = 1;
+        let bestCount = -1;
+        for (let i = 0; i < lines.length; i++) {
+            const lower = lines[i]!.toLowerCase();
+            let count = 0;
+            for (const tok of queryTokens) if (lower.includes(tok)) count++;
+            if (count > bestCount) {
+                bestCount = count;
+                bestLine = i + 1;
+            }
+        }
+        const start = Math.max(0, bestLine - 1 - contextLines);
+        const end = Math.min(lines.length - 1, bestLine - 1 + contextLines);
+        const snippetLines: string[] = [];
+        for (let i = start; i <= end; i++) {
+            snippetLines.push(`    ${String(i + 1).padStart(4, " ")} | ${lines[i] ?? ""}`);
+        }
+        hits.set(`${absPath}:${bestLine}`, {
+            file: absPath,
+            relFile: relative(cwd, absPath).replace(/\\/g, "/"),
+            line: bestLine,
+            endLine: bestLine,
+            name: "(bm25 match)",
+            kind: "bm25",
+            snippet: snippetLines.join("\n"),
+            engines: ["bm25"],
+            score: item.score,
+        });
+    }
+    return hits;
 }
 
 function fuseAndDedup(
