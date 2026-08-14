@@ -25,7 +25,7 @@
  */
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -101,6 +101,9 @@ export interface LSPBridge {
 
   /** Get stats for diagnostics */
   getStats(): LSPBridgeStats;
+
+  /** Get stats scoped to the manager root containing `cwd`, or null. */
+  getStatsForRoot(cwd: string): LSPBridgeStats | null;
 }
 
 export interface LSPBridgeStats {
@@ -775,6 +778,49 @@ async function createBridge(): Promise<LSPBridge | null> {
         managerCount: managerCache.size,
         connectionsByRoot,
         totalOpenDocuments,
+      };
+    },
+
+    /**
+     * Stats scoped to the manager root that contains (or equals) `cwd`.
+     * Returns null when no cached root covers cwd. Used by health so LSP
+     * availability reflects the current workspace, not all roots.
+     */
+    getStatsForRoot(cwd: string): LSPBridgeStats | null {
+      const resolvedCwd = resolve(cwd);
+      let bestRoot: string | null = null;
+      let bestLen = -1;
+      for (const root of managerCache.keys()) {
+        // Sentinel keys (e.g. "__default__" used by isAvailable) are not
+        // filesystem paths — skip them during containment matching.
+        if (!isAbsolute(root)) continue;
+        const rel = relative(root, resolvedCwd);
+        const inside = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+        if (inside && root.length > bestLen) {
+          bestRoot = root;
+          bestLen = root.length;
+        }
+      }
+      if (!bestRoot) {
+        // No path root covers cwd — fall back to the default manager if present.
+        const def = managerCache.get("__default__");
+        if (!def) return null;
+        const defCount = (def as any).connectedLanguageCount ?? 0;
+        const defOpenDocs = (def as any).getAllOpenFiles()?.length ?? 0;
+        return {
+          managerCount: 1,
+          connectionsByRoot: { __default__: defCount },
+          totalOpenDocuments: defOpenDocs,
+        };
+      }
+      const mgr = managerCache.get(bestRoot);
+      if (!mgr) return null;
+      const count = (mgr as any).connectedLanguageCount ?? 0;
+      const openDocs = (mgr as any).getAllOpenFiles()?.length ?? 0;
+      return {
+        managerCount: 1,
+        connectionsByRoot: { [bestRoot]: count },
+        totalOpenDocuments: openDocs,
       };
     },
   };

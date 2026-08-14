@@ -14,6 +14,8 @@ const HealthSchema = Type.Object({});
 export interface HealthToolOptions {
   /** Reads current watcher state from the activation closure. */
   readonly getWatcherState: () => WatcherHealthState;
+  /** Reads whether the shared context graph is built (from the activation closure). */
+  readonly getGraphState?: () => { built: boolean };
 }
 
 const HEALTH_DESCRIPTION =
@@ -28,9 +30,10 @@ export function createHealthTool(opts: HealthToolOptions): ToolDefinition {
     description: HEALTH_DESCRIPTION,
     parameters: HealthSchema as unknown as Record<string, unknown>,
     async execute(_toolCallId: string, _params: any, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: { cwd: string }) {
-      const report = await getRuntimeHealth(ctx.cwd, opts.getWatcherState);
+      const report = await getRuntimeHealth(ctx.cwd, opts.getWatcherState, opts.getGraphState);
       const lines = [
-        `graph: generation=${report.graph.generation}`,
+        `root: ${report.root}`,
+        `graph: generation=${report.graph.generation} built=${report.graph.built}`,
         `watcher: active=${report.watcher.active} dirty=${report.watcher.dirty}`,
         `semanticIndex: available=${report.semanticIndex.available} state=${report.semanticIndex.state}${
           report.semanticIndex.stats

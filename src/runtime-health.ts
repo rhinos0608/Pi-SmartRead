@@ -31,12 +31,14 @@ export type SemanticIndexState =
   | "stale_or_unavailable";
 
 export interface RuntimeHealthReport {
-  graph: { generation: number };
+  /** Current workspace root identity (cwd). */
+  root: string;
+  graph: { generation: number; built: boolean };
   watcher: WatcherHealthState;
   semanticIndex: {
     available: boolean;
     state: SemanticIndexState;
-    stats?: { ready: boolean; updating: boolean; dimension: number | null; fileCount: number; chunkCount: number };
+    stats?: { ready: boolean; updating: boolean; dimension: number | null; fileCount: number; chunkCount: number; hasLastError?: boolean };
   };
   embedding: { enabled: boolean; model: string | null };
   lsp: { available: boolean; stats?: { managerCount: number; totalOpenDocuments: number } };
@@ -63,6 +65,7 @@ export function resetRuntimeHealth(): void {
 export async function getRuntimeHealth(
   cwd: string,
   getWatcherState: () => WatcherHealthState,
+  getGraphState?: () => { built: boolean },
 ): Promise<RuntimeHealthReport> {
   const semanticIndex = getSemanticIndex(cwd);
   const indexStats = semanticIndex?.getStats();
@@ -80,9 +83,8 @@ export async function getRuntimeHealth(
   try {
     const bridge = await getLSPBridge();
     if (bridge) {
-      const stats = bridge.getStats();
-      // Availability is derived from per-root connection stats, not the bridge
-      // isAvailable() default-manager quirk (which always reports false).
+      // Scope LSP availability to the current cwd's root, not all roots.
+      const stats = bridge.getStatsForRoot(cwd) ?? bridge.getStats();
       const available = Object.values(stats.connectionsByRoot).some((count) => count > 0);
       lsp = {
         available,
@@ -101,7 +103,8 @@ export async function getRuntimeHealth(
   }
 
   return {
-    graph: { generation: currentGraphGeneration() },
+    root: cwd,
+    graph: { generation: currentGraphGeneration(), built: getGraphState?.().built ?? false },
     watcher: getWatcherState(),
     semanticIndex: {
       available: semanticIndex?.isAvailable() ?? false,
@@ -113,6 +116,7 @@ export async function getRuntimeHealth(
             dimension: indexStats.dimension,
             fileCount: indexStats.indexedFileCount,
             chunkCount: indexStats.chunkCount,
+            ...(indexStats.lastError ? { hasLastError: true } : {}),
           }
         : undefined,
     },
