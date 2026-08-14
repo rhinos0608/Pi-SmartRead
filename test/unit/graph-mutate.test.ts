@@ -35,4 +35,27 @@ describe("graph_mutate", () => {
       rmSync(parent, { recursive: true, force: true });
     }
   });
+
+  it("returns isError:true when EdgeStore persistence fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "graph-mutate-fail-"));
+    try {
+      // A regular file at the EdgeStore log directory path makes the append
+      // fail (ENOTDIR on mkdir/appendFileSync), forcing a persistence failure.
+      writeFileSync(join(root, ".pi-smartread"), "not-a-directory\n");
+
+      const tool = createGraphMutateTool();
+      const result = await tool.execute(
+        "id-fail",
+        { from: "src/a.ts", to: "src/b.ts", directory: root, relation: "breakage" },
+        undefined,
+        undefined,
+        { cwd: root } as any,
+      );
+
+      expect((result as { isError?: boolean }).isError).toBe(true);
+      expect((result.content[0] as { text: string }).text).toContain("Failed to persist");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

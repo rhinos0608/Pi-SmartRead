@@ -37,7 +37,7 @@ export function createGraphMutateTool(): ToolDefinition {
   const def: any = {
     name: "graph_mutate",
     label: "graph_mutate",
-    description: `[EXPERIMENTAL] Record a verified breakage or co-change relationship between two files/symbols for future graph-aware retrieval. Use only after evidence proves coupling, e.g. { from: "src/auth.ts", to: "test/auth.test.ts", relation: "breakage", context: "auth edit broke token expiry test" }. Prefer search/repo_map to discover relationships before recording; do not use for speculative notes or ordinary reads.`,
+    description: `[EXPERIMENTAL] Record a verified breakage or co-change relationship between two files/symbols for future graph-aware retrieval. Use only after evidence proves coupling, e.g. { from: "src/auth.ts", to: "test/auth.test.ts", relation: "breakage", context: "auth edit broke token expiry test" }. Paths are resolved against the project root (or the explicit 'directory' root). Absolute paths outside the root are accepted as an explicit opt-in — this does NOT automatically expand the workspace boundary. Prefer grep/inspect to discover relationships before recording; do not use for speculative notes or ordinary reads.`,
     parameters: GraphMutateInputSchema,
 
     async execute(
@@ -60,12 +60,16 @@ export function createGraphMutateTool(): ToolDefinition {
 
       try {
         const relation = input.relation ?? "breakage";
-        if (relation === "breakage") {
-          EdgeStore.recordBreakage(resolvedRoot, fromPath, toPath, input.context, input.confidence);
-        } else {
-          EdgeStore.recordCoChange(resolvedRoot, fromPath, toPath, input.context, input.confidence);
-        }
         const label = relation === "breakage" ? "breakage" : "co-change";
+        const ok = relation === "breakage"
+          ? EdgeStore.recordBreakage(resolvedRoot, fromPath, toPath, input.context, input.confidence)
+          : EdgeStore.recordCoChange(resolvedRoot, fromPath, toPath, input.context, input.confidence);
+        if (!ok) {
+          return {
+            content: [{ type: "text", text: `❌ Failed to persist ${label} edge: ${input.from} → ${input.to} (storage write failed)` }],
+            isError: true,
+          };
+        }
         return {
           content: [{ type: "text", text: `✅ Recorded ${label}: ${input.from} → ${input.to}${input.context ? ` (${input.context})` : ""}` }],
         };

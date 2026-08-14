@@ -788,7 +788,7 @@ export class EdgeStore {
     to: string,
     context?: string,
     confidence?: number,
-  ): void {
+  ): boolean {
     const event: MutationEvent = {
       type: "breakage",
       data: {
@@ -800,7 +800,7 @@ export class EdgeStore {
       },
       timestamp: Date.now(),
     };
-    EdgeStore.append(root, event);
+    return EdgeStore.append(root, event);
   }
 
   /**
@@ -818,7 +818,7 @@ export class EdgeStore {
     to: string,
     context?: string,
     confidence?: number,
-  ): void {
+  ): boolean {
     const event: MutationEvent = {
       type: "co_change",
       data: {
@@ -830,7 +830,7 @@ export class EdgeStore {
       },
       timestamp: Date.now(),
     };
-    EdgeStore.append(root, event);
+    return EdgeStore.append(root, event);
   }
 
   /**
@@ -930,7 +930,7 @@ export class EdgeStore {
     }
   }
 
-  private static append(root: string, event: MutationEvent): void {
+  private static append(root: string, event: MutationEvent): boolean {
     const logPath = EdgeStore.getLogPath(root);
     const dir = dirname(logPath);
 
@@ -943,8 +943,10 @@ export class EdgeStore {
     const line = JSON.stringify(event) + "\n";
     try {
       appendFileSync(logPath, line, "utf-8");
+      return true;
     } catch {
-      // Silently ignore write failures — edge recording is advisory
+      // Report persistence failure to the caller (graph_mutate returns an error).
+      return false;
     }
   }
 }
