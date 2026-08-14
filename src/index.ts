@@ -7,8 +7,10 @@ import { startWatching } from "./file-watcher.js";
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
+import type { ContextGraph } from "./context-graph.js";
 import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, resetSharedContextGraph } from "./mcp-registry.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
+import { createHealthTool } from "./health-tool.js";
 import { createReadTool } from "./unified-read.js";
 import { fileURLToPath } from "node:url";
 import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
@@ -87,8 +89,9 @@ ensureHashlineReady().catch((err) =>
 /**
  * Resolve a qualified symbol name to a file path and optional line number.
  * Resolution order: LSP workspace/symbol first, then ContextGraph.findSymbolFiles() fallback.
+ * `graphGetter` supplies the dirty-aware lazy ContextGraph (resets the dirty flag once).
  */
-async function resolveSymbolForReadTool(symbol: string, dirty?: boolean): Promise<{ path: string; line?: number } | null> {
+async function resolveSymbolForReadTool(symbol: string, graphGetter?: () => ContextGraph): Promise<{ path: string; line?: number } | null> {
   const root = process.cwd();
   try {
     const bridge = await getLSPBridge();
@@ -106,7 +109,7 @@ async function resolveSymbolForReadTool(symbol: string, dirty?: boolean): Promis
     // LSP not available
   }
   try {
-    const graph = getSharedContextGraph(root, dirty);
+    const graph = graphGetter ? graphGetter() : getSharedContextGraph(root);
     const files = await graph.findSymbolFiles(symbol);
     if (files.length > 0) {
       return { path: files[0]!.path };
@@ -132,6 +135,27 @@ export default async function (pi: ExtensionAPI) {
     stop: undefined as (() => void) | undefined,
     contextGraphDirty: false,
   };
+
+  // WP-5: single lazy ContextGraph getter that consumes/resets the watcher
+  // dirty flag exactly once. Used by inspect, grep, and read-symbol fallback
+  // so file changes force exactly one rebuild, not an infinite rebuild loop.
+  const freshGraphGetter = () => {
+    const g = getSharedContextGraph(process.cwd(), watchState.contextGraphDirty);
+    watchState.contextGraphDirty = false;
+    return g;
+  };
+
+  // Bind the live evidence resolver synchronously when a bus is present,
+  // BEFORE any tool can execute. The async installInspectAndResolver call
+  // below reuses this same bus (no rebind) and installs the RPC handler.
+  if (pi.events && typeof pi.events.on === "function") {
+    try {
+      getSharedEvidenceResolver(pi.events as {
+        emit: (c: string, d: unknown) => void;
+        on: (c: string, h: (d: unknown) => void) => () => void;
+      });
+    } catch { /* best-effort */ }
+  }
 
   try {
     watchState.stop = startWatching(process.cwd(), (dirtyPaths) => {
@@ -439,7 +463,7 @@ export default async function (pi: ExtensionAPI) {
       }
     }
 
-    // ── Upstream grep low-result hint: suggest wrapped grep for better coverage ──
+    // ── Grep low-result hint: suggest broadening the current query. ──
     if (toolName === "grep" && !event.isError && grepRegistered) {
       const textContent = (outputEvent.content ?? [])
         .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
@@ -449,8 +473,7 @@ export default async function (pi: ExtensionAPI) {
       const lineCount = textContent.split("\n").filter((l: string) => l.trim()).length;
       const lowMatches = isNoMatch || (lineCount > 0 && lineCount < 4);
       if (lowMatches) {
-        const pattern = typeof event.input?.pattern === "string" ? event.input.pattern : "";
-        const hint = `\n[hint] Try grep("${pattern}") for broader coverage with symbol + semantic search.`;
+        const hint = `\n[hint] Low result count. Broaden or rephrase the pattern, or relax the path/glob scope for more matches.`;
         const content = [...(outputEvent.content ?? [])];
         const textIdx = content.findIndex((c: any) => c.type === "text");
         if (textIdx >= 0) {
@@ -494,34 +517,50 @@ export default async function (pi: ExtensionAPI) {
   // 2. Inspect v4: directory → map, file → structural facts + signals
   //    Query mode removed — use grep for code search.
   //    WP-5: pass ContextGraph for graph-dependent params.
-  if (!ToolRegistry.getInstance().has("inspect")) {
-    // Lazy getter resolves at execute time so file-watcher dirty flags are respected
-    const def = buildInspectTool(() => null, () => getSharedContextGraph(process.cwd(), watchState.contextGraphDirty));
-    ToolRegistry.getInstance().register({
-      name: "inspect",
-      description: def.description,
-      inputSchema: def.parameters as Record<string, unknown>,
-      execute: def.execute,
-      category: ToolCategory.READ,
-    });
-  }
+  // 2. Inspect: unconditionally replace the eager MCP fallback with a
+  //    Pi-runtime definition wired to the dirty-aware freshGraphGetter.
+  const inspectDef = buildInspectTool(() => null, freshGraphGetter);
+  ToolRegistry.getInstance().registerOrReplace({
+    name: "inspect",
+    description: inspectDef.description,
+    inputSchema: inspectDef.parameters as Record<string, unknown>,
+    execute: inspectDef.execute,
+    category: ToolCategory.READ,
+  });
 
-  // 2.5 Grep: wrap upstream grep with BM25+symbol+semantic
-  //    WP-5: pass ContextGraph for graphFilter wiring.
-  let grepRegistered = false;
-  if (!ToolRegistry.getInstance().has("grep")) {
-    const grepDef = createGrepTool({
-      contextGraph: () => getSharedContextGraph(process.cwd(), watchState.contextGraphDirty),
-    });
-    ToolRegistry.getInstance().register({
-      name: "grep",
-      description: GREP_DESCRIPTION,
-      inputSchema: grepDef.parameters as Record<string, unknown>,
-      execute: grepDef.execute,
-      category: ToolCategory.READ,
-    });
-    grepRegistered = true;
-  }
+  // 2.5 Grep: unconditionally replace the eager MCP fallback. WP-5:
+  //    pass freshGraphGetter for graphFilter + wire the live evidence
+  //    resolver and session-file fallback so grep evidence reaches patch.
+  const grepRegistered = true;
+  const grepDef = createGrepTool({
+    contextGraph: freshGraphGetter,
+    resolver: {
+      publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
+        getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
+      },
+    },
+    // getSessionFilePath returns null so grep falls back to ctx at execute time.
+    getSessionFilePath: () => null,
+  });
+  ToolRegistry.getInstance().registerOrReplace({
+    name: "grep",
+    description: GREP_DESCRIPTION,
+    inputSchema: grepDef.parameters as Record<string, unknown>,
+    execute: grepDef.execute,
+    category: ToolCategory.READ,
+  });
+
+  // 2.6 Health: additive public status tool (no smartread_ prefix).
+  const healthDef = createHealthTool({
+    getWatcherState: () => ({ active: !!watchState.stop, dirty: watchState.contextGraphDirty }),
+  });
+  ToolRegistry.getInstance().registerOrReplace({
+    name: "health",
+    description: healthDef.description,
+    inputSchema: healthDef.parameters as Record<string, unknown>,
+    execute: healthDef.execute,
+    category: ToolCategory.STATUS,
+  });
 
   // 3. Core tools: the loop iterates all tools from ToolRegistry.getAll()
   //    and registers each via pi.registerTool (covers inspect, skill, and any
@@ -545,7 +584,7 @@ export default async function (pi: ExtensionAPI) {
     publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
       getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
     },
-    resolveSymbol: (s) => resolveSymbolForReadTool(s, watchState.contextGraphDirty),
+    resolveSymbol: (s) => resolveSymbolForReadTool(s, freshGraphGetter),
   }));
 
   // 4. Versioned evidence RPC resolver install: best-effort, runs in the

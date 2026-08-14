@@ -60,6 +60,17 @@ export class ToolRegistry {
     this.tools.set(registration.name, registration);
   }
 
+  /**
+   * Replace (or add) a registration by name. Used by the Pi extension
+   * activation path to override eager MCP fallback registrations with
+   * runtime-aware definitions. Strict duplicate `register()` behavior is
+   * preserved for all other callers.
+   */
+  registerOrReplace(registration: ToolRegistration): void {
+    this.tools.delete(registration.name);
+    this.tools.set(registration.name, registration);
+  }
+
   has(name: string): boolean {
     return this.tools.has(name);
   }
