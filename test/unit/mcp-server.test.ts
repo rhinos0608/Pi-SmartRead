@@ -133,7 +133,7 @@ describe("MCP stdio server", () => {
     expect(result.protocolVersion).toBe("2024-11-05");
     expect(result.capabilities).toBeDefined();
     expect(result.serverInfo.name).toBe("pi-smartread");
-    expect(result.serverInfo.version).toBe("0.1.0");
+    expect(result.serverInfo.version).toBe("0.5.0");
   }, 60_000);
 
   it("responds to tools/list with registered tools", async () => {
@@ -272,6 +272,74 @@ describe("MCP stdio server", () => {
     expect(result).toBeDefined();
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Unknown tool");
+  }, 60_000);
+
+  it("rejects tools/call with invalid arguments via inputSchema validation", async () => {
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: {
+          name: "inspect",
+          // Missing required 'path' — must be rejected at the protocol boundary
+          arguments: {},
+        },
+      },
+    ], 60_000);
+
+    expect(response.jsonrpc).toBe("2.0");
+    expect(response.id).toBe(7);
+    const result = response.result as any;
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Invalid params");
+  }, 60_000);
+
+  it("rejects tools/call with omitted arguments via inputSchema validation", async () => {
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 9,
+        method: "tools/call",
+        params: {
+          name: "inspect",
+          // No 'arguments' key at all — normalized to {} and rejected (missing path)
+        },
+      },
+    ], 60_000);
+
+    expect(response.jsonrpc).toBe("2.0");
+    expect(response.id).toBe(9);
+    const result = response.result as any;
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Invalid params");
+  }, 60_000);
+
+  it("rejects tools/call with null arguments via inputSchema validation", async () => {
+    const response = await callMcpServer([
+      mcpInitialize(),
+      mcpInitialized(),
+      {
+        jsonrpc: "2.0",
+        id: 10,
+        method: "tools/call",
+        params: {
+          name: "inspect",
+          arguments: null,
+        },
+      },
+    ], 60_000);
+
+    expect(response.jsonrpc).toBe("2.0");
+    expect(response.id).toBe(10);
+    // The MCP SDK rejects `arguments: null` at the protocol boundary (before
+    // the handler runs), so the response is a JSON-RPC error, not a tool result.
+    // Null is still rejected — never silently accepted.
+    expect((response as any).error).toBeDefined();
   }, 60_000);
 
   it("returns tool list entries have valid JSON Schema for inputSchema", async () => {

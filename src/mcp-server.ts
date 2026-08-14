@@ -18,12 +18,14 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   ListToolsRequestSchema,
-  CallToolRequestSchema,
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  RequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { Value } from "@sinclair/typebox/value";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,7 +62,7 @@ const tools: ToolDefinition[] = buildToolRegistry();
 // ── MCP Server Setup ───────────────────────────────────────────────
 
 const server = new Server(
-  { name: "pi-smartread", version: "0.1.0" },
+  { name: "pi-smartread", version: "0.5.0" },
   { capabilities: { tools: {}, prompts: {}, resources: {} } },
 );
 
@@ -78,8 +80,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 let toolCallCounter = 0;
 
-server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-  const { name, arguments: args } = request.params;
+// Lenient call-tool schema: allows `arguments` to be omitted/undefined so the
+// handler can normalize it to {} before TypeBox schema validation. `null` is
+// rejected explicitly in the handler (below) — the MCP SDK silently drops
+// schema-rejected requests without a JSON-RPC error response, so rejecting
+// null at the schema boundary would break the error contract.
+const LenientCallToolRequestSchema = RequestSchema.extend({
+  method: z.literal("tools/call"),
+  params: z.object({
+    name: z.string(),
+    arguments: z.record(z.string(), z.unknown()).optional().nullable(),
+  }),
+});
+
+server.setRequestHandler(LenientCallToolRequestSchema, async (request, extra) => {
+  const { name, arguments: rawArgs } = request.params;
+  // Reject null arguments at the request boundary — never silently accepted.
+  if (rawArgs === null) {
+    throw new McpError(ErrorCode.InvalidParams, "arguments must be an object, not null");
+  }
+  // Normalize missing/omitted arguments to {} so TypeBox schema validation runs
+  // uniformly (e.g. a missing required field is rejected as Invalid params).
+  const args = rawArgs ?? {};
 
   const tool = tools.find((t) => t.name === name);
   if (!tool) {
@@ -91,7 +113,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
   try {
     // Validate tool args against inputSchema
-    if (tool.parameters && args !== undefined && args !== null) {
+    if (tool.parameters) {
       try {
         // Simple type-based validation using Value.Check
         const valid = (Value as any).Check(tool.parameters, args);
@@ -111,7 +133,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const ctx = toExtensionContext(SERVER_CWD);
     (ctx.sessionManager as unknown as { getSessionFile: () => string }).getSessionFile = () => MCP_SESSION_FILE;
 
-    const result = await tool.execute(toolCallId, args ?? {}, extra.signal ?? undefined, undefined, ctx);
+    const result = await tool.execute(toolCallId, args, extra.signal ?? undefined, undefined, ctx);
 
     if (result === undefined) {
       return {
