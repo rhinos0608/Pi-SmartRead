@@ -6,7 +6,7 @@ const TOOL_GUIDE_LINES = [
   "- read { paths: [...] }: multiple known files with batch evidence.",
   "- read { query }: indexed BM25+embedding RRF, then reads selected files; falls back to grep+AST discovery.",
   "- inspect { path }: directory → ranked repo map; file → structural facts (callers, parent, children, overrides, re-exports) + quality signals (complexity, public API, reuse, recency, tests, deprecation).",
-  "- grep { pattern }: primary code search — BM25 ranking + symbol matching + semantic fallback. Use for any pattern, symbol name, or concept.",
+  "- grep { pattern }: primary code search — BM25 ranking + symbol matching + semantic fallback. Also accepts { queries: [...] } with 1-10 full search objects.",
   "Prefer narrow params. After code changes, re-run reads/inspects that informed decisions.",
 ];
 

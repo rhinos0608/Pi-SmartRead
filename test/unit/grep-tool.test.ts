@@ -7,10 +7,10 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { createGrepTool, type GrepToolOptions } from "../../src/grep-tool.js";
-import { disposeSemanticIndexes } from "../../src/semantic-index-registry.js";
+import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../src/semantic-index-registry.js";
 
 function makeCtx(cwd: string) {
     return { cwd } as any;
@@ -107,6 +107,127 @@ describe("grep tool — literal mode", () => {
         expect(text).toContain("src/db.ts");
         expect((result.details as any).engines).toEqual(["lexical"]);
     });
+
+    it("searches regex alternation within a file path", async () => {
+        writeFileSync(
+            join(workdir, "src", "index.ts"),
+            "registerTool(browserTool);\nregisterTool(fetchTool);\n",
+            "utf8",
+        );
+        const result = await createGrepTool(makeOpts()).execute(
+            "t-regex-file",
+            { pattern: "browser|registerTool", path: "src/index.ts" },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain("src/index.ts");
+        expect(text).toContain("registerTool(browserTool)");
+        expect(text).not.toContain("src/auth.ts");
+        expect((result.details as any).engines).toEqual(["regex"]);
+    });
+
+    it("searches ordinary text within an absolute file path", async () => {
+        const indexPath = join(workdir, "src", "index.ts");
+        writeFileSync(indexPath, "registerTool(browserTool);\n", "utf8");
+        const result = await createGrepTool(makeOpts()).execute(
+            "t-text-absolute-file",
+            { pattern: "registerTool", path: indexPath },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain("src/index.ts");
+        expect(text).toContain("registerTool(browserTool)");
+        expect((result.details as any).engines).toEqual(["lexical-passthrough"]);
+    });
+
+    it("auto-detects regex alternation for directory searches", async () => {
+        const result = await createGrepTool(makeOpts()).execute(
+            "t-regex-directory",
+            { pattern: "DATABASE_URL|validateToken", path: "src" },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain("src/auth.ts");
+        expect(text).toContain("src/db.ts");
+        expect((result.details as any).engines).toEqual(["regex"]);
+    });
+
+    it("treats regex metacharacters literally when literal is true", async () => {
+        writeFileSync(join(workdir, "src", "patterns.txt"), "browser|registerTool\nbrowser\n", "utf8");
+        const result = await createGrepTool(makeOpts()).execute(
+            "t-regex-literal-override",
+            { pattern: "browser|registerTool", path: "src/patterns.txt", literal: true },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        expect((result.details as any).totalHits).toBe(1);
+        expect((result.details as any).engines).toEqual(["lexical"]);
+    });
+});
+
+// ── Batch queries ──────────────────────────────────────────────────
+
+describe("grep tool — batch queries", () => {
+    it("exposes a bounded queries array of full search objects", () => {
+        const schema = createGrepTool(makeOpts()).parameters as any;
+        expect(schema.properties.queries.type).toBe("array");
+        expect(schema.properties.queries.minItems).toBe(1);
+        expect(schema.properties.queries.maxItems).toBe(10);
+        expect(schema.properties.queries.items.required).toContain("pattern");
+        expect(schema.properties.queries.items.properties.graphFilter).toBeDefined();
+    });
+
+    it("runs multiple full query objects in one call", async () => {
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-batch",
+            {
+                queries: [
+                    { pattern: "DATABASE_URL", literal: true },
+                    { pattern: "validateToken" },
+                ],
+            },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain('Query 1: "DATABASE_URL"');
+        expect(text).toContain('Query 2: "validateToken"');
+        expect(text).toContain("src/db.ts");
+        expect(text).toContain("src/auth.ts");
+
+        const details = result.details as any;
+        expect(details.queryResults).toHaveLength(2);
+        expect(details.queryResults[0].pattern).toBe("DATABASE_URL");
+        expect(details.queryResults[1].pattern).toBe("validateToken");
+        expect(validateInspectionEnvelope(details.workspaceEvidence).ok).toBe(true);
+        expect(details.workspaceEvidence.resources).toHaveLength(2);
+    });
+
+    it("requires exactly one search mode and bounds direct execute calls", async () => {
+        const tool = createGrepTool(makeOpts());
+        const execute = (params: any) => tool.execute("t-batch-invalid", params, undefined, undefined, makeCtx(workdir));
+
+        await expect(execute({ pattern: "auth", queries: [{ pattern: "token" }] }))
+            .rejects.toThrow("Provide exactly one of: pattern or queries");
+        await expect(execute({ queries: [] }))
+            .rejects.toThrow("queries must contain between 1 and 10 search objects");
+        await expect(execute({ queries: Array.from({ length: 11 }, () => ({ pattern: "auth" })) }))
+            .rejects.toThrow("queries must contain between 1 and 10 search objects");
+    });
 });
 
 // ── WP-2: graphFilter schema ───────────────────────────────────────
@@ -140,7 +261,18 @@ describe("grep tool — graphFilter schema (WP-2)", () => {
 // ── Non-literal / cascade ───────────────────────────────────────────
 
 describe("grep tool — non-literal cascade", () => {
-    it("finds known symbol via AST layer when no semantic index", async () => {
+    it("passes through lexical search while the semantic index is unbuilt", async () => {
+        const index = getOrCreateSemanticIndex(workdir, {
+            config: {
+                baseUrl: "http://localhost:11434/v1",
+                model: "test-model",
+                chunkSizeChars: 4096,
+                chunkOverlapChars: 0,
+                maxChunksPerFile: 12,
+            },
+        });
+        expect(index.isAvailable()).toBe(false);
+
         const tool = createGrepTool(makeOpts());
         const result = await tool.execute(
             "t2",
@@ -149,11 +281,10 @@ describe("grep tool — non-literal cascade", () => {
             undefined,
             makeCtx(workdir),
         );
+
         const text = (result.content[0] as { text: string }).text;
         expect(text).toContain("validateToken");
-        // Should have at least symbol engine
-        const engines = (result.details as any).engines as string[];
-        expect(engines).toContain("symbol");
+        expect((result.details as any).engines).toEqual(["lexical-passthrough"]);
     });
 
     it("returns valid evidence envelope with mode='query'", async () => {
@@ -209,6 +340,120 @@ describe("grep tool — non-literal cascade", () => {
         );
         expect(authResources.length).toBe(1);
         expect(authResources[0].allowedRanges.length).toBeGreaterThanOrEqual(2);
+    });
+});
+
+// ── Semantic fallback ──────────────────────────────────────────────
+
+describe("grep tool — semantic fallback", () => {
+    it("uses embeddings only after lexical and symbol search return no hits", async () => {
+        const embed = vi.fn(async (request: { inputs: string[] }) => ({
+            vectors: request.inputs.map((input) => {
+                if (/identity proof|authenticate|validateToken/i.test(input)) return [1, 0, 0];
+                if (/database|connectDatabase|DATABASE_URL/i.test(input)) return [0, 1, 0];
+                return [0, 0, 1];
+            }),
+        }));
+        const index = getOrCreateSemanticIndex(workdir, {
+            config: {
+                baseUrl: "http://localhost:11434/v1",
+                model: "test-model",
+                chunkSizeChars: 4096,
+                chunkOverlapChars: 0,
+                maxChunksPerFile: 12,
+            },
+            fetchEmbeddings: embed as never,
+        });
+        await index.updateIndex();
+        embed.mockClear();
+
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-semantic-fallback",
+            { pattern: "identity proof" },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const details = result.details as any;
+        const text = (result.content[0] as { text: string }).text;
+        expect(details.engines).toEqual(["semantic"]);
+        expect(details.totalHits).toBe(1);
+        expect(embed).toHaveBeenCalledTimes(1);
+        expect(embed.mock.calls[0]?.[0].inputs).toEqual(["identity proof"]);
+        expect(text).toContain("src/auth.ts");
+        expect(text).not.toContain("src/db.ts");
+    });
+
+    it("keeps exact raw matches ahead of partial BM25 matches", async () => {
+        const embed = vi.fn(async (request: { inputs: string[] }) => ({
+            vectors: request.inputs.map(() => [0, 0, 1]),
+        }));
+        const index = getOrCreateSemanticIndex(workdir, {
+            config: {
+                baseUrl: "http://localhost:11434/v1",
+                model: "test-model",
+                chunkSizeChars: 4096,
+                chunkOverlapChars: 0,
+                maxChunksPerFile: 12,
+            },
+            fetchEmbeddings: embed as never,
+        });
+        await index.updateIndex();
+        writeFileSync(
+            join(workdir, "src", "payment.ts"),
+            "export const marker = 'processPayment_special_string';\n",
+            "utf8",
+        );
+
+        const result = await createGrepTool(makeOpts()).execute(
+            "t-exact-over-bm25",
+            { pattern: "processPayment_special_string", limit: 1 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const details = result.details as any;
+        const text = (result.content[0] as { text: string }).text;
+        expect(details.engines).toContain("lexical");
+        expect(text).toContain("src/payment.ts");
+    });
+
+    it("prefers an exact raw match from a file missing in the semantic index", async () => {
+        const embed = vi.fn(async (request: { inputs: string[] }) => ({
+            vectors: request.inputs.map(() => [0, 0, 1]),
+        }));
+        const index = getOrCreateSemanticIndex(workdir, {
+            config: {
+                baseUrl: "http://localhost:11434/v1",
+                model: "test-model",
+                chunkSizeChars: 4096,
+                chunkOverlapChars: 0,
+                maxChunksPerFile: 12,
+            },
+            fetchEmbeddings: embed as never,
+        });
+        await index.updateIndex();
+        writeFileSync(
+            join(workdir, "src", "payment.ts"),
+            "export const marker = 'quuxZorb987654';\n",
+            "utf8",
+        );
+
+        const result = await createGrepTool(makeOpts()).execute(
+            "t-stale-index-lexical",
+            { pattern: "quuxZorb987654" },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const details = result.details as any;
+        const text = (result.content[0] as { text: string }).text;
+        expect(details.engines).toEqual(["lexical-passthrough"]);
+        expect(text).toContain("src/payment.ts");
     });
 });
 
@@ -431,5 +676,49 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
         const resources = details.workspaceEvidence.resources;
         expect(resources).toHaveLength(1);
         expect(resources[0].canonicalPath).toContain("importer.ts");
+    });
+});
+
+// ── Glob-aware retrieval ─────────────────────────────────────────
+describe("grep tool — glob-aware retrieval", () => {
+    it("constrains candidates before bounded topK so limit is filled with matching glob files", async () => {
+        // 30 .ts + 30 .md, all contain "needle", interleaved alphabetically.
+        for (let i = 0; i < 30; i++) {
+            writeFileSync(join(workdir, "src", `f${i}.ts`), `export const needle${i} = 1; // needle\n`, "utf8");
+            writeFileSync(join(workdir, "src", `f${i}.md`), `# doc ${i}\nneedle\n`, "utf8");
+        }
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-glob",
+            { pattern: "needle", literal: true, glob: "src/*.ts", limit: 20 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        const text = (result.content[0] as { text: string }).text;
+        // Glob pre-filter fills the bounded topK with .ts hits (not fewer).
+        expect((result.details as any).shownHits).toBe(20);
+        expect((result.details as any).totalHits).toBeGreaterThanOrEqual(20);
+        expect(text).not.toContain(".md");
+    });
+});
+
+// ── Explicit degradation reasons ─────────────────────────────────
+describe("grep tool — explicit degradation reasons", () => {
+    it("reports index_unavailable degradation when no semantic index is available", async () => {
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-deg",
+            { pattern: "authenticate" },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        // engines contract preserved.
+        expect((result.details as any).engines).toEqual(["lexical-passthrough"]);
+        // structured, non-secret degradation present.
+        const degradation = (result.details as any).degradation;
+        expect(Array.isArray(degradation)).toBe(true);
+        expect(degradation.some((d: any) => d.code === "index_unavailable")).toBe(true);
     });
 });
