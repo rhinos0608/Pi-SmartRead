@@ -40,6 +40,9 @@ export function getSharedContextGraph(
     if (!sharedContextGraph || sharedContextGraphRoot !== root || dirty) {
         sharedContextGraph = new ContextGraph(root);
         sharedContextGraphRoot = root;
+        // Generation is bumped only inside buildContextGraph() after an actual
+        // successful rebuild — NOT on instance creation — so health's
+        // generation reflects real rebuild count, not instance churn.
     }
     return sharedContextGraph;
 }
