@@ -10,6 +10,7 @@ import type {
 import { createReadTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@mariozechner/pi-coding-agent";
 import { validateEmbeddingConfig } from "./config.js";
 import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings, fetchEmbeddingsSharded, SHARD_SIZE } from "./embedding.js";
+import { embeddingProfileId } from "./embedding-profile.js";
 import { PersistentEmbeddingCache } from "./persistent-embedding-cache.js";
 import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
 import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
@@ -77,8 +78,11 @@ function createEmbeddingCacheKey(config: EmbedRequest, query: string, inputs: st
   return JSON.stringify({
     cwdSafeBaseUrl: config.baseUrl.replace(/\/+$/, ""),
     model: config.model,
+    profile: embeddingProfileId(config.model),
     query,
-    inputs: [...inputs].sort(),
+    inputs: [...inputs],
+    inputTypes: config.inputTypes,
+    inputTitles: config.inputTitles,
   });
 }
 
@@ -629,8 +633,11 @@ export function createIntentReadTool(
           }
         }
 
-        // Collect all chunk texts plus the query
+        // Collect all chunk texts plus document titles for model-specific retrieval prompts.
         const allChunkTexts = fileChunks.flatMap((chunks) => chunks.map((c) => c.embeddingText ?? c.text));
+        const allChunkTitles = fileChunks.flatMap((chunks, fileIndex) =>
+          chunks.map(() => successfulFiles[fileIndex]!.path)
+        );
 
         const bodies = successfulFiles.map((f) => f.body!);
         const paths = successfulFiles.map((f) => f.path);
@@ -663,6 +670,8 @@ export function createIntentReadTool(
               model,
               apiKey,
               inputs: [embeddingQuery, ...allChunkTexts],
+              inputTypes: ["query", ...allChunkTexts.map(() => "document" as const)],
+              inputTitles: [undefined, ...allChunkTitles],
             };
             const embeddingCacheKey = createEmbeddingCacheKey(embeddingRequest, query, allChunkTexts);
 

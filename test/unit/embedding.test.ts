@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchEmbeddings } from "../../src/embedding.js";
+import { fetchEmbeddings, fetchEmbeddingsSharded, SHARD_SIZE } from "../../src/embedding.js";
 
 const BASE_URL = "http://localhost:11434/v1";
 const MODEL = "nomic-embed-text";
@@ -27,6 +27,48 @@ describe("fetchEmbeddings", () => {
     const body = JSON.parse(opts?.body as string);
     expect(body.model).toBe(MODEL);
     expect(body.input).toEqual(["query", "file body"]);
+  });
+
+  it("formats typed EmbeddingGemma inputs before POSTing", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeOkResponse([[0.1], [0.2]]));
+
+    await fetchEmbeddings({
+      baseUrl: BASE_URL,
+      model: "text-embedding-embeddinggemma-300m",
+      inputs: ["find auth", "export const auth = true;"],
+      inputTypes: ["query", "document"],
+      inputTitles: [undefined, "src/auth.ts"],
+    });
+
+    const [, opts] = vi.mocked(fetch).mock.calls[0]!;
+    const body = JSON.parse(opts?.body as string);
+    expect(body.input).toEqual([
+      "task: code retrieval | query: find auth",
+      "title: src/auth.ts | text: export const auth = true;",
+    ]);
+  });
+
+  it("preserves EmbeddingGemma roles and titles across shards", async () => {
+    vi.mocked(fetch).mockImplementation(async (_url, options) => {
+      const body = JSON.parse(options?.body as string) as { input: string[] };
+      return makeOkResponse(body.input.map(() => [0.1]));
+    });
+    const inputs = Array.from({ length: SHARD_SIZE + 1 }, (_, index) => `input ${index}`);
+
+    await fetchEmbeddingsSharded({
+      baseUrl: BASE_URL,
+      model: "google/embeddinggemma-300m",
+      inputs,
+      inputTypes: ["query", ...inputs.slice(1).map(() => "document" as const)],
+      inputTitles: [undefined, ...inputs.slice(1).map((_, index) => `src/file-${index + 1}.ts`)],
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const firstBody = JSON.parse(vi.mocked(fetch).mock.calls[0]![1]?.body as string);
+    const secondBody = JSON.parse(vi.mocked(fetch).mock.calls[1]![1]?.body as string);
+    expect(firstBody.input[0]).toBe("task: code retrieval | query: input 0");
+    expect(firstBody.input.at(-1)).toBe("title: src/file-39.ts | text: input 39");
+    expect(secondBody.input).toEqual(["title: src/file-40.ts | text: input 40"]);
   });
 
   it("normalizes trailing slash in baseUrl", async () => {

@@ -79,6 +79,11 @@ describe("LocalEmbeddingProvider construction", () => {
     expect(provider.modelId).toBe("Xenova/bge-small-en-v1");
   });
 
+  it("defaults EmbeddingGemma to fp32 because its activations do not support fp16", () => {
+    const provider = new LocalEmbeddingProvider({ modelId: "google/embeddinggemma-300m" });
+    expect(provider.dtype).toBe("fp32");
+  });
+
   it("accepts modelDir, dtype, and normalize options", () => {
     const provider = new LocalEmbeddingProvider({
       modelId: "Xenova/all-MiniLM-L6-v2",

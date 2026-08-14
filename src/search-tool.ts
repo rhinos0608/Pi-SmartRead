@@ -23,7 +23,7 @@ import {
 import { shouldShowLowResultHint } from "./hook.js";
 import { filenameToLang, isSupportedFile } from "./languages.js";
 import { loadSearchConfig } from "./config.js";
-import { bm25Scores, computeRrfScores } from "./scoring.js";
+import { bm25Scores, computeRrfScores, cosineSimilarity } from "./scoring.js";
 import { fetchEmbeddings } from "./embedding.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
@@ -236,6 +236,8 @@ async function scoreDefinitions(
       model: embeddingConfig.model,
       apiKey: embeddingConfig.apiKey,
       inputs: [query, ...embedTexts],
+      inputTypes: ["query", ...embedTexts.map(() => "document" as const)],
+      inputTitles: [undefined, ...defs.map((definition) => `${definition.relFile}:${definition.name}`)],
       timeoutMs: 30_000,
     });
 
@@ -243,18 +245,7 @@ async function scoreDefinitions(
       const queryVec = vectors[0]!;
       for (let i = 0; i < defs.length; i++) {
         const docVec = vectors[i + 1]!;
-        let dot = 0;
-        let qMag = 0;
-        let dMag = 0;
-        for (let j = 0; j < queryVec.length; j++) {
-          const qv = queryVec[j] ?? 0;
-          const dv = docVec[j] ?? 0;
-          dot += qv * dv;
-          qMag += qv * qv;
-          dMag += dv * dv;
-        }
-        defs[i]!.similarity =
-          qMag > 0 && dMag > 0 ? dot / (Math.sqrt(qMag) * Math.sqrt(dMag)) : 0;
+        defs[i]!.similarity = cosineSimilarity(queryVec, docVec);
       }
 
       const withBm25 = defs
@@ -1254,7 +1245,7 @@ export async function handleGrep(
   params: SearchInput,
   cwd: string,
   signal: AbortSignal | undefined,
-  options?: { preDiscoveredFiles?: string[]; sharedDefinitionCache?: Map<string, CodeDefinition[]>; sharedSummary?: DiscoverySummary },
+  options?: { preDiscoveredFiles?: string[]; sharedDefinitionCache?: Map<string, CodeDefinition[]>; sharedSummary?: DiscoverySummary; fileGlob?: string },
 ) {
   const query = params.query!.trim();
   const maxResults = clampMaxResults(params.maxResults);
@@ -1282,6 +1273,16 @@ export async function handleGrep(
   }
   const definitionCache = options?.sharedDefinitionCache ?? new Map<string, CodeDefinition[]>();
   const matches: GrepSearchMatch[] = [];
+
+  // Glob pre-filter: constrain candidates BEFORE the bounded loop so cutoff
+  // happens after glob (existing post-filter remains as a final safeguard).
+  if (options?.fileGlob) {
+    const { minimatch } = await import("minimatch");
+    const glob = options.fileGlob;
+    allFiles = allFiles.filter((filePath) =>
+      minimatch(relative(cwd, filePath).replace(/\\/g, "/"), glob),
+    );
+  }
 
   const MAX_FILE_BYTES = 10 * 1024 * 1024;
 

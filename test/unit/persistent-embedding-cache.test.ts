@@ -42,6 +42,28 @@ describe("PersistentEmbeddingCache", () => {
     expect(key3).not.toBe(key1);
   });
 
+  it("separates EmbeddingGemma prompt roles and titles", () => {
+    const base = { ...makeReq(), model: "google/embeddinggemma-300m" };
+    const queryKey = PersistentEmbeddingCache.computeKey({
+      ...base,
+      inputTypes: ["query", "document"],
+      inputTitles: [undefined, "src/a.ts"],
+    }, "test", ["document"]);
+    const documentKey = PersistentEmbeddingCache.computeKey({
+      ...base,
+      inputTypes: ["document", "document"],
+      inputTitles: [undefined, "src/a.ts"],
+    }, "test", ["document"]);
+    const renamedKey = PersistentEmbeddingCache.computeKey({
+      ...base,
+      inputTypes: ["query", "document"],
+      inputTitles: [undefined, "src/b.ts"],
+    }, "test", ["document"]);
+
+    expect(queryKey).not.toBe(documentKey);
+    expect(queryKey).not.toBe(renamedKey);
+  });
+
   it("stores and retrieves embedding results", () => {
     const cache = new PersistentEmbeddingCache(tmpDir);
     const key = PersistentEmbeddingCache.computeKey(makeReq(), "query", ["content"]);

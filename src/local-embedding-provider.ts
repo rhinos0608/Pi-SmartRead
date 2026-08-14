@@ -6,12 +6,18 @@
  * error message if it is not installed.
  */
 
+import {
+  formatEmbeddingInputs,
+  isEmbeddingGemmaModel,
+  type EmbeddingInputType,
+} from "./embedding-profile.js";
+
 export interface LocalEmbedOptions {
   /** HuggingFace model ID (default: 'Xenova/all-MiniLM-L6-v2') */
   modelId?: string;
   /** Local model directory — sets env.localModelPath and disallows remote models */
   modelDir?: string;
-  /** ONNX dtype (default: 'fp16' — good balance of size/speed/quality) */
+  /** ONNX dtype (default: 'fp16'; EmbeddingGemma defaults to 'fp32') */
   dtype?: "fp32" | "fp16" | "q8";
   /** Whether to L2-normalize output vectors (default: true) */
   normalize?: boolean;
@@ -20,6 +26,11 @@ export interface LocalEmbedOptions {
 const DEFAULT_MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 const DEFAULT_DTYPE: LocalEmbedOptions["dtype"] = "fp16";
 const DEFAULT_NORMALIZE = true;
+
+export interface LocalEmbedInputOptions {
+  inputTypes?: readonly EmbeddingInputType[];
+  inputTitles?: readonly (string | undefined)[];
+}
 
 // -----------------------------------------------------------------------
 // Tensor → number[][] helpers
@@ -75,10 +86,11 @@ export class LocalEmbeddingProvider {
   private options: { modelId: string; modelDir: string | undefined; dtype: "fp32" | "fp16" | "q8"; normalize: boolean };
 
   constructor(options: LocalEmbedOptions = {}) {
+    const modelId = options.modelId ?? DEFAULT_MODEL_ID;
     this.options = {
-      modelId: options.modelId ?? DEFAULT_MODEL_ID,
+      modelId,
       modelDir: options.modelDir ?? undefined,
-      dtype: (options.dtype ?? DEFAULT_DTYPE) as "fp32" | "fp16" | "q8",
+      dtype: (options.dtype ?? (isEmbeddingGemmaModel(modelId) ? "fp32" : DEFAULT_DTYPE)) as "fp32" | "fp16" | "q8",
       normalize: options.normalize ?? DEFAULT_NORMALIZE,
     };
   }
@@ -113,7 +125,7 @@ export class LocalEmbeddingProvider {
    * configured `normalize` flag so that cosine similarity can be used
    * on the returned vectors without any further post-processing.
    */
-  async embed(inputs: string[]): Promise<number[][]> {
+  async embed(inputs: string[], options: LocalEmbedInputOptions = {}): Promise<number[][]> {
     if (!this.pipeline) {
       throw new Error(
         "LocalEmbeddingProvider is not initialized. Call initialize() first."
@@ -124,7 +136,13 @@ export class LocalEmbeddingProvider {
       return [];
     }
 
-    const result = await this.pipeline(inputs, {
+    const formattedInputs = formatEmbeddingInputs({
+      model: this.options.modelId,
+      inputs,
+      inputTypes: options.inputTypes,
+      inputTitles: options.inputTitles,
+    });
+    const result = await this.pipeline(formattedInputs, {
       pooling: "mean",
       normalize: this.options.normalize,
     });

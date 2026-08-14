@@ -20,6 +20,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { EmbedRequest, EmbedResult } from "./embedding.js";
+import { embeddingProfileId } from "./embedding-profile.js";
 
 const DEFAULT_MAX_ENTRIES = 128;
 const CACHE_DIRNAME = ".pi-smartread.embeddings.cache";
@@ -61,8 +62,11 @@ export class PersistentEmbeddingCache {
     const payload = JSON.stringify({
       baseUrl: req.baseUrl.replace(/\/+$/, ""),
       model: req.model,
+      profile: embeddingProfileId(req.model),
       query,
-      inputs: [...inputs].sort(),
+      inputs: [...inputs],
+      inputTypes: req.inputTypes,
+      inputTitles: req.inputTitles,
     });
     return createHash("sha256").update(payload).digest("hex").slice(0, 16);
   }

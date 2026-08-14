@@ -1,8 +1,17 @@
+import {
+  formatEmbeddingInputs,
+  type EmbeddingInputType,
+} from "./embedding-profile.js";
+
 export interface EmbedRequest {
   baseUrl: string;
   model: string;
   apiKey?: string;
   inputs: string[];
+  /** Positional query/document roles used by model-specific embedding profiles. */
+  inputTypes?: readonly EmbeddingInputType[];
+  /** Positional document titles; ignored for query inputs. */
+  inputTitles?: readonly (string | undefined)[];
   timeoutMs?: number;
 }
 
@@ -26,6 +35,8 @@ function makeLocalProviderKey(req: LocalEmbedRequest): string {
 
 export interface LocalEmbedRequest {
   inputs: string[];
+  inputTypes?: readonly EmbeddingInputType[];
+  inputTitles?: readonly (string | undefined)[];
   modelId?: string;
   modelDir?: string;
   dtype?: "fp32" | "fp16" | "q8";
@@ -59,7 +70,10 @@ export async function fetchLocalEmbeddings(
     cachedLocalProviderKey = key;
   }
 
-  const vectors = await cachedLocalProvider.embed(req.inputs);
+  const vectors = await cachedLocalProvider.embed(req.inputs, {
+    inputTypes: req.inputTypes,
+    inputTitles: req.inputTitles,
+  });
   return { vectors };
 }
 export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
@@ -71,10 +85,12 @@ export const SHARD_SIZE = 40;
 export const MAX_CONCURRENT_SHARDS = 4;
 
 export async function fetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
+  const formattedInputs = formatEmbeddingInputs(req);
+
   // Token validation before sending
   let totalTokens = 0;
-  for (let i = 0; i < req.inputs.length; i++) {
-    const estimatedTokens = Math.ceil((req.inputs[i] ?? "").length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+  for (let i = 0; i < formattedInputs.length; i++) {
+    const estimatedTokens = Math.ceil((formattedInputs[i] ?? "").length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
     totalTokens += estimatedTokens;
     if (estimatedTokens > MAX_ESTIMATED_TOKENS_PER_INPUT) {
       throw new Error(
@@ -100,7 +116,7 @@ export async function fetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
     response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify({ model: req.model, input: req.inputs }),
+      body: JSON.stringify({ model: req.model, input: formattedInputs }),
       signal: controller.signal,
     });
   } catch (err) {
@@ -171,9 +187,11 @@ export async function fetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
  * to account for serialized shard execution.
  */
 export async function fetchEmbeddingsSharded(req: EmbedRequest): Promise<EmbedResult> {
+  const formattedInputs = formatEmbeddingInputs(req);
+
   // Per-input token validation (same as fetchEmbeddings)
-  for (let i = 0; i < req.inputs.length; i++) {
-    const estimatedTokens = Math.ceil((req.inputs[i] ?? "").length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+  for (let i = 0; i < formattedInputs.length; i++) {
+    const estimatedTokens = Math.ceil((formattedInputs[i] ?? "").length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
     if (estimatedTokens > MAX_ESTIMATED_TOKENS_PER_INPUT) {
       throw new Error(
         `Input at index ${i} exceeds token limit: estimated ${estimatedTokens} tokens, max ${MAX_ESTIMATED_TOKENS_PER_INPUT}`,
@@ -181,17 +199,22 @@ export async function fetchEmbeddingsSharded(req: EmbedRequest): Promise<EmbedRe
     }
   }
 
-  // Split into shards of SHARD_SIZE
-  const shards: string[][] = [];
+  // Split into shards of SHARD_SIZE while preserving positional metadata.
+  const shards: EmbedRequest[] = [];
   for (let i = 0; i < req.inputs.length; i += SHARD_SIZE) {
-    shards.push(req.inputs.slice(i, i + SHARD_SIZE));
+    shards.push({
+      ...req,
+      inputs: req.inputs.slice(i, i + SHARD_SIZE),
+      inputTypes: req.inputTypes?.slice(i, i + SHARD_SIZE),
+      inputTitles: req.inputTitles?.slice(i, i + SHARD_SIZE),
+    });
   }
 
   // Pre-validate per-shard token totals (fail fast before any network calls)
   for (let s = 0; s < shards.length; s++) {
-    const shard = shards[s];
+    const shard = shards[s]!;
     let shardTokens = 0;
-    for (const input of shard!) {
+    for (const input of formatEmbeddingInputs(shard)) {
       shardTokens += Math.ceil(input.length / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
     }
     if (shardTokens > MAX_ESTIMATED_TOKENS_PER_BATCH) {
@@ -221,13 +244,13 @@ export async function fetchEmbeddingsSharded(req: EmbedRequest): Promise<EmbedRe
         // Retry once on transient failures (network errors, 5xx).
         // Client errors (4xx — bad API key, invalid model) are not retried.
         try {
-          return await fetchEmbeddings({ ...req, inputs: shard });
+          return await fetchEmbeddings(shard);
         } catch (firstErr) {
           const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
           // HTTP 4xx — permanent failure, don't retry
           if (/HTTP 4\d\d/.test(msg)) throw firstErr;
           // Network/timeout/5xx — retry once
-          return await fetchEmbeddings({ ...req, inputs: shard });
+          return await fetchEmbeddings(shard);
         }
       },
     );
