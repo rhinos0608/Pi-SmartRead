@@ -422,7 +422,7 @@ describe("MCP advanced capabilities", () => {
 
     const result = response.result as any;
     expect(result.serverInfo.name).toBe("pi-smartread");
-    expect(result.serverInfo.version).toBe("0.1.0");
+    expect(result.serverInfo.version).toBe("0.5.0");
     expect(result.capabilities).toBeDefined();
     expect(result.capabilities.tools).toBeDefined();
     expect(result.capabilities.prompts).toBeDefined();

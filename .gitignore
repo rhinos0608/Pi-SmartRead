@@ -17,6 +17,7 @@ understand-anything.config.json
 .smart-edit-undo/
 test/unit/CLAUDE.md
 .subagent-work/
+.subagents/
 research/
 /dump.ts
 config.enc
