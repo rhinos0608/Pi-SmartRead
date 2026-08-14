@@ -316,6 +316,9 @@ function resolvePythonImportPath(
   specifier: string,
 ): string | undefined {
   const dots = specifier.match(/^\.+/)?.[0] ?? "";
+  // Absolute (stdlib / third-party) imports are never resolvable to workspace
+  // files — keep them unresolved. Only relative imports are resolved here.
+  if (!dots) return undefined;
   const name = specifier.slice(dots.length);
   const depth = dots.length;
 
@@ -326,6 +329,14 @@ function resolvePythonImportPath(
     base = parent;
   }
 
+  // Dot-only imports (`from . import x` / `from .. import x`) resolve to the
+  // package itself — the walked-up directory's __init__.py.
+  if (!name) {
+    const pkgInit = resolve(base, "__init__.py");
+    try { if (statSync(pkgInit).isFile()) return pkgInit; } catch { /* not found */ }
+    return undefined;
+  }
+
   // Try directory-based module: <base>/name/__init__.py
   const dirInit = resolve(base, name, "__init__.py");
   try { if (statSync(dirInit).isFile()) return dirInit; } catch { /* not found */ }
@@ -334,7 +345,8 @@ function resolvePythonImportPath(
   const fileMod = resolve(base, `${name}.py`);
   try { if (statSync(fileMod).isFile()) return fileMod; } catch { /* not found */ }
 
-  return resolve(base, name);
+  // Unresolvable — never return a non-existent path.
+  return undefined;
 }
 
 function extractTSReExportsFromFile(
@@ -796,7 +808,9 @@ function extractDependencies(
         ? "re-export"
         : "import";
     try {
-      const resolvedPath = resolveImportPath(filePath, specifier);
+      const resolvedPath = isPy
+        ? resolvePythonImportPath(filePath, specifier)
+        : resolveImportPath(filePath, specifier);
       deps.push({ specifier, line: lineNum, resolvedPath: resolvedPath ?? undefined, kind });
     } catch {
       deps.push({ specifier, line: lineNum, kind });
@@ -851,7 +865,9 @@ export async function findImportDependents(
           const specifier = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "";
           if (!specifier || !specifier.startsWith(".")) continue;
           try {
-            const resolved = resolveImportPath(srcFile, specifier);
+            const resolved = isPy
+              ? resolvePythonImportPath(srcFile, specifier)
+              : resolveImportPath(srcFile, specifier);
             if (resolved && resolve(resolved) === normTarget) {
               const lineNum = content.slice(0, match.index).split("\n").length;
               fileResults.push({

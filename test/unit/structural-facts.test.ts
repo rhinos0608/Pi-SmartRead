@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { extractStructuralFacts } from "../../src/structural-facts.js";
@@ -540,6 +540,108 @@ class MyModel:
       const qux = facts.children.find((c) => c.name === "qux");
       expect(qux).toBeDefined();
       expect(qux!.visibility).toBe("protected");
+    });
+  });
+
+  describe("Python import resolution (regression)", () => {
+    let dir: string;
+    let targetFile: string;
+    let importerFile: string;
+
+    beforeAll(() => {
+      dir = fixtureDir("py-imports");
+      writeFileSync(join(dir, "utils.py"), `def helper(): ...\n`);
+      writeFileSync(join(dir, "models.py"), `class Model: ...\n`);
+      writeFileSync(
+        join(dir, "main.py"),
+        [
+          "import os",
+          "from pathlib import Path",
+          "from django.db import models",
+          "from .utils import helper",
+          "from .models import Model",
+        ].join("\n") + "\n",
+      );
+      targetFile = join(dir, "target.py");
+      writeFileSync(targetFile, `def foo(): ...\n`);
+      importerFile = join(dir, "importer.py");
+      writeFileSync(
+        importerFile,
+        ["from .target import foo", "import os", "import json"].join("\n") + "\n",
+      );
+      writeFileSync(join(dir, "stdlib_only.py"), `import os\nimport sys\n`);
+    });
+
+    afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+    it("dependency path: stdlib/third-party absolute imports stay unresolved; relative imports resolve", async () => {
+      const facts = await extractStructuralFacts(join(dir, "main.py"), dir);
+      const deps = facts.dependencies ?? [];
+      const absSpecifiers = deps.map((d) => d.specifier);
+      expect(absSpecifiers).not.toContain("os");
+      expect(absSpecifiers).not.toContain("pathlib");
+      expect(absSpecifiers).not.toContain("django.db");
+      for (const d of deps) {
+        if (d.resolvedPath) {
+          expect(existsSync(d.resolvedPath)).toBe(true);
+        }
+      }
+      const utilsDep = deps.find((d) => d.specifier === ".utils");
+      expect(utilsDep).toBeDefined();
+      expect(utilsDep!.resolvedPath).toBe(join(dir, "utils.py"));
+      const modelsDep = deps.find((d) => d.specifier === ".models");
+      expect(modelsDep).toBeDefined();
+      expect(modelsDep!.resolvedPath).toBe(join(dir, "models.py"));
+    });
+
+    it("dependent path: relative Python import resolves the dependent; stdlib-only files are excluded", async () => {
+      const { findImportDependents } = await import("../../src/structural-facts.js");
+      const dependents = await findImportDependents(targetFile, dir, "python");
+      const files = dependents.map((d) => d.file);
+      expect(files).toContain(importerFile);
+      expect(files).not.toContain(join(dir, "stdlib_only.py"));
+    });
+  });
+
+  describe("Python dot-only relative imports (regression)", () => {
+    let pkgDir: string;
+    let subDir: string;
+    let modFile: string;
+    let pkgInit: string;
+
+    beforeAll(() => {
+      pkgDir = fixtureDir("py-dot-imports");
+      subDir = join(pkgDir, "sub");
+      mkdirSync(subDir, { recursive: true });
+      pkgInit = join(pkgDir, "__init__.py");
+      writeFileSync(pkgInit, `from .sub import helper\n`);
+      writeFileSync(join(subDir, "__init__.py"), `def helper(): ...\n`);
+      writeFileSync(join(pkgDir, "top.py"), `def top(): ...\n`);
+      modFile = join(subDir, "mod.py");
+      writeFileSync(
+        modFile,
+        ["from . import helper", "from .. import top"].join("\n") + "\n",
+      );
+    });
+
+    afterAll(() => rmSync(pkgDir, { recursive: true, force: true }));
+
+    it("dependency path: `from . import x` and `from .. import y` resolve the package __init__.py", async () => {
+      const facts = await extractStructuralFacts(modFile, pkgDir);
+      const deps = facts.dependencies ?? [];
+      const oneDot = deps.find((d) => d.specifier === ".");
+      expect(oneDot).toBeDefined();
+      expect(oneDot!.resolvedPath).toBe(join(subDir, "__init__.py"));
+      const twoDot = deps.find((d) => d.specifier === "..");
+      expect(twoDot).toBeDefined();
+      expect(twoDot!.resolvedPath).toBe(pkgInit);
+    });
+
+    it("dependent path: `from .. import x` marks the package __init__.py as imported", async () => {
+      const { findImportDependents } = await import("../../src/structural-facts.js");
+      const dependents = await findImportDependents(pkgInit, pkgDir, "python");
+      const files = dependents.map((d) => d.file);
+      expect(files).toContain(modFile);
     });
   });
 });
