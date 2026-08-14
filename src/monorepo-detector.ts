@@ -279,6 +279,8 @@ export function detectServiceBoundaries(rootDir: string): BoundaryResult {
       const lines = content.split("\n");
       let inServices = false;
       let foundServiceBlock = false;
+      let indentDetected = false;
+      let svcIndent = "  ";
 
       for (const line of lines) {
         const trimmed = line.trim();
@@ -292,10 +294,22 @@ export function detectServiceBoundaries(rootDir: string): BoundaryResult {
           continue;
         }
         if (!inServices) continue;
-        // 2-space indented key = service name inside the services mapping
-        const svcMatch = line.match(/^  (\w[\w.-]*):\s*$/);
-        if (svcMatch) {
-          const name = svcMatch[1];
+        // Detect indentation from first indented line beneath services:
+        if (!indentDetected && trimmed.length > 0) {
+          const indentMatch = line.match(/^(\s+)\S/);
+          if (indentMatch) {
+            svcIndent = indentMatch[1]!;
+            indentDetected = true;
+          }
+        }
+        // Service name key at detected indentation; accept quoted or unquoted keys with inline value
+        // Verify exact indent: strip svcIndent prefix, ensure next char is not whitespace
+        if (!line.startsWith(svcIndent)) continue;
+        const afterIndent = line.slice(svcIndent.length);
+        if (afterIndent.length === 0 || afterIndent[0] === ' ' || afterIndent[0] === '\t') continue;
+        const keyMatch = afterIndent.match(/^(['"\u0060]?)([\w][\w.-]*)\1\s*:/);
+        if (keyMatch) {
+          const name = keyMatch[2]!;
           if (name && !services.has(name)) {
             services.set(name, { name, rootPath: ".", dependencies: [] });
           }

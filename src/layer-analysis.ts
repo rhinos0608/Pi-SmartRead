@@ -159,7 +159,7 @@ function classifyFile(
  * Regex matching ES/CJS import specifiers in source text.
  * Captures the specifier string (group 1) from import/require/export statements.
  */
-const IMPORT_SPECIFIER_RE = /(?:import\s+(?:[\w$*\s{},]+\s+from\s+)?["']([^"'\n\r]+)["']|import\s*\(["']([^"'\n\r]+)["']\)|(?:const|let|var)\s+[\w$]+\s*=\s*require\(["']([^"'\n\r]+)["']\)|export\s+(?:[\w$*\s{},]+\s+from\s+)["']([^"'\n\r]+)["'])/g;
+const IMPORT_SPECIFIER_RE = /(?:import\s+(?:[\w$*\s{},]+\s+from\s+)?["']([^"'\n\r]+)["']|import\s*\(["']([^"'\n\r]+)["']\)|(?:const|let|var)\s+(?:\{[\w\s$,]+\}|\[[\w\s$,]+\]|[\w$]+)\s*=\s*require\(["']([^"'\n\r]+)["']\)|export\s+(?:[\w$*\s{},]+\s+from\s+)["']([^"'\n\r]+)["'])/g;
 
 /**
  * Extract bare package specifiers from raw source text.

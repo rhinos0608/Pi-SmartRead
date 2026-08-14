@@ -2,7 +2,7 @@
  * Tests for layer-analysis — architectural layer derivation.
  */
 import { describe, it, expect } from "vitest";
-import { deriveLayers } from "../../src/layer-analysis.js";
+import { deriveLayers, extractPackageSpecifiers } from "../../src/layer-analysis.js";
 
 describe("deriveLayers", () => {
   it("classifies controller files by name pattern", () => {
@@ -81,17 +81,56 @@ describe("deriveLayers", () => {
   });
 
   it("classifies controller by rawImportsByFile package specifiers", () => {
-    const files = ["src/api/handlers.ts"];
-    const rawImports = new Map([["src/api/handlers.ts", new Set(["express"])]
-    ]);
+    // Use a path that does NOT match any controller filePattern (no handler/route/api segments)
+    const files = ["src/modules/user.ts"];
+    // Without imports, should be unclassified
+    const resultNoImports = deriveLayers([], files);
+    expect(resultNoImports.layers.has("controller")).toBe(false);
+    expect(resultNoImports.unclassified).toContain("src/modules/user.ts");
+
+    // With express import hint, classifyFile should pick up controller
+    const rawImports = new Map([["src/modules/user.ts", new Set(["express"])]]);
     const result = deriveLayers([], files, rawImports);
     expect(result.layers.has("controller")).toBe(true);
-    expect(result.layers.get("controller")).toContain("src/api/handlers.ts");
+    expect(result.layers.get("controller")).toContain("src/modules/user.ts");
   });
 
   it("backwards-compatible: works without rawImportsByFile param", () => {
-    const files = ["src/api/handlers.ts"];
+    const files = ["src/api/UserController.ts"];
     const result = deriveLayers([], files);
     expect(result.layers.has("controller")).toBe(true);
+    expect(result.layers.get("controller")).toContain("src/api/UserController.ts");
+  });
+
+  it("classifies controller via extractPackageSpecifiers from source text", () => {
+    // Simulate the executeDirectoryInspect({ layers: true }) runtime path:
+    // source text → extractPackageSpecifiers → rawImportsByFile → deriveLayers
+    const sourceText = `
+import { Router } from "express";
+import { AuthService } from "./auth/service";
+const app = Router();
+`;
+    const packages = extractPackageSpecifiers(sourceText);
+    const files = ["src/modules/user.ts"];
+    const rawImports = new Map([["src/modules/user.ts", packages]]);
+    const result = deriveLayers([], files, rawImports);
+    // "express" import hint should classify as controller
+    expect(result.layers.has("controller")).toBe(true);
+    expect(result.layers.get("controller")).toContain("src/modules/user.ts");
+  });
+
+  it("classifies controller via extractPackageSpecifiers with Python-style imports", () => {
+    // Python from-import should not match controller import hints (no express/fastify etc.)
+    const sourceText = `
+from flask import Flask
+import os
+`;
+    const packages = extractPackageSpecifiers(sourceText);
+    const files = ["src/modules/user.py"];
+    const rawImports = new Map([["src/modules/user.py", packages]]);
+    const result = deriveLayers([], files, rawImports);
+    // flask is not in controller importHints, so should remain unclassified
+    expect(result.layers.has("controller")).toBe(false);
+    expect(result.unclassified).toContain("src/modules/user.py");
   });
 });
