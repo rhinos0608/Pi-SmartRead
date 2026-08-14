@@ -1,7 +1,7 @@
 # Search Tool Consolidation Design
 
+**Status:** Historical / superseded. Archived with the tool-consolidation plans; the `search` tool described here (mode-dispatch union: `symbols`/`callers`/`resolve`/`code`) does not match the shipped surface. Current code ships `search` as a grep-shaped BM25+AST+semantic tool, a separate `symbol` tool, and a separate `grep` tool. See `docs/parity/**` and current source for the live contract.
 **Date:** 2026-05-03
-**Status:** Approved
 
 ## Motivation
 

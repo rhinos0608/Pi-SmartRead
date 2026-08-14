@@ -48,7 +48,7 @@ The `break` exits the inner `for (let i = …)` only; control then falls through
 
 ## High
 
-### H1. `intent-read.ts:691-730` — empty-chunk file loops are wrong; the `else` branch is unreachable
+### H1. `intent-read.ts:723-750` — empty-chunk file loop: invariant currently synchronized, no fix (Medium-architecture)
 ```ts
 for (let fi = 0; fi < fileChunks.length; fi++) {
     const numChunks = fileChunks[fi]!.length;
@@ -68,18 +68,9 @@ for (let fi = 0; fi < fileChunks.length; fi++) {
     chunkIdx += numChunks;
 }
 ```
-The code looks correct, but `chunkIdx += numChunks` is incremented in the same iteration regardless of branch — good. However, the `myChunkVecs` is computed using `chunkVecs.slice(chunkIdx, chunkIdx + numChunks)` where `chunkVecs = vectors.slice(1)` and the index depends on the *previous* file's chunk count. When `fileChunks` and `successfulFiles` are the same length, this is right; but if any file was dropped from `successfulFiles` between the chunk build (line 600) and the score loop (line 704), the mapping breaks. The current code keeps them in sync because `fileChunks` is populated by iterating `successfulFiles` directly, so this is safe **today** — but the implicit coupling is fragile. If a future change skips empty-bodied files after the chunk loop, the chunk map will drift.
+**Reclassified (no fix):** the array loop is **currently synchronized**. `fileChunks` is populated by iterating `successfulFiles` directly, so both arrays have the same length and `chunkIdx` advances by `numChunks` every iteration regardless of branch — the chunk-vector mapping stays aligned. `semanticScores` is filled in **both** branches (`maxScore` or `-Infinity`), so the later `semanticScores[i]!` read (guarded by `embeddingStatus === "ok"`) is safe; on the BM25-fallback path the read is skipped entirely. The `else` branch is reachable when a file yields zero chunks.
 
-**No fix needed yet**, but: extract a `parallel` walk (`for (let i = 0; i < successfulFiles.length; i++)`) over both arrays together and document the invariant.
-
-**H1 (real) — semanticScores length mismatch in embedding-fail path:**
-Look at lines 691–737. When `vectors.length !== allChunkTexts.length + 1`, the code sets `embeddingStatus = "failed_fallback_bm25"` and **does not fill `semanticScores`**. Then at line 768 the loop `for (let i = 0; i < successfulFiles.length; i++) { base.semanticScore = semanticScores[i]!; }` reads `semanticScores[i]!` — but `semanticScores` is `undefined`/empty in the fallback path? Actually `semanticScores: number[] = []` is initialized at line 631 and the only fills happen in the `if (vectors.length === ...)` block. So on fallback, `semanticScores.length === 0` and `semanticScores[i]!` for `i >= 0` would throw `TypeError: undefined`. **However**, the `else` branch at line 766 `if (embeddingStatus === "ok")` guards line 768, so the read is skipped. OK, that path is safe.
-
-But: the `chunkRelevance` is only set inside the OK branch (line 716), so on fallback `fileDetail.chunkRelevance` is undefined. Acceptable; documented.
-
-**Real concern (related) — `filesChunked` count vs. iteration:** the per-iteration `filesChunked++` (line 708) happens **inside** the OK branch. So when embeddings fail, `filesChunked = 0` and `totalChunks = 0`. The `chunkInfo` block at line 1006 uses `filesChunked > 0` as a guard. OK.
-
-**Net H1:** logic is correct but tightly coupled. Mark as Medium-architecture.
+The only risk is the implicit coupling: if a future change drops files from `successfulFiles` after the chunk build, the chunk map would drift. **No fix needed today**; document the invariant (walk both arrays in lockstep) if the coupling is ever touched. Reclassify from High to **Medium-architecture** (tight coupling, not a runtime bug).
 
 ---
 
@@ -199,7 +190,7 @@ A single transient init failure (`initParser()` throws) sets the instance flag t
 
 ---
 
-### M5. `fs-scan-cache.ts:191-200` — expired entries are not deleted before rescan
+### M5. `fs-scan-cache.ts:191-203` — expired entries not deleted before rescan (FIXED)
 ```ts
 const cached = this.cache.get(key);
 const entryData = this.cacheGetWithAge(key);
@@ -212,13 +203,13 @@ if (cached !== undefined && entryData !== undefined) {
     if (age < ttl) {
         return { entries: cached, cacheAgeMs: age };
     }
+    // Expired — delete before rescan to prevent stale refs and race conditions
+    this.cache.delete(key);
 }
 // Cache miss or expired — run the scan
 const result = await scanFn();
 ```
-When TTL is exceeded, the entry stays in the cache. If two callers race (one awaiting `scanFn()`, one in flight), the second sees the expired entry still, gets `cached` (the stale data), and `age < ttl` is false so it falls through to `await scanFn()` again. Both run the scan. Minor wasted work.
-
-**Fix:** `this.cache.delete(key)` before the `await scanFn()`.
+**Status: PARTIALLY FIXED.** The stale-entry deletion is fixed independently: `fs-scan-cache.ts:202-203` now calls `this.cache.delete(key)` before the rescan, so a racing caller can no longer observe the expired entry. However, the duplicate-scan race itself is NOT closed — `getOrScan` has no separate in-flight promise guard, so concurrent callers with an expired/missing entry can still both run `scanFn()`. The finding remains open until a per-key in-flight promise deduplicates concurrent `scanFn()` calls.
 
 ---
 

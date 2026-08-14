@@ -257,7 +257,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
   - Use `input.contextGraph` (populated by WP-5) when available for graph-dependent operations; gracefully degrade to no-graph behavior when absent ✓
 - `src/hook.ts`:
   - Add `symbol` param to read tool schema (TypeBox Optional String) ✓
-  - In execute: if `params.symbol`, resolve via DI-injected `resolveSymbol` → if found, delegate to single-file read with offset = line - 5 ✓
+  - In execute: if `params.symbol`, resolve via DI-injected `resolveSymbol` → if found, delegate to single-file read with `offset = max(1, line - 5)` (clamped to ≥1) and `limit = params.limit` (passthrough; no forced default) ✓
   - Symbol resolution is dependency-injected via `WrapReadToolOptions.resolveSymbol` — no direct LSP import in hook.ts ✓
 
 **Dependencies:** WP-2 (impact-analysis.ts, graph-filter.ts), WP-3 (route-extraction.ts, community-detection.ts, layer-analysis.ts, monorepo-detector.ts, signals.ts extension)

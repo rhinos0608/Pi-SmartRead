@@ -68,9 +68,9 @@ MVP fusion uses reciprocal rank fusion (RRF) across candidate channel ranks with
 
 All expensive phases are best-effort. A failed channel is recorded in `details.degraded` and does not fail the entire search unless no channel can produce output.
 
-## Supporting tool: `smartread_status`
+## Supporting tool: `smartread_status` (removed)
 
-`smartread_status` is a lightweight health check for agents. It reports:
+`smartread_status` was a lightweight health check for agents. It reported:
 
 - working directory;
 - source file count;
@@ -78,7 +78,7 @@ All expensive phases are best-effort. A failed channel is recorded in `details.d
 - known cache directories;
 - registered tool health notes.
 
-Use it before expensive searches or when retrieval quality appears degraded.
+**Deprecated/unavailable:** The tool was removed in a later consolidation; health visibility is now covered by cross-cutting health checks. Do not rely on `smartread_status` in current usage.
 
 ## Non-goals for MVP
 

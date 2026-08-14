@@ -12,9 +12,11 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 
 | Tool | What it does |
 |---|---|
-| `read` | Single-file, multi-file, query-selected file reads, or symbol-resolved code (via `symbol` param) with contextual enrichment and strong evidence. |
-| `inspect` | Two modes — directory (ranked repo map + clusters, layers, boundaries, routes) or file (structural facts + quality signals + call graph traversal, impact analysis, dead code detection, diff mapping). |
-| `grep` | Primary code search — BM25 ranking + AST symbol matching + semantic fallback behind a grep-shaped interface, plus graph-aware filtering (`graphFilter`). |
+| `read` | Single-file, multi-file, query-selected file reads, or symbol-resolved code (via `symbol` param) with contextual enrichment and strong evidence. Only complete rendered read blocks provide strong evidence for patch. |
+| `inspect` | Two modes — directory (ranked repo map + clusters, layers, boundaries, routes) or file (structural facts + quality signals + call graph traversal, impact analysis, dead code detection, diff mapping). Returns search-match evidence — read a file before editing it. |
+| `grep` | Primary code search — BM25 ranking + AST symbol matching + semantic fallback behind a grep-shaped interface, plus graph-aware filtering (`graphFilter`). Returns search-match evidence — read a file before editing it. |
+| `health` | Reports runtime graph/watcher/semantic-index/embedding/LSP status. |
+| `skill` | Manages agent skills. |
 | `graph_mutate` | [experimental] Records semantic coupling observations into the context graph. |
 
 Experimental tools (`graph_mutate` and git-notes tools) are opt-in via `pi-smartread.config.json` and only register when enabled.
@@ -149,11 +151,11 @@ Provide exactly one of `pattern` or `queries`. Batch output stays grouped by que
 
 ### Internal cascade (agent never sees)
 
-Pass `literal: true` to skip the cascade and go straight to exact text grep.
+Pass `literal: true` to skip the cascade and go straight to exact text grep. `literal: true` is deterministic — the pattern is matched as an exact substring (no regex interpretation), so metacharacters like `.` or `*` are literal.
 
 Otherwise (default):
 1. Exact text grep runs first (always) → serves as priority safeguard
-2. If semantic index unavailable → return exact-match results directly
+2. If semantic index unavailable → fuse exact-match results, an in-memory BM25 lexical ranker (token overlap over the discovered source corpus), and AST symbol search
 3. If semantic index available, run:
    - BM25 lexical ranker (token overlap)
    - AST symbol matcher (tree-sitter name resolution)
@@ -161,9 +163,11 @@ Otherwise (default):
 4. If zero fused hits and semantic index supports vector search:
    Embedding semantic fallback (minimum cosine similarity 0.3)
 
+Regex auto-detection is best-effort: it only recognizes a small set of common regex constructs (alternation, anchors, character classes, quantifiers). Patterns not in that set are treated as literal substrings — a pattern that looks like regex but is not recognized will NOT be interpreted as regex.
+
 ```
 Path: literal=true                     → exact-text grep only
-Path: semantic-index-unavailable       → exact-text grep only (passthrough)
+Path: semantic-index-unavailable       → exact-text + in-memory BM25 + AST symbol search
 Path: semantic-index-available         → BM25 + AST → RRF → (embedding fallback if empty)
 ```
 
@@ -211,7 +215,7 @@ When editing file A causes type-checking errors in file B:
 }
 ```
 
-The next `grep` or `inspect` touching A will automatically include B as a candidate.
+Persisted mutation edges are loaded by the next successful graph build and used only by graph-aware operations (they do not automatically expand or alter ordinary `grep`/`inspect` results).
 
 ### Co-change
 
@@ -281,7 +285,7 @@ Create `pi-smartread.config.json` in the current directory or any parent:
 | `rerankEnabled` | — | — | No | Enable structural reranking after RRF (default: false) |
 | `hydeEnabled` | — | — | No | Enable HyDE query expansion (default: false) |
 | `externalReranker` | — | — | No | External reranker API config (see below) |
-| `PI_SMARTREAD_ALLOWED_ROOT` | `CBM_ALLOWED_ROOT` | — | No | **Env var only.** Restricts automatic semantic-index/retrieval scoping to subtree; does NOT gate direct `read`/`grep`/`inspect` tool access |
+| — | `PI_SMARTREAD_ALLOWED_ROOT` | `CBM_ALLOWED_ROOT` | No | **Env var only.** Restricts automatic semantic-index/retrieval scoping to subtree; does NOT gate direct `read`/`grep`/`inspect` tool access |
 
 ### Caching
 

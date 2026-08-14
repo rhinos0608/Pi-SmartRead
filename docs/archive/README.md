@@ -4,7 +4,7 @@ This directory holds historical SmartRead audits and planning documents that
 describe prior tooling and design phases which no longer reflect the current
 codebase.
 
-**Archived as of:** the current working-tree archive task.
+**Archived as of:** 2026-08-14.
 
 **What is archived here:**
 - `audits/` — one-off audit/fix review documents from earlier development cycles.

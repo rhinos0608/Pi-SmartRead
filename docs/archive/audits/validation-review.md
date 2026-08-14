@@ -1,7 +1,8 @@
 # Validation / Test Audit — Pi-SmartRead
 
-**Scope:** `/Users/rhinesharar/Pi-SmartRead/Pi-SmartRead`
+**Scope:** Pi-SmartRead repository root (absolute path redacted)
 **Mode:** Read-only audit. No project/source files were modified. Only test/typecheck/lint commands were executed, and this report was written.
+**Revision:** Reviewed against the working tree (uncommitted changes) on top of HEAD; the reviewed state is captured in the archive commit `b7bc3eb` ("docs: archive superseded audits and plans, document operational invariants").
 **Input files requested:** `plan.md` and `progress.md` — **neither exists** at the specified paths (`ENOENT`). The audit proceeded against the working-tree changes instead (`git status` + `git diff HEAD`), since those represent the actual modified behavior to validate.
 
 ---
@@ -139,7 +140,7 @@ describe("renderSmartReadToolGuide", () => {
 ### 4.5 `context-application.ts` / `context-hygiene.ts` / `bash-context-guard.ts` / `doom-loop-suggestions.ts` / `hook.ts` / `mcp-prompts.ts` / `mcp-server.ts` — well covered
 - `bash-context-guard.ts` new profiles + `toolName` hint → `bash-context-guard.test.ts` (44 tests incl. new `GUARD_HINT_DEEP_SEARCH` + per-tool profile assertions). ✅
 - `context-application.ts` expanded `MASKABLE_STALE_TOOLS` set → `context-application.test.ts` parameterized `it.each` over all 9 added tools. ✅
-- `context-hygiene.ts` `renderStaleRepoMapPlaceholder` → `context-hygiene.test.ts` repo_map placeholder test. ✅
+- `context-hygiene.ts` `renderStaleRepoMapPlaceholder` → `context-hygiene.test.ts` repo_map placeholder test. ⚠️ rendering-only: the test asserts the masking/rendering layer only; the production `resourcesForTool → record → generateReport` path is not exercised (the repo_map placeholder is unreachable dead code — see correctness-review.md Finding 1).
 - `doom-loop-suggestions.ts` `grep` removal + `semantic_read`→`intent_read` rename → `doom-loop.test.ts` 3 new assertions. ✅
 - `hook.ts` always-on tool-guide injection → `hook.test.ts` asserts presence of guide/intent_read/deep_search. ✅
 - `mcp-prompts.ts` + `mcp-server.ts` new `smartread-tool-guide` prompt → `mcp-advanced.test.ts` prompt count 3→4 and get-prompt body assertions. ✅

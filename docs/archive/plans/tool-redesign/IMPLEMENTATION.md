@@ -191,7 +191,7 @@ New function `executeDirectoryInspect()`: Reuse `src/repomap-tool.ts` → `creat
 New function `executeFileInspect()`:
 1. Call `extractStructuralFacts()` (P1)
 2. Call `computeFileSignals()` (P2)
-3. Build evidence envelope: `mode: "file"`, resources per referenced file with `coverage: "search-match"`, `allowedRanges` covering symbol locations
+3. Build evidence envelope: `mode: "symbol"`, resources per referenced file with `coverage: "search-match"`, `allowedRanges` covering symbol locations
 4. Render output text (see SPEC.md file mode example)
 5. Return `InspectV4Result`
 
@@ -290,9 +290,9 @@ async execute(toolCallId, params, signal, _onUpdate, ctx) {
 
 **`runLiteralGrep()`**: Call through to upstream grep via the pi harness (see P5 registration pattern). Or use `handleGrep()` from search-tool.ts as a direct implementation. Build evidence with `coverage: "search-match"` per hit.
 
-**`buildGrepResult()`**: Build `WorkspaceEvidenceEnvelope` with `mode: "grep"`. Resources = one per hit with `allowedRanges`. Render output text: rank, file, line-range, enclosing symbol, snippet + context lines. Add truncation notice if totalHits > shown.
+**`buildGrepResult()`**: Build `WorkspaceEvidenceEnvelope` with `mode: "query"`. Resources = one per hit with `allowedRanges`. Render output text: rank, file, line-range, enclosing symbol, snippet + context lines. Add truncation notice if totalHits > shown.
 
-**Evidence:** Same pattern as current `executeQueryInspectDetails` (src/inspect.ts:122-203): `mode: "grep"`, `coverage: "search-match"`, `resourcesByPath` deduplicated, `allowedRanges` merged.
+**Evidence:** Same pattern as current `executeQueryInspectDetails` (src/inspect.ts:122-203): `mode: "query"`, `coverage: "search-match"`, `resourcesByPath` deduplicated, `allowedRanges` merged.
 
 **Acceptance:**
 - `grep('auth')` → ranked hits from BM25 + symbol
@@ -429,7 +429,7 @@ reg("grep", () => createGrepTool({ resolver: null, getSessionFilePath: () => nul
 
 `inspect-v4.test.ts`:
 - `inspect { path: tmpDir }` → directory mode, map content, evidence mode="map"
-- `inspect { path: tmpFile }` → file mode, structural facts + signals, evidence mode="file"
+- `inspect { path: tmpFile }` → file mode, structural facts + signals, evidence mode="symbol"
 - `inspect { path: "nonexistent" }` → throws
 - `inspect { query: "old" }` → throws with migration message
 - `inspect { symbol: "old" }` → throws with migration message
@@ -442,7 +442,7 @@ reg("grep", () => createGrepTool({ resolver: null, getSessionFilePath: () => nul
 - Deduplication: same file+symbol in BM25 and symbol → merged
 - RRF fusion: score ordering correct
 - Truncation: totalHits > limit → truncated flag set
-- Evidence envelope: mode="grep", coverage="search-match"
+- Evidence envelope: mode="query", coverage="search-match"
 
 **Updated tests:**
 - `inspect-v3.test.ts`: update `resolveMode` tests to `resolveInspectV4Mode`; update `executeInspectDetails`→`executeInspectV4`. Remove query-mode and symbol-mode tests. Add migration-error tests for old params.
@@ -521,7 +521,7 @@ Phase 3
 | MODIFY | `src/inspect-tool.ts` (schema + description) | P3 |
 | NEW | `src/grep-tool.ts` | P4 |
 | MODIFY | `src/index.ts` (registration + grep hint) | P5 |
-| MODIFY | `src/mcp-reg| MODIFY | `src/mcp-registry.ts` (inspect v4 + grep registration) | P5 |
+| MODIFY | `src/mcp-registry.ts` (inspect v4 + grep registration) | P5 |
 | MODIFY | `src/tool-guidance.ts` (guide text) | P7 |
 | MODIFY | `AGENTS.md` (tool docs) | P7 |
 | NEW | `test/unit/structural-facts.test.ts` | P6 |
@@ -561,7 +561,7 @@ Phase 3
 
 3. **Tree-sitter grammar availability**: Native tree-sitter (tags.ts, callgraph.ts) and WASM (grammar-loader.ts) use different grammar packages. **Mitigation**: Structural facts engine uses native tree-sitter via tags.ts (same path as callgraph.ts). Fall back to WASM via grammar-loader.ts if native unavailable for a language.
 
-4. **Evidence pipeline breakage**: New `mode: "file"` and `mode: "grep"` must be accepted by SmartEdit's patch authorization. **Mitigation**: Both modes use `coverage: "search-match"` — identical to current query/symbol modes that SmartEdit already rejects. No change to SmartEdit's authorization logic required. Verify by running SmartEdit's evidence-resolver integration tests after deployment.
+4. **Evidence pipeline breakage**: New `mode: "symbol"` and `mode: "query"` envelopes must be accepted by SmartEdit's evidence validation. **Mitigation**: SmartEdit accepts the query/symbol envelope but rejects these modes for patch authorization — `coverage: "search-match"` is weak evidence and cannot authorize a patch. Patch authorization remains unavailable until `read` provides stronger evidence (full-file/line-range). No change to SmartEdit's authorization logic required. Verify by running SmartEdit's evidence-resolver integration tests after deployment.
 
 5. **`reuse` signal requires ContextGraph**: On cold start, ContextGraph has no cache. First `inspect` call triggers full repo scan. **Mitigation**: Reuse signal returns "Graph unavailable — building..." on cold start. Subsequent calls resolve.
 

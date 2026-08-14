@@ -1,5 +1,7 @@
 # SPEC: inspect v4 + wrapped grep
 
+> **Status:** Historical / superseded. Archived redesign spec. The `inspect` v4 and wrapped `grep` surface it specifies is shipped; see `docs/parity/**` and current source for the live contract. Function names below reflect the shipped v4 naming (`executeInspectV4`, `resolveInspectV4Mode`, `InspectV4Input`, `InspectV4Result`).
+
 ## 1.1 Tool: `inspect` (redesigned)
 
 ### Description (actual text)
@@ -38,8 +40,8 @@ src/
 ├── index.ts
 │   └── activate() — extension entry point
 ├── inspect.ts
-│   ├── executeInspectDetails() — async dispatch
-│   └── resolveMode() — input classifier
+│   ├── executeInspectV4() — async dispatch
+│   └── resolveInspectV4Mode() — input classifier
 ├── hook.ts
 │   ├── interceptContextualRead() — read enrichment
 │   └── createExtendedReadTool() — tool factory
@@ -62,13 +64,13 @@ Parent Module
   (top-level module)
 
 Children (7 exported)
-  computeInspectDetails()         L67  deprecated sync wrapper
-  executeInspectDetails()         L79  async entry point
-  resolveMode()                   L93  input classifier
-  InspectMode                     L32  type
-  InspectDetails                  L35  interface
-  ComputeInspectDetailsInput      L43  interface
-  mergeRanges()                   L205 internal
+  executeInspectV4()              L81  async entry point
+  resolveInspectV4Mode()          L55  input classifier
+  executeDirectoryInspect()      L90  directory mode
+  executeFileInspect()           L382 file mode
+  InspectV4Mode                  L4   type
+  InspectV4Input                 L9   interface
+  InspectV4Result                L47  interface
 
 Base Classes / Interfaces
   (none)
@@ -77,10 +79,10 @@ Overrides
   (none)
 
 Re-Exported By (1)
-  src/inspect-tool.ts — imports executeInspectDetails
+  src/inspect-tool.ts — imports executeInspectV4
 
 Signals
-  Complexity:   High (cyclomatic 12, max 22 in executeQueryInspectDetails)
+  Complexity:   High (cyclomatic 12, max 22 in executeFileInspect)
   Public API:   Yes (7 exported)
   Reuse:        Yes (4 importing files)
   Recency:      3 days ago (commit aff71c4)

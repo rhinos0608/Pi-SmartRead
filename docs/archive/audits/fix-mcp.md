@@ -41,7 +41,7 @@
 
 ### 11. mcp-server.ts — Validate tool args against inputSchema
 - Added `Value.Check(tool.parameters, args)` validation before execute.
-- Returns `-32602 Invalid params` with error details on failure.
+- Returns `isError: true` with `Invalid params: <details>` text on failure (not a JSON-RPC `-32602` code).
 - Imported `Value` from `@sinclair/typebox/value`.
 - Uses `as any` cast to work around TypeBox version incompatibility between `@sinclair/typebox` and `typebox` (peer dep of `@mariozechner/pi-coding-agent`).
 

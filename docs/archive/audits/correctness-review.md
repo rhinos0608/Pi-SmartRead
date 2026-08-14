@@ -104,7 +104,7 @@ There is a second, independent reason it cannot fire even if resources were capt
     {
       "id": "criterion-1",
       "status": "satisfied",
-      "evidence": "Review-only task completed without widening scope: no project/source files were modified. Only the deliverable audit file (audit/correctness-review.md) was written. Findings are scoped to the requested areas (tool registration, MCP server, context hygiene/application, bash guard, doom-loop, hook, intent-read)."
+      "evidence": "Review-only task completed without widening scope: no project/source files were modified. Only the deliverable audit file (docs/archive/audits/correctness-review.md) was written. Findings are scoped to the requested areas (tool registration, MCP server, context hygiene/application, bash guard, doom-loop, hook, intent-read)."
     },
     {
       "id": "criterion-2",
@@ -113,7 +113,7 @@ There is a second, independent reason it cannot fire even if resources were capt
     }
   ],
   "changedFiles": [
-    "audit/correctness-review.md (created — review deliverable only; no project/source files modified)"
+    "docs/archive/audits/correctness-review.md (created — review deliverable only; no project/source files modified)"
   ],
   "testsAddedOrUpdated": [],
   "commandsRun": [

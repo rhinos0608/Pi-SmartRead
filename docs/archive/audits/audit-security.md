@@ -6,17 +6,17 @@
 - **Exploit path:** MCP client calls `resources/read` with `smartread://config`. `getResolvedConfig()` returns `validateEmbeddingConfig()` output verbatim, including `embedding.apiKey` and `embedding.externalReranker.apiKey` if configured via env or `pi-smartread.config.json`.
 - **Fix:** Redact secrets before JSON serialization. Return only booleans/metadata: `apiKeyConfigured: true`, never raw key. Add regression test for `smartread://config` with `PI_SMARTREAD_EMBEDDING_API_KEY` set.
 
-## 2. Workspace file-read boundary missing
-- **Severity:** High
-- **File/line:** `read-many.ts:163-173`, `utils.ts:281-295`
-- **Exploit path:** MCP/Pi caller invokes `read_files` with absolute path like `/etc/passwd` or `/Users/<user>/.ssh/config`. `validatePath()` only rejects literal `..`; it does not require path inside `ctx.cwd`, and `resolveReadPath()` returns absolute paths unchanged before handing them to builtin read.
-- **Fix:** Add central `resolveWorkspacePath(ctx.cwd, requestedPath)` using `realpath` for root and target. Reject targets outside allowed workspace unless explicit `allowOutsideWorkspace` capability exists. Apply to `read_files`, `semantic_read`, builtin-read wrapper, and tests.
+## 2. Workspace file-read boundary — intentionally unrestricted (by design, not a defect)
+- **Severity:** Informational (by design)
+- **File/line:** `read-many.ts:1-12`, `utils.ts:283-291`
+- **Status:** Direct file reads are **intentionally unrestricted** per the operational invariant (AGENTS.md). `resolveExplicitFile`/`resolveReadPath` resolve paths but do **not** gate them to the workspace; `PI_SMARTREAD_ALLOWED_ROOT` scopes the semantic index, background indexing, and retrieval only — it does **not** gate direct reads. Cross-root reads are permitted by design; permission is enforced externally (by the Pi harness), not in this codebase. `validatePath()` rejects literal `..`; `resolveReadPath()` returns absolute paths unchanged.
+- **Do not "fix":** Do not wire `isWithinRoot`/`getAllowedRoot`/`resolveWorkspacePath` into read paths. This is a known, tested, intentional boundary (see `test/unit/workspace-boundary.test.ts`). Escalate rather than silently reversing it.
 
-## 3. Directory parameters allow arbitrary filesystem scans
-- **Severity:** High
-- **File/line:** `search-tool.ts:307-309`, `find-symbol-tool.ts:54-55`, `deep-search-tool.ts:96-98`, `repomap-tool.ts:85-86`, `git-notes-tool.ts:51-52`, `git-notes-tool.ts:86-87`
-- **Exploit path:** MCP caller passes `directory: "/"`, `/Users`, or another repo path. Search/map/symbol/git tools scan/read outside current workspace and return filenames/snippets/git notes.
-- **Fix:** Normalize every `directory` against `ctx.cwd`, then require `realpath(directory)` inside `realpath(ctx.cwd)` or an explicit configured allowlist. `repomap-tool.ts` should use `resolve(ctx.cwd, params.directory)` and same guard.
+## 3. Directory parameters allow arbitrary filesystem scans (addressed; allowed-root scopes index/retrieval)
+- **Severity:** High (original) — addressed in the hardening pass
+- **File/line:** `search-tool.ts`, `find-symbol-tool.ts`, `deep-search-tool.ts`, `repomap-tool.ts`, `git-notes-tool.ts`
+- **Status:** `directory` params for search/map/symbol/git tools are now realpath-bounded to the workspace via `resolveDirParam`/`resolveSearchRoot`/`resolveDirectory`/`resolveSearchDirParam` (see `security-boundary-review.md`). The `PI_SMARTREAD_ALLOWED_ROOT` env var scopes the semantic index, background indexing, and retrieval — it does **not** gate direct file reads, which remain intentionally unrestricted (see finding #2).
+- **Fix (applied):** Normalize every `directory` against `ctx.cwd`, then require `realpath(directory)` inside `realpath(ctx.cwd)` or an explicit configured allowlist.
 
 ## 4. Untrusted repo config can exfiltrate code via embedding/reranker endpoints
 - **Severity:** High

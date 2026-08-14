@@ -1,6 +1,6 @@
 # Deep Search Implementation Plan
 
-> **Note (2026-06-18):** Deep search is a first-class `deep_search` tool. The implementation lives in `deep-search.ts` and is exposed via `deep-search-tool.ts`. The original `smartread_status` tool referenced below was removed.
+> **Note (2026-06-18):** Deep search is consolidated into the unified `search` tool: callers set `depth: "deep"` to trigger the deep path, whose internal `depth` parameter accepts `"quick" | "standard" | "thorough"` (default `"standard"`). The implementation lives in `deep-search.ts`, invoked via `executeDeepSearch` from `search-tool.ts`. The original `smartread_status` tool referenced below was removed.
 
 ## Source brief
 
@@ -9,7 +9,7 @@ This plan implements the MVP from `/Users/rhinesharar/Pi-SmartRead/tmp/deep-sear
 1. add `deep_search` with `quick` and `standard` depth;
 2. fuse structural, symbol, optional semantic, and graph channels;
 3. return provenance-rich markdown and follow-up suggestions;
-4. add `smartread_status` for health visibility.
+4. ~~add `smartread_status` for health visibility.~~ — Removed; health visibility absorbed into cross-cutting health checks.
 
 ## Code changes
 
@@ -41,7 +41,7 @@ Add `deep-search.ts` to `package.json.files` and `tsconfig.json.include`.
 
 Add focused unit tests for:
 
-- `smartread_status` summary output;
+- ~~`smartread_status` summary output;~~ — tool removed; no such test.
 - `deep_search` validation;
 - `deep_search` returning fused markdown and machine-readable details on a temporary TypeScript repository.
 

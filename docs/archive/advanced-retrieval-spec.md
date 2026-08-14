@@ -1,7 +1,7 @@
 # Advanced Repository Retrieval Spec
 
-**Status:** Implemented (with refinements). Most features shipped; see notes below for exceptions.
-**Related research:** `docs/advanced-retrieval-research.md`
+**Status:** Historical / superseded. Archived with the advanced-retrieval plan; see `docs/archive/advanced-retrieval-implementation-plan.md` and current source for the shipped state.
+**Related research:** `docs/archive/advanced-retrieval-research.md`
 **Target:** Pi-SmartRead TypeScript extension, with optional future MCP adapter.
 
 ## Goal

@@ -1,9 +1,9 @@
 # Phase 6–8 Implementation Notes
 
-> **Note (2026-05-19):** All features documented below are shipped and in production. The MCP server now uses `@modelcontextprotocol/sdk` (not bare JSON-RPC as originally planned). `smartread_status` tool was removed in a later consolidation.
+> **Note (2026-05-19):** Most features documented below are shipped and in production. The external/preference reranker (Phase 6) is **dormant** — config-only, no production callers invoke `rerankWithExternal`; it is off by default. The MCP server now uses `@modelcontextprotocol/sdk` (not bare JSON-RPC as originally planned). `smartread_status` tool was removed in a later consolidation.
 
 Covers the implementation of the remaining gaps from the advanced retrieval plan:
-- Phase 6: External/preference reranker endpoint ✅
+- Phase 6: External/preference reranker endpoint ✅ (dormant — config-only, no production callers)
 - Phase 8: MCP adapter (stdio server) ✅
 - HyDE query expansion ✅
 - Retrieval benchmarks (Recall@k/MRR) ✅
@@ -26,18 +26,17 @@ Add to `pi-smartread.config.json`:
 
 ```json
 {
-  "baseUrl": "http://localhost:11434/v1",
   "model": "nomic-embed-text",
   "rerankEnabled": true,
   "externalReranker": {
-    "baseUrl": "https://api.cohere.com/v1",
-    "apiKey": "your-api-key",
     "model": "rerank-english-v3.0",
     "timeoutMs": 10000,
     "maxDocuments": 20
   }
 }
 ```
+
+> **Note:** `baseUrl` and `apiKey` are **environment-only** — supplied as shell environment variables `PI_SMARTREAD_RERANKER_BASE_URL` / `PI_SMARTREAD_RERANKER_API_KEY`, never read from the repo `pi-smartread.config.json` file. The sample above is illustrative; do not commit real endpoints or secrets.
 
 | Field | Default | Description |
 |---|---|---|
@@ -79,7 +78,7 @@ If the external API fails (timeout, HTTP error, network error, unrecognized form
 
 - External reranker is **off by default** — requires explicit config
 - Document snippets may be sent to the external API — document this for users
-- API keys are read from config or environment, never logged
+- API keys are read from the environment only, never logged
 
 ### Tests (8 new)
 

@@ -73,11 +73,11 @@ Scope: `package.json` packaging, `tsconfig`/`eslint` mismatch, runtime imports, 
 
 ## P2 — Test performance and reliability
 
-### 10. MCP tests are slow (179s of the 114.6s test run, ~28% of total time)
+### 10. MCP tests are slow (65.6s + 114s aggregate across the two suites; dominant wall-clock contributor)
 - **Files:**
   - `test/unit/mcp-server.test.ts` (266 lines) — 6 tests, **65.6s**
   - `test/unit/mcp-advanced.test.ts` (448 lines) — 14 tests, **114s**
-- **Cause:** both suites spawn a fresh `node --import tsx mcp-server.ts` subprocess **per test**, with a 30s per-test timeout. tsx + esbuild cold boot is ~8–10s; 20 tests × ~9s = ~180s, matching the observed time.
+- **Cause:** both suites spawn a fresh `node --import tsx mcp-server.ts` subprocess **per test**, with a 30s per-test timeout. tsx + esbuild cold boot is ~8–10s; 20 tests × ~9s ≈ 180s aggregate across the two files, matching the observed per-file durations. (Vitest runs files in parallel, so the aggregate per-file time exceeds the 114.6s wall-clock total.)
 - **Fix options (in order of effort):**
   1. Add `test.mcpServer.keepAlive` mode and a single shared server reused across tests (cut ~150s).
   2. Mark these `describe` blocks with `test.mcpServer.serial` and gate them behind `process.env.RUN_MCP_INTEGRATION=1` so PRs run a fast smoke set.

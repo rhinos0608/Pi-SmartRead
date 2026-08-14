@@ -191,7 +191,7 @@ The `from`/`to` are correctly bounded to `resolvedRoot` (line 61), so they canno
 ## What is already handled well (confirmed during this review)
 
 - **`smartread://config` resource** (`mcp-resources.ts:45-74`): API keys redacted to `apiKeyConfigured: true` booleans; external reranker exposed only as `externalRerankerConfigured: !!…`. (Prior finding #1 — fixed.)
-- **`read_files`** (`read-many.ts:164`): `resolveWorkspacePath(ctx.cwd, resolveReadPath(targetPath))` with realpath check. Internal-URL branch (`skill://`/`memory://`/`graph://`) bypasses disk; `file://` and unknown schemes throw rather than read.
+- **`read_files`** (`read-many.ts:319`): direct file reads are **intentionally unrestricted** — `resolveExplicitFile(ctx.cwd, resolveReadPath(targetPath))` resolves paths but does not gate them to the workspace (permission is handled externally; `PI_SMARTREAD_ALLOWED_ROOT` scopes index/retrieval only). Internal-URL branch (`skill://`/`memory://`/`graph://`) bypasses disk; `file://` and unknown schemes throw rather than read.
 - **`search`/`deep_search`/`repo_map`/`find_symbol`/`git_notes_*` `directory` params**: all use realpath-bounded `resolveDirParam`/`resolveSearchRoot`/`resolveDirectory`/`resolveSearchDirParam` (per-file copies of the same pattern). (Prior finding #3 — fixed.)
 - **`skill://`** (`skill-protocol.ts:33-52`): lexical `startsWith` + `realpathSync` symlink check before `readFile`. (Prior finding #5 — fixed.)
 - **`graph://file/<name>`** (`graph-protocol.ts` → `context-graph.ts:getFileNeighbours` → `getImportNeighbours`): `isPathInside(this.root, fullPath)` guards the `readFileSync`. Symlink-escape via the URL `name` segment does not reach an unbounded read.

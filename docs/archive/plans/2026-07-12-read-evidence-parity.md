@@ -1,5 +1,7 @@
 # Read/Inspect Evidence + Enrichment Parity Implementation Plan
 
+> **Status:** Historical / superseded. Archived implementation plan, shipped (commit `0618026`). The `read` tool now emits a path-mode `details.workspaceEvidence` envelope and shares enrichment via `src/file-context.ts` / `src/path-evidence.ts`. See `docs/parity/**` and current source for the live contract.
+
 > **For agentic workers:** Implement this plan task-by-task in order. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** The `read` tool emits the same strong `details.workspaceEvidence` envelope as `inspect` path mode (so smart-edit's `patch`/`edit` can consume an `evidenceRef` from a plain read), and both the read path and the inspect path mode share the same per-file contextual enrichment: git context (recent commits + trailers), structural/graph/LSP enrichment, and git notes when present.

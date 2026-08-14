@@ -199,11 +199,11 @@ SmartRead achieves agent-facing parity when:
 - [x] Agent can understand module boundaries via community detection (`inspect { clusters: true }`)
 - [x] Agent can query graph schema (what nodes/edges exist) (`inspect { graphSchema: true }`)
 - [x] Agent can extract HTTP route → handler mappings for web projects (`inspect { routes: true }`)
-- [ ] Agent can identify test↔source coverage gaps
+- [ ] Agent can identify test↔source coverage gaps (detectTests() only reports test presence via conventional test paths — no source-to-test coverage-gap analysis yet)
 - [x] Agent has background file watching for real-time invalidation (`file-watcher.ts`)
 - [x] Agent can retrieve code by qualified name (symbol param on read)
 - [ ] Agent's multi-signal scoring includes complexity, AST profile, and proximity signals
-- [ ] Cross-session ADRs feed into retrieval ranking
+- [x] Cross-session ADRs feed into retrieval ranking
 
 **Not required for parity:** Cypher engine, 158 grammars, 3D UI, 43-client support, cross-repo edges, runtime trace ingestion, supervised subprocess indexing, team-shared binary artifact.
 

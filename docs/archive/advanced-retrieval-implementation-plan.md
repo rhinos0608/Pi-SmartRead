@@ -1,7 +1,7 @@
 # Advanced Repository Retrieval Implementation Plan
 
 **Status:** Proposed plan
-**Inputs:** `docs/advanced-retrieval-research.md`, `docs/advanced-retrieval-spec.md`, current TypeScript source.
+**Inputs:** `docs/archive/advanced-retrieval-research.md`, `docs/archive/advanced-retrieval-spec.md`, current TypeScript source.
 
 ## Guiding principle
 
@@ -67,7 +67,7 @@ Build the smallest useful graph-aware retrieval layer first. Keep `intent_read` 
 
 - Unit-test import expansion.
 - Unit-test symbol definition/reference file lookup.
-- Unit-test workspace escape rejection.
+- ~~Unit-test workspace escape rejection.~~ — Superseded: cross-root file reads are intentionally unrestricted (see AGENTS.md operational invariants); do not wire boundary enforcement into read paths.
 - Unit-test deterministic ordering and caps.
 
 ### Exit criteria

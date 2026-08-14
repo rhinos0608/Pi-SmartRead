@@ -328,7 +328,7 @@ All new params in `inspect` produce the existing evidence modes:
 | `callDepth` | `symbol` | Referenced caller/callee files | search-match |
 | `deadCode` | `symbol` (file) / `map` (dir) | Files containing dead functions (file mode) / Zero resources (dir mode) | Directory mode: no file authorization |
 | `impact` | `symbol` | All affected files in blast radius | search-match |
-| `diff` | `symbol` | Changed files + blast radius files | search-match |
+| `diff` | `symbol` | Inspected file + changed files | search-match |
 | `clusters` | `map` | Zero resources | Architecture insight, no file authorization |
 | `graphSchema` | `map` | Zero resources | Schema introspection |
 | `hotspots` | `symbol` (file) / `map` (dir) | Files (file mode) / Zero resources (dir mode) | Directory mode: no file authorization |

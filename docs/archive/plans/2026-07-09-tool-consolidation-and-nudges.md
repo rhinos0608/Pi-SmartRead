@@ -1,5 +1,7 @@
 # Tool Consolidation (Option A) + Contextual Nudges (Option C) Implementation Plan
 
+> **Status:** Historical / superseded. Archived implementation plan. The tool names it removes (`find_symbol`, `symbol_info`, `deep_search`, `intent_read`) no longer exist in the current surface, and the `symbol`/`search`/`read` tools it targets are shipped. The `registerSymbolTool` naming it specifies is live (`src/find-symbol-tool.ts`). See `docs/parity/**` and current source for the live contract.
+
 > **For agentic workers:** Implement this plan task-by-task in order. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Shrink the SmartRead tool surface from 8 core tools to 5 (`read`, `read_files`, `search`, `symbol`, `repo_map`) and inject contextual nudges at the moment of need so agents discover the deeper modes.
