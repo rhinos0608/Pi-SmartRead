@@ -48,7 +48,7 @@
 | Multi-signal combined scoring | 11 signals (TF-IDF, RRI, API sig, AST, dataflow, Halstead, MinHash, proximity, diffusion, +2) | Multi-signal reranking (graph distance, PageRank, path proximity, temporal) — 4-5 signals | PARTIAL |
 | Structural graph search (regex, label, degree) | `search_graph` with regex name, label filter, degree filter | `grep` tool (BM25+AST+semantic cascade + graph-aware filter via `graphFilter` param) | PARTIAL |
 | Cypher-like graph query language | Full read-only openCypher subset (MATCH, WHERE, aggregates, variable paths) | None | GAP |
-| Graph schema introspection | `get_graph_schema` (labels, counts, patterns) | `inspect { graphSchema: true }` — returns node/edge counts and sample edges | PARTIAL |
+| Graph schema introspection | `get_graph_schema` (labels, counts, patterns) | `inspect { graphSchema: true }` — returns file-node counts (deduplicated), edge counts, symbol-entries, and sample edges | PARTIAL |
 | Code snippet retrieval by qualified name | `get_code_snippet` by `<project>.<path>.<name>` | `read { symbol }` resolves via LSP `workspaceSymbol` + context graph fallback | PARITY |
 | Code text search (grep) | `search_code` graph-augmented grep | `grep` tool with multi-engine cascade | SMARTREAD-ONLY |
 | Glob-filtered search | `file_pattern` param on search_graph | `glob` param on grep | PARITY |
@@ -182,7 +182,7 @@ For each in-scope gap or partial: capability, agent value, rough size, build-on 
 | 18 | **Runtime trace ingestion** | Agent can learn actual call patterns from profiling data to improve graph accuracy | L | `callgraph.ts`, `context-graph.ts` | `graph_mutate` could accept trace data; low priority vs static analysis |
 | 19 | **File co-change edges integration** | Near-clone exists but not in main retrieval; SEMANTICALLY_RELATED edges missing | M | `near-clone.ts`, `git-context.ts` | Integrate near-clone into `grep` results boost and inspect enrichment |
 | 20 | **Persistent graph storage** | ContextGraph rebuilds on restart; team-shared artifact could skip re-analysis | L | `context-graph.ts`, `EdgeStore` | Serialize ContextGraph to SQLite on session end; restore on start. Or leverage semantic-index SQLite for graph data |
-| 21 | **Background file watcher** | Agent works on long sessions; snapshot-based detection misses real-time changes | M | `fs-scan-cache.ts`, `incremental-index.ts` | Use Node.js `fs.watch` or chokidar; invalidate caches on change event; no git polling needed |
+| 21 | **Background file watcher** | Agent works on long sessions; snapshot-based detection misses real-time changes | M | `file-watcher.ts`, `incremental-index.ts` | Uses Node.js `fs.watch` (recursive/non-recursive) + chokidar opt-in; debounced cache invalidation |
 | 22 | **Cross-session decision persistence** | Git notes are experimental; ADRs are markdown; neither feeds retrieval ranking | S | `adr-store.ts`, `git-notes.ts`, `intent-read.ts` | Integrate ADRs into retrieval ranking as boost signals; make git notes part of read enrichment |
 | 23 | **Type-aware call resolution (deeper)** | Current callgraph is syntactic; Hybrid LSP in reference resolves generics, inheritance | L | `lsp-bridge.ts`, `callgraph.ts` | LSP bridge already has goToDefinition + findReferences; wire into callgraph for type-aware resolution in TS/JS |
 

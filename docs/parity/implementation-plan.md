@@ -234,7 +234,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 **Wave:** 2 — Depends on WP-2, WP-3 (needs compute modules available)
 **Scope:** Wire all new inspect params to their compute modules, add `symbol` param to read, render output sections
 **ADR:** ADR-001, ADR-004, ADR-005
-**Status:** ~90% complete — schema, compute wiring, validation, and symbol resolution implemented. Remaining: WP-5 runtime DI wiring for contextGraph (grep graphFilter execution path).
+**Status:** ~95% complete — schema, compute wiring, validation, symbol resolution, and WP-5 runtime DI wiring (contextGraph for grep graphFilter + inspect) all implemented.
 
 **Inspect DI ownership:** WP-4 extends `InspectV4Input` (src/inspect-types.ts) with an optional `contextGraph?: ContextGraph` field. This is the type-level contract. WP-5 is responsible for populating this field from `inspect-tool.ts` options at runtime.
 

@@ -51,7 +51,7 @@ If Pi is already running:
 
 ## `read`
 
-Read files with strong workspace evidence. Supports three modes:
+Read files with strong workspace evidence. Supports four modes:
 
 - **Single file**: `{ path: "src/auth.ts" }` or `{ path, offset, limit }`
 - **Multiple files**: `{ paths: [{ path: "a.ts" }, { path: "b.ts" }] }`
@@ -133,25 +133,46 @@ Primary code search tool. Wraps standard text search with a hybrid cascade — t
 { "pattern": "auth middleware" }
 ```
 
+Run up to 10 searches in one call. Top-level options act as shared defaults; query-level options override them:
+
+```json
+{
+  "path": "src",
+  "queries": [
+    { "pattern": "auth middleware" },
+    { "pattern": "DATABASE_URL", "literal": true }
+  ]
+}
+```
+
+Provide exactly one of `pattern` or `queries`. Batch output stays grouped by query and publishes one evidence envelope containing all shown hits.
+
 ### Internal cascade (agent never sees)
 
-```
-Layer 1: BM25 lexical — ranked by token overlap (always)
-Layer 2: AST symbol match — tree-sitter name resolution (always)
-    ↓ RRF fusion (k=60), deduplicate by file+symbol
-If zero hits:
-Layer 3: Embedding semantic (when index available)
-If still zero:
-Layer 4: Pass-through to upstream grep (raw text)
-```
+Pass `literal: true` to skip the cascade and go straight to exact text grep.
 
-Pass `literal: true` to skip the cascade and go straight to raw text search.
+Otherwise (default):
+1. Exact text grep runs first (always) → serves as priority safeguard
+2. If semantic index unavailable → return exact-match results directly
+3. If semantic index available, run:
+   - BM25 lexical ranker (token overlap)
+   - AST symbol matcher (tree-sitter name resolution)
+   ↓ RRF fusion + dedup, exact matches prepended at front
+4. If zero fused hits and semantic index supports vector search:
+   Embedding semantic fallback (minimum cosine similarity 0.3)
+
+```
+Path: literal=true                     → exact-text grep only
+Path: semantic-index-unavailable       → exact-text grep only (passthrough)
+Path: semantic-index-available         → BM25 + AST → RRF → (embedding fallback if empty)
+```
 
 ### Parameters
 
 | Param | Type | Description |
 |---|---|---|
-| `pattern` | string (required) | Text, symbol name, or concept to search for |
+| `pattern` | string | Single text, symbol name, or concept. Mutually exclusive with `queries` |
+| `queries` | object[] | 1-10 full search objects. Mutually exclusive with `pattern` |
 | `path` | string | Directory or file to scope search (default: cwd) |
 | `glob` | string | File filter, e.g. `*.ts` or `src/**/*.py` |
 | `ignoreCase` | boolean | Case-insensitive search (default: false) |
@@ -234,19 +255,25 @@ Create `pi-smartread.config.json` in the current directory or any parent:
 
 ```json
 {
-  "baseUrl": "http://localhost:11434/v1",
   "model": "nomic-embed-text",
-  "apiKey": "ollama"
+  "chunkSizeChars": 4096,
+  "probeEnabled": false,
+  "rerankEnabled": false
 }
 ```
+
+> **Security:** `baseUrl` and `apiKey` are never read from the config file —
+> only from environment variables. Network endpoints are untrusted in
+> repo-level config. Set them via `PI_SMARTREAD_EMBEDDING_BASE_URL` and
+> `PI_SMARTREAD_EMBEDDING_API_KEY` (or `EMBEDDING_BASE_URL` as fallback).
 
 ### Config fields
 
 | Key | Env var | Alt env var | Required | Description |
 |---|---|---|---|---|
-| `baseUrl` | `PI_SMARTREAD_EMBEDDING_BASE_URL` | `EMBEDDING_BASE_URL` | Yes | OpenAI-compatible base URL |
+| `baseUrl` | `PI_SMARTREAD_EMBEDDING_BASE_URL` | `EMBEDDING_BASE_URL` | Yes | OpenAI-compatible base URL (env only, not from file) |
 | `model` | `PI_SMARTREAD_EMBEDDING_MODEL` | `EMBEDDING_MODEL` | Yes | Embedding model name |
-| `apiKey` | `PI_SMARTREAD_EMBEDDING_API_KEY` | — | No | Bearer token |
+| `apiKey` | `PI_SMARTREAD_EMBEDDING_API_KEY` | — | No | Bearer token (env only, not from file) |
 | `chunkSizeChars` | `PI_SMARTREAD_CHUNK_SIZE` | — | No | Target chunk size (default: 4096) |
 | `chunkOverlapChars` | `PI_SMARTREAD_CHUNK_OVERLAP` | — | No | Chunk overlap (default: 512) |
 | `maxChunksPerFile` | `PI_SMARTREAD_MAX_CHUNKS` | — | No | Max chunks per file (default: 12) |
@@ -254,6 +281,7 @@ Create `pi-smartread.config.json` in the current directory or any parent:
 | `rerankEnabled` | — | — | No | Enable structural reranking after RRF (default: false) |
 | `hydeEnabled` | — | — | No | Enable HyDE query expansion (default: false) |
 | `externalReranker` | — | — | No | External reranker API config (see below) |
+| `PI_SMARTREAD_ALLOWED_ROOT` | `CBM_ALLOWED_ROOT` | — | No | **Env var only.** Restricts automatic semantic-index/retrieval scoping to subtree; does NOT gate direct `read`/`grep`/`inspect` tool access |
 
 ### Caching
 
@@ -289,12 +317,15 @@ When active, `details.hyde` reports the generated document, detected pattern, an
 
 An optional external reranker API can replace the local structural reranker. Supports Cohere, Jina, or any compatible endpoint.
 
+> **Security:** Reranker `baseUrl` and `apiKey` are overridden by
+> `PI_SMARTREAD_RERANKER_BASE_URL` and `PI_SMARTREAD_RERANKER_API_KEY`
+> environment variables when set. Network endpoints are untrusted in repo-level
+> config. Non-network settings like `model` and `timeoutMs` may come from file.
+
 ```json
 {
   "rerankEnabled": true,
   "externalReranker": {
-    "baseUrl": "https://api.cohere.com/v1",
-    "apiKey": "your-api-key",
     "model": "rerank-english-v3.0",
     "timeoutMs": 10000,
     "maxDocuments": 20
@@ -479,16 +510,16 @@ The standalone `read_files`, `search`, `repo_map`, and `symbol` tools had been c
 
 ## Related docs
 
-- `docs/research-deep-dive.md` — Design research, ecosystem analysis, and roadmap (predates consolidation; historical)
-- `docs/advanced-retrieval-spec.md` — Proposed architecture for graph-aware retrieval (historical / superseded)
-- `docs/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan (historical / superseded)
-- `docs/advanced-retrieval-research.md` — Academic and industry research survey (historical / superseded)
+- `docs/archive/research-deep-dive.md` — Design research, ecosystem analysis, and roadmap (predates consolidation; historical)
+- `docs/archive/advanced-retrieval-spec.md` — Proposed architecture for graph-aware retrieval (historical / superseded)
+- `docs/archive/advanced-retrieval-implementation-plan.md` — Phase-by-phase implementation plan (historical / superseded)
+- `docs/archive/advanced-retrieval-research.md` — Academic and industry research survey (historical / superseded)
 - `docs/pi-hashline-readmap-research.md` — Cross-extension integration analysis (historical / superseded)
-- `docs/deep-search-spec.md` — Deep search specification (historical / superseded)
-- `docs/deep-search-implementation.md` — Deep search implementation plan (historical / superseded)
-- `docs/phase-6-8-implementation-notes.md` — Notes on external reranker, MCP server, HyDE, benchmarks, multi-language call graphs (historical / superseded)
-- `docs/tool-consolidation-plan.md` — Pre-v3 tool-consolidation design (historical / superseded)
-- `docs/plans/2026-05-03-search-tool-consolidation-design.md` — Pre-v3 search-tool consolidation design (historical / superseded)
+- `docs/archive/deep-search-spec.md` — Deep search specification (historical / superseded)
+- `docs/archive/deep-search-implementation.md` — Deep search implementation plan (historical / superseded)
+- `docs/archive/phase-6-8-implementation-notes.md` — Notes on external reranker, MCP server, HyDE, benchmarks, multi-language call graphs (historical / superseded)
+- `docs/archive/tool-consolidation-plan.md` — Pre-v3 tool-consolidation design (historical / superseded)
+- `docs/archive/plans/2026-05-03-search-tool-consolidation-design.md` — Pre-v3 search-tool consolidation design (historical / superseded)
 - `docs/mcp-quickstart.md` — MCP server setup for Claude Desktop, Cursor, and generic clients
 
 ---

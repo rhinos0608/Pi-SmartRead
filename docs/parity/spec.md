@@ -17,7 +17,7 @@
 // Added to InspectV4Schema in src/inspect-tool.ts
 callDepth: Type.Optional(Type.Number({
   minimum: 1, maximum: 5,
-  description: "BFS call graph traversal depth (1-5). File mode."
+  description: "BFS call graph traversal depth (1-5, default 1). File mode."
 })),
 callDirection: Type.Optional(Type.Union([
   Type.Literal("callers"),

@@ -1,7 +1,7 @@
 # Reference Capability Inventory: DeusData/codebase-memory-mcp
 
 > **Source:** [github.com/DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) — MIT License
-> **Version:** commit hash unknown — captured via web research on 2026-07-16
+> **Version:** commit `e3e4d6fc4a8a47290a4a5cf50fdbb8c0e2033bcb` — retrieved from [github.com/DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) on 2026-07-16
 > **Language:** Pure C, single static binary, zero runtime dependencies
 > **Stars:** 32K+ | **Research paper:** arXiv:2603.27277
 
