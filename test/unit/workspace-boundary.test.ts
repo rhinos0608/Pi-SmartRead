@@ -1,8 +1,15 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalPath, resolveWorkspaceDirectory, resolveWorkspaceFile, resolveWorkspacePath } from "../../src/workspace-boundary.js";
+import {
+  canonicalPath,
+  getAllowedRoot,
+  isWithinRoot,
+  resolveWorkspaceDirectory,
+  resolveWorkspaceFile,
+  resolveWorkspacePath,
+} from "../../src/workspace-boundary.js";
 
 const roots: string[] = [];
 
@@ -51,5 +58,83 @@ describe("workspace boundary", () => {
     // it only gates automatic background indexing via effectiveSemanticRoot.
     expect(resolveWorkspacePath(root, inside, { env })).toBe(canonicalPath(inside));
     expect(resolveWorkspacePath(root, external, { env })).toBe(canonicalPath(external));
+  });
+});
+
+describe("getAllowedRoot", () => {
+  it("returns null when no env var is set", () => {
+    expect(getAllowedRoot("/", {})).toBeNull();
+  });
+
+  it("resolves relative env value against cwd", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "smartread-allowed-"));
+    roots.push(tmp);
+    mkdirSync(join(tmp, "project"), { recursive: true });
+    const env = { PI_SMARTREAD_ALLOWED_ROOT: "project" } as NodeJS.ProcessEnv;
+    const result = getAllowedRoot(tmp, env);
+    expect(result).toBe(canonicalPath(join(tmp, "project")));
+  });
+
+  it("accepts absolute env value as-is", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "smartread-allowed-"));
+    roots.push(tmp);
+    const env = { PI_SMARTREAD_ALLOWED_ROOT: tmp } as NodeJS.ProcessEnv;
+    const result = getAllowedRoot("/", env);
+    expect(result).toBe(canonicalPath(tmp));
+  });
+
+  it("throws when env path does not exist", () => {
+    const env = { PI_SMARTREAD_ALLOWED_ROOT: "/nonexistent/" + Date.now() } as NodeJS.ProcessEnv;
+    expect(() => getAllowedRoot("/", env)).toThrow(/does not exist/);
+  });
+
+  it("falls back to CBM_ALLOWED_ROOT when PI_SMARTREAD_ALLOWED_ROOT is not set", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "smartread-allowed-"));
+    roots.push(tmp);
+    const env = { CBM_ALLOWED_ROOT: tmp } as NodeJS.ProcessEnv;
+    const result = getAllowedRoot("/", env);
+    expect(result).toBe(canonicalPath(tmp));
+  });
+});
+
+describe("isWithinRoot", () => {
+  it("returns true when target is inside root", () => {
+    const root = mkdtempSync(join(tmpdir(), "smartread-iswithin-"));
+    roots.push(root);
+    mkdirSync(join(root, "sub", "deep"), { recursive: true });
+    expect(isWithinRoot(root, join(root, "sub"))).toBe(true);
+    expect(isWithinRoot(root, join(root, "sub", "deep"))).toBe(true);
+  });
+
+  it("returns true for root itself", () => {
+    const root = mkdtempSync(join(tmpdir(), "smartread-iswithin-"));
+    roots.push(root);
+    expect(isWithinRoot(root, root)).toBe(true);
+  });
+
+  it("returns false for path traversal attempts", () => {
+    const root = mkdtempSync(join(tmpdir(), "smartread-iswithin-"));
+    roots.push(root);
+    const malicious = join(root, "..", "..", "etc", "passwd");
+    expect(isWithinRoot(root, malicious)).toBe(false);
+  });
+
+  it("returns false for completely outside path", () => {
+    const root = mkdtempSync(join(tmpdir(), "smartread-iswithin-"));
+    const outside = mkdtempSync(join(tmpdir(), "smartread-outside-"));
+    roots.push(root, outside);
+    expect(isWithinRoot(root, outside)).toBe(false);
+  });
+
+  it("handles symlinked paths correctly (resolves canonical before comparison)", () => {
+    const root = mkdtempSync(join(tmpdir(), "smartread-iswithin-"));
+    const inner = join(root, "target");
+    const outside = mkdtempSync(join(tmpdir(), "smartread-symlink-"));
+    roots.push(root, outside);
+    mkdirSync(inner, { recursive: true });
+    const link = join(root, "link_to_outside");
+    symlinkSync(outside, link);
+    // Symlink points outside root, so after resolution it should be outside
+    expect(isWithinRoot(root, link)).toBe(false);
   });
 });
