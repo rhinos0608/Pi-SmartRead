@@ -242,7 +242,7 @@ describe("expandBlastRadius", () => {
       getMutationNeighbours: () => [],
     } as any;
 
-    const result = await expandBlastRadius("src/a.ts", mockGraph, 3);
+    const result = await expandBlastRadius("src/a.ts", mockGraph, 3, "");
     expect(result.size).toBe(1);
     expect(result.has("src/a.ts")).toBe(true);
   });
@@ -262,7 +262,7 @@ describe("expandBlastRadius", () => {
       getMutationNeighbours: () => [],
     } as any;
 
-    const result = await expandBlastRadius("src/a.ts", mockGraph, 2);
+    const result = await expandBlastRadius("src/a.ts", mockGraph, 2, "");
     expect(result.size).toBe(4);
     expect(result.get("src/a.ts")?.depth).toBe(0);
     expect(result.get("src/b.ts")?.depth).toBe(1);
@@ -286,7 +286,7 @@ describe("expandBlastRadius", () => {
       getMutationNeighbours: () => [],
     } as any;
 
-    const result = await expandBlastRadius("src/a.ts", mockGraph, 1);
+    const result = await expandBlastRadius("src/a.ts", mockGraph, 1, "");
     expect(result.size).toBe(2); // a.ts + b.ts only
     expect(result.has("src/c.ts")).toBe(false);
   });
@@ -305,7 +305,7 @@ describe("expandBlastRadius", () => {
       },
     } as any;
 
-    const result = await expandBlastRadius("src/a.ts", mockGraph, 3);
+    const result = await expandBlastRadius("src/a.ts", mockGraph, 3, "");
     expect(result.size).toBe(2);
     expect(result.get("src/b.ts")?.edgeType).toBe("co_change");
   });
@@ -326,7 +326,7 @@ describe("expandBlastRadius", () => {
       getMutationNeighbours: () => [],
     } as any;
 
-    const result = await expandBlastRadius("src/a.ts", mockGraph, 3);
+    const result = await expandBlastRadius("src/a.ts", mockGraph, 3, "");
     expect(result.size).toBe(3); // a, b, c — no infinite loop
   });
 
@@ -336,7 +336,7 @@ describe("expandBlastRadius", () => {
       getMutationNeighbours: () => [],
     } as any;
 
-    const result = await expandBlastRadius("src/a.ts", mockGraph, 3);
+    const result = await expandBlastRadius("src/a.ts", mockGraph, 3, "");
     expect(result.size).toBe(1); // Only the target
   });
 });

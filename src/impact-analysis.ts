@@ -191,7 +191,7 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
 
   // When ContextGraph is available, perform real BFS traversal
   if (contextGraph) {
-    const bfsResult = await expandBlastRadius(targetFile, contextGraph, maxDepth);
+    const bfsResult = await expandBlastRadius(targetFile, contextGraph, maxDepth, workspaceRoot ?? "");
     for (const [path, { depth }] of bfsResult) {
       visited.set(path, { depth });
     }
@@ -316,17 +316,18 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
  * Maps resolved(to) → resolved(from)[] for files that import a given target.
  * Best-effort: relies on getProvenanceEdges() availability on ContextGraph.
  */
-function buildReverseImportIndex(graph: ContextGraph): Map<string, string[]> {
+function buildReverseImportIndex(graph: ContextGraph, workspaceRoot: string): Map<string, string[]> {
   const index = new Map<string, string[]>();
   const edges = graph.getProvenanceEdges();
+  const _resolve = (p: string) => workspaceRoot ? resolve(workspaceRoot, p) : resolve(p);
   for (const { from, to } of edges) {
-    const key = resolve(to);
+    const key = _resolve(to);
     let list = index.get(key);
     if (!list) {
       list = [];
       index.set(key, list);
     }
-    list.push(resolve(from));
+    list.push(_resolve(from));
   }
   return index;
 }
@@ -342,6 +343,7 @@ export async function expandBlastRadius(
   targetFile: string,
   contextGraph: ContextGraph,
   maxDepth: number,
+  workspaceRoot: string,
 ): Promise<Map<string, { depth: number; edgeType: string }>> {
   const visited = new Map<string, { depth: number; edgeType: string }>();
   const queue: Array<{ path: string; depth: number }> = [{ path: targetFile, depth: 0 }];
@@ -350,6 +352,7 @@ export async function expandBlastRadius(
   // Lazy-built reverse-import index: resolved(to) → resolved(from)[]
   // Captures files that import a given file (imported_by edges).
   let reverseImportIndex: Map<string, string[]> | null = null;
+  const _resolve = (p: string) => workspaceRoot ? resolve(workspaceRoot, p) : resolve(p);
 
   while (queue.length > 0) {
     const current = queue.shift()!;
@@ -373,9 +376,9 @@ export async function expandBlastRadius(
     let reverseImports: string[] = [];
     try {
       if (reverseImportIndex === null) {
-        reverseImportIndex = buildReverseImportIndex(contextGraph);
+        reverseImportIndex = buildReverseImportIndex(contextGraph, workspaceRoot);
       }
-      reverseImports = reverseImportIndex.get(resolve(current.path)) ?? [];
+      reverseImports = reverseImportIndex.get(_resolve(current.path)) ?? [];
     } catch {
       // getProvenanceEdges may fail — skip reverse imports
     }
