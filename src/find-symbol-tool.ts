@@ -1,5 +1,5 @@
 import { existsSync, promises as fs } from "node:fs";
-import { relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition } from "./types.js";
@@ -170,6 +170,7 @@ export async function handleSymbol(
   root: string,
   cwd: string,
   signal?: AbortSignal,
+  fileGlob?: string,
 ) {
   // Fire off LSP workspace search concurrently with the tree-sitter scan so
   // both strategies contribute without sequential latency cost.
@@ -197,6 +198,30 @@ export async function handleSymbol(
     allFiles.push(...files);
   }
   allFiles = [...new Set(allFiles)];
+  // Glob pre-filter: constrain candidates before the bounded scan (existing
+  // post-filter stays as a safeguard).
+  const matchesGlob =
+    fileGlob === undefined
+      ? undefined
+      : async (filePath: string) => {
+          const { minimatch } = await import("minimatch");
+          // Absolute filesystem candidates are normalized relative to cwd;
+          // LSP results already carry cwd-relative paths and must be matched
+          // directly (feeding them back through relative(cwd, ...) would
+          // resolve against process.cwd() and produce wrong paths).
+          const rel = isAbsolute(filePath) ? relative(cwd, filePath) : filePath;
+          return minimatch(rel.replace(/\\/g, "/"), fileGlob as string);
+        };
+  if (matchesGlob) {
+    const seen = new Set<string>();
+    const filtered: string[] = [];
+    for (const filePath of allFiles) {
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
+      if (await matchesGlob(filePath)) filtered.push(filePath);
+    }
+    allFiles = filtered;
+  }
   const matches: SymbolEntry[] = [];
   let totalDefs = 0;
 
@@ -276,7 +301,15 @@ export async function handleSymbol(
   // Merge LSP results first (typically faster/more accurate for configured
   // language servers), then fill remaining slots with tree-sitter results.
   // Deduplicate by file:line so the same symbol isn't shown twice.
-  const lspResults = await lspSearchPromise;
+  const lspResultsRaw = await lspSearchPromise;
+  let lspResults = lspResultsRaw;
+  if (matchesGlob) {
+    const filtered: typeof lspResults = [];
+    for (const r of lspResults) {
+      if (await matchesGlob(r.relative_path)) filtered.push(r);
+    }
+    lspResults = filtered;
+  }
   const seen = new Set<string>();
   const merged: SymbolEntry[] = [];
   for (const r of lspResults) {

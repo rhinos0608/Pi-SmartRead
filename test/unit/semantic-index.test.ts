@@ -8,6 +8,7 @@ import {
   type SemanticIndexOptions,
 } from "../../src/semantic-index.js";
 import { SqliteVecStore, type Chunk } from "../../src/sqlite-vec-store.js";
+import type { EmbedRequest } from "../../src/embedding.js";
 
 class FakeStore {
   chunks = new Map<number, Chunk>();
@@ -106,7 +107,7 @@ function vectorFor(text: string, dimension = 7): number[] {
 
 function makeIndex(root: string, overrides: Partial<SemanticIndexOptions> = {}) {
   const stores: FakeStore[] = [];
-  const embed = vi.fn(async (request: { inputs: string[] }) => ({
+  const embed = vi.fn(async (request: EmbedRequest) => ({
     vectors: request.inputs.map((input) => vectorFor(input)),
   }));
   const index = new SemanticIndex(root, {
@@ -245,6 +246,23 @@ describe("SemanticIndex", () => {
     expect(embed).toHaveBeenCalledTimes(1);
   });
 
+  it("marks indexed chunks as titled documents and searches as a query", async () => {
+    writeFileSync(join(root, "auth.ts"), "export const auth = true;\n");
+    const { index, embed } = makeIndex(root);
+
+    await index.updateIndex();
+    const indexRequest = embed.mock.calls[0]![0];
+    expect(indexRequest.inputTypes).toEqual(indexRequest.inputs.map(() => "document"));
+    expect(indexRequest.inputTitles).toEqual(indexRequest.inputs.map(() => "auth.ts"));
+
+    await index.search("find auth");
+    const queryRequest = embed.mock.calls.at(-1)![0];
+    expect(queryRequest).toMatchObject({
+      inputs: ["find auth"],
+      inputTypes: ["query"],
+    });
+  });
+
   it("uses whole-corpus BM25 plus semantic RRF and supports directory zero hits", async () => {
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "auth.ts"), "export const exactNeedle = 'authentication token';\n");
@@ -301,4 +319,51 @@ describe("SemanticIndex", () => {
 
     index.dispose();
   });
+  it("constrains semantic + hybrid results with fileGlob", async () => {
+    writeFileSync(join(root, "a.ts"), "export const authToken = 'authentication token';\n");
+    writeFileSync(join(root, "b.txt"), "authentication token doc\n");
+    writeFileSync(join(root, "c.ts"), "export const database = 'database schema';\n");
+    const { index } = makeIndex(root);
+    await index.updateIndex();
+
+    const all = await index.search("authentication", { topK: 10, mode: "semantic" });
+    expect(all.map((r) => r.filePath)).toEqual(expect.arrayContaining(["a.ts", "b.txt"]));
+
+    const onlyTs = await index.search("authentication", { topK: 10, mode: "semantic", fileGlob: "*.ts" });
+    const tsPaths = onlyTs.map((r) => r.filePath);
+    expect(tsPaths).toContain("a.ts");
+    expect(tsPaths).not.toContain("b.txt");
+
+    const hybrid = await index.search("authentication", { topK: 10, mode: "hybrid", fileGlob: "*.txt" });
+    const hybridPaths = hybrid.map((r) => r.filePath);
+    expect(hybridPaths).toContain("b.txt");
+    expect(hybridPaths).not.toContain("a.ts");
+    index.dispose();
+  });
+
+  it("does not lose glob-matching rows below the vector-store cutoff when non-glob rows rank higher", async () => {
+    // 3 glob-matching .ts files rank LOW for the query; 5 non-glob .txt files
+    // rank HIGH. With the old k = glob-filtered corpus.length, the vector store
+    // returns only non-glob rows and the glob rows are lost after post-filter.
+    for (const name of ["a.ts", "b.ts", "c.ts"]) {
+      writeFileSync(join(root, name), "export const database = 'database schema';\n");
+    }
+    for (let i = 1; i <= 5; i++) {
+      writeFileSync(join(root, `n${i}.txt`), "authentication token doc\n");
+    }
+    const { index } = makeIndex(root);
+    await index.updateIndex();
+
+    const semantic = await index.search("authentication", { topK: 10, mode: "semantic", fileGlob: "*.ts" });
+    const semanticPaths = semantic.map((r) => r.filePath);
+    expect(semanticPaths).toEqual(expect.arrayContaining(["a.ts", "b.ts", "c.ts"]));
+    expect(semanticPaths).not.toContain("n1.txt");
+
+    const hybrid = await index.search("authentication", { topK: 10, mode: "hybrid", fileGlob: "*.ts" });
+    const hybridPaths = hybrid.map((r) => r.filePath);
+    expect(hybridPaths).toEqual(expect.arrayContaining(["a.ts", "b.ts", "c.ts"]));
+    expect(hybridPaths).not.toContain("n1.txt");
+    index.dispose();
+  });
+
 });

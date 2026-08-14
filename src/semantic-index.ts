@@ -12,6 +12,7 @@ import type { ResolvedEmbeddingConfig } from "./config.js";
 import { validateEmbeddingConfig } from "./config.js";
 import { chunkTextAst } from "./chunking.js";
 import { fetchEmbeddings, type EmbedRequest, type EmbedResult } from "./embedding.js";
+import { embeddingProfileId } from "./embedding-profile.js";
 import { discoverFiles, type FileDiscoveryResult } from "./file-discovery.js";
 import { bm25Scores, computeRanks } from "./scoring.js";
 import {
@@ -30,10 +31,18 @@ export interface SemanticSearchResult {
   score: number;
 }
 
+export type SemanticSearchMode = "hybrid" | "lexical" | "semantic";
+
 export interface SemanticSearchOptions {
   topK?: number;
   /** Project-root-relative directory prefix. */
   pathPrefix?: string;
+  /** Retrieval strategy. Defaults to hybrid RRF. */
+  mode?: SemanticSearchMode;
+  /** Minimum cosine similarity for semantic-only results (-1 to 1). */
+  minScore?: number;
+  /** Project-root-relative glob to constrain candidate files before scoring. */
+  fileGlob?: string;
 }
 
 export interface SemanticIndexStats {
@@ -143,6 +152,22 @@ function emptyMetadata(fingerprint: string): SemanticMetadata {
   };
 }
 
+function toSemanticSearchResult(
+  filePath: string,
+  chunk: CorpusChunk | VecSearchResult,
+  score: number,
+): SemanticSearchResult {
+  return {
+    filePath,
+    symbolKind: chunk.symbolKind,
+    language: chunk.language,
+    codeSnippet: chunk.codeSnippet.slice(0, 400),
+    lineStart: chunk.lineStart,
+    lineEnd: chunk.lineEnd,
+    score,
+  };
+}
+
 export class SemanticIndex {
   readonly root: string;
   private readonly config: ResolvedEmbeddingConfig | null;
@@ -169,6 +194,7 @@ export class SemanticIndex {
     this.fingerprint = sha256(JSON.stringify({
       baseUrl: this.config?.baseUrl.replace(/\/+$/, "") ?? "",
       model: this.config?.model ?? "",
+      embeddingProfile: embeddingProfileId(this.config?.model ?? ""),
       chunkSizeChars: this.config?.chunkSizeChars ?? 4096,
       chunkOverlapChars: this.config?.chunkOverlapChars ?? 512,
       maxChunksPerFile: this.config?.maxChunksPerFile ?? 12,
@@ -312,6 +338,8 @@ export class SemanticIndex {
           model: this.config!.model,
           apiKey: this.config!.apiKey,
           inputs: texts,
+          inputTypes: texts.map(() => "document" as const),
+          inputTitles: texts.map(() => relPath),
         });
         if (this.disposed) throw new SemanticUnavailableError("Semantic index was disposed during update");
         if (embedded.vectors.length !== texts.length || embedded.vectors.length === 0) {
@@ -376,18 +404,61 @@ export class SemanticIndex {
     if (!this.config) throw new SemanticUnavailableError("Embedding configuration is unavailable");
     const topK = Math.max(1, Math.min(100, Math.trunc(options.topK ?? 20)));
     const prefix = options.pathPrefix ? normalizeRelative(options.pathPrefix) : undefined;
+    const mode = options.mode ?? "hybrid";
+    const minScore = Math.max(-1, Math.min(1, options.minScore ?? -1));
     if (!this.store) return [];
 
-    const corpus = this.store.getAllChunks().filter((chunk) => isWithinPrefix(chunk.filePath, prefix));
+    let corpus = this.store.getAllChunks().filter((chunk) => isWithinPrefix(chunk.filePath, prefix));
     if (corpus.length === 0) return [];
+    // Prefix-filtered candidate count BEFORE glob narrowing. The vector store
+    // only knows the prefix, not the glob, so it must be asked for enough rows
+    // to cover the full prefix pool; otherwise non-glob rows consume k and
+    // glob-matching rows below the artificial cutoff are silently lost.
+    const prefixCandidateCount = corpus.length;
+
+    // Glob pre-filter: constrain candidate chunks (and later semantic rows)
+    // before bounded topK so cutoff happens after glob.
+    let matchGlob: ((p: string) => boolean) | undefined;
+    if (options.fileGlob) {
+      const { minimatch } = await import("minimatch");
+      const glob = normalizeRelative(options.fileGlob);
+      matchGlob = (p: string) => minimatch(normalizeRelative(p), glob);
+    }
+    if (matchGlob) corpus = corpus.filter((chunk) => matchGlob!(chunk.filePath));
+    if (corpus.length === 0) return [];
+
+    const chunksByFile = new Map<string, CorpusChunk[]>();
+    for (const chunk of corpus) {
+      const list = chunksByFile.get(chunk.filePath) ?? [];
+      list.push(chunk);
+      chunksByFile.set(chunk.filePath, list);
+    }
+    const filePaths = [...chunksByFile.keys()].sort();
+    const bodies = filePaths.map((path) => chunksByFile.get(path)!.map((chunk) => chunk.codeSnippet).join("\n"));
+    const lexicalScores = bm25Scores(query, bodies);
+
+    if (mode === "lexical") {
+      return filePaths
+        .map((filePath, index) => ({ filePath, score: lexicalScores[index] ?? 0 }))
+        .filter(({ score }) => score > 0)
+        .sort((a, b) => b.score - a.score || a.filePath.localeCompare(b.filePath))
+        .slice(0, topK)
+        .map(({ filePath, score }) => {
+          const chunks = chunksByFile.get(filePath)!;
+          const chunkScores = bm25Scores(query, chunks.map((chunk) => chunk.codeSnippet));
+          const bestIndex = chunkScores.reduce((best, value, index) => value > (chunkScores[best] ?? -Infinity) ? index : best, 0);
+          return toSemanticSearchResult(filePath, chunks[bestIndex]!, score);
+        });
+    }
 
     let queryVector: number[];
     try {
       const response = await this.embed({
         baseUrl: this.config.baseUrl,
-        model: this.config!.model,
+        model: this.config.model,
         apiKey: this.config.apiKey,
         inputs: [query],
+        inputTypes: ["query"],
       });
       queryVector = response.vectors[0] ?? [];
     } catch (error) {
@@ -404,23 +475,15 @@ export class SemanticIndex {
     try {
       semanticRows = this.store.search(
         new Float32Array(queryVector),
-        corpus.length,
+        matchGlob ? prefixCandidateCount : corpus.length,
         prefix ? { filePathPrefix: prefix } : undefined,
       );
     } catch (error) {
       throw new SemanticUnavailableError("Vector search failed", { cause: error });
     }
 
-    const chunksByFile = new Map<string, CorpusChunk[]>();
-    for (const chunk of corpus) {
-      const list = chunksByFile.get(chunk.filePath) ?? [];
-      list.push(chunk);
-      chunksByFile.set(chunk.filePath, list);
-    }
-    const filePaths = [...chunksByFile.keys()].sort();
-    const bodies = filePaths.map((path) => chunksByFile.get(path)!.map((chunk) => chunk.codeSnippet).join("\n"));
-    const lexicalScores = bm25Scores(query, bodies);
-    const lexicalRanks = computeRanks(lexicalScores, filePaths);
+    // Glob post-filter on semantic rows (lexical corpus already filtered above).
+    if (matchGlob) semanticRows = semanticRows.filter((row) => matchGlob!(row.filePath));
 
     const bestSemantic = new Map<string, VecSearchResult>();
     for (const row of semanticRows) {
@@ -428,9 +491,18 @@ export class SemanticIndex {
       if (!previous || row.distance < previous.distance) bestSemantic.set(row.filePath, row);
     }
     const rankedSemanticRows = [...bestSemantic.values()].sort((a, b) => a.distance - b.distance || a.filePath.localeCompare(b.filePath));
+
+    if (mode === "semantic") {
+      return rankedSemanticRows
+        .map((row) => ({ row, score: 1 - row.distance }))
+        .filter(({ score }) => score >= minScore)
+        .slice(0, topK)
+        .map(({ row, score }) => toSemanticSearchResult(row.filePath, row, score));
+    }
+
+    const lexicalRanks = computeRanks(lexicalScores, filePaths);
     const semanticRankByFile = new Map(rankedSemanticRows.map((row, index) => [row.filePath, index + 1]));
     const missingRank = filePaths.length + 1;
-
     const ranked = filePaths.map((filePath, index) => ({
       filePath,
       lexicalScore: lexicalScores[index] ?? 0,
@@ -444,15 +516,7 @@ export class SemanticIndex {
       const lexicalChunkScores = bm25Scores(query, chunks.map((chunk) => chunk.codeSnippet));
       const bestLexicalIndex = lexicalChunkScores.reduce((best, value, index) => value > (lexicalChunkScores[best] ?? -Infinity) ? index : best, 0);
       const selected = lexicalScore > 0 ? chunks[bestLexicalIndex]! : (semantic ?? chunks[0]!);
-      return {
-        filePath,
-        symbolKind: selected.symbolKind,
-        language: selected.language,
-        codeSnippet: selected.codeSnippet.slice(0, 400),
-        lineStart: selected.lineStart,
-        lineEnd: selected.lineEnd,
-        score,
-      };
+      return toSemanticSearchResult(filePath, selected, score);
     });
   }
 
@@ -467,18 +531,21 @@ export class SemanticIndex {
     for (const relPath of relPaths) {
       this.pendingStalePaths.add(relPath);
       this.store?.deleteByFilePath(relPath);
+      delete this.metadata.files[relPath];
     }
-    if (!this.updatePromise) {
-      this.applyPendingStale(this.metadata.files);
-      this.metadata.completed = false;
-      this.writeMetadata();
-    }
+    this.metadata.completed = false;
+    this.writeMetadata();
+    this.ready = false;  // Ensure ready follows completed
   }
 
+  /**
+   * Remove pending-stale entries from the given target dict (used on nextFiles
+   * during commit so an in-flight update doesn't overwrite markFilesStale()).
+   * Does NOT modify this.metadata.files — markFilesStale already did that.
+   */
   private applyPendingStale(targetFiles: Record<string, FileState>): void {
     for (const relPath of this.pendingStalePaths) {
       delete targetFiles[relPath];
-      this.store?.deleteByFilePath(relPath);
     }
     this.pendingStalePaths.clear();
   }
