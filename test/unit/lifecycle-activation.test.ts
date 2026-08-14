@@ -44,6 +44,10 @@ vi.mock("../../src/mcp-registry.js", async (importOriginal) => {
       graphCalls.push({ root, dirty: dirty ?? false });
       return actual.getSharedContextGraph(root, dirty);
     },
+    getSharedContextGraphAsync: async (root: string, dirty?: boolean) => {
+      graphCalls.push({ root, dirty: dirty ?? false });
+      return actual.getSharedContextGraphAsync(root, dirty);
+    },
   };
 });
 
@@ -154,29 +158,114 @@ describe("lifecycle activation (confirmed defects)", () => {
     expect(publishSpy).toHaveBeenCalled();
   });
 
-  it("consumes the watcher dirty flag exactly once across graph-dependent calls", async () => {
+  it("a watcher mutation rebuilds the shared graph; one graph-dependent call builds exactly once (not repeatedly)", async () => {
     const { api, registered } = makeApi();
     registerExtension(api);
 
-    // Watcher reports a file change → index marks the graph dirty.
-    const onDirty = watcherCallbacks[watcherCallbacks.length - 1];
-    expect(onDirty).toBeTypeOf("function");
-    onDirty!(["src/auth.ts"]);
+    const { ContextGraph } = await import("../../src/context-graph.js");
+    const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph");
 
     const grepTool = registered.find((t) => t.name === "grep")!;
     const ctx = { cwd: workdir, sessionManager: { getFile: () => {} } } as any;
 
-    // First graph-dependent call rebuilds (dirty consumed once).
+    // First graph-dependent call builds the graph from scratch.
     await grepTool.execute("t-1", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
-    // Second graph-dependent call must NOT rebuild again.
-    await grepTool.execute("t-2", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    const buildsAfterFirst = buildSpy.mock.calls.length;
+    expect(buildsAfterFirst).toBeGreaterThanOrEqual(1);
 
-    const workdirCalls = graphCalls.filter((c) => c.dirty === true);
-    // Exactly one rebuild triggered by the dirty flag (module-load calls are dirty=false).
-    expect(workdirCalls.length).toBe(1);
-    // And a subsequent call observed the flag as consumed (false).
-    const cleanCalls = graphCalls.filter((c) => c.dirty === false);
-    expect(cleanCalls.length).toBeGreaterThan(0);
+    // Watcher reports a change → the shared graph is invalidated.
+    const onDirty = watcherCallbacks[watcherCallbacks.length - 1];
+    expect(onDirty).toBeTypeOf("function");
+    onDirty!(["src/auth.ts"]);
+
+    // Next graph-dependent call rebuilds exactly once.
+    await grepTool.execute("t-2", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    expect(buildSpy.mock.calls.length).toBe(buildsAfterFirst + 1);
+
+    // A subsequent call reuses the fresh graph — no extra rebuild.
+    await grepTool.execute("t-3", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    expect(buildSpy.mock.calls.length).toBe(buildsAfterFirst + 1);
+
+    buildSpy.mockRestore();
+  });
+
+  it("B1: a mutation during an in-flight build guarantees a graph rebuilt after the mutation (dirty not lost)", async () => {
+    const { api, registered } = makeApi();
+    registerExtension(api);
+
+    const { ContextGraph } = await import("../../src/context-graph.js");
+    const realBuild = ContextGraph.prototype.buildContextGraph;
+    let blocked = true;
+    let releaseBuild: (() => void) | null = null;
+    let buildCount = 0;
+    const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph").mockImplementation(async function (this: any, ...args: any[]) {
+      buildCount++;
+      if (blocked) {
+        await new Promise<void>((res) => { releaseBuild = res; });
+      }
+      return (realBuild as any).apply(this, args);
+    });
+
+    const grepTool = registered.find((t) => t.name === "grep")!;
+    const ctx = { cwd: workdir, sessionManager: { getFile: () => {} } } as any;
+
+    // First graph-dependent call starts a build and blocks mid-build.
+    const p1 = grepTool.execute("t-1", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    await vi.waitFor(() => { expect(buildCount).toBe(1); expect(releaseBuild).not.toBeNull(); });
+
+    // A mutation arrives while the first build is in flight.
+    const onDirty = watcherCallbacks[watcherCallbacks.length - 1];
+    onDirty!(["src/auth.ts"]);
+
+    // Second graph-dependent call coalesces onto the in-flight build, then must
+    // trigger a rebuild after it completes (the mutation was not included).
+    const p2 = grepTool.execute("t-2", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    // Wait until p2 has reached the coalescing state: it has entered the
+    // shared-graph getter (graphCalls) but has not started a second build
+    // (buildCount still 1 — it is awaiting the blocked in-flight build).
+    await vi.waitFor(() => {
+      expect(graphCalls.length).toBe(2);
+      expect(buildCount).toBe(1);
+    });
+
+    // Release the first build; the second build (after the mutation) proceeds.
+    blocked = false;
+    releaseBuild!();
+    releaseBuild = null;
+
+    await Promise.all([p1, p2]);
+
+    // Exactly two builds: the blocked first one and the rebuild after the
+    // mutation. If the dirty signal were lost, only one build would occur.
+    expect(buildSpy).toHaveBeenCalledTimes(2);
+
+    buildSpy.mockRestore();
+  });
+
+  it("a successful write/edit tool_result invalidates the shared graph; a failed one does not", async () => {
+    const { api, registered, handlers } = makeApi();
+    registerExtension(api);
+
+    const { ContextGraph } = await import("../../src/context-graph.js");
+    const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph");
+
+    const grepTool = registered.find((t) => t.name === "grep")!;
+    const ctx = { cwd: workdir, sessionManager: { getFile: () => {} } } as any;
+
+    await grepTool.execute("t-1", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    const buildsAfterFirst = buildSpy.mock.calls.length;
+
+    // A failed write must NOT invalidate the graph.
+    await handlers.tool_result!({ toolName: "write", toolCallId: "w-fail", isError: true, input: { path: "src/auth.ts" } });
+    await grepTool.execute("t-2", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    expect(buildSpy.mock.calls.length).toBe(buildsAfterFirst);
+
+    // A successful edit invalidates → next graph-dependent call rebuilds.
+    await handlers.tool_result!({ toolName: "edit", toolCallId: "e-ok", isError: false, input: { path: "src/auth.ts" } });
+    await grepTool.execute("t-3", { pattern: "auth", literal: true, graphFilter: "CALLS->auth.login" }, undefined, undefined, ctx);
+    expect(buildSpy.mock.calls.length).toBe(buildsAfterFirst + 1);
+
+    buildSpy.mockRestore();
   });
 
   it("binds the evidence resolver to a live bus synchronously at activation", async () => {

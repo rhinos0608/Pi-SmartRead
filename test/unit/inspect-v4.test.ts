@@ -456,4 +456,30 @@ describe("createInspectV4Tool (schema and execute)", () => {
         expect(published).toHaveLength(1);
         expect(published[0].envelope.resources).toEqual([]);
     });
+
+    it("awaits an async contextGraph getter before graph-dependent output (runtime wiring)", async () => {
+        let built = false;
+        const tool = createInspectV4Tool({
+            getSessionFilePath: () => "/sessions/abc.jsonl",
+            contextGraph: async () => {
+                const { ContextGraph } = await import("../../src/context-graph.js");
+                const graph = new ContextGraph(workdir);
+                await graph.buildContextGraph();
+                built = true;
+                return graph;
+            },
+        });
+        const result = await tool.execute(
+            "c-graph",
+            { path: "hello.ts", graphSchema: true },
+            undefined,
+            undefined,
+            makeCtx(),
+        );
+        // The registered runtime tool must await the getter (build) before
+        // producing graph-dependent output — never receive an unbuilt graph.
+        expect(built).toBe(true);
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain("Graph Schema");
+    });
 });

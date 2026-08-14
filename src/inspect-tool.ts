@@ -72,7 +72,7 @@ export interface InspectToolOptions {
     /** Returns the canonical session file path for the current session, or null if ephemeral. */
     readonly getSessionFilePath: () => string | null | undefined;
     /** ContextGraph instance or getter for graph-dependent inspect params (WP-5 DI). */
-    readonly contextGraph?: ContextGraph | (() => ContextGraph);
+    readonly contextGraph?: ContextGraph | (() => ContextGraph | Promise<ContextGraph>);
 }
 
 const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality.
@@ -164,6 +164,12 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             const crossErr = validateCrossParams(params);
             if (crossErr) throw new Error(crossErr);
 
+            // WP-5: resolve contextGraph from DI (await getter so a registered
+            // runtime tool never receives an unbuilt graph).
+            const contextGraph = typeof opts.contextGraph === "function"
+                ? await opts.contextGraph()
+                : opts.contextGraph;
+
             const inspectInput: InspectV4Input = {
                 path: params.path,
                 signals: params.signals,
@@ -185,8 +191,8 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                 boundaries: params.boundaries,
                 routes: params.routes,
                 layers: params.layers,
-                // WP-5: populate contextGraph from DI (resolve lazily if getter)
-                contextGraph: typeof opts.contextGraph === "function" ? opts.contextGraph() : opts.contextGraph,
+                // WP-5: populate contextGraph from DI (resolved above)
+                contextGraph,
             };
 
             // Mode-specific param validation (spec §4)

@@ -113,7 +113,7 @@ export interface GrepToolOptions {
     };
     readonly getSessionFilePath?: () => string | null | undefined;
     /** ContextGraph instance or getter for graphFilter edge checks (WP-5 DI). */
-    readonly contextGraph?: ContextGraph | (() => ContextGraph);
+    readonly contextGraph?: ContextGraph | (() => ContextGraph | Promise<ContextGraph>);
 }
 
 export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
@@ -212,46 +212,72 @@ async function executeGrepQuery(
 ): Promise<GrepExecutionResult> {
     const { searchDir, scopedFile } = resolveSearchScope(cwd, params.path);
     const topK = clamp(params.limit ?? 20, 1, 100);
-    const gatherK = Math.min(topK * 2, 200);
     const contextLines = clamp(params.contextLines ?? 2, 0, 10);
     const caseSensitive = !(params.ignoreCase ?? false);
     const startTime = Date.now();
 
     const regexPattern = params.literal ? null : detectRegexPattern(params.pattern);
     const fileGlob = params.glob;
-    const searchResult = params.literal || regexPattern === null
-        ? params.literal
-            ? await runLiteralGrep(params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob)
-            : await runSmartCascade(params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob)
-        : await runRegexGrep(regexPattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob);
-    let hits = searchResult.hits;
-
-    if (params.glob) {
-        const { minimatch } = await import("minimatch");
-        hits = hits.filter((hit) => minimatch(hit.relFile, params.glob!));
+    const hasGraphFilter = params.graphFilter !== undefined;
+    if (hasGraphFilter && !parseGraphFilter(params.graphFilter!)) {
+        throw new Error('Invalid graphFilter: expected "EDGE_TYPE->target" format');
     }
 
-    let graphFilterNotes: string[] = [];
-    if (params.graphFilter !== undefined) {
-        if (!parseGraphFilter(params.graphFilter)) {
-            throw new Error('Invalid graphFilter: expected "EDGE_TYPE->target" format');
-        }
-        const contextGraph = typeof opts.contextGraph === "function" ? opts.contextGraph() : opts.contextGraph;
+    // Resolve the context graph once (await getter so a registered runtime
+    // tool never receives an unbuilt graph — the shared async getter builds
+    // with the call graph and coalesces concurrent callers).
+    let contextGraph: ContextGraph | undefined;
+    if (hasGraphFilter) {
+        contextGraph = typeof opts.contextGraph === "function" ? await opts.contextGraph() : opts.contextGraph;
         if (!contextGraph) throw new Error("graphFilter requires an indexed context graph");
-        const filtered = await applyGraphFilter(hits, params.graphFilter, contextGraph);
-        hits = filtered.hits;
-        graphFilterNotes = filtered.notes;
+    }
+
+    // Iterative over-fetch: when graphFilter is present, filtering can starve
+    // the candidate pool below topK. Fetch the maximum candidate set in a
+    // single pass — re-running the corpus search per gather step would repeat
+    // full searches and re-evaluate the graph filter. Without graphFilter this
+    // runs once at the small gatherK.
+    const MAX_GATHER = 2000;
+    let gatherK = hasGraphFilter ? MAX_GATHER : Math.min(topK * 2, 200);
+    let hits: GrepHit[] = [];
+    let engines: string[] = [];
+    let degradation: GrepDegradation[] | undefined;
+    let graphFilterNotes: string[] = [];
+    for (;;) {
+        const searchResult = params.literal || regexPattern === null
+            ? params.literal
+                ? await runLiteralGrep(params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob)
+                : await runSmartCascade(params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob)
+            : await runRegexGrep(regexPattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob);
+        let current = searchResult.hits;
+        engines = searchResult.engines;
+        degradation = searchResult.degradation;
+
+        if (params.glob) {
+            const { minimatch } = await import("minimatch");
+            current = current.filter((hit) => minimatch(hit.relFile, params.glob!));
+        }
+
+        if (hasGraphFilter) {
+            const filtered = await applyGraphFilter(current, params.graphFilter!, contextGraph!);
+            current = filtered.hits;
+            graphFilterNotes = filtered.notes;
+        }
+
+        hits = current;
+        if (!hasGraphFilter || hits.length >= topK || gatherK >= MAX_GATHER) break;
+        gatherK = Math.min(gatherK * 2, MAX_GATHER);
     }
 
     return {
         pattern: params.pattern,
         shown: hits.slice(0, topK),
         totalHits: hits.length,
-        engines: searchResult.engines,
+        engines,
         truncated: hits.length > topK,
         elapsedMs: Date.now() - startTime,
         graphFilterNotes,
-        ...(searchResult.degradation ? { degradation: searchResult.degradation } : {}),
+        ...(degradation ? { degradation } : {}),
     };
 }
 

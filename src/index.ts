@@ -8,7 +8,7 @@ import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
 import type { ContextGraph } from "./context-graph.js";
-import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, resetSharedContextGraph } from "./mcp-registry.js";
+import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, getSharedContextGraphAsync, isSharedContextGraphBuilt, isSharedGraphRebuildPending, invalidateSharedGraph, resetSharedContextGraph } from "./mcp-registry.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
 import { createHealthTool } from "./health-tool.js";
 import { createReadTool } from "./unified-read.js";
@@ -91,7 +91,7 @@ ensureHashlineReady().catch((err) =>
  * Resolution order: LSP workspace/symbol first, then ContextGraph.findSymbolFiles() fallback.
  * `graphGetter` supplies the dirty-aware lazy ContextGraph (resets the dirty flag once).
  */
-async function resolveSymbolForReadTool(symbol: string, graphGetter?: () => ContextGraph): Promise<{ path: string; line?: number } | null> {
+async function resolveSymbolForReadTool(symbol: string, graphGetter?: () => ContextGraph | Promise<ContextGraph>): Promise<{ path: string; line?: number } | null> {
   const root = process.cwd();
   try {
     const bridge = await getLSPBridge();
@@ -109,7 +109,7 @@ async function resolveSymbolForReadTool(symbol: string, graphGetter?: () => Cont
     // LSP not available
   }
   try {
-    const graph = graphGetter ? graphGetter() : getSharedContextGraph(root);
+    const graph = graphGetter ? await graphGetter() : getSharedContextGraph(root);
     const files = await graph.findSymbolFiles(symbol);
     if (files.length > 0) {
       return { path: files[0]!.path };
@@ -133,17 +133,16 @@ export default async function (pi: ExtensionAPI) {
   /** WP-1 writes dirty flag; WP-5 reads it to trigger lazy ContextGraph rebuild. */
   const watchState = {
     stop: undefined as (() => void) | undefined,
-    contextGraphDirty: false,
   };
 
-  // WP-5: single lazy ContextGraph getter that consumes/resets the watcher
-  // dirty flag exactly once. Used by inspect, grep, and read-symbol fallback
-  // so file changes force exactly one rebuild, not an infinite rebuild loop.
-  const freshGraphGetter = () => {
-    const g = getSharedContextGraph(process.cwd(), watchState.contextGraphDirty);
-    watchState.contextGraphDirty = false;
-    return g;
-  };
+  // WP-5: single lazy ContextGraph getter used by inspect, grep, and
+  // read-symbol fallback so a graph-dependent call never receives an unbuilt
+  // graph. Invalidation is revision-based inside mcp-registry
+  // (invalidateSharedGraph) rather than a boolean that could be cleared by a
+  // build that did not include the change; the getter just ensures a build
+  // covering the latest revision. Concurrent calls coalesce; a mutation during
+  // a build queues a rebuild instead of losing the dirty signal.
+  const freshGraphGetter = async () => getSharedContextGraphAsync(process.cwd());
 
   // Bind the live evidence resolver synchronously when a bus is present,
   // BEFORE any tool can execute. The async installInspectAndResolver call
@@ -174,7 +173,8 @@ export default async function (pi: ExtensionAPI) {
         const incIdx = getIncrementalIndex(process.cwd());
         incIdx.invalidate();
       } catch { /* incremental index may not exist */ }
-      watchState.contextGraphDirty = true;
+      // WP-5: the workspace changed — the shared graph is stale until rebuilt.
+      invalidateSharedGraph();
     });
   } catch (err) {
     console.warn(`[SmartRead] File watcher failed to start: ${(err as Error).message}`);
@@ -186,7 +186,6 @@ export default async function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     watchState.stop?.();
     watchState.stop = undefined;
-    watchState.contextGraphDirty = false;
     try { resetSharedContextGraph(); } catch { /* may not be loaded */ }
     await shutdownAllManagers();
     resetLSPBridge();
@@ -225,16 +224,6 @@ export default async function (pi: ExtensionAPI) {
   // 1. tool_call: feed doom-loop detector
   pi.on("tool_call", (event: any) => {
     const toolName = event.toolName as string;
-    // Invalidate FS scan cache for write/edit mutations so subsequent scans see fresh state
-    if (toolName === "write" || toolName === "edit" || toolName === "graph_mutate") {
-      const input = (event.input ?? {}) as Record<string, unknown>;
-      const target = typeof input.path === "string" ? input.path :
-        typeof input.filePath === "string" ? input.filePath :
-        typeof input.relative_path === "string" ? input.relative_path : undefined;
-      if (target) {
-        invalidateFsScanCache(target);
-      }
-    }
 
     recordToolCall(
       doomLoopState,
@@ -323,6 +312,45 @@ export default async function (pi: ExtensionAPI) {
               }
             })
             .catch(() => {});
+        }
+      }
+    }
+
+    // ── Centralized successful mutation invalidation ──
+    // Only successful write/edit/graph_mutate results invalidate caches.
+    // Failed tool results must NOT mutate state. The watcher remains
+    // supplemental (it also invalidates on fs events); this is the authoritative
+    // path for tool-driven mutations.
+    if (toolName === "write" || toolName === "edit" || toolName === "graph_mutate") {
+      if (!event.isError) {
+        const input = (event.input ?? {}) as Record<string, unknown>;
+        if (toolName === "graph_mutate") {
+          // Graph mutation must cause a graph rebuild on next use.
+          invalidateSharedGraph();
+        } else {
+          const target =
+            (typeof input.path === "string" && input.path) ||
+            (typeof input.filePath === "string" && input.filePath) ||
+            (typeof input.relative_path === "string" && input.relative_path);
+          if (target) {
+            invalidateFsScanCache(target);
+            try {
+              const semIdx = getSemanticIndex(process.cwd());
+              if (semIdx && typeof semIdx.markFilesStale === "function") {
+                semIdx.markFilesStale([target]);
+              }
+            } catch {
+              // semantic invalidation is advisory
+            }
+            try {
+              getIncrementalIndex(process.cwd()).invalidate();
+            } catch {
+              // incremental-index invalidation is advisory
+            }
+          }
+          // A successful write/edit invalidates the graph: it must be rebuilt
+          // on next graph-dependent use (revision-based, not a boolean flag).
+          invalidateSharedGraph();
         }
       }
     }
@@ -552,7 +580,8 @@ export default async function (pi: ExtensionAPI) {
 
   // 2.6 Health: additive public status tool (no smartread_ prefix).
   const healthDef = createHealthTool({
-    getWatcherState: () => ({ active: !!watchState.stop, dirty: watchState.contextGraphDirty }),
+    getWatcherState: () => ({ active: !!watchState.stop, dirty: isSharedGraphRebuildPending() }),
+    getGraphState: () => ({ built: isSharedContextGraphBuilt() }),
   });
   ToolRegistry.getInstance().registerOrReplace({
     name: "health",

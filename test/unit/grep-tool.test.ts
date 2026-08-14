@@ -677,6 +677,45 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
         expect(resources).toHaveLength(1);
         expect(resources[0].canonicalPath).toContain("importer.ts");
     });
+
+    it("awaits an async contextGraph getter before applying graphFilter (runtime wiring)", async () => {
+        // Add a file that imports auth.ts so graphFilter has an edge to check
+        writeFileSync(
+            join(workdir, "src", "importer.ts"),
+            [
+                'import { authenticate } from "./auth";',
+                "export function useAuth() {",
+                "  return authenticate;",
+                "}",
+            ].join("\n"),
+            "utf8",
+        );
+        let built = false;
+        // Simulate the runtime DI: an async getter that builds the shared graph
+        // (with call graph) — the tool must await it before graphFilter.
+        const { ContextGraph } = await import("../../src/context-graph.js");
+        const tool = createGrepTool(makeOpts({
+            contextGraph: async () => {
+                const graph = new ContextGraph(workdir);
+                await graph.buildContextGraph({ includeCalls: true });
+                built = true;
+                return graph;
+            },
+        }));
+
+        const result = await tool.execute(
+            "t-gf-async",
+            { pattern: "authenticate", literal: true, graphFilter: "IMPORTED_BY->src/auth.ts", limit: 10 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        expect(built).toBe(true);
+        const details = result.details as any;
+        const resources = details.workspaceEvidence.resources;
+        expect(resources).toHaveLength(1);
+        expect(resources[0].canonicalPath).toContain("importer.ts");
+    });
 });
 
 // ── Glob-aware retrieval ─────────────────────────────────────────
@@ -720,5 +759,46 @@ describe("grep tool — explicit degradation reasons", () => {
         const degradation = (result.details as any).degradation;
         expect(Array.isArray(degradation)).toBe(true);
         expect(degradation.some((d: any) => d.code === "index_unavailable")).toBe(true);
+    });
+});
+
+// ── graphFilter single-pass over-fetch ──────────────────────────
+// N3 regression: when graphFilter is present, the gather loop requests the
+// maximum candidate set in a single pass instead of re-running the corpus
+// search per gather step. Counts applyGraphFilter invocations (one per loop
+// iteration) via ESM live binding to prove the loop does not re-evaluate.
+describe("grep tool — graphFilter single-pass over-fetch", () => {
+    it("fetches the maximum candidate set in one pass when filtering starves hits below topK", async () => {
+        // Seed a modest corpus so the search has candidates to gather.
+        for (let i = 0; i < 12; i++) {
+            writeFileSync(
+                join(workdir, "src", `file_${String(i).padStart(2, "0")}.ts`),
+                `export const token${i} = ${i};
+`,
+                "utf8",
+            );
+        }
+
+        const { ContextGraph } = await import("../../src/context-graph.js");
+        const graphFilterModule = await import("../../src/graph-filter.js");
+        const graph = new ContextGraph(workdir);
+
+        // Force a filter that keeps no hits — the single-pass gather must still
+        // evaluate the graph filter exactly once (no repeated corpus searches).
+        const tool = createGrepTool(makeOpts({ contextGraph: graph }));
+        const spy = vi.spyOn(graphFilterModule, "applyGraphFilter");
+
+        await tool.execute(
+            "t-overfetch",
+            { pattern: "token", literal: true, graphFilter: "CALLS->nonexistent.symbol", limit: 100 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        // Exactly one filter pass: the gather loop requests the maximum
+        // candidate set once instead of re-running the search per gather step.
+        expect(spy.mock.calls.length).toBe(1);
+        spy.mockRestore();
     });
 });
