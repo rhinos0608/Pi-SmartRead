@@ -64,11 +64,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@orama/orama": "^3.1.18",
-    "@rhinos0608/pi-workspace-protocol": "github:rhinos0608/Pi-Workspace-Protocol#v0.3.0",
+    "@rhinos0608/pi-workspace-protocol": "git+https://github.com/rhinos0608/Pi-Workspace-Protocol.git#v0.3.0",
     "@sinclair/typebox": "^0.34.13",
     "ignore": "^7.0.5",
     "sqlite-vec": "^0.1.9",
     "tree-sitter": "0.21.1",
+    "zod": "^4.4.2",
     "tree-sitter-go": "0.21.0",
     "tree-sitter-javascript": "0.23.1",
     "tree-sitter-python": "0.21.0",
@@ -80,6 +81,7 @@
     "@huggingface/transformers": "^4.2.0",
     "@vscode/tree-sitter-wasm": "^0.3.1",
     "better-sqlite3": "^11.7.0",
+    "chokidar": "^4.0.3",
     "web-tree-sitter": "^0.22.6"
   },
   "devDependencies": {
