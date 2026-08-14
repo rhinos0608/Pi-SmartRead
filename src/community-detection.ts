@@ -24,7 +24,8 @@ function createRng(seed: number): () => number {
     s ^= s << 13;
     s ^= s >> 17;
     s ^= s << 5;
-    return (s >>> 0) / 0xffffffff;
+    // Use 0x100000000 (2^32) as denominator so max output is strictly < 1.
+    return (s >>> 0) / 0x100000000;
   };
 }
 
@@ -33,16 +34,34 @@ function seedFrom(
   nodes: string[],
   edges: Array<{ from: string; to: string }>,
 ): number {
+  // Sort copies of inputs for canonical determinism.
+  const sortedNodes = [...nodes].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  const sortedEdges = [...edges].sort((a, b) => {
+    const cmp = a.from < b.from ? -1 : a.from > b.from ? 1 : 0;
+    return cmp !== 0 ? cmp : a.to < b.to ? -1 : a.to > b.to ? 1 : 0;
+  });
+
   let h = 5381;
-  for (const n of nodes) {
+  for (const n of sortedNodes) {
+    // Length-delimited encoding: length prefix before content
+    h = ((h << 5) + h + n.length) >>> 0;
     for (let i = 0; i < n.length; i++) {
       h = ((h << 5) + h + n.charCodeAt(i)) >>> 0;
     }
   }
-  h = ((h << 5) + h + nodes.length) >>> 0;
-  h = ((h << 5) + h + edges.length) >>> 0;
-  for (const e of edges) {
-    for (const ch of e.from + e.to) {
+  h = ((h << 5) + h + sortedNodes.length) >>> 0;
+  h = ((h << 5) + h + sortedEdges.length) >>> 0;
+  for (const e of sortedEdges) {
+    // Length-delimited from field
+    h = ((h << 5) + h + e.from.length) >>> 0;
+    for (const ch of e.from) {
+      h = ((h << 5) + h + ch.charCodeAt(0)) >>> 0;
+    }
+    // Separator between from and to to prevent concatenation collisions.
+    h = ((h << 5) + h + 0) >>> 0;
+    // Length-delimited to field
+    h = ((h << 5) + h + e.to.length) >>> 0;
+    for (const ch of e.to) {
       h = ((h << 5) + h + ch.charCodeAt(0)) >>> 0;
     }
   }

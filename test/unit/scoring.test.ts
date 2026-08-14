@@ -155,9 +155,17 @@ describe("cosineSimilarity", () => {
     expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0);
   });
 
-  it("returns -Infinity when either vector has zero norm", () => {
-    expect(cosineSimilarity([0, 0], [1, 2])).toBe(-Infinity);
-    expect(cosineSimilarity([1, 2], [0, 0])).toBe(-Infinity);
+  it("returns 0 when either vector has zero norm", () => {
+    expect(cosineSimilarity([0, 0], [1, 2])).toBe(0);
+    expect(cosineSimilarity([1, 2], [0, 0])).toBe(0);
+  });
+
+  it("returns 0 for empty vectors", () => {
+    expect(cosineSimilarity([], [])).toBe(0);
+  });
+
+  it("returns 0 for length-mismatched vectors", () => {
+    expect(cosineSimilarity([1, 0], [1, 0, 0])).toBe(0);
   });
 });
 

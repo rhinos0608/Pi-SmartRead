@@ -288,17 +288,17 @@ function computeStructuralScore(input: RerankerInput): number {
 
   // ── WP-7: Multi-signal scoring expansion ──────────────────────
   // halsteadComplexity: higher = more complex → penalised (inverted)
-  if (input.halsteadComplexity !== undefined) {
+  if (input.halsteadComplexity !== undefined && Number.isFinite(input.halsteadComplexity)) {
     score += Math.max(0, 1 - Math.min(1, Math.max(0, input.halsteadComplexity) / 500));
     signals++;
   }
   // astProfile: cyclomatic-like, 0–1, higher = more branching → penalised
-  if (input.astProfile !== undefined) {
+  if (input.astProfile !== undefined && Number.isFinite(input.astProfile)) {
     score += Math.max(0, 1 - Math.min(1, Math.max(0, input.astProfile)));
     signals++;
   }
   // minHashProximity: higher = more similar → boosted
-  if (input.minHashProximity !== undefined) {
+  if (input.minHashProximity !== undefined && Number.isFinite(input.minHashProximity)) {
     score += Math.max(0, Math.min(1, input.minHashProximity));
     signals++;
   }
@@ -459,22 +459,10 @@ export function segmentText(
 /**
  * L2-normalised cosine similarity between two vectors.
  * Vectors are assumed pre-normalised (dot product === cosine sim).
+ * Re-exported from scoring.ts for convenience.
  */
-export function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0;
-  let magA = 0;
-  let magB = 0;
-  for (let i = 0; i < a.length; i++) {
-    const aVal = a[i]!;
-    const bVal = b[i]!;
-    dot += aVal * bVal;
-    magA += aVal * aVal;
-    magB += bVal * bVal;
-  }
-  const denom = Math.sqrt(magA) * Math.sqrt(magB);
-  return denom === 0 ? 0 : dot / denom;
-}
+import { cosineSimilarity } from "./scoring.js";
+export { cosineSimilarity };
 
 /** Mean-pool a list of vectors into a single vector. */
 export function meanPool(vectors: number[][]): number[] {
