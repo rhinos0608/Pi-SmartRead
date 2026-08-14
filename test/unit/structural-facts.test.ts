@@ -626,7 +626,7 @@ class MyModel:
 
     afterAll(() => rmSync(pkgDir, { recursive: true, force: true }));
 
-    it("dependency path: `from . import x` and `from .. import y` resolve the package __init__.py", async () => {
+    it("dependency path: dot-only imports resolve concrete modules before package __init__.py", async () => {
       const facts = await extractStructuralFacts(modFile, pkgDir);
       const deps = facts.dependencies ?? [];
       const oneDot = deps.find((d) => d.specifier === ".");
@@ -634,12 +634,12 @@ class MyModel:
       expect(oneDot!.resolvedPath).toBe(join(subDir, "__init__.py"));
       const twoDot = deps.find((d) => d.specifier === "..");
       expect(twoDot).toBeDefined();
-      expect(twoDot!.resolvedPath).toBe(pkgInit);
+      expect(twoDot!.resolvedPath).toBe(join(pkgDir, "top.py"));
     });
 
-    it("dependent path: `from .. import x` marks the package __init__.py as imported", async () => {
+    it("dependent path: `from .. import top` marks top.py as imported", async () => {
       const { findImportDependents } = await import("../../src/structural-facts.js");
-      const dependents = await findImportDependents(pkgInit, pkgDir, "python");
+      const dependents = await findImportDependents(join(pkgDir, "top.py"), pkgDir, "python");
       const files = dependents.map((d) => d.file);
       expect(files).toContain(modFile);
     });

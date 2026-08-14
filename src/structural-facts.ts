@@ -314,6 +314,7 @@ function resolveImportPath(
 function resolvePythonImportPath(
   importerPath: string,
   specifier: string,
+  importedName?: string,
 ): string | undefined {
   const dots = specifier.match(/^\.+/)?.[0] ?? "";
   // Absolute (stdlib / third-party) imports are never resolvable to workspace
@@ -329,8 +330,20 @@ function resolvePythonImportPath(
     base = parent;
   }
 
-  // Dot-only imports (`from . import x` / `from .. import x`) resolve to the
-  // package itself — the walked-up directory's __init__.py.
+  // Dot-only imports (`from . import x` / `from .. import x`) usually resolve
+  // to the walked-up package's __init__.py. If the imported name is itself a
+  // sibling module (for example `from .. import top`), prefer that concrete
+  // module so dependency and dependent analysis does not stop at __init__.py.
+  if (!name && importedName) {
+    const importedDirInit = resolve(base, importedName, "__init__.py");
+    try { if (statSync(importedDirInit).isFile()) return importedDirInit; } catch { /* not found */ }
+
+    const importedFile = resolve(base, `${importedName}.py`);
+    try { if (statSync(importedFile).isFile()) return importedFile; } catch { /* not found */ }
+  }
+
+  // Fall back to the package itself when the imported name is a symbol
+  // exported from __init__.py or no concrete module exists.
   if (!name) {
     const pkgInit = resolve(base, "__init__.py");
     try { if (statSync(pkgInit).isFile()) return pkgInit; } catch { /* not found */ }
@@ -445,7 +458,7 @@ function extractPythonReExportsFromFile(
       if (!moduleName) return;
 
       const sourcePath = moduleName.text;
-      const resolved = resolvePythonImportPath(filePath, sourcePath);
+      const resolved = resolvePythonImportPath(filePath, sourcePath, node.childForFieldName("name")?.text);
       const wildcard = node.childForFieldName("wildcard");
       const name = node.childForFieldName("name");
 
@@ -792,24 +805,26 @@ function extractDependencies(
   const isPy = lang === "python";
 
   const importRe = isPy
-    ? /^\s*(?:from\s+(\S+)\s+import|import\s+(\S+))/gm
+    ? /^\s*(?:from\s+(\S+)\s+import\s+([A-Za-z_]\w*)|import\s+(\S+))/gm
     : JS_IMPORT_RE;
 
   let match: RegExpExecArray | null;
   while ((match = importRe.exec(code)) !== null) {
-    const specifier = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "";
+    const specifier = isPy
+      ? (match[1] ?? match[3] ?? "")
+      : (match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "");
     if (!specifier) continue;
     if (!specifier.startsWith(".")) continue;
     // Relative import — try to resolve
     const lineNum = code.slice(0, match.index).split("\n").length;
-    const kind: DependencyInfo["kind"] = match[3]
+    const kind: DependencyInfo["kind"] = isPy ? "import" : match[3]
       ? "require"
       : match[4] || match[5] || match[6]
         ? "re-export"
         : "import";
     try {
       const resolvedPath = isPy
-        ? resolvePythonImportPath(filePath, specifier)
+        ? resolvePythonImportPath(filePath, specifier, match[2])
         : resolveImportPath(filePath, specifier);
       deps.push({ specifier, line: lineNum, resolvedPath: resolvedPath ?? undefined, kind });
     } catch {
@@ -856,17 +871,19 @@ export async function findImportDependents(
         const srcLang = filenameToLang(srcFile);
         const isPy = srcLang === "python";
         const importRe = isPy
-          ? /(?:from\s+(\S+)\s+import|import\s+(\S+))/gm
+          ? /(?:from\s+(\S+)\s+import\s+([A-Za-z_]\w*)|import\s+(\S+))/gm
           : JS_IMPORT_RE;
 
         let match: RegExpExecArray | null;
         const fileResults: DependentInfo[] = [];
         while ((match = importRe.exec(content)) !== null) {
-          const specifier = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "";
+          const specifier = isPy
+            ? (match[1] ?? match[3] ?? "")
+            : (match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "");
           if (!specifier || !specifier.startsWith(".")) continue;
           try {
             const resolved = isPy
-              ? resolvePythonImportPath(srcFile, specifier)
+              ? resolvePythonImportPath(srcFile, specifier, match[2])
               : resolveImportPath(srcFile, specifier);
             if (resolved && resolve(resolved) === normTarget) {
               const lineNum = content.slice(0, match.index).split("\n").length;
