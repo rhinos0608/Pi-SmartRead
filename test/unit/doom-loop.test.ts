@@ -339,6 +339,54 @@ describe("recordToolResult", () => {
     }
   });
 
+  it("does not warn when current result is materially different from repeated history", () => {
+    const repeated = Array.from(
+      { length: 20 },
+      (_, index) => `stable record ${index} customer-${index} active balance-${index * 10}`,
+    ).join("\n");
+    const novel = Array.from(
+      { length: 20 },
+      (_, index) => `compiler diagnostic ${index} module-${index} failed code-${index * 7}`,
+    ).join("\n");
+    for (let i = 0; i < 10; i++) {
+      recordToolCall(state, "search", `call-${i + 1}`, { query: `q-${i}` });
+      recordToolResult(state, `call-${i + 1}`, repeated);
+    }
+
+    recordToolCall(state, "search", "call-11", { query: "q-11" });
+    recordToolResult(state, "call-11", novel);
+
+    expect(state.pendingWarnings.has("call-11")).toBe(false);
+  });
+
+  it("warns when results contain the same data with small volatile differences", () => {
+    const rows = Array.from(
+      { length: 20 },
+      (_, index) => `record ${index}: customer-${index} active balance-${index * 10}`,
+    ).join("\n");
+    for (let i = 0; i < 10; i++) {
+      recordToolCall(state, "search", `call-${i + 1}`, { query: `q-${i}` });
+      recordToolResult(state, `call-${i + 1}`, `request-id: ${i}\n${rows}`);
+    }
+
+    expect(state.pendingWarnings.get("call-10")?.kind).toBe("content-chanting");
+  });
+
+  it("does not create a content-chanting warning when identical content comes from a different tool", () => {
+    const result = "X".repeat(50);
+    for (let i = 0; i < 10; i++) {
+      recordToolCall(state, "search", `call-${i + 1}`, { query: `q-${i}` });
+      recordToolResult(state, `call-${i + 1}`, result);
+    }
+
+    // Same content produced by a different tool must not count toward the
+    // search tool's chant window.
+    recordToolCall(state, "read", "call-11", { path: "/a.ts" });
+    recordToolResult(state, "call-11", result);
+
+    expect(state.pendingWarnings.has("call-11")).toBe(false);
+  });
+
   it("respects MAX_CONTENT_CHUNKS window", () => {
     // Fill window with 200 unique chunks
     for (let i = 0; i < 200; i++) {

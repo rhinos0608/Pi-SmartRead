@@ -33,6 +33,8 @@ export type DoomLoopWarning =
 interface ContentChunkRecord {
   hash: string;
   text: string;
+  toolName: string;
+  shingles: Set<string>;
 }
 
 export interface DoomLoopState {
@@ -120,6 +122,9 @@ export const MAX_CONTENT_CHUNKS = 200;
 export const CHUNK_SIZE = 50;
 export const CONTENT_CHANTING_THRESHOLD = 10;
 export const MAX_RESULT_FINGERPRINTS_PER_TOOL = 32;
+const CONTENT_SHINGLE_SIZE = 3;
+const MIN_CONTENT_SHINGLES = 8;
+const CONTENT_SIMILARITY_THRESHOLD = 0.8;
 
 /** Simple string hash for content-chunk comparison (not cryptographic). */
 function hashString(s: string): string {
@@ -166,6 +171,30 @@ function normalizeResultContent(content: string): string {
 
 function makeResultFingerprint(content: string): string {
   return `${hashString(content)}:${content.length}`;
+}
+
+function makeContentShingles(content: string): Set<string> {
+  const tokens = content.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const shingles = new Set<string>();
+  for (let i = 0; i <= tokens.length - CONTENT_SHINGLE_SIZE; i++) {
+    shingles.add(tokens.slice(i, i + CONTENT_SHINGLE_SIZE).join("\u0000"));
+  }
+  return shingles;
+}
+
+function isSimilarResult(left: ContentChunkRecord, right: ContentChunkRecord): boolean {
+  if (left.toolName !== right.toolName) return false;
+  if (left.hash === right.hash && left.text === right.text) return true;
+  if (Math.min(left.shingles.size, right.shingles.size) < MIN_CONTENT_SHINGLES) return false;
+
+  const [smaller, larger] = left.shingles.size <= right.shingles.size
+    ? [left.shingles, right.shingles]
+    : [right.shingles, left.shingles];
+  let overlap = 0;
+  for (const shingle of smaller) {
+    if (larger.has(shingle)) overlap++;
+  }
+  return overlap / larger.size >= CONTENT_SIMILARITY_THRESHOLD;
 }
 
 function findCallById(state: DoomLoopState, toolCallId: string): RecordedToolCall | undefined {
@@ -267,8 +296,8 @@ export function recordToolCall(
 /**
  * Record tool result text for content-chanting detection.
  *
- * Tracks exact whole-result repeats in a sliding window. Novel results also
- * clear weak call-pattern warnings before they are injected.
+ * Tracks same-tool whole-result similarity in a sliding window. Novel results
+ * also clear weak call-pattern warnings before they are injected.
  */
 export function recordToolResult(
   state: DoomLoopState,
@@ -284,12 +313,22 @@ export function recordToolResult(
   const call = findCallById(state, toolCallId);
   const toolName = call?.toolName ?? "__unknown__";
   const fingerprint = makeResultFingerprint(normalized);
+  const result = {
+    hash: fingerprint,
+    text: normalized,
+    toolName,
+    shingles: makeContentShingles(normalized),
+  };
+  const similarResultCount = state.contentChunks.reduce(
+    (count, previous) => count + (isSimilarResult(result, previous) ? 1 : 0),
+    0,
+  );
   let seenForTool = state.resultFingerprintsByTool.get(toolName);
   if (!seenForTool) {
     seenForTool = new Set<string>();
     state.resultFingerprintsByTool.set(toolName, seenForTool);
   }
-  const isNovelResult = !seenForTool.has(fingerprint);
+  const isNovelResult = !seenForTool.has(fingerprint) && similarResultCount === 0;
   seenForTool.add(fingerprint);
   if (seenForTool.size > MAX_RESULT_FINGERPRINTS_PER_TOOL) {
     const excess = seenForTool.size - MAX_RESULT_FINGERPRINTS_PER_TOOL;
@@ -307,7 +346,7 @@ export function recordToolResult(
     state.pendingWarnings.delete(toolCallId);
   }
 
-  state.contentChunks.push({ hash: fingerprint, text: normalized });
+  state.contentChunks.push(result);
 
   if (state.contentChunks.length > MAX_CONTENT_CHUNKS) {
     state.contentChunks.splice(0, state.contentChunks.length - MAX_CONTENT_CHUNKS);
@@ -323,25 +362,10 @@ export function recordToolResult(
     state.stagedWarnings.delete(toolCallId);
   }
 
-  const freq = new Map<string, { count: number; text: string }>();
-  for (const result of state.contentChunks) {
-    const existing = freq.get(result.hash);
-    if (!existing) {
-      freq.set(result.hash, { count: 1, text: result.text });
-    } else if (existing.text === result.text) {
-      existing.count++;
-    }
+  const repetitionCount = similarResultCount + 1;
+  if (repetitionCount >= CONTENT_CHANTING_THRESHOLD && !state.pendingWarnings.has(toolCallId)) {
+    state.pendingWarnings.set(toolCallId, { kind: "content-chanting", count: repetitionCount });
   }
-
-  for (const { count } of freq.values()) {
-    if (count >= CONTENT_CHANTING_THRESHOLD) {
-      if (!state.pendingWarnings.has(toolCallId)) {
-        state.pendingWarnings.set(toolCallId, { kind: "content-chanting", count });
-      }
-      return;
-    }
-  }
-
 }
 
 export function consumeDoomLoopWarning(
