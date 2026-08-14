@@ -133,14 +133,18 @@ server.setRequestHandler(LenientCallToolRequestSchema, async (request, extra) =>
     const ctx = toExtensionContext(SERVER_CWD);
     (ctx.sessionManager as unknown as { getSessionFile: () => string }).getSessionFile = () => MCP_SESSION_FILE;
 
-    const result = await tool.execute(toolCallId, args, extra.signal ?? undefined, undefined, ctx);
+    const rawResult = await tool.execute(toolCallId, args, extra.signal ?? undefined, undefined, ctx);
 
-    if (result === undefined) {
+    if (rawResult === undefined) {
       return {
         content: [{ type: "text" as const, text: "Tool executed successfully (no output)" }],
         isError: false,
       };
     }
+
+    // ToolDefinition's base result type omits the optional error flag used by
+    // graph_mutate, so retain that extension at the MCP boundary.
+    const result = rawResult as typeof rawResult & { isError?: boolean | null };
 
     // Convert tool result to MCP content format
     const content: Array<{ type: "text"; text: string }> = (result.content ?? []).map((item: any) => {
@@ -152,7 +156,10 @@ server.setRequestHandler(LenientCallToolRequestSchema, async (request, extra) =>
 
     return {
       content,
-      isError: false,
+      // Preserve the tool's own error state (graph_mutate sets isError: true on
+      // EdgeStore persistence failure). Absent/null states remain protocol
+      // success, matching the MCP SDK's optional result flag semantics.
+      isError: result.isError ?? false,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

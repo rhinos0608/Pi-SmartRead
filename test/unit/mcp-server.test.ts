@@ -9,9 +9,17 @@ import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MCP_SERVER_PATH = join(__dirname, "../../src/mcp-server.ts");
+// Resolve tsx's loader to an absolute path so `--import` works regardless of
+// the child's cwd (a temp dir for graph_mutate has no node_modules to resolve
+// a bare `tsx` specifier against). ESM-safe require via createRequire.
+const require = createRequire(import.meta.url);
+const TSX_LOADER_PATH = require.resolve("tsx");
 
 function mcpInitialize(): Record<string, unknown> {
   return {
@@ -48,6 +56,7 @@ function mcpInitialized(): Record<string, unknown> {
 function callMcpServer(
   messageOrMessages: Record<string, unknown> | Array<Record<string, unknown>>,
   timeoutMs = 30_000,
+  childCwd?: string,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     // Per-test timeout kills the subprocess and rejects
@@ -57,9 +66,9 @@ function callMcpServer(
       reject(new Error("MCP server timeout"));
     }, timeoutMs);
 
-    const child = spawn("node", ["--import", "tsx", MCP_SERVER_PATH], {
+    const child = spawn("node", ["--import", TSX_LOADER_PATH, MCP_SERVER_PATH], {
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: join(__dirname, "../.."),
+      cwd: childCwd ?? join(__dirname, "../.."),
     });
 
     let stderr = "";
@@ -373,4 +382,42 @@ describe("MCP stdio server", () => {
       expect(hasContent).toBe(true);
     }
   }, 60_000);
+
+  it("graph_mutate surfaces EdgeStore persistence failure as protocol-level isError when enabled", async () => {
+    // Temp cwd with experimental.graphMutate enabled and a regular file at
+    // `.pi-smartread` blocking EdgeStore directory/log creation. The registry
+    // reads experimental config from the child's cwd at module init.
+    const childCwd = mkdtempSync(join(tmpdir(), "mcp-graphmutate-"));
+    try {
+      mkdirSync(childCwd, { recursive: true });
+      writeFileSync(
+        join(childCwd, "pi-smartread.config.json"),
+        JSON.stringify({ experimental: { graphMutate: true } }),
+        "utf8",
+      );
+      // Block `.pi-smartread/` directory creation with a regular file.
+      writeFileSync(join(childCwd, ".pi-smartread"), "", "utf8");
+
+      const response = await callMcpServer([
+        mcpInitialize(),
+        mcpInitialized(),
+        {
+          jsonrpc: "2.0",
+          id: 99,
+          method: "tools/call",
+          params: {
+            name: "graph_mutate",
+            arguments: { from: "src/a.ts", to: "src/b.ts", relation: "breakage" },
+          },
+        },
+      ], 60_000, childCwd);
+
+      const result = response.result as any;
+      // Tool returned isError: true — the server must forward it, not hardcode false.
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Failed to persist");
+    } finally {
+      rmSync(childCwd, { recursive: true, force: true });
+    }
+  }, 90_000);
 });
