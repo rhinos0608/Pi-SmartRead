@@ -114,6 +114,8 @@ function watchDirectoryTree(
   maxWatcherCount: number,
   onDirty: (relativePath: string) => void,
   scheduleFlush: () => void,
+  watchedDirs?: Set<string>,
+  pathToWatcher?: Map<string, FSWatcher>,
 ): void {
   const remaining = maxWatcherCount - watchers.length;
   if (remaining <= 0) {
@@ -127,13 +129,49 @@ function watchDirectoryTree(
   const dirs = collectDirectories(absPath, remaining);
   for (const dir of dirs) {
     if (watchers.length >= maxWatcherCount) break;
+    // If directory was previously watched (e.g. deleted and recreated),
+    // close the stale watcher and remove it from tracking sets.
+    if (pathToWatcher?.has(dir)) {
+      try {
+        pathToWatcher.get(dir)!.close();
+      } catch { /* already closed */ }
+      const idx = watchers.indexOf(pathToWatcher.get(dir)!);
+      if (idx !== -1) watchers.splice(idx, 1);
+      pathToWatcher.delete(dir);
+      watchedDirs?.delete(dir);
+    }
+    // Skip already-watched directories to prevent duplicate watchers on rename events.
+    if (watchedDirs?.has(dir)) continue;
     try {
       const watcher = watch(dir, (_event, filename) => {
         if (filename === null) return;
         onDirty(relative(root, join(dir, filename)));
         scheduleFlush();
+
+        // Dynamic directory discovery: if a rename creates a new dir, watch it
+        if (_event === "rename") {
+          const absPath2 = join(dir, filename);
+          try {
+            if (statSync(absPath2).isDirectory()) {
+              watchDirectoryTree(
+                absPath2,
+                root,
+                watchers,
+                maxWatcherCount,
+                onDirty,
+                scheduleFlush,
+                watchedDirs,
+                pathToWatcher,
+              );
+            }
+          } catch { /* statSync failed — not a real path, ignore */ }
+        }
       });
       watchers.push(watcher);
+      pathToWatcher?.set(dir, watcher);
+      // Only mark as watched AFTER the watcher was created successfully, so a
+      // dir that failed initial watch can be retried by dynamic discovery.
+      watchedDirs?.add(dir);
     } catch {
       // Ignore per-directory errors during dynamic discovery.
     }
@@ -313,6 +351,8 @@ function startNonRecursiveWatch(
   };
 
   const dirs = collectDirectories(root, maxWatcherCount);
+  const watchedDirs = new Set<string>();  // Only successful watchers (dedup)
+  const pathToWatcher = new Map<string, FSWatcher>();  // Track path-to-watcher ownership
 
   if (dirs.length >= maxWatcherCount) {
     console.warn(
@@ -348,6 +388,8 @@ function startNonRecursiveWatch(
                 maxWatcherCount,
                 (path) => pendingPaths.add(path),
                 scheduleFlush,
+                watchedDirs,
+                pathToWatcher,
               );
             }
           } catch (_e) {
@@ -356,6 +398,10 @@ function startNonRecursiveWatch(
         }
       });
       watchers.push(watcher);
+      pathToWatcher.set(dir, watcher);
+      // Only mark as watched AFTER the watcher was created successfully, so a
+      // dir that failed initial watch can be retried by dynamic discovery.
+      watchedDirs.add(dir);
     } catch (err) {
       console.warn(
         `[file-watcher] Failed to watch ${dir}: ${(err as Error).message}`,

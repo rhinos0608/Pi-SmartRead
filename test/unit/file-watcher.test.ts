@@ -341,9 +341,44 @@ describe("file-watcher", () => {
       expect(onDirty).toHaveBeenCalledTimes(1);
       const paths = onDirty.mock.calls[0]![0] as string[];
       expect(paths.length).toBe(1);
-      // Last watched dir is deepest (a/b/c), so relative path includes subdirs
-      expect(paths[0]).toMatch(/changed\.ts$/);
+      // Last watched dir is deepest (a/b/c), so relative path includes the nested subdirs
+      expect(paths[0]).toMatch(/a\/b\/c\/changed\.ts$/);
       stop();
+    });
+
+    it("retries a dir that failed initial watch via dynamic discovery", () => {
+      const onDirty = vi.fn();
+      const failedDir = path.join(tmpRoot, "a");
+      let failedDirCalls = 0;
+      mockWatch.mockImplementation((dir: string) => {
+        if (dir === failedDir && failedDirCalls === 0) {
+          failedDirCalls++;
+          throw new Error("EPERM");
+        }
+        return { close: mockClose };
+      });
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const stop = startWatching(tmpRoot, onDirty, {
+        mode: "non-recursive",
+        maxWatcherCount: 100,
+      });
+
+      // Initial: root, a(throws), a/b, a/b/c → 4 calls, 3 successful watchers.
+      expect(mockWatch).toHaveBeenCalledTimes(4);
+
+      // Simulate a rename on the root watcher re-creating dir "a".
+      const rootListener = mockWatch.mock.calls[0]![1] as (event: string, filename: string | null) => void;
+      rootListener("rename", "a");
+
+      // Dynamic discovery must retry watching the previously-failed dir. The
+      // already-watched a/b and a/b/c are also re-watched (pathToWatcher
+      // close+rewatch for the deleted-and-recreated case), so total = 7.
+      expect(mockWatch).toHaveBeenCalledTimes(7);
+      const postInitial = mockWatch.mock.calls.slice(4).map((c) => c[0]);
+      expect(postInitial).toContain(failedDir);
+      stop();
+      consoleWarnSpy.mockRestore();
     });
   });
 
