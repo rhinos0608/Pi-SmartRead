@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, utimesSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   computeComplexity,
@@ -38,15 +38,13 @@ function dirname(p: string): string {
   return i >= 0 ? p.slice(0, i) : ".";
 }
 
-/** Stub ContextGraph returning canned importers. */
+/** Stub ContextGraph using real import-edge direction: importer → imported target. */
 async function makeMockGraph(importingFiles: string[]): Promise<ContextGraph> {
-  // Minimal mock that implements getFileNeighbours
   return {
-    getFileNeighbours: async (_path: string) =>
-      importingFiles.map((p) => ({
-        path: p,
-        provenance: { from: "", to: p, type: "imported_by" as const, confidence: 1 },
-      })),
+    getProvenanceEdges: () => importingFiles.map((from) => ({
+      from,
+      to: "/repo/src/target.ts",
+    })),
   } as unknown as ContextGraph;
 }
 
@@ -240,18 +238,44 @@ describe("computeReuseBreadth", () => {
     expect(result.confidence).toBe("high");
   });
 
-  it("no graph → Unknown", async () => {
-    const result = await computeReuseBreadth("/repo/src/target.ts", null);
+  it("no graph, no workspace → Unknown", async () => {
+    const result = await computeReuseBreadth("/nonexistent/src/target.ts", null);
     expect(result.name).toBe("reuse");
     expect(result.value).toBe("Unknown");
     expect(result.confidence).toBe("none");
+    expect(result.source).toBe("import scan");
+    expect(result.detail).toContain("could not scan workspace");
   });
 
-  it("undefined graph → Unknown", async () => {
-    const result = await computeReuseBreadth("/repo/src/target.ts");
+  it("undefined graph, no workspace → Unknown", async () => {
+    const result = await computeReuseBreadth("/nonexistent/src/target.ts");
     expect(result.name).toBe("reuse");
     expect(result.value).toBe("Unknown");
     expect(result.confidence).toBe("none");
+    expect(result.source).toBe("import scan");
+    expect(result.detail).toContain("could not scan workspace");
+  });
+
+  it("precomputed dependents count used when no graph", async () => {
+    const precomputed = [
+      { file: "/repo/src/importer.ts", line: 5, symbolName: "", kind: "import" as const },
+    ];
+    const result = await computeReuseBreadth("/repo/src/target.ts", null, precomputed);
+    expect(result.name).toBe("reuse");
+    expect(result.value).toContain("1 importing file");
+    expect(result.confidence).toBe("medium");
+    expect(result.source).toBe("import scan");
+    expect(result.detail).toContain("direct imports/re-exports only");
+    // Single mention of graph unavailability
+    expect(result.label).toBe("Yes");
+  });
+
+  it("precomputed empty dependents with no graph → No importing files found", async () => {
+    const result = await computeReuseBreadth("/repo/src/target.ts", null, []);
+    expect(result.name).toBe("reuse");
+    expect(result.value).toBe("No importing files found");
+    expect(result.confidence).toBe("low");
+    expect(result.source).toBe("import scan");
   });
 });
 
@@ -373,6 +397,23 @@ describe("findTestLinkage", () => {
     const result = findTestLinkage(join(srcDir, "helper.ts"), workdir);
     expect(result.length).toBe(1);
     expect(result[0]!.coverage).toBe("indirect");
+  });
+
+  it("finds Python prefix and suffix conventions in nested test directories", () => {
+    const srcDir = join(workdir, "src");
+    const testsDir = join(workdir, "test", "unit");
+    mkdirSync(srcDir, { recursive: true });
+    mkdirSync(testsDir, { recursive: true });
+    const srcPath = join(srcDir, "worker.py");
+    writeFileSync(srcPath, "def work():\n    return True\n");
+    writeFileSync(join(testsDir, "test_worker.py"), "def test_work():\n    assert True\n");
+    writeFileSync(join(testsDir, "worker_test.py"), "def test_work_again():\n    assert True\n");
+
+    const result = findTestLinkage(srcPath, workdir);
+    expect(result.map((link) => basename(link.testFile)).sort()).toEqual([
+      "test_worker.py",
+      "worker_test.py",
+    ]);
   });
 
   it("returns empty when no test files exist", () => {

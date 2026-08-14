@@ -77,7 +77,7 @@ export interface InspectToolOptions {
 
 const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality.
 - Pass a directory to get a ranked repository map with key symbols and architecture.
-- Pass a file to get structural facts: callers, parent class, children, base classes, overrides, re-exports, plus quality signals (complexity, public API, deprecation, test presence, reuse breadth, recency).
+- Pass a file to get structural facts: external dependents (importing files), dependencies (imported modules), internal call sites, parent class, children, base classes, overrides, re-exports, plus quality signals (complexity, public API, deprecation, test presence, reuse breadth, recency).
 - callDepth/callDirection: BFS call graph traversal (file mode, depth 1-5, direction callers/callees/both).
 - impact: Compute blast radius — files/symbols reachable via call+import graph from target.
 - diff: Map git diff (unstaged/staged/HEAD) to affected symbols with risk classification.

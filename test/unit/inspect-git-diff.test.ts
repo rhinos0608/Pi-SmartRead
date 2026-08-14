@@ -92,8 +92,8 @@ describe("inspect diff internals", () => {
     describe("renderDiffSection", () => {
         it("returns error section for non-git directory", async () => {
             const section = await renderDiffSection("unstaged", nonRepoDir);
-            expect(section).toContain("Error");
-            expect(section).toContain("git repository");
+            expect(section.text).toContain("Error");
+            expect(section.text).toContain("git repository");
         });
 
         it("returns diff impact section with risk classification", async () => {
@@ -104,12 +104,12 @@ describe("inspect diff internals", () => {
                 "export const x = 1;\nexport const y = 2;\nexport const z = 3;\n",
             );
             const section = await renderDiffSection("unstaged", repoRoot);
-            expect(section).toContain("Diff Impact");
-            expect(section).toContain("Risk Summary");
+            expect(section.text).toContain("Diff Impact");
+            expect(section.text).toContain("Risk Summary");
             // 2 added lines → LOW
-            expect(section).toContain("LOW");
-            expect(section).not.toContain("HIGH");
-            expect(section).not.toContain("CRITICAL");
+            expect(section.text).toContain("LOW");
+            expect(section.text).not.toContain("HIGH");
+            expect(section.text).not.toContain("CRITICAL");
         });
 
         it("renders HIGH risk when a file has >10 added lines", async () => {
@@ -120,8 +120,8 @@ describe("inspect diff internals", () => {
             for (let i = 0; i < 11; i++) lines.push(`export const y${i} = ${i};`);
             writeFileSync(join(repoRoot, "test.ts"), lines.join("\n") + "\n");
             const section = await renderDiffSection("unstaged", repoRoot);
-            expect(section).toContain("HIGH");
-            expect(section).not.toContain("CRITICAL");
+            expect(section.text).toContain("HIGH");
+            expect(section.text).not.toContain("CRITICAL");
         });
 
         it("renders CRITICAL risk when a file has >20 added lines in one hunk", async () => {
@@ -132,7 +132,7 @@ describe("inspect diff internals", () => {
             for (let i = 0; i < 21; i++) lines.push(`export const y${i} = ${i};`);
             writeFileSync(join(repoRoot, "test.ts"), lines.join("\n") + "\n");
             const section = await renderDiffSection("unstaged", repoRoot);
-            expect(section).toContain("CRITICAL");
+            expect(section.text).toContain("CRITICAL");
         });
 
         it("returns no-changes section for clean repo", async () => {
@@ -140,7 +140,7 @@ describe("inspect diff internals", () => {
             git(repoRoot, ["add", "."]);
             git(repoRoot, ["commit", "-m", "initial"]);
             const section = await renderDiffSection("unstaged", repoRoot);
-            expect(section).toContain("no changes found");
+            expect(section.text).toContain("no changes found");
         });
     });
 });

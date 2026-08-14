@@ -367,7 +367,9 @@ describe("graphSchema rendering", () => {
       graphSchema: true,
     });
     expect(result.contentText).toContain("## Graph Schema");
-    expect(result.contentText).toContain("not built");
+    expect(result.contentText).toMatch(/not available|no graph/i);
+    // No longer says '"not built"'
+    expect(result.contentText).not.toContain('"not built"');
   });
 });
 

@@ -153,11 +153,232 @@ describe("executeFileInspect", () => {
             cwd: workdir,
             sessionFilePath: "/sessions/abc.jsonl",
         });
-        expect(result.contentText).toContain("Callers (0)");
+        expect(result.contentText).toContain("External Dependents (0)");
+        expect(result.contentText).toContain("Dependencies (0)");
+        expect(result.contentText).toContain("Internal Call Sites (0)");
         expect(result.contentText).toContain("Children (0)");
         expect(result.contentText).toContain("Base Classes / Interfaces");
         expect(result.contentText).toContain("Overrides");
         expect(result.contentText).toContain("Re-Exported By (0)");
+    });
+
+    it("signal rendering uses human-readable names without Yes:Yes or Unknown:Unknown", async () => {
+        const result = await executeFileInspect({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        const text = result.contentText;
+        // Human-readable names should appear in output
+        expect(text).toContain("Complexity");
+        expect(text).toContain("Public API");
+        expect(text).toContain("External Reuse");
+        expect(text).toContain("Last Change");
+        expect(text).toContain("Tests");
+        expect(text).toContain("Deprecation");
+        // Forbidden patterns: will contain label/value but not "Yes: Yes" or "Unknown: Unknown"
+        expect(text).not.toContain("Yes: Yes");
+        expect(text).not.toContain("Unknown: Unknown");
+    });
+
+    it("finds convention-matched tests in nested repo test directories", async () => {
+        const srcDir = join(workdir, "src");
+        const unitTestDir = join(workdir, "test", "unit");
+        mkdirSync(srcDir, { recursive: true });
+        mkdirSync(unitTestDir, { recursive: true });
+        writeFileSync(join(srcDir, "feature.ts"), "export const feature = true;\n", "utf8");
+        writeFileSync(join(unitTestDir, "feature.test.ts"), "test('feature', () => {});\n", "utf8");
+
+        const result = await executeFileInspect({
+            path: "src/feature.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+            signals: ["tests"],
+        });
+
+        expect(result.contentText).toContain("Tests: Yes (test/unit/feature.test.ts)");
+    });
+
+    it("uses import-scan dependents when context graph has no importer edge", async () => {
+        writeFileSync(join(workdir, "target.ts"), "export const target = true;\n", "utf8");
+        writeFileSync(join(workdir, "importer.ts"), 'import { target } from "./target.ts";\n', "utf8");
+        const emptyGraph = {
+            getFileNeighbours: async () => [],
+        } as any;
+
+        const result = await executeFileInspect({
+            path: "target.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+            contextGraph: emptyGraph,
+            signals: ["reuse"],
+        });
+
+        expect(result.contentText).toContain("External Dependents (1)");
+        expect(result.contentText).toContain("External Reuse: Yes (1 importing file)");
+    });
+
+    it("no-graph graphSchema fallback shows import/dependent edges, not just 'not built'", async () => {
+        const result = await executeFileInspect({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+            graphSchema: true,
+        });
+        const text = result.contentText;
+        // Should mention fallback nature and show counts
+        expect(text).toContain("Context graph: not available");
+        expect(text).toContain("dependencies");
+        expect(text).toContain("dependents");
+        // Should NOT contain the old "not built" message alone
+        expect(text).not.toMatch(/contextGraph: "not built"/i);
+    });
+
+    it("no-graph impact fallback shows direct import-scan dependents", async () => {
+        const result = await executeFileInspect({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+            impact: true,
+        });
+        const text = result.contentText;
+        // Should mention fallback nature clearly
+        expect(text).toContain("Context graph not available");
+        expect(text).toContain("import-scan");
+    });
+
+    it("evidence resources include files from externalDependents and dependencies", async () => {
+        // Create an importing file
+        const importerPath = join(workdir, "importer.ts");
+        writeFileSync(importerPath, `import { hello } from "./hello.ts";\n`, "utf8");
+
+        const result = await executeFileInspect({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        // Should reference the importer file in content
+        expect(result.contentText).toContain("External Dependents");
+        // Resources should exist
+        expect(result.workspaceEvidence.resources.length).toBeGreaterThanOrEqual(1);
+        // Re-verify new section names appear
+        expect(result.contentText).toContain("Dependencies");
+        expect(result.contentText).toContain("Internal Call Sites");
+    });
+
+    it("external dependent importer has range on importer file at import line", async () => {
+        // Create an importing file that imports hello.ts
+        const importerPath = join(workdir, "sub", "importer.ts");
+        mkdirSync(join(workdir, "sub"), { recursive: true });
+        writeFileSync(importerPath, "import { hello } from '../hello.ts';\n", "utf8");
+
+        const result = await executeFileInspect({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        // External dependents section should reference the importer file
+        expect(result.contentText).toContain("importer.ts");
+        // Evidence should include the importer file path (canonicalPath)
+        const hasImporter = result.workspaceEvidence.resources.some(
+            (r: any) => r.canonicalPath && r.canonicalPath.includes("importer.ts")
+        );
+        expect(hasImporter).toBe(true);
+    });
+
+    it("dependency line belongs to inspected file, not dependency file", async () => {
+        // hello.ts imports from sub/helper.ts
+        const helperDir = join(workdir, "sub");
+        mkdirSync(helperDir, { recursive: true });
+        writeFileSync(join(helperDir, "helper.ts"), "export const helper = 1;\n", "utf8");
+        writeFileSync(file, 'import { helper } from "./sub/helper.ts";\n' + "alpha\nbeta\ngamma\ndelta\n", "utf8");
+
+        const result = await executeFileInspect({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        // Should render the dependency with line number
+        expect(result.contentText).toContain("Dependencies");
+        expect(result.contentText).toContain("L1");
+        // Evidence should include the inspected file as resource (dependency line on hello.ts)
+        const hasInspectedResource = result.workspaceEvidence.resources.some(
+            (r: any) => r.canonicalPath && r.canonicalPath.includes("hello.ts")
+        );
+        expect(hasInspectedResource).toBe(true);
+    });
+
+    it("same-basename different module is NOT counted as external dependent", async () => {
+        // Create two modules with same basename in different directories
+        mkdirSync(join(workdir, "modA"), { recursive: true });
+        mkdirSync(join(workdir, "modB"), { recursive: true });
+        writeFileSync(join(workdir, "modA", "helper.ts"), "export const foo = 1;\n", "utf8");
+        writeFileSync(join(workdir, "modB", "helper.ts"), "export const bar = 2;\n", "utf8");
+        // modA/client.ts imports from modA/helper.ts — should NOT be dependent of modB/helper.ts
+        writeFileSync(join(workdir, "modA", "client.ts"), 'import { foo } from "./helper.ts";\n', "utf8");
+        // modB/npm-like.ts imports bare "express" — should NOT be dependent of anything
+        writeFileSync(join(workdir, "modB", "npmlike.ts"), 'import express from "express";\n', "utf8");
+
+        const resultB = await executeFileInspect({
+            path: join(workdir, "modB", "helper.ts"),
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        // modB/helper.ts should have zero external dependents
+        expect(resultB.contentText).toContain("External Dependents (0)");
+
+        const resultA = await executeFileInspect({
+            path: join(workdir, "modA", "helper.ts"),
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        // modA/helper.ts should have 1 external dependent (client.ts)
+        expect(resultA.contentText).toContain("External Dependents (1)");
+        expect(resultA.contentText).toContain("client.ts");
+    });
+
+    it(".js specifier resolves .ts target", async () => {
+        // TS file that imports with .js extension but the underlying file is .ts
+        writeFileSync(join(workdir, "dep.ts"), "export const x = 1;\n", "utf8");
+        writeFileSync(join(workdir, "user.ts"), 'import { x } from "./dep.js";\n', "utf8");
+
+        const result = await executeFileInspect({
+            path: "dep.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        // user.ts should be found as external dependent via .js→.ts resolution
+        expect(result.contentText).toContain("External Dependents (1)");
+        expect(result.contentText).toContain("user.ts");
+    });
+
+    it("extensionless specifier resolves index.ts", async () => {
+        // Create barrel: mod/index.ts imported as "./mod"
+        mkdirSync(join(workdir, "mylib"), { recursive: true });
+        writeFileSync(join(workdir, "mylib", "index.ts"), "export const magic = 42;\n", "utf8");
+        writeFileSync(join(workdir, "app.ts"), 'import { magic } from "./mylib";\n', "utf8");
+
+        const result = await executeFileInspect({
+            path: join(workdir, "mylib", "index.ts"),
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        expect(result.contentText).toContain("External Dependents (1)");
+        expect(result.contentText).toContain("app.ts");
+    });
+
+    it("nested importer is found repo-wide (not just sibling)", async () => {
+        // Deeply nested importer in subdirectory
+        mkdirSync(join(workdir, "a", "b", "c"), { recursive: true });
+        writeFileSync(join(workdir, "a", "b", "c", "deep.ts"), 'import { hello } from "../../../hello.ts";\n', "utf8");
+
+        const result = await executeFileInspect({
+            path: "hello.ts",
+            cwd: workdir,
+            sessionFilePath: "/sessions/abc.jsonl",
+        });
+        expect(result.contentText).toContain("External Dependents (1)");
+        expect(result.contentText).toContain("deep.ts");
     });
 });
 

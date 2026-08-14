@@ -1,9 +1,11 @@
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { relative, resolve, dirname, basename, extname, join } from "node:path";
 import { createRequire } from "node:module";
 import type { SignalName, SignalResult, FileSignals } from "./signals-types.js";
 import type { TestLinkage } from "./signals-types.js";
 import type { ContextGraph } from "./context-graph.js";
+import type { DependentInfo } from "./structural-facts-types.js";
+import { findImportDependents } from "./structural-facts.js";
 import { filenameToLang, type SupportedLanguage } from "./languages.js";
 import { fileLastModifiedRelative } from "./git-history.js";
 
@@ -308,36 +310,90 @@ export function detectPublicApi(
   };
 }
 
+function reuseFromImportScan(dependents: DependentInfo[]): SignalResult {
+  const count = new Set(dependents.map((dependent) => resolve(dependent.file))).size;
+  if (count > 0) {
+    const noun = count === 1 ? "file" : "files";
+    return {
+      name: "reuse",
+      label: "Yes",
+      value: `Yes (${count} importing ${noun})`,
+      detail: `import scan (${count} ${noun}, direct imports/re-exports only)`,
+      confidence: "medium",
+      source: "import scan",
+    };
+  }
+  return {
+    name: "reuse",
+    label: "No",
+    value: "No importing files found",
+    detail: "Import scan found no dependents",
+    confidence: "low",
+    source: "import scan",
+  };
+}
+
 export async function computeReuseBreadth(
   absolutePath: string,
   graph?: ContextGraph | null,
+  precomputedDependents?: DependentInfo[],
+  cwd?: string,
 ): Promise<SignalResult> {
   if (!graph) {
-    return {
-      name: "reuse",
-      label: "Unknown",
-      value: "Unknown",
-      detail: "Graph unavailable",
-      confidence: "none",
-      source: "context graph",
-    };
+    // Use precomputed dependents if provided (avoids second scan).
+    if (precomputedDependents) return reuseFromImportScan(precomputedDependents);
+    // Standalone scan: try workspace-wide import resolution
+    const scanCwd = cwd ?? dirname(absolutePath);
+    try {
+      // Quick directory check — findSrcFiles returns [] for non-existent dirs
+      // but we need to distinguish "no workspace" from "no dependents"
+      if (!existsSync(scanCwd)) {
+        return {
+          name: "reuse",
+          label: "Unknown",
+          value: "Unknown",
+          detail: "Graph unavailable — could not scan workspace",
+          confidence: "none",
+          source: "import scan",
+        };
+      }
+      const dependents = await findImportDependents(absolutePath, scanCwd, filenameToLang(absolutePath) as any);
+      return reuseFromImportScan(dependents);
+    } catch {
+      return {
+        name: "reuse",
+        label: "Unknown",
+        value: "Unknown",
+        detail: "Graph unavailable — could not scan workspace",
+        confidence: "none",
+        source: "import scan",
+      };
+    }
   }
 
   try {
-    const neighbours = await graph.getFileNeighbours(absolutePath);
-    const importingFiles = neighbours.filter(
-      (n) => n.provenance.type === "imported_by",
+    const targetPath = resolve(absolutePath);
+    const graphPaths = new Set(
+      graph.getProvenanceEdges()
+        .filter((edge) => resolve(edge.to) === targetPath)
+        .map((edge) => resolve(edge.from)),
     );
-    const uniquePaths = new Set(importingFiles.map((n) => n.path));
+    const scanPaths = new Set((precomputedDependents ?? []).map((dependent) => resolve(dependent.file)));
+    const uniquePaths = new Set([...graphPaths, ...scanPaths]);
     const count = uniquePaths.size;
 
     if (count > 0) {
+      if (graphPaths.size === 0 && precomputedDependents) {
+        return reuseFromImportScan(precomputedDependents);
+      }
+      const noun = count === 1 ? "file" : "files";
       return {
         name: "reuse",
         label: "Yes",
-        value: `Yes (${count} importing files)`,
+        value: `Yes (${count} importing ${noun})`,
+        ...(count > graphPaths.size ? { detail: "context graph supplemented by direct import scan" } : {}),
         confidence: "high",
-        source: "context graph",
+        source: count > graphPaths.size ? "context graph + import scan" : "context graph",
       };
     }
 
@@ -346,9 +402,10 @@ export async function computeReuseBreadth(
       label: "No",
       value: "No importing files",
       confidence: "high",
-      source: "context graph",
+      source: "context graph + import scan",
     };
   } catch {
+    if (precomputedDependents) return reuseFromImportScan(precomputedDependents);
     return {
       name: "reuse",
       label: "Unknown",
@@ -400,59 +457,16 @@ export function detectTests(
   absolutePath: string,
   cwd: string,
 ): SignalResult {
-  const parsedPath = absolutePath;
-  const basename = parsedPath.split("/").pop() ?? parsedPath.split("\\").pop() ?? "";
-  const dir = dirname(parsedPath);
-  const filenameNoExt = basename.replace(/\.[^.]+$/, "");
-
-  // Candidate test paths
-  const candidates = new Set<string>();
-
-  // Common patterns:
-  // src/foo.ts → test/foo.test.ts, test/foo.spec.ts, src/foo.test.ts, src/__tests__/foo.test.ts
-  // src/foo.py → tests/test_foo.py, test_foo.py
-  const srcDir = dir;
-  const testDir = resolve(dir, "..", "test");
-  const testsDir = resolve(dir, "..", "tests");
-  const srcTestDir = resolve(dir, "__tests__");
-
-  const exts = isPythonFile(parsedPath) ? [".py"] : [".ts", ".tsx", ".js", ".jsx"];
-
-  for (const ext of exts) {
-    // test/ dir pattern
-    candidates.add(resolve(testDir, `${filenameNoExt}.test${ext}`));
-    candidates.add(resolve(testDir, `${filenameNoExt}.spec${ext}`));
-    candidates.add(resolve(testDir, `${filenameNoExt}_test${ext}`));
-    // tests/ dir pattern (python)
-    candidates.add(resolve(testsDir, `test_${filenameNoExt}${ext}`));
-    candidates.add(resolve(testsDir, `${filenameNoExt}_test${ext}`));
-    // same dir pattern
-    candidates.add(resolve(srcDir, `${filenameNoExt}.test${ext}`));
-    candidates.add(resolve(srcDir, `${filenameNoExt}.spec${ext}`));
-    candidates.add(resolve(srcDir, `test_${filenameNoExt}${ext}`));
-    // __tests__ dir pattern
-    candidates.add(resolve(srcTestDir, `${filenameNoExt}.test${ext}`));
-    // python test_ prefix in same dir
-    if (isPythonFile(parsedPath)) {
-      candidates.add(resolve(srcDir, `test_${filenameNoExt}.py`));
-    }
-  }
-
-  for (const candidate of candidates) {
-    try {
-      if (existsSync(candidate) && statSync(candidate).isFile()) {
-        return {
-          name: "tests",
-          label: "Yes",
-          value: `Yes (${relative(cwd, candidate)})`,
-          detail: candidate,
-          confidence: "medium",
-          source: "test file discovery",
-        };
-      }
-    } catch {
-      continue;
-    }
+  const linkage = findTestLinkage(absolutePath, cwd)[0];
+  if (linkage) {
+    return {
+      name: "tests",
+      label: "Yes",
+      value: `Yes (${relative(cwd, linkage.testFile)})`,
+      detail: linkage.testFile,
+      confidence: "medium",
+      source: "test file discovery",
+    };
   }
 
   return {
@@ -522,15 +536,41 @@ export function findTestLinkage(
   const repoTestDir = resolve(cwd, "test");
   const repoTestsDir = resolve(cwd, "tests");
 
+  // Collect bounded subdirectory levels under repo test roots for layouts like test/unit/<name>.test.ts
+  const testSubDirs = new Set<string>();
+  for (const root of [repoTestDir, repoTestsDir]) {
+    testSubDirs.add(root);
+    try {
+      for (const d1 of readdirSync(root, { withFileTypes: true })) {
+        if (d1.isDirectory()) {
+          testSubDirs.add(resolve(root, d1.name));
+          try {
+            for (const d2 of readdirSync(resolve(root, d1.name), { withFileTypes: true })) {
+              if (d2.isDirectory()) testSubDirs.add(resolve(root, d1.name, d2.name));
+            }
+          } catch { /* skip unreadable */ }
+        }
+      }
+    } catch { /* skip if root doesn't exist */ }
+  }
+
   for (const ext of exts) {
     testCandidates.add(resolve(testDir, `${basenameNoExt}.test${ext}`));
     testCandidates.add(resolve(testDir, `${basenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(testDir, `test_${basenameNoExt}${ext}`));
+    testCandidates.add(resolve(testDir, `${basenameNoExt}_test${ext}`));
     testCandidates.add(resolve(testsDir, `test_${basenameNoExt}${ext}`));
+    testCandidates.add(resolve(testsDir, `${basenameNoExt}_test${ext}`));
     testCandidates.add(resolve(srcDir, `${basenameNoExt}.test${ext}`));
     testCandidates.add(resolve(srcDir, `${basenameNoExt}.spec${ext}`));
+    testCandidates.add(resolve(srcDir, `test_${basenameNoExt}${ext}`));
     testCandidates.add(resolve(srcTestDir, `${basenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(repoTestDir, `${basenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(repoTestDir, `${basenameNoExt}.spec${ext}`));
+    for (const subDir of testSubDirs) {
+      testCandidates.add(resolve(subDir, `${basenameNoExt}.test${ext}`));
+      testCandidates.add(resolve(subDir, `${basenameNoExt}.spec${ext}`));
+      testCandidates.add(resolve(subDir, `test_${basenameNoExt}${ext}`));
+      testCandidates.add(resolve(subDir, `${basenameNoExt}_test${ext}`));
+    }
     testCandidates.add(resolve(repoTestsDir, `test_${basenameNoExt}${ext}`));
   }
 
@@ -542,22 +582,78 @@ export function findTestLinkage(
         try {
           const testContent = readFileSync(candidate, "utf-8");
           // Parse import/require specifiers and resolve relative paths
-          const specifierRe = /(?:from\s+['"]([^'"]+)['"])|(?:require\s*\(\s*['"]([^'"]+)['"]\s*\))/g;
+          const specifierRe = /(?:from\s+['"]([^'"]+)['"])|(?:import\s+['"]([^'"]+)['"])|(?:require\s*\(\s*['"]([^'"]+)['"]\s*\))/g;
+          // Python-specific import patterns: "import package.module" and "from package.module import symbol"
+          const pyImportRe = /^import\s+([a-zA-Z_][\w.]*(?:\s*,\s*[a-zA-Z_][\w.]*)*)\s*$|^from\s+([a-zA-Z_][\w.]+)\s+import\s+/gm;
           const candidateDir = dirname(candidate);
           let m: RegExpExecArray | null;
           let found = false;
+          // Python: parse import/from statements
+          if (isPy) {
+            pyImportRe.lastIndex = 0;
+            while ((m = pyImportRe.exec(testContent)) !== null) {
+              if (m[1]) {
+                // "import package.module" — try each comma-separated module
+                for (const mod of m[1].split(",")) {
+                  const modName = mod.trim();
+                  if (!modName) continue;
+                  // Try module as file or package from candidateDir and cwd
+                  for (const baseDir of [candidateDir, cwd]) {
+                    const modPath = join(baseDir, modName.replace(/\./g, "/"));
+                    if (modPath + ".py" === absolutePath || join(modPath, "__init__.py") === absolutePath) {
+                      found = true; break;
+                    }
+                  }
+                  if (found) break;
+                }
+              } else if (m[2]) {
+                // "from package.module import symbol"
+                const modName = m[2].trim();
+                for (const baseDir of [candidateDir, cwd]) {
+                  const modPath = join(baseDir, modName.replace(/\./g, "/"));
+                  if (modPath + ".py" === absolutePath || join(modPath, "__init__.py") === absolutePath) {
+                    found = true; break;
+                  }
+                }
+              }
+              if (found) break;
+            }
+          }
+          // JS/TS: parse import/require specifiers
+          specifierRe.lastIndex = 0;
           while ((m = specifierRe.exec(testContent)) !== null) {
-            const specifier = m[1] ?? m[2];
+            if (found) break;
+            const specifier = m[1] ?? m[2] ?? m[3];
             if (!specifier) continue;
-            // Only resolve relative or root-relative imports
-            if (!specifier.startsWith(".") && !specifier.startsWith("/")) continue;
+            // Resolve root-relative against cwd, dot-relative against candidateDir
+            // Normalize leading slash: resolve relative to cwd, not filesystem root
+            const normalized = specifier.startsWith("/") ? "." + specifier : specifier;
+            const base = normalized.startsWith("/") ? cwd : candidateDir;
+            if (!specifier.startsWith(".") && !specifier.startsWith("/")) {
+              // Python: try bare module name resolution
+              if (isPy && !specifier.startsWith(".")) {
+                // Try module as file or package
+                for (const ext of [".py"]) {
+                  if (join(candidateDir, specifier + ext) === absolutePath) {
+                    found = true; break;
+                  }
+                  // Try package __init__.py
+                  if (join(candidateDir, specifier, "__init__.py") === absolutePath) {
+                    found = true; break;
+                  }
+                }
+                if (found) break;
+              }
+              continue;
+            }
             try {
-              const resolved = resolve(candidateDir, specifier);
+              const resolved = resolve(base, normalized);
               // Try exact path
               let match = resolved === absolutePath;
-              // Try extension resolution (.ts, .tsx, .js, .jsx, .mjs, .cjs)
+              // Try extension resolution
+              const resolveExts = isPy ? [".py"] : [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
               if (!match) {
-                for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]) {
+                for (const ext of resolveExts) {
                   if (resolved + ext === absolutePath) {
                     match = true;
                     break;
@@ -566,8 +662,12 @@ export function findTestLinkage(
               }
               // Try index-file resolution (directory → index.*)
               if (!match) {
-                for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]) {
+                for (const ext of resolveExts) {
                   if (join(resolved, `index${ext}`) === absolutePath) {
+                    match = true;
+                    break;
+                  }
+                  if (isPy && join(resolved, "__init__.py") === absolutePath) {
                     match = true;
                     break;
                   }
@@ -611,6 +711,7 @@ export async function computeFileSignals(
   contextGraph?: ContextGraph | null,
   requestedSignals?: SignalName[],
   _signal?: AbortSignal,
+  externalDependents?: DependentInfo[],
 ): Promise<FileSignals> {
   const names = requestedSignals ?? ALL_SIGNALS;
   const signals: SignalResult[] = [];
@@ -627,7 +728,7 @@ export async function computeFileSignals(
           result = detectPublicApi(absolutePath);
           break;
         case "reuse":
-          result = await computeReuseBreadth(absolutePath, contextGraph);
+          result = await computeReuseBreadth(absolutePath, contextGraph, externalDependents, cwd);
           break;
         case "recency":
           result = await computeRecency(absolutePath, cwd);

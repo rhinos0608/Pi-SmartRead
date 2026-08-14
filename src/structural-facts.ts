@@ -3,11 +3,15 @@
  * Reuses tree-sitter (native), callgraph.ts, and import-resolution patterns.
  */
 import { readFileSync, statSync, readdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname, resolve, basename } from "node:path";
 import Parser from "tree-sitter";
 import { initParser } from "./tags.js";
 import { filenameToLang, type SupportedLanguage } from "./languages.js";
 import { createRequire } from "node:module";
+import { findSrcFiles } from "./file-discovery.js";
+import { chooseConcurrency } from "./adaptive-concurrency.js";
+import type { ContextGraph } from "./context-graph.js";
 
 const require = createRequire(import.meta.url);
 // Native tree-sitter grammars (same pattern as callgraph.ts)
@@ -35,6 +39,8 @@ import type {
   ParentInfo,
   OverrideInfo,
   ReExportInfo,
+  DependentInfo,
+  DependencyInfo,
 } from "./structural-facts-types.js";
 
 const MAX_FILE_SIZE = 500 * 1024;
@@ -749,6 +755,133 @@ function mergeCallers(callers: CallerInfo[]): CallerInfo[] {
   return merged;
 }
 
+// ── Import/dependency extraction ───────────────────────────────
+
+/**
+ * Shared regex for JS/TS import, require, and re-export patterns.
+ * Capture groups:
+ *   1 — import ... from '...'
+ *   2 — import '...'
+ *   3 — require('...')
+ *   4 — export { ... } from '...'
+ *   5 — export * from '...'
+ *   6 — export type { ... } from '...'
+ */
+const JS_IMPORT_RE =
+  /(?:import\s+[^;]*?from\s+['"]([^'"]+)['"])|(?:import\s+['"]([^'"]+)['"])|(?:require\s*\(\s*['"]([^'"]+)['"]\s*\))|(?:export\s*\{[^}]*\}\s+from\s+['"]([^'"]+)['"])|(?:export\s*\*\s+from\s+['"]([^'"]+)['"])|(?:export\s+type\s*\{[^}]*\}\s+from\s+['"]([^'"]+)['"])/gm;
+
+/** Extract import/require/re-export statements from source code with line refs. */
+function extractDependencies(
+  code: string,
+  filePath: string,
+  lang: SupportedLanguage,
+): DependencyInfo[] {
+  const deps: DependencyInfo[] = [];
+  const isPy = lang === "python";
+
+  const importRe = isPy
+    ? /^\s*(?:from\s+(\S+)\s+import|import\s+(\S+))/gm
+    : JS_IMPORT_RE;
+
+  let match: RegExpExecArray | null;
+  while ((match = importRe.exec(code)) !== null) {
+    const specifier = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "";
+    if (!specifier) continue;
+    if (!specifier.startsWith(".")) continue;
+    // Relative import — try to resolve
+    const lineNum = code.slice(0, match.index).split("\n").length;
+    const kind: DependencyInfo["kind"] = match[3]
+      ? "require"
+      : match[4] || match[5] || match[6]
+        ? "re-export"
+        : "import";
+    try {
+      const resolvedPath = resolveImportPath(filePath, specifier);
+      deps.push({ specifier, line: lineNum, resolvedPath: resolvedPath ?? undefined, kind });
+    } catch {
+      deps.push({ specifier, line: lineNum, kind });
+    }
+  }
+  return deps;
+}
+
+/**
+ * Scan workspace source files for imports of the target file.
+ * Returns files (with line refs) that import or re-export the target module.
+ * Bounded: scans up to 2000 source files, ignore-aware via findSrcFiles.
+ */
+export async function findImportDependents(
+  absolutePath: string,
+  cwd: string,
+  _lang: SupportedLanguage,
+): Promise<DependentInfo[]> {
+  const results: DependentInfo[] = [];
+
+  let srcFiles: string[];
+  try {
+    srcFiles = await findSrcFiles(cwd, 2000);
+  } catch {
+    throw new Error("findImportDependents: could not scan workspace");
+  }
+
+  const normTarget = resolve(absolutePath);
+  const concurrency = chooseConcurrency({ fileCount: srcFiles.length, operation: "parse" });
+
+  // Process files with bounded concurrency
+  for (let i = 0; i < srcFiles.length; i += concurrency) {
+    const batch = srcFiles.slice(i, i + concurrency);
+    const batchResults = await Promise.all(
+      batch.map(async (srcFile) => {
+        if (srcFile === absolutePath) return null;
+        let content: string;
+        try {
+          content = await readFile(srcFile, "utf-8");
+        } catch {
+          return null;
+        }
+        const srcLang = filenameToLang(srcFile);
+        const isPy = srcLang === "python";
+        const importRe = isPy
+          ? /(?:from\s+(\S+)\s+import|import\s+(\S+))/gm
+          : JS_IMPORT_RE;
+
+        let match: RegExpExecArray | null;
+        const fileResults: DependentInfo[] = [];
+        while ((match = importRe.exec(content)) !== null) {
+          const specifier = match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? match[6] ?? "";
+          if (!specifier || !specifier.startsWith(".")) continue;
+          try {
+            const resolved = resolveImportPath(srcFile, specifier);
+            if (resolved && resolve(resolved) === normTarget) {
+              const lineNum = content.slice(0, match.index).split("\n").length;
+              fileResults.push({
+                file: srcFile,
+                line: lineNum,
+                symbolName: "",
+                kind: "import",
+              });
+            }
+          } catch {
+            // skip unresolvable
+          }
+        }
+        return fileResults.length > 0 ? fileResults : null;
+      }),
+    );
+    for (const r of batchResults) {
+      if (r) results.push(...r);
+    }
+  }
+
+  // Deduplicate by file
+  const seen = new Set<string>();
+  return results.filter(r => {
+    if (seen.has(r.file)) return false;
+    seen.add(r.file);
+    return true;
+  });
+}
+
 // ── TS/JS fact extraction ─────────────────────────────────────
 
 function extractTSJSFacts(
@@ -871,6 +1004,8 @@ function extractTSJSFacts(
 
   return {
     callers: allCallers,
+    dependencies: extractDependencies(code, filePath, lang),
+    internalCallSites: intras,
     parentClass,
     parentModule,
     children,
@@ -974,6 +1109,8 @@ function extractPythonFacts(
 
   return {
     callers: allCallers,
+    dependencies: extractDependencies(code, filePath, "python"),
+    internalCallSites: intras,
     parentClass,
     parentModule,
     children,
@@ -1010,6 +1147,7 @@ export async function extractStructuralFacts(
   absolutePath: string,
   cwd: string,
   _signal?: AbortSignal,
+  contextGraph?: ContextGraph,
 ): Promise<StructuralFacts> {
   const notices: string[] = [];
 
@@ -1019,6 +1157,8 @@ export async function extractStructuralFacts(
     if (st.size > MAX_FILE_SIZE) {
       return {
         callers: [],
+        dependencies: [],
+        internalCallSites: [],
         children: [],
         baseClasses: [],
         interfaces: [],
@@ -1030,6 +1170,8 @@ export async function extractStructuralFacts(
   } catch {
     return {
       callers: [],
+      dependencies: [],
+      internalCallSites: [],
       children: [],
       baseClasses: [],
       interfaces: [],
@@ -1044,6 +1186,8 @@ export async function extractStructuralFacts(
   if (!lang) {
     return {
       callers: [],
+      dependencies: [],
+      internalCallSites: [],
       children: [],
       baseClasses: [],
       interfaces: [],
@@ -1059,6 +1203,8 @@ export async function extractStructuralFacts(
   if (!grammar) {
     return {
       callers: [],
+      dependencies: [],
+      internalCallSites: [],
       children: [],
       baseClasses: [],
       interfaces: [],
@@ -1074,6 +1220,8 @@ export async function extractStructuralFacts(
   } catch {
     return {
       callers: [],
+      dependencies: [],
+      internalCallSites: [],
       children: [],
       baseClasses: [],
       interfaces: [],
@@ -1091,6 +1239,8 @@ export async function extractStructuralFacts(
   } catch {
     return {
       callers: [],
+      dependencies: [],
+      internalCallSites: [],
       children: [],
       baseClasses: [],
       interfaces: [],
@@ -1103,6 +1253,8 @@ export async function extractStructuralFacts(
   if (!tree) {
     return {
       callers: [],
+      dependencies: [],
+      internalCallSites: [],
       children: [],
       baseClasses: [],
       interfaces: [],
@@ -1114,21 +1266,68 @@ export async function extractStructuralFacts(
 
   const root = tree.rootNode;
 
+  let facts: StructuralFacts;
+
   if (lang === "typescript" || lang === "tsx" || lang === "javascript") {
-    return extractTSJSFacts(root, code, absolutePath, cwd, lang, notices);
+    facts = extractTSJSFacts(root, code, absolutePath, cwd, lang, notices);
+  } else if (lang === "python") {
+    facts = extractPythonFacts(root, code, absolutePath, cwd, notices);
+  } else {
+    return {
+      callers: [],
+      dependencies: [],
+      internalCallSites: [],
+      children: [],
+      baseClasses: [],
+      interfaces: [],
+      overrides: [],
+      reExportedBy: [],
+      notices: [...notices, "Structural facts not yet supported for language: " + lang],
+    };
   }
 
-  if (lang === "python") {
-    return extractPythonFacts(root, code, absolutePath, cwd, notices);
+  // Async scan for external dependents (best-effort, import-based)
+  // Use contextGraph if available, otherwise fall back to file scan
+  if (contextGraph && typeof contextGraph.getProvenanceEdges === "function") {
+    try {
+      const normTarget = resolve(cwd, absolutePath);
+      const edges = contextGraph.getProvenanceEdges();
+      const dependents: DependentInfo[] = [];
+      const seen = new Set<string>();
+      for (const edge of edges) {
+        if (resolve(cwd, edge.to) === normTarget) {
+          if (seen.has(edge.from)) continue;
+          seen.add(edge.from);
+          dependents.push({
+            file: edge.from,
+            line: 0,
+            symbolName: "",
+            kind: "import",
+          });
+        }
+      }
+      if (dependents.length > 0) {
+        facts.externalDependents = dependents;
+      } else {
+        // Graph has no matching edges — fall back to file scan
+        try {
+          const scanned = await findImportDependents(absolutePath, cwd, lang);
+          facts.externalDependents = scanned;
+        } catch {
+          // best-effort: leave externalDependents empty
+        }
+      }
+    } catch {
+      // best-effort: leave externalDependents empty
+    }
+  } else {
+    try {
+      const dependents = await findImportDependents(absolutePath, cwd, lang);
+      facts.externalDependents = dependents;
+    } catch {
+      // best-effort: leave externalDependents empty
+    }
   }
 
-  return {
-    callers: [],
-    children: [],
-    baseClasses: [],
-    interfaces: [],
-    overrides: [],
-    reExportedBy: [],
-    notices: [...notices, "Structural facts not yet supported for language: " + lang],
-  };
+  return facts;
 }
