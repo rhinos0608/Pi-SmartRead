@@ -72,7 +72,7 @@ export interface InspectToolOptions {
     /** Returns the canonical session file path for the current session, or null if ephemeral. */
     readonly getSessionFilePath: () => string | null | undefined;
     /** ContextGraph instance or getter for graph-dependent inspect params (WP-5 DI). */
-    readonly contextGraph?: ContextGraph | (() => ContextGraph | Promise<ContextGraph>);
+    readonly contextGraph?: ContextGraph | ((cwd: string) => ContextGraph | Promise<ContextGraph>);
 }
 
 const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality.
@@ -138,6 +138,23 @@ function validateCrossParams(params: InspectV4ToolInput): string | undefined {
     return undefined;
 }
 
+/**
+ * Whether this request actually consumes ContextGraph and therefore justifies
+ * awaiting the async `opts.contextGraph` getter. Only directory
+ * clusters/layers/graphSchema and file impact/graphSchema read the graph;
+ * ordinary inspect, signals, call traversal, deadCode, hotspots, diff, routes
+ * and boundaries all have non-graph fallbacks.
+ */
+function needsContextGraph(
+    mode: "file" | "directory",
+    params: InspectV4ToolInput,
+): boolean {
+    if (mode === "directory") {
+        return params.clusters === true || params.layers === true || params.graphSchema === true;
+    }
+    return params.impact === true || params.graphSchema === true;
+}
+
 export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
     return {
         name: "inspect",
@@ -164,12 +181,8 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             const crossErr = validateCrossParams(params);
             if (crossErr) throw new Error(crossErr);
 
-            // WP-5: resolve contextGraph from DI (await getter so a registered
-            // runtime tool never receives an unbuilt graph).
-            const contextGraph = typeof opts.contextGraph === "function"
-                ? await opts.contextGraph()
-                : opts.contextGraph;
-
+            // Build input WITHOUT resolving the async contextGraph getter yet —
+            // only graph-dependent params pay for the shared graph build.
             const inspectInput: InspectV4Input = {
                 path: params.path,
                 signals: params.signals,
@@ -191,17 +204,28 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                 boundaries: params.boundaries,
                 routes: params.routes,
                 layers: params.layers,
-                // WP-5: populate contextGraph from DI (resolved above)
-                contextGraph,
             };
 
-            // Mode-specific param validation (spec §4)
-            // We need to resolve the mode to validate dir-only params.
-            // resolveInspectV4Mode is in inspect.ts — import it from there.
+            // Resolve the target mode and run mode-specific validation BEFORE
+            // touching the graph. Invalid path / invalid mode-param requests
+            // return their existing error without invoking the graph getter.
             const { resolveInspectV4Mode } = await import("./inspect.js");
             const resolvedMode = resolveInspectV4Mode(inspectInput);
             const modeErr = validateDirOnlyParams(params, resolvedMode, params.path);
             if (modeErr) throw new Error(modeErr);
+
+            // Only params that actually consume ContextGraph justify awaiting the
+            // async getter: directory clusters/layers/graphSchema and file
+            // impact/graphSchema. Ordinary file/directory inspect, signals, call
+            // traversal, deadCode, hotspots, diff, routes, boundaries do not.
+            if (needsContextGraph(resolvedMode, params)) {
+                // WP-5: resolve contextGraph from DI (await getter so a registered
+                // runtime tool never receives an unbuilt graph).
+                inspectInput.contextGraph =
+                    typeof opts.contextGraph === "function"
+                        ? await opts.contextGraph(ctx.cwd)
+                        : opts.contextGraph;
+            }
 
             const details = await executeInspectV4(inspectInput);
 

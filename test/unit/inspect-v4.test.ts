@@ -483,3 +483,124 @@ describe("createInspectV4Tool (schema and execute)", () => {
         expect(text).toContain("Graph Schema");
     });
 });
+
+describe("inspect lazy ContextGraph getter", () => {
+    function makeGraphStub(): any {
+        return {
+            getProvenanceEdges: () => [],
+            getCapacityStats: () => ({ fileIndex: { entries: 0 }, graphIndex: { entries: 0 } }),
+            getFileNeighbours: async () => [],
+            getNeighbors: async () => [],
+            getSymbolIndex: () => ({}),
+        };
+    }
+
+    function makeTool() {
+        const getter = vi.fn(async (_root: string) => makeGraphStub());
+        const tool = createInspectV4Tool({
+            getSessionFilePath: () => "/sessions/abc.jsonl",
+            contextGraph: getter,
+        });
+        return { tool, getter };
+    }
+
+    async function run(tool: any, params: Record<string, unknown>) {
+        try {
+            await tool.execute("x", params, undefined, undefined, makeCtx());
+        } catch {
+            // Execution result is irrelevant here — only whether the getter fired.
+        }
+    }
+
+    it("does not invoke getter for ordinary file inspect", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "hello.ts" });
+        expect(getter).not.toHaveBeenCalled();
+    });
+
+    it("does not invoke getter for ordinary package.json inspect", async () => {
+        writeFileSync(join(workdir, "package.json"), "{\"name\":\"fixture\"}\n", "utf8");
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "package.json" });
+        expect(getter).not.toHaveBeenCalled();
+    });
+
+    it("does not invoke getter for ordinary directory inspect", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "mysrc" });
+        expect(getter).not.toHaveBeenCalled();
+    });
+
+    it("does not invoke getter for signals including reuse", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "hello.ts", signals: ["reuse", "tests"] });
+        expect(getter).not.toHaveBeenCalled();
+    });
+
+    it("does not invoke getter for call traversal, deadCode, hotspots, diff, routes, boundaries", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "hello.ts", callDepth: 2, callDirection: "callers" });
+        await run(tool, { path: "hello.ts", deadCode: true });
+        await run(tool, { path: "hello.ts", hotspots: true });
+        await run(tool, { path: "hello.ts", diff: "HEAD" });
+        await run(tool, { path: "hello.ts", routes: true });
+        await run(tool, { path: "mysrc", boundaries: true });
+        expect(getter).not.toHaveBeenCalled();
+    });
+
+    it("invalid file-mode param (clusters) rejects without invoking getter", async () => {
+        const { tool, getter } = makeTool();
+        await expect(
+            tool.execute("x", { path: "hello.ts", clusters: true }, undefined, undefined, makeCtx()),
+        ).rejects.toThrow(/clusters/);
+        expect(getter).not.toHaveBeenCalled();
+    });
+
+    it("nonexistent path rejects without invoking getter", async () => {
+        const { tool, getter } = makeTool();
+        await expect(
+            tool.execute("x", { path: "does-not-exist.ts" }, undefined, undefined, makeCtx()),
+        ).rejects.toThrow();
+        expect(getter).not.toHaveBeenCalled();
+    });
+
+    it("directory clusters invokes getter once", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "mysrc", clusters: true });
+        expect(getter).toHaveBeenCalledTimes(1);
+        expect(getter).toHaveBeenCalledWith(workdir);
+    });
+
+    it("directory layers invokes getter once", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "mysrc", layers: true });
+        expect(getter).toHaveBeenCalledTimes(1);
+    });
+
+    it("directory graphSchema invokes getter once", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "mysrc", graphSchema: true });
+        expect(getter).toHaveBeenCalledTimes(1);
+    });
+
+    it("file graphSchema invokes getter once", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "hello.ts", graphSchema: true });
+        expect(getter).toHaveBeenCalledTimes(1);
+        expect(getter).toHaveBeenCalledWith(workdir);
+    });
+
+    it("file impact invokes getter once", async () => {
+        const { tool, getter } = makeTool();
+        await run(tool, { path: "hello.ts", impact: true });
+        expect(getter).toHaveBeenCalledTimes(1);
+    });
+
+    it("file clusters is rejected (dir-only) without invoking getter", async () => {
+        const { tool, getter } = makeTool();
+        await expect(
+            tool.execute("x", { path: "hello.ts", clusters: true }, undefined, undefined, makeCtx()),
+        ).rejects.toThrow();
+        expect(getter).not.toHaveBeenCalled();
+    });
+});

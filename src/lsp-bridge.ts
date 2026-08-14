@@ -801,18 +801,7 @@ async function createBridge(): Promise<LSPBridge | null> {
           bestLen = root.length;
         }
       }
-      if (!bestRoot) {
-        // No path root covers cwd — fall back to the default manager if present.
-        const def = managerCache.get("__default__");
-        if (!def) return null;
-        const defCount = (def as any).connectedLanguageCount ?? 0;
-        const defOpenDocs = (def as any).getAllOpenFiles()?.length ?? 0;
-        return {
-          managerCount: 1,
-          connectionsByRoot: { __default__: defCount },
-          totalOpenDocuments: defOpenDocs,
-        };
-      }
+      if (!bestRoot) return null;
       const mgr = managerCache.get(bestRoot);
       if (!mgr) return null;
       const count = (mgr as any).connectedLanguageCount ?? 0;

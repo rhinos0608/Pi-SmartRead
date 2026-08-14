@@ -607,7 +607,7 @@ export interface WrapReadToolOptions {
     * Resolution order: LSP exact qualified-name match first, then
     * ContextGraph.findSymbolFiles() fallback.
     */
-   readonly resolveSymbol?: (symbol: string) => Promise<SymbolResolution | null>;
+   readonly resolveSymbol?: (symbol: string, cwd?: string) => Promise<SymbolResolution | null>;
 }
 
 function requirePositiveInteger(value: unknown, name: string): void {
@@ -645,7 +645,7 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
         if (!opts?.resolveSymbol) {
           throw new Error(`Symbol "${params.symbol}" not found in workspace`);
         }
-        const resolution = await opts.resolveSymbol(params.symbol);
+        const resolution = await opts.resolveSymbol(params.symbol, ctx.cwd);
         if (!resolution) {
           throw new Error(`Symbol "${params.symbol}" not found in workspace`);
         }

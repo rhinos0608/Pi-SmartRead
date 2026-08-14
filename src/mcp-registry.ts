@@ -46,6 +46,11 @@ let graphRevision = 0;
 // -1 until the first successful build. A graph is only fresh for a caller
 // when graphRevision === sharedGraphRevision (the mutation was included).
 let sharedGraphRevision = -1;
+// Health metadata is retained per root even though the legacy shared graph
+// cache still holds one active instance. This prevents health for workspace B
+// from inheriting B's built/generation state from workspace A when callers
+// switch roots in one process.
+const graphHealthByRoot = new Map<string, { generation: number; builtRevision: number }>();
 // In-flight build chain. A single tail promise; a rebuild triggered while a
 // build is running is chained after it, so concurrent callers coalesce onto
 // identical required builds but a mutation invalidating a mid-flight build
@@ -74,6 +79,29 @@ const MAX_GRAPH_BUILD_ATTEMPTS = 3;
  */
 export function invalidateSharedGraph(): void {
   graphRevision++;
+}
+
+/**
+ * Read-only access to the monotonic workspace revision. Bumped by every
+ * workspace mutation (watcher event, successful write/edit/graph_mutate).
+ * Consumed by grep's no-index BM25 corpus cache to decide when a cached
+ * corpus is stale. A single global monotonic counter is used (not per-root):
+ * a mutation anywhere bumps it for every root, which causes only extra cache
+ * misses (never stale corpus data), keeping the graph invalidation semantics
+ * unchanged.
+ */
+export function getWorkspaceRevision(): number {
+  return graphRevision;
+}
+
+/**
+ * Synchronous peek at the shared ContextGraph for a root, returning it only
+ * when it has actually been built for that root (never triggering a build).
+ * Null when unbuilt or built for a different root. Lets no-index grep reuse
+ * the structural symbol index without eagerly building the graph.
+ */
+export function getSharedContextGraphIfBuilt(root: string): ContextGraph | null {
+  return sharedContextGraphBuilt && sharedContextGraphRoot === root ? sharedContextGraph : null;
 }
 export function getSharedContextGraph(
     root: string,
@@ -140,6 +168,11 @@ export async function getSharedContextGraphAsync(
                 sharedContextGraphRoot = root;
                 sharedContextGraphBuilt = true;
                 sharedGraphRevision = startRevision;
+                const previous = graphHealthByRoot.get(root);
+                graphHealthByRoot.set(root, {
+                    generation: (previous?.generation ?? 0) + 1,
+                    builtRevision: startRevision,
+                });
             }
         })();
         buildTail = tailPromise;
@@ -161,16 +194,27 @@ export async function getSharedContextGraphAsync(
 }
 
 /** Report whether the shared graph for the current root is built (health). */
-export function isSharedContextGraphBuilt(): boolean {
-    return sharedContextGraphBuilt;
+export function isSharedContextGraphBuilt(root = process.cwd()): boolean {
+    return sharedContextGraphBuilt && sharedContextGraphRoot === root;
 }
 
 /**
  * Report whether a rebuild is pending: the graph is unbuilt or was built
  * before the latest invalidation. Used by health to surface a stale graph.
  */
-export function isSharedGraphRebuildPending(): boolean {
-    return !sharedContextGraphBuilt || graphRevision > sharedGraphRevision;
+export function isSharedGraphRebuildPending(root = process.cwd()): boolean {
+    if (!sharedContextGraphBuilt || sharedContextGraphRoot !== root) return true;
+    return graphRevision > sharedGraphRevision;
+}
+
+/** Root-scoped graph state for health; never falls back to another root. */
+export function getSharedContextGraphHealth(root: string): { built: boolean; generation: number } {
+    const state = graphHealthByRoot.get(root);
+    const activeForRoot = sharedContextGraphRoot === root;
+    return {
+        built: activeForRoot && sharedContextGraphBuilt && state !== undefined,
+        generation: state?.generation ?? 0,
+    };
 }
 
 /** Dispose the shared ContextGraph (for test isolation / shutdown). */
@@ -182,6 +226,7 @@ export function resetSharedContextGraph(): void {
     sharedGraphRevision = -1;
     buildTail = null;
     buildTailRoot = null;
+    graphHealthByRoot.clear();
 }
 
 // Explicitly initialize registry before declaring tools.
@@ -298,7 +343,11 @@ reg("skill", () => toToolDefinition(createSkillTool()), ToolCategory.SKILL);
 // takes precedence when a live bus is available; `reg()` is a no-op if
 // the tool is already present in the registry.
 reg("inspect", () => buildInspectToolForExtension(() => null), ToolCategory.READ);
-reg("grep", () => createGrepTool({ contextGraph: () => getSharedContextGraphAsync(process.cwd()) }), ToolCategory.READ);
+reg("grep", () => createGrepTool({
+    contextGraph: (root) => getSharedContextGraphAsync(root),
+    getWorkspaceRevision,
+    getSharedContextGraphIfBuilt,
+}), ToolCategory.READ);
 
 // Inspect tool is registered at extension activation time so it can use
 // the live event bus. We expose a helper that the extension calls to add
@@ -313,7 +362,7 @@ export function registerInspectToolWithBus(bus: { emit: (c: string, d: unknown) 
             },
         },
         getSessionFilePath: () => null, // Overridden by extension
-        contextGraph: () => getSharedContextGraphAsync(process.cwd()),
+        contextGraph: (root) => getSharedContextGraphAsync(root),
     });
     // Override the tool factory in the extension path: see registerInspectToolExtension below
     registry.register({
@@ -340,7 +389,7 @@ export function buildInspectToolForExtension(
             },
         },
         getSessionFilePath,
-        contextGraph: contextGraphOverride ?? (() => getSharedContextGraphAsync(process.cwd())),
+        contextGraph: contextGraphOverride ?? ((root) => getSharedContextGraphAsync(root)),
     });
 }
 

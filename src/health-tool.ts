@@ -7,7 +7,7 @@
  */
 import { Type } from "@sinclair/typebox";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { getRuntimeHealth, type WatcherHealthState } from "./runtime-health.js";
+import { getRuntimeHealth, type GraphHealthState, type WatcherHealthState } from "./runtime-health.js";
 
 const HealthSchema = Type.Object({});
 
@@ -15,7 +15,7 @@ export interface HealthToolOptions {
   /** Reads current watcher state from the activation closure. */
   readonly getWatcherState: () => WatcherHealthState;
   /** Reads whether the shared context graph is built (from the activation closure). */
-  readonly getGraphState?: () => { built: boolean };
+  readonly getGraphState?: (cwd: string) => GraphHealthState;
 }
 
 const HEALTH_DESCRIPTION =

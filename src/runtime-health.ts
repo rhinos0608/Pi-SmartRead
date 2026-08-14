@@ -7,7 +7,6 @@
  * degradation codes. Never exposes raw error messages, URLs, keys, or PII.
  */
 import { validateEmbeddingConfig } from "./config.js";
-import { currentGraphGeneration } from "./context-graph.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 
@@ -45,11 +44,25 @@ export interface RuntimeHealthReport {
   recentDegradations: Array<{ backend: DegradationBackend; code: string }>;
 }
 
+export interface GraphHealthState {
+  built: boolean;
+  generation: number;
+}
+
 // ── Bounded degradation ring buffer (cap 20) ──────────────────────
 const RECENT_CAP = 20;
 const recent: DegradationRecord[] = [];
 
 export function recordDegradation(code: string, backend: DegradationBackend): void {
+  // A backend can be unavailable for an entire session (for example when the
+  // optional semantic index is not installed). Do not turn every subsequent
+  // search into an identical health-history entry; retain a new record when
+  // the observed degradation changes or a different backend intervenes.
+  const previous = recent[recent.length - 1];
+  if (previous?.backend === backend && previous.code === code) {
+    previous.ts = Date.now();
+    return;
+  }
   recent.push({ backend, code, ts: Date.now() });
   if (recent.length > RECENT_CAP) recent.shift();
 }
@@ -65,7 +78,7 @@ export function resetRuntimeHealth(): void {
 export async function getRuntimeHealth(
   cwd: string,
   getWatcherState: () => WatcherHealthState,
-  getGraphState?: () => { built: boolean },
+  getGraphState?: (cwd: string) => GraphHealthState,
 ): Promise<RuntimeHealthReport> {
   const semanticIndex = getSemanticIndex(cwd);
   const indexStats = semanticIndex?.getStats();
@@ -84,12 +97,18 @@ export async function getRuntimeHealth(
     const bridge = await getLSPBridge();
     if (bridge) {
       // Scope LSP availability to the current cwd's root, not all roots.
-      const stats = bridge.getStatsForRoot(cwd) ?? bridge.getStats();
-      const available = Object.values(stats.connectionsByRoot).some((count) => count > 0);
-      lsp = {
-        available,
-        stats: { managerCount: stats.managerCount, totalOpenDocuments: stats.totalOpenDocuments },
-      };
+      // A missing manager for this root means LSP is unavailable here. Do not
+      // fall back to aggregate stats from another workspace.
+      const stats = bridge.getStatsForRoot(cwd);
+      if (!stats) {
+        lsp = { available: false };
+      } else {
+        const available = Object.values(stats.connectionsByRoot).some((count) => count > 0);
+        lsp = {
+          available,
+          stats: { managerCount: stats.managerCount, totalOpenDocuments: stats.totalOpenDocuments },
+        };
+      }
     }
   } catch {
     lsp = { available: false };
@@ -102,9 +121,10 @@ export async function getRuntimeHealth(
     else semanticState = "stale_or_unavailable";
   }
 
+  const graph = getGraphState?.(cwd) ?? { built: false, generation: 0 };
   return {
     root: cwd,
-    graph: { generation: currentGraphGeneration(), built: getGraphState?.().built ?? false },
+    graph,
     watcher: getWatcherState(),
     semanticIndex: {
       available: semanticIndex?.isAvailable() ?? false,

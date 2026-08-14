@@ -8,7 +8,7 @@ import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
 import type { ContextGraph } from "./context-graph.js";
-import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, getSharedContextGraphAsync, isSharedContextGraphBuilt, isSharedGraphRebuildPending, invalidateSharedGraph, resetSharedContextGraph } from "./mcp-registry.js";
+import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, getSharedContextGraphAsync, getSharedContextGraphHealth, isSharedGraphRebuildPending, invalidateSharedGraph, resetSharedContextGraph, getWorkspaceRevision, getSharedContextGraphIfBuilt } from "./mcp-registry.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
 import { createHealthTool } from "./health-tool.js";
 import { createReadTool } from "./unified-read.js";
@@ -91,8 +91,8 @@ ensureHashlineReady().catch((err) =>
  * Resolution order: LSP workspace/symbol first, then ContextGraph.findSymbolFiles() fallback.
  * `graphGetter` supplies the dirty-aware lazy ContextGraph (resets the dirty flag once).
  */
-async function resolveSymbolForReadTool(symbol: string, graphGetter?: () => ContextGraph | Promise<ContextGraph>): Promise<{ path: string; line?: number } | null> {
-  const root = process.cwd();
+async function resolveSymbolForReadTool(symbol: string, cwd = process.cwd(), graphGetter?: (root: string) => ContextGraph | Promise<ContextGraph>): Promise<{ path: string; line?: number } | null> {
+  const root = cwd;
   try {
     const bridge = await getLSPBridge();
     if (bridge?.isAvailable()) {
@@ -109,7 +109,7 @@ async function resolveSymbolForReadTool(symbol: string, graphGetter?: () => Cont
     // LSP not available
   }
   try {
-    const graph = graphGetter ? await graphGetter() : getSharedContextGraph(root);
+    const graph = graphGetter ? await graphGetter(root) : getSharedContextGraph(root);
     const files = await graph.findSymbolFiles(symbol);
     if (files.length > 0) {
       return { path: files[0]!.path };
@@ -142,7 +142,7 @@ export default async function (pi: ExtensionAPI) {
   // build that did not include the change; the getter just ensures a build
   // covering the latest revision. Concurrent calls coalesce; a mutation during
   // a build queues a rebuild instead of losing the dirty signal.
-  const freshGraphGetter = async () => getSharedContextGraphAsync(process.cwd());
+  const freshGraphGetter = async (root = process.cwd()) => getSharedContextGraphAsync(root);
 
   // Bind the live evidence resolver synchronously when a bus is present,
   // BEFORE any tool can execute. The async installInspectAndResolver call
@@ -569,6 +569,8 @@ export default async function (pi: ExtensionAPI) {
     },
     // getSessionFilePath returns null so grep falls back to ctx at execute time.
     getSessionFilePath: () => null,
+    getWorkspaceRevision,
+    getSharedContextGraphIfBuilt,
   });
   ToolRegistry.getInstance().registerOrReplace({
     name: "grep",
@@ -581,7 +583,7 @@ export default async function (pi: ExtensionAPI) {
   // 2.6 Health: additive public status tool (no smartread_ prefix).
   const healthDef = createHealthTool({
     getWatcherState: () => ({ active: !!watchState.stop, dirty: isSharedGraphRebuildPending() }),
-    getGraphState: () => ({ built: isSharedContextGraphBuilt() }),
+    getGraphState: (root) => getSharedContextGraphHealth(root),
   });
   ToolRegistry.getInstance().registerOrReplace({
     name: "health",
@@ -613,7 +615,7 @@ export default async function (pi: ExtensionAPI) {
     publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
       getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
     },
-    resolveSymbol: (s) => resolveSymbolForReadTool(s, freshGraphGetter),
+    resolveSymbol: (s, cwd) => resolveSymbolForReadTool(s, cwd, freshGraphGetter),
   }));
 
   // 4. Versioned evidence RPC resolver install: best-effort, runs in the
