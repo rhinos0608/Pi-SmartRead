@@ -24,9 +24,21 @@ vi.mock("node:fs", async () => {
   };
 });
 
-// Deterministically simulate chokidar being unavailable: tryRequireChokidar()
-// must always resolve to null regardless of the repository's installed modules.
-vi.mock("chokidar", () => {
+// Deterministically simulate chokidar being unavailable regardless of the
+// repository's installed modules. file-watcher resolves chokidar through an
+// ESM-safe `createRequire(import.meta.url)`, so mock `node:module.createRequire`
+// to hand back a require that throws for any module — keeping the fallback
+// contract deterministic even with chokidar physically installed.
+const { mockModuleRequire } = vi.hoisted(() => ({ mockModuleRequire: vi.fn() }));
+vi.mock("node:module", async () => {
+  const actual = await vi.importActual<typeof import("node:module")>("node:module");
+  return {
+    ...actual,
+    createRequire: () => mockModuleRequire,
+  };
+});
+// Default: require throws (module not found) so tryRequireChokidar() returns null.
+mockModuleRequire.mockImplementation(() => {
   throw new Error("Cannot find module 'chokidar'");
 });
 
@@ -57,6 +69,7 @@ function escapeRegExp(s: string): string {
 describe("file-watcher", () => {
   let savedNodeEnv: string | undefined;
   let savedVitest: string | undefined;
+  let savedWatcherMode: string | undefined;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -65,6 +78,7 @@ describe("file-watcher", () => {
     // Capture originals for safe restore
     savedNodeEnv = process.env.NODE_ENV;
     savedVitest = process.env.VITEST;
+    savedWatcherMode = process.env.FILE_WATCHER_MODE;
     // Set test mode to allow watcher to start in test environment
     process.env.NODE_ENV = "test";
   });
@@ -82,6 +96,11 @@ describe("file-watcher", () => {
       delete process.env.VITEST;
     } else {
       process.env.VITEST = savedVitest;
+    }
+    if (savedWatcherMode === undefined) {
+      delete process.env.FILE_WATCHER_MODE;
+    } else {
+      process.env.FILE_WATCHER_MODE = savedWatcherMode;
     }
   });
 
@@ -107,6 +126,55 @@ describe("file-watcher", () => {
   });
 
   describe("chokidar mode contract", () => {
+    it("uses descriptor-safe polling by default instead of native watcher handles", () => {
+      process.env.NODE_ENV = "development";
+      delete process.env.VITEST;
+      const onDirty = vi.fn();
+      const chokidarWatch = vi.fn();
+      mockModuleRequire.mockReturnValue({ watch: chokidarWatch });
+      mockWatch.mockReturnValue({ close: mockClose });
+
+      const stop = startWatching("/test/root", onDirty);
+
+      expect(mockWatch).not.toHaveBeenCalled();
+      expect(chokidarWatch).not.toHaveBeenCalled();
+      stop();
+    });
+
+    it("enables the bounded native watcher only when requested through the environment", () => {
+      process.env.NODE_ENV = "development";
+      delete process.env.VITEST;
+      process.env.FILE_WATCHER_MODE = "non-recursive";
+      mockWatch.mockReturnValue({ close: mockClose });
+
+      const stop = startWatching("/test/root", vi.fn());
+
+      expect(mockWatch).toHaveBeenCalled();
+      stop();
+    });
+
+    it("excludes generated and subagent trees in explicit chokidar mode", () => {
+      process.env.NODE_ENV = "development";
+      delete process.env.VITEST;
+      const chokidarWatch = vi.fn();
+      const chokidarWatcher = { on: vi.fn(), close: vi.fn() };
+      chokidarWatcher.on.mockReturnValue(chokidarWatcher);
+      chokidarWatch.mockReturnValue(chokidarWatcher);
+      mockModuleRequire.mockReturnValue({ watch: chokidarWatch });
+
+      startWatching("/test/root", vi.fn(), { mode: "chokidar" });
+
+      const ignored = chokidarWatch.mock.calls[0]![1].ignored as (path: string) => boolean;
+      expect(ignored("/test/root/node_modules/pkg/index.js")).toBe(true);
+      expect(ignored("/test/root/.git/objects/pack")).toBe(true);
+      expect(ignored("/test/root/.pi-smartread.tags.cache")).toBe(true);
+      expect(ignored("/test/root/.pi-subagents/artifacts/outputs/result.json")).toBe(true);
+      expect(ignored("/test/root/.subagents/worker/transcript.jsonl")).toBe(true);
+      expect(ignored("/test/root/.subagent-work/state.json")).toBe(true);
+      expect(ignored("/test/root/.smart-edit-undo/revision.json")).toBe(true);
+      expect(ignored("/test/root/src/index.ts")).toBe(false);
+    });
+
     it("explicit mode:'chokidar' warns then falls back to native when chokidar is absent", () => {
       process.env.NODE_ENV = "development";
       delete process.env.VITEST;
@@ -282,6 +350,25 @@ describe("file-watcher", () => {
     afterEach(() => {
       // Clean up temp dirs
       fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it("detects external additions, edits, and deletions with the default polling watcher", () => {
+      const onDirty = vi.fn();
+      const changedPath = path.join(tmpRoot, "external-change.ts");
+      fs.writeFileSync(changedPath, "export const changed = false;\n");
+      const stop = startWatching(tmpRoot, onDirty);
+
+      fs.writeFileSync(changedPath, "export const changed = true and longer;\n");
+      vi.advanceTimersByTime(1_000);
+
+      expect(onDirty).toHaveBeenCalledWith(["external-change.ts"]);
+      onDirty.mockClear();
+
+      fs.rmSync(changedPath);
+      vi.advanceTimersByTime(1_000);
+
+      expect(onDirty).toHaveBeenCalledWith(["external-change.ts"]);
+      stop();
     });
 
     it("creates one watcher per discovered directory (up to maxWatcherCount)", () => {

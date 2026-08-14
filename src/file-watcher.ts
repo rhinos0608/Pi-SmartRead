@@ -1,20 +1,27 @@
 /**
- * File Watcher — debounced fs.watch-based change detection with chokidar opt-in.
+ * File Watcher — debounced, descriptor-safe change detection.
  *
- * Uses `fs.watch(root, { recursive: true })` on macOS/Windows.
- * Falls back to non-recursive on Linux (one watcher per subdirectory).
- * Optional chokidar detection: `try { require("chokidar") } catch {}`.
+ * Uses stat-based polling by default, so external workspace changes always
+ * invalidate stale retrieval state without consuming OS watch handles. Native
+ * and chokidar watching remain opt-ins for environments with ample headroom.
  *
  * The watcher only detects changes and reports dirty paths.
  * Re-indexing is lazy — triggered by the next query, not by this module.
  *
- * FD cap: Linux non-recursive mode creates one watcher per subdirectory.
- * A max-watcher-count cap (default 256) prevents FD exhaustion.
+ * FD cap: non-recursive mode creates one watcher per subdirectory. Its
+ * conservative max-watcher-count cap (default 16) is used only when explicitly
+ * enabled through `FILE_WATCHER_MODE=non-recursive` or WatcherOptions.
  */
 
 import { watch, type FSWatcher } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { readdirSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+
+// ESM-safe optional require: this package is `"type": "module"`, so a bare
+// `require` is undefined. createRequire yields a module-scoped require that
+// resolves from this file's location, mirroring callgraph.ts/grammar-loader.ts.
+const require = createRequire(import.meta.url);
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
@@ -25,23 +32,32 @@ const DEBOUNCE_MS = parseInt(
 
 /** Maximum watchers before graceful degradation (FD cap). */
 const MAX_WATCHER_COUNT = parseInt(
-  process.env["FILE_WATCHER_MAX_COUNT"] ?? "256",
+  process.env["FILE_WATCHER_MAX_COUNT"] ?? "16",
   10,
 );
 
-// ── Platform detection ──────────────────────────────────────────────────────
+/** Polling keeps freshness reliable without allocating native watch handles. */
+const POLL_INTERVAL_MS = parseInt(
+  process.env["FILE_WATCHER_POLL_INTERVAL_MS"] ?? "1000",
+  10,
+);
 
-const SUPPORTS_RECURSIVE = process.platform === "darwin" || process.platform === "win32";
+/**
+ * Trees that do not contribute source changes and can contain thousands of
+ * directories. Pi's subagent transcripts and artifacts are written during a
+ * session, but are not workspace source and must not consume watcher handles.
+ */
+const WATCH_IGNORED_DIRECTORY = /(^|[/\\])(node_modules|\.git|dist|build|coverage|\.cache|\.next|\.pi-smartread[^/\\]*|\.pi-subagents|\.subagents|\.subagent-work|\.smart-edit-undo|graphify-out)([/\\]|$)/;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface WatcherOptions {
   /** Debounce window in ms. Default: 500 */
   debounceMs?: number;
-  /** Maximum watcher count before degradation. Default: 256 */
+  /** Maximum watcher count before degradation. Default: 16 */
   maxWatcherCount?: number;
-  /** Force a specific mode: "chokidar", "recursive", "non-recursive", or "none" */
-  mode?: "chokidar" | "recursive" | "non-recursive" | "none";
+  /** Force a specific mode. Default: descriptor-safe polling. */
+  mode?: "polling" | "chokidar" | "recursive" | "non-recursive" | "none";
 }
 
 // ── Chokidar detection ─────────────────────────────────────────────────────
@@ -60,11 +76,25 @@ type ChokidarModule = {
 
 function tryRequireChokidar(): ChokidarModule | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require("chokidar") as ChokidarModule;
   } catch {
     return null;
   }
+}
+
+/** Prevent a late native watcher failure from becoming an uncaught EventEmitter error. */
+function guardNativeWatcher(watcher: FSWatcher, directory: string): void {
+  const maybeOn = (watcher as FSWatcher & {
+    on?: (event: string, listener: (error: Error) => void) => unknown;
+  }).on;
+  maybeOn?.call(watcher, "error", (error: Error) => {
+    console.warn(`[file-watcher] Stopped watching ${directory}: ${error.message}`);
+    try {
+      watcher.close();
+    } catch {
+      // The watcher may already be closed after its error.
+    }
+  });
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -91,6 +121,7 @@ function collectDirectories(
     for (const entry of entries) {
       if (dirs.length >= maxCount) break;
       const fullPath = join(current, entry);
+      if (WATCH_IGNORED_DIRECTORY.test(fullPath)) continue;
       try {
         if (statSync(fullPath).isDirectory()) {
           dirs.push(fullPath);
@@ -103,6 +134,39 @@ function collectDirectories(
   }
 
   return dirs;
+}
+
+/** Capture source-file identity without retaining any filesystem handles. */
+function scanFileState(root: string): Map<string, string> {
+  const state = new Map<string, string>();
+  const queue = [root];
+
+  while (queue.length > 0) {
+    const directory = queue.shift()!;
+    let entries: string[];
+    try {
+      entries = readdirSync(directory);
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const absolutePath = join(directory, entry);
+      if (WATCH_IGNORED_DIRECTORY.test(absolutePath)) continue;
+      try {
+        const stat = statSync(absolutePath);
+        if (stat.isDirectory()) {
+          queue.push(absolutePath);
+        } else if (stat.isFile()) {
+          state.set(relative(root, absolutePath), `${stat.mtimeMs}:${stat.size}`);
+        }
+      } catch {
+        // A file can disappear during a scan; it will be reconciled next pass.
+      }
+    }
+  }
+
+  return state;
 }
 
 /** Watch directory and all discovered descendants with non-recursive watchers. */
@@ -166,6 +230,7 @@ function watchDirectoryTree(
           } catch { /* statSync failed — not a real path, ignore */ }
         }
       });
+      guardNativeWatcher(watcher, dir);
       watchers.push(watcher);
       pathToWatcher?.set(dir, watcher);
       // Only mark as watched AFTER the watcher was created successfully, so a
@@ -202,17 +267,20 @@ export function startWatching(
   const resolvedRoot = resolve(root);
   const debounceMs = options?.debounceMs ?? DEBOUNCE_MS;
   const maxWatcherCount = options?.maxWatcherCount ?? MAX_WATCHER_COUNT;
-  const mode = options?.mode;
+  const mode = options?.mode ?? watcherModeFromEnvironment();
 
   // Test-mode no-op: prevents FD leaks during test runs
   if (mode === "none" || process.env.VITEST || process.env.NODE_ENV === "test") {
     return () => {};
   }
 
-  // Chokidar: default tries an installed chokidar on ALL platforms (the
-  // non-recursive fallback recommends installing it, so honor that). Explicit
-  // mode:'chokidar' requires it — if absent, warn then fall back to native.
-  if (mode === "chokidar" || !mode) {
+  if (mode === "polling") {
+    return startPollingWatch(resolvedRoot, onDirty);
+  }
+
+  // Chokidar is explicit-only: even with ignored dependency trees it can open
+  // enough handles to exhaust the process while Pi is loading extensions.
+  if (mode === "chokidar") {
     const chokidar = tryRequireChokidar();
     if (chokidar) {
       return startChokidarWatch(resolvedRoot, onDirty, debounceMs, chokidar);
@@ -224,15 +292,55 @@ export function startWatching(
     }
   }
 
-  // Recursive: default on platforms that support it; explicit mode:'recursive'
-  // attempts recursive everywhere and falls back (with a warning) if the
-  // platform/runtime rejects it.
-  if (mode === "recursive" || (SUPPORTS_RECURSIVE && mode !== "non-recursive")) {
+  // Explicit recursive mode attempts recursive everywhere and falls back (with
+  // a warning) if the platform/runtime rejects it.
+  if (mode === "recursive") {
     return startRecursiveWatch(resolvedRoot, onDirty, debounceMs, maxWatcherCount);
   }
 
-  // Linux non-recursive fallback (or explicit mode)
+  // Non-recursive fallback (or explicit mode)
   return startNonRecursiveWatch(resolvedRoot, onDirty, debounceMs, maxWatcherCount);
+}
+
+/**
+ * Polling is the default because semantic results must become stale when agents
+ * or users edit outside SmartRead. Invalid values also resolve to polling so a
+ * typo never disables freshness tracking.
+ */
+function watcherModeFromEnvironment(): WatcherOptions["mode"] {
+  const configured = process.env["FILE_WATCHER_MODE"];
+  if (configured === "none" || configured === "polling" || configured === "chokidar" || configured === "recursive" || configured === "non-recursive") {
+    return configured;
+  }
+  return "polling";
+}
+
+// ── Polling mode (default) ─────────────────────────────────────────────────
+
+function startPollingWatch(
+  root: string,
+  onDirty: (paths: string[]) => void,
+): () => void {
+  let previous = scanFileState(root);
+  const intervalMs = Number.isFinite(POLL_INTERVAL_MS) && POLL_INTERVAL_MS > 0
+    ? POLL_INTERVAL_MS
+    : 1000;
+
+  const timer = setInterval(() => {
+    const next = scanFileState(root);
+    const dirtyPaths = new Set<string>();
+    for (const [path, fingerprint] of next) {
+      if (previous.get(path) !== fingerprint) dirtyPaths.add(path);
+    }
+    for (const path of previous.keys()) {
+      if (!next.has(path)) dirtyPaths.add(path);
+    }
+    previous = next;
+    if (dirtyPaths.size > 0) onDirty([...dirtyPaths]);
+  }, intervalMs);
+  timer.unref();
+
+  return () => clearInterval(timer);
 }
 
 // ── Chokidar mode ──────────────────────────────────────────────────────────
@@ -259,6 +367,7 @@ function startChokidarWatch(
     ignoreInitial: true,
     persistent: true,
     awaitWriteFinish: false,
+    ignored: (filePath: string) => WATCH_IGNORED_DIRECTORY.test(filePath),
   });
 
   const handler = (filePath: string) => {
@@ -274,6 +383,12 @@ function startChokidarWatch(
   watcher.on("change", handler);
   watcher.on("add", handler);
   watcher.on("unlink", handler);
+  // Chokidar reports late setup failures asynchronously. Without this listener
+  // EventEmitter treats EMFILE as fatal and terminates the entire Pi session.
+  watcher.on("error", (error: unknown) => {
+    console.warn(`[file-watcher] Chokidar disabled: ${(error as Error).message}`);
+    void watcher.close();
+  });
 
   return () => {
     if (timer !== null) {
@@ -318,6 +433,7 @@ function startRecursiveWatch(
 
   try {
     const watcher = watch(root, { recursive: true }, handler);
+    guardNativeWatcher(watcher, root);
     watchers.push(watcher);
   } catch (err) {
     console.warn(
@@ -405,6 +521,7 @@ function startNonRecursiveWatch(
           }
         }
       });
+      guardNativeWatcher(watcher, dir);
       watchers.push(watcher);
       pathToWatcher.set(dir, watcher);
       // Only mark as watched AFTER the watcher was created successfully, so a
@@ -418,8 +535,8 @@ function startNonRecursiveWatch(
   }
 
   console.warn(
-    `[file-watcher] Linux non-recursive mode: watching ${watchers.length} directories. ` +
-    `Install chokidar for recursive support.`,
+    `[file-watcher] Descriptor-capped mode: watching ${watchers.length} directories. ` +
+    `Set FILE_WATCHER_MAX_COUNT or mode:'chokidar' only if the process has sufficient FD headroom.`,
   );
 
   return () => {

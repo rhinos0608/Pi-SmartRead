@@ -251,6 +251,18 @@ Languages without dedicated tree-sitter parsers still work for file reading and 
 
 ## Configuration
 
+### File watching
+
+Filesystem watching defaults to descriptor-safe polling, so external edits reliably invalidate stale graph and semantic-index state even under the common 256-file-descriptor limit. SmartRead also invalidates its own successful edits immediately. The polling interval defaults to one second and can be adjusted with `FILE_WATCHER_POLL_INTERVAL_MS`.
+
+For an environment with substantial file-descriptor headroom, you can opt into a bounded native watcher:
+
+```bash
+FILE_WATCHER_MODE=non-recursive FILE_WATCHER_MAX_COUNT=16 pi
+```
+
+`chokidar` and recursive modes are also available (`FILE_WATCHER_MODE=chokidar` or `recursive`) but need substantially more file-descriptor headroom. Generated dependency, build, cache, and Pi subagent trees are excluded in every enabled mode.
+
 ### Embedding backend
 
 Semantic ranking uses an **OpenAI-compatible embeddings API**.
