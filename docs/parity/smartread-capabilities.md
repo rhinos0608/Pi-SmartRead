@@ -51,7 +51,7 @@ Behavior: Directory mode returns a ranked repo map (PageRank + import-based). Fi
 - `contextLines: number` — Lines per match (default 2, max 10)
 - `graphFilter: string` — Filter results by graph relationship (format: `EDGE_TYPE->target`, e.g. `CALLS->auth.login`)
 
-Behavior: Smart cascade: Layer1 BM25 lexical → Layer2 AST symbol → RRF fusion + dedup → embedding retry (wider topK) → lexical grep passthrough fallback. literal:true bypasses cascade. graphFilter post-filters hits via `src/graph-filter.ts` against the ContextGraph edge index. Emits evidence envelope with `coverage: "search-match"` per hit.
+Behavior: Smart cascade: Layer1 BM25 lexical → Layer2 AST symbol → RRF fusion + dedup → optional embedding retry (wider topK) → lexical grep passthrough fallback. Without an embedding index, conceptual wording does not imply semantic equivalence: retrieval is lexical and symbol-based. `literal:true` bypasses cascade. graphFilter post-filters hits via `src/graph-filter.ts` against the ContextGraph edge index. Emits evidence envelope with `coverage: "search-match"` per hit.
 
 **`graph_mutate`** (`src/graph-mutate.ts:15-29`)
 - `from: string` — Modified file/symbol

@@ -88,48 +88,81 @@ export function tokenize(text: string): string[] {
 }
 
 export function bm25Scores(query: string, documents: string[]): number[] {
-  const k1 = 1.2;
-  const b = 0.75;
-  const N = documents.length;
+  return compileBm25Corpus(documents).score(query);
+}
 
-  if (N === 0) return [];
+/**
+ * Pre-compiled BM25 corpus. Tokenizes each document once and caches term
+ * frequencies and document frequencies so repeated queries against the same
+ * corpus skip re-tokenization. `score(query)` returns scores in the same
+ * order and with identical values to `bm25Scores(query, docs)` over the docs
+ * this corpus was compiled from.
+ */
+export interface Bm25Corpus {
+  readonly n: number;
+  readonly avgDocLen: number;
+  /** Per-document token counts (index-aligned with the source documents). */
+  readonly docTokenCounts: number[];
+  /** Per-document term-frequency maps (index-aligned with source documents). */
+  readonly docTfs: Array<Map<string, number>>;
+  /** term -> number of documents containing it. */
+  readonly df: Map<string, number>;
+  score(query: string): number[];
+}
 
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
+
+/**
+ * Compile a reusable BM25 corpus. For an empty document list, `score` returns
+ * an empty array and no division-by-zero occurs.
+ */
+export function compileBm25Corpus(documents: string[]): Bm25Corpus {
   const tokenizedDocs = documents.map(tokenize);
-  const avgDocLen = Math.max(1, tokenizedDocs.reduce((sum, d) => sum + d.length, 0) / N);
+  const n = documents.length;
+  const totalTokens = tokenizedDocs.reduce((sum, d) => sum + d.length, 0);
+  const avgDocLen = n === 0 ? 0 : Math.max(1, totalTokens / n);
 
-  const queryTokens = tokenize(query);
-
-  // df: number of documents containing each unique query token
-  const df = new Map<string, number>();
-  for (const token of queryTokens) {
-    let count = 0;
-    for (const doc of tokenizedDocs) {
-      if (doc.includes(token)) count += 1;
-    }
-    df.set(token, count);
-  }
-
-  // IDF: log((N - df + 0.5) / (df + 0.5) + 1)
-  const idf = new Map<string, number>();
-  for (const token of queryTokens) {
-    const d = df.get(token) ?? 0;
-    idf.set(token, Math.log((N - d + 0.5) / (d + 0.5) + 1));
-  }
-
-  return tokenizedDocs.map((docTokens) => {
-    const docLen = docTokens.length;
-    // term frequency map for this document
+  const docTokenCounts = tokenizedDocs.map((d) => d.length);
+  const docTfs = tokenizedDocs.map((docTokens) => {
     const tf = new Map<string, number>();
     for (const t of docTokens) tf.set(t, (tf.get(t) ?? 0) + 1);
-
-    let score = 0;
-    for (const token of queryTokens) {
-      const f = tf.get(token) ?? 0;
-      const tfScore = (f * (k1 + 1)) / (f + k1 * (1 - b + b * (docLen / avgDocLen)));
-      score += (idf.get(token) ?? 0) * tfScore;
-    }
-    return score;
+    return tf;
   });
+
+  // Document frequency over every term present in the corpus (not just query).
+  const df = new Map<string, number>();
+  for (const docTokens of tokenizedDocs) {
+    const seen = new Set(docTokens);
+    for (const t of seen) df.set(t, (df.get(t) ?? 0) + 1);
+  }
+
+  return {
+    n,
+    avgDocLen,
+    docTokenCounts,
+    docTfs,
+    df,
+    score(query: string): number[] {
+      if (n === 0) return [];
+      const queryTokens = tokenize(query);
+      const idf = new Map<string, number>();
+      for (const token of queryTokens) {
+        const d = df.get(token) ?? 0;
+        idf.set(token, Math.log((n - d + 0.5) / (d + 0.5) + 1));
+      }
+      return docTfs.map((tf, i) => {
+        const docLen = docTokenCounts[i]!;
+        let score = 0;
+        for (const token of queryTokens) {
+          const f = tf.get(token) ?? 0;
+          const tfScore = (f * (BM25_K1 + 1)) / (f + BM25_K1 * (1 - BM25_B + BM25_B * (docLen / avgDocLen)));
+          score += (idf.get(token) ?? 0) * tfScore;
+        }
+        return score;
+      });
+    },
+  };
 }
 
 export function maxChunkSimilarity(queryVec: number[], chunkVecs: number[][]): ChunkScoreResult {

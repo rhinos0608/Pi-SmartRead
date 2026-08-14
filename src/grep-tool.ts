@@ -7,7 +7,7 @@
  */
 
 import { realpathSync, statSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import {
@@ -27,8 +27,9 @@ import type { ContextGraph } from "./context-graph.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
 import { sessionFileFromContext } from "./inspect-tool.js";
 import { recordDegradation } from "./runtime-health.js";
-import { bm25Scores, tokenize } from "./scoring.js";
+import { tokenize, compileBm25Corpus, type Bm25Corpus } from "./scoring.js";
 import { findCodeFiles } from "./file-discovery.js";
+import { LruCache } from "./utils.js";
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -127,7 +128,22 @@ export interface GrepToolOptions {
     };
     readonly getSessionFilePath?: () => string | null | undefined;
     /** ContextGraph instance or getter for graphFilter edge checks (WP-5 DI). */
-    readonly contextGraph?: ContextGraph | (() => ContextGraph | Promise<ContextGraph>);
+    readonly contextGraph?: ContextGraph | ((cwd: string) => ContextGraph | Promise<ContextGraph>);
+    /**
+     * Monotonic workspace revision provider. When present, the no-index BM25
+     * fallback caches its corpus per (workspace root, revision) and skips
+     * re-reading/re-tokenizing the candidate set on unchanged workspaces.
+     * Absent → the fallback stays uncached. Injected by runtime registrations
+     * (never imported here to avoid an mcp-registry dependency cycle).
+     */
+    readonly getWorkspaceRevision?: () => number;
+    /**
+     * Synchronous peek at an already-built shared ContextGraph (null if not
+     * built). Lets no-index grep resolve simple symbols from the structural
+     * index without triggering a graph build; handleSymbol remains the
+     * fallback when the graph is unavailable or the match is absent.
+     */
+    readonly getSharedContextGraphIfBuilt?: (root: string) => ContextGraph | null;
 }
 
 export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
@@ -242,15 +258,14 @@ async function executeGrepQuery(
     // with the call graph and coalesces concurrent callers).
     let contextGraph: ContextGraph | undefined;
     if (hasGraphFilter) {
-        contextGraph = typeof opts.contextGraph === "function" ? await opts.contextGraph() : opts.contextGraph;
+        contextGraph = typeof opts.contextGraph === "function" ? await opts.contextGraph(cwd) : opts.contextGraph;
         if (!contextGraph) throw new Error("graphFilter requires an indexed context graph");
     }
 
-    // Iterative over-fetch: when graphFilter is present, filtering can starve
-    // the candidate pool below topK. Fetch the maximum candidate set in a
-    // single pass — re-running the corpus search per gather step would repeat
-    // full searches and re-evaluate the graph filter. Without graphFilter this
-    // runs once at the small gatherK.
+    // Bounded over-fetch: when graphFilter is present, filtering can starve
+    // the candidate pool below topK, so gather up to MAX_GATHER in one pass.
+    // The graph filter is applied once to that bounded candidate set; without
+    // graphFilter this starts with the smaller gatherK and may expand below.
     const MAX_GATHER = 2000;
     let gatherK = hasGraphFilter ? MAX_GATHER : Math.min(topK * 2, 200);
     let hits: GrepHit[] = [];
@@ -261,7 +276,22 @@ async function executeGrepQuery(
         const searchResult = params.literal || regexPattern === null
             ? params.literal
                 ? await runLiteralGrep(params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob)
-                : await runSmartCascade(params.pattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob)
+                : await runSmartCascade(
+                    params.pattern,
+                    searchDir,
+                    gatherK,
+                    contextLines,
+                    caseSensitive,
+                    cwd,
+                    signal,
+                    scopedFile,
+                    fileGlob,
+                    opts,
+                    // Graph filtering needs a larger candidate pool: exact
+                    // lexical hits can all be filtered out, so keep the
+                    // fallback layers available in that mode.
+                    !hasGraphFilter,
+                )
             : await runRegexGrep(regexPattern, searchDir, gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob);
         let current = searchResult.hits;
         engines = searchResult.engines;
@@ -350,8 +380,11 @@ async function runSmartCascade(
     signal: AbortSignal | undefined,
     scopedFile?: string,
     fileGlob?: string,
+    opts?: GrepToolOptions,
+    allowExactShortCircuit = true,
 ): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[] }> {
     const bigK = gatherK;
+    const root = canonicalizeWorkspaceRoot(cwd);
     const degradation: GrepDegradation[] = [];
     const semanticIndex = getSemanticIndex(searchDir);
     const exactResult = await runLiteralGrep(
@@ -368,39 +401,79 @@ async function runSmartCascade(
     if (!semanticIndex?.isAvailable()) {
         degradation.push({ backend: "semantic", code: "index_unavailable" });
         recordDegradation("index_unavailable", "semantic");
+        // Exact lexical results already satisfy the caller's requested
+        // result limit. Avoid the full AST scan and BM25 corpus build in the
+        // common path where exact results are sufficient. `gatherK` is at
+        // least twice the requested limit (capped at 200), so this preserves
+        // the same number of displayed exact results while eliminating the
+        // expensive fallback work. Graph-filtered queries opt out above so
+        // they can over-fetch candidates that survive graph filtering.
+        const requestedLimit = Math.max(1, Math.ceil(gatherK / 2));
+        if (allowExactShortCircuit && exactResult.hits.length >= requestedLimit) {
+            return { hits: exactResult.hits, engines: ["lexical-passthrough"], degradation };
+        }
         // No semantic index: keep grep useful by fusing exact lexical, a real
         // in-memory BM25 ranker (token overlap over the discovered source
         // corpus), and AST symbol search. Exact hits stay prepended at front.
         const symbolHits = new Map<string, GrepHit>();
         let symbolOk = false;
-        try {
-            const symResult = await handleSymbol(pattern, bigK, false, searchDir, cwd, signal, fileGlob);
-            for (const m of symResult.matches) {
-                const absPath = tryCanonical(resolve(cwd, m.relative_path));
-                if (scopedFile && absPath !== scopedFile) continue;
-                const relFile = m.relative_path;
-                const line = m.line;
-                const key = `${absPath}:${line}`;
-                if (!symbolHits.has(key)) {
+        // Reuse the shared structural index for a simple exact symbol when a
+        // graph is already built — avoids a full AST workspace scan. handleSymbol
+        // remains the fallback for qualified/partial identifiers, an unavailable
+        // graph, or when the symbol is absent from the index.
+        const builtGraph = opts?.getSharedContextGraphIfBuilt?.(root) ?? null;
+        const isSimpleIdentifier = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(pattern);
+        if (isSimpleIdentifier && builtGraph) {
+            const def = builtGraph.findExactSymbolDef(pattern);
+            if (def) {
+                const absPath = tryCanonical(def.file);
+                if (!scopedFile || absPath === scopedFile) {
+                    const key = `${absPath}:${def.line}`;
                     symbolHits.set(key, {
                         file: absPath,
-                        relFile,
-                        line,
-                        endLine: m.end_line ?? line,
-                        name: m.name,
-                        kind: "symbol",
-                        snippet: m.body ?? "",
+                        relFile: relative(cwd, absPath).replace(/\\/g, "/"),
+                        line: def.line,
+                        endLine: def.line,
+                        name: def.name,
+                        kind: def.kind,
+                        snippet: "",
                         engines: ["symbol"],
                         score: 1,
                     });
+                    symbolOk = true;
                 }
             }
-            if (symbolHits.size > 0) symbolOk = true;
-        } catch {
-            degradation.push({ backend: "symbol", code: "symbol_failed" });
-            recordDegradation("symbol_failed", "symbol");
         }
-        const bm25Hits = await runFallbackBm25(pattern, searchDir, bigK, contextLines, cwd, signal, scopedFile, fileGlob);
+        if (!symbolOk) {
+            try {
+                const symResult = await handleSymbol(pattern, bigK, false, searchDir, cwd, signal, fileGlob);
+                for (const m of symResult.matches) {
+                    const absPath = tryCanonical(resolve(cwd, m.relative_path));
+                    if (scopedFile && absPath !== scopedFile) continue;
+                    const relFile = m.relative_path;
+                    const line = m.line;
+                    const key = `${absPath}:${line}`;
+                    if (!symbolHits.has(key)) {
+                        symbolHits.set(key, {
+                            file: absPath,
+                            relFile,
+                            line,
+                            endLine: m.end_line ?? line,
+                            name: m.name,
+                            kind: "symbol",
+                            snippet: m.body ?? "",
+                            engines: ["symbol"],
+                            score: 1,
+                        });
+                    }
+                }
+                if (symbolHits.size > 0) symbolOk = true;
+            } catch {
+                degradation.push({ backend: "symbol", code: "symbol_failed" });
+                recordDegradation("symbol_failed", "symbol");
+            }
+        }
+        const bm25Hits = await runFallbackBm25(pattern, searchDir, bigK, contextLines, cwd, signal, scopedFile, fileGlob, opts, root);
 
         let combined = fuseAndDedup(bm25Hits, symbolHits);
         if (exactResult.hits.length > 0) {
@@ -682,28 +755,44 @@ const MAX_BM25_CANDIDATES = 1000; // ponytail: hard cap on corpus reads; raise i
 // Per-file size cap for the BM25 fallback corpus (matches semantic-index's 2MB limit).
 const MAX_BM25_FILE_BYTES = 2 * 1024 * 1024;
 
-async function runFallbackBm25(
-    pattern: string,
-    searchDir: string,
-    topK: number,
-    contextLines: number,
-    cwd: string,
-    signal: AbortSignal | undefined,
-    scopedFile?: string,
-    fileGlob?: string,
-): Promise<Map<string, GrepHit>> {
-    const hits = new Map<string, GrepHit>();
-    if (signal?.aborted) throw new Error("Operation aborted");
+// ── Per-workspace-revision BM25 corpus cache ──────────────────────────────
+// Bounds repeated no-index fallback cost: same workspace + same revision ⇒
+// reuse the compiled corpus instead of re-reading/re-tokenizing up to
+// MAX_BM25_CANDIDATES files on every query. Correctness is anchored on the
+// injected monotonic workspace revision (any mutation bumps it), so a cached
+// entry is only ever served for an unchanged workspace.
+interface CorpusEntry {
+    fileList: string[];
+    contents: string[];
+    corpus: Bm25Corpus;
+}
+const MAX_CORPUS_CACHE_ENTRIES = 3; // ponytail: small bounded LRU; raise if multi-glob working sets thrash
+const corpusCache = new LruCache<CorpusEntry>(MAX_CORPUS_CACHE_ENTRIES);
+const pendingCorpusBuilds = new Map<string, Promise<CorpusEntry | null>>();
+let corpusBuildCount = 0; // test instrumentation
 
+function corpusKeyString(root: string, revision: number, searchDir: string, cwd: string, fileGlob: string): string {
+    return `${root}\u0000${revision}\u0000${searchDir}\u0000${cwd}\u0000${fileGlob}`;
+}
+
+function isWithinWorkspace(root: string, dir: string): boolean {
+    const rel = relative(root, dir);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+async function buildCorpus(
+    searchDir: string,
+    scopedFile: string | undefined,
+    cwd: string,
+    fileGlob: string | undefined,
+): Promise<CorpusEntry> {
+    corpusBuildCount++;
     const fs = await import("node:fs/promises");
     const { minimatch } = await import("minimatch");
-
     // Apply fileGlob during discovery (before the candidate cap) so matching
     // files beyond the first MAX_BM25_CANDIDATES discovered are still considered.
     const discoveryCap = fileGlob ? 10_000 : MAX_BM25_CANDIDATES;
-    let files = scopedFile
-        ? [scopedFile]
-        : await findCodeFiles(searchDir, discoveryCap, signal);
+    let files = scopedFile ? [scopedFile] : await findCodeFiles(searchDir, discoveryCap);
     if (fileGlob) {
         files = files.filter((f) => minimatch(relative(cwd, f).replace(/\\/g, "/"), fileGlob));
     }
@@ -712,7 +801,6 @@ async function runFallbackBm25(
     const fileList: string[] = [];
     const contents: string[] = [];
     for (const f of files) {
-        if (signal?.aborted) throw new Error("Operation aborted");
         try {
             const st = await fs.stat(f);
             if (st.size > MAX_BM25_FILE_BYTES) continue; // skip oversized files
@@ -722,9 +810,96 @@ async function runFallbackBm25(
             // skip unreadable files
         }
     }
+    return { fileList, contents, corpus: compileBm25Corpus(contents) };
+}
+
+/**
+ * Return a corpus for the search scope, caching it per (root, revision).
+ * Scoped single-file searches and searches outside the tracked workspace (or
+ * without an injected revision source) are never cached. Concurrent callers
+ * coalesce onto a single in-flight build; a build that finished after the
+ * workspace revision changed is discarded (never published) and rebuilt.
+ */
+async function getSearchCorpus(
+    searchDir: string,
+    scopedFile: string | undefined,
+    cwd: string,
+    fileGlob: string | undefined,
+    root: string,
+    getWorkspaceRevision: (() => number) | undefined,
+): Promise<{ entry: CorpusEntry; cached: boolean }> {
+    // Uncacheable scope: single-file target, no revision source, or a search
+    // that leaves the tracked workspace (revision doesn't reflect it).
+    const cacheable =
+        !scopedFile &&
+        getWorkspaceRevision !== undefined &&
+        isWithinWorkspace(root, searchDir);
+    if (!cacheable) {
+        return { entry: await buildCorpus(searchDir, scopedFile, cwd, fileGlob), cached: false };
+    }
+    const glob = fileGlob ?? "";
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const revision = getWorkspaceRevision();
+        const key = corpusKeyString(root, revision, searchDir, cwd, glob);
+        const hit = corpusCache.get(key);
+        if (hit) return { entry: hit, cached: true };
+        let pending = pendingCorpusBuilds.get(key);
+        if (!pending) {
+            // Builder must not inherit any caller abort signal: a coalesced
+            // build serves all concurrent callers, so cancellation is handled
+            // by the caller before/after the await, never inside the build.
+            pending = buildCorpus(searchDir, scopedFile, cwd, fileGlob).then((entry) => {
+                if (getWorkspaceRevision() !== revision) return null; // stale — don't publish
+                corpusCache.set(key, entry);
+                return entry;
+            });
+            pendingCorpusBuilds.set(key, pending);
+        }
+        try {
+            const result = await pending;
+            if (result) return { entry: result, cached: false };
+            // Revision changed mid-build → loop to rebuild at the new revision.
+        } catch (err) {
+            pendingCorpusBuilds.delete(key);
+            throw err;
+        } finally {
+            pendingCorpusBuilds.delete(key);
+        }
+    }
+    // Safety net: loop exited without a fresh build (revision churn).
+    return { entry: await buildCorpus(searchDir, scopedFile, cwd, fileGlob), cached: false };
+}
+
+async function runFallbackBm25(
+    pattern: string,
+    searchDir: string,
+    topK: number,
+    contextLines: number,
+    cwd: string,
+    signal: AbortSignal | undefined,
+    scopedFile: string | undefined,
+    fileGlob: string | undefined,
+    opts: GrepToolOptions | undefined,
+    root: string,
+): Promise<Map<string, GrepHit>> {
+    const hits = new Map<string, GrepHit>();
+    if (signal?.aborted) throw new Error("Operation aborted");
+
+    const { entry } = await getSearchCorpus(
+        searchDir,
+        scopedFile,
+        cwd,
+        fileGlob,
+        root,
+        opts?.getWorkspaceRevision,
+    );
+    // Cancellation is honored around (not inside) the shared corpus build.
+    if (signal?.aborted) throw new Error("Operation aborted");
+
+    const { fileList, contents, corpus } = entry;
     if (fileList.length === 0) return hits;
 
-    const scores = bm25Scores(pattern, contents);
+    const scores = corpus.score(pattern);
     const queryTokens = tokenize(pattern);
 
     const ranked: Array<{ file: string; score: number; content: string }> = [];
@@ -964,4 +1139,49 @@ function mergeRanges(ranges: Array<{ startLine: number; endLine: number }>): Arr
 
 function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+// ── Test instrumentation ────────────────────────────────────────────────────
+// Exported so focused tests can assert cache reuse/invalidation deterministically
+// without wall-clock timing. Production callers never need these.
+export function _bm25CorpusCacheForTests(): { size: number; builds: number } {
+    return { size: corpusCache.size, builds: corpusBuildCount };
+}
+export function _resetBm25CorpusCacheForTests(): void {
+    corpusCache.clear();
+    pendingCorpusBuilds.clear();
+    corpusBuildCount = 0;
+}
+
+/**
+ * Deterministic corpus-cache benchmark (test instrumentation). Builds an
+ * n-file synthetic repo, measures cold vs warm getSearchCorpus elapsed time
+ * and corpus build counts. No wall-clock threshold — asserts cache-hit and
+ * build-count determinism, not timing. Isolates the corpus cache from the
+ * full grep path (which also runs an AST symbol scan that would dominate).
+ */
+export async function _bm25CacheBenchmark(
+    n: number,
+): Promise<{ coldMs: number; warmMs: number; coldBuilds: number; warmBuilds: number; cachedWarm: boolean }> {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const pm = await import("node:path");
+    const dir = fs.realpathSync(fs.mkdtempSync(pm.join(os.tmpdir(), "grep-bench-")));
+    fs.mkdirSync(pm.join(dir, "src"), { recursive: true });
+    for (let i = 0; i < n; i++) {
+        fs.writeFileSync(pm.join(dir, "src", `f${i}.ts`), `export function fn${i}(x:number){return tokenize("alpha${i}")+x;}\n`, "utf8");
+    }
+    _resetBm25CorpusCacheForTests();
+    const getRevision = () => 0;
+    const src = pm.join(dir, "src");
+    const t0 = Date.now();
+    await getSearchCorpus(src, undefined, dir, undefined, dir, getRevision);
+    const coldMs = Date.now() - t0;
+    const coldBuilds = _bm25CorpusCacheForTests().builds;
+    const t1 = Date.now();
+    const warm = await getSearchCorpus(src, undefined, dir, undefined, dir, getRevision);
+    const warmMs = Date.now() - t1;
+    const warmBuilds = _bm25CorpusCacheForTests().builds;
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { coldMs, warmMs, coldBuilds, warmBuilds, cachedWarm: warm.cached };
 }

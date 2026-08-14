@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bm25Scores,
+  compileBm25Corpus,
   cosineSimilarity,
   computeRanks,
   computeRrfScores,
@@ -185,6 +186,31 @@ describe("computeRanks", () => {
 
   it("handles single element", () => {
     expect(computeRanks([0.9], ["a"])).toEqual([1]);
+  });
+});
+
+describe("compileBm25Corpus", () => {
+  it("compiled corpus scores match bm25Scores exactly", () => {
+    const docs = [
+      "export function authToken validator handles signing and expiry",
+      "auth middleware checks token signature before route",
+      "const DATABASE_HOST = 'localhost';",
+      "cache key uses token hash for auth lookups",
+    ];
+    const corpus = compileBm25Corpus(docs);
+    const query = "auth token signing";
+    const compiled = corpus.score(query);
+    const direct = bm25Scores(query, docs);
+    expect(compiled.length).toBe(docs.length);
+    for (let i = 0; i < docs.length; i++) {
+      expect(compiled[i]!).toBeCloseTo(direct[i]!, 10);
+    }
+  });
+
+  it("empty corpus scores to an empty array without dividing by zero", () => {
+    const corpus = compileBm25Corpus([]);
+    expect(corpus.score("anything")).toEqual([]);
+    expect(corpus.avgDocLen).toBe(0);
   });
 });
 

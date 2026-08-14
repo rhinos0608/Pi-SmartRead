@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { createGrepTool, type GrepToolOptions } from "../../src/grep-tool.js";
+import { createGrepTool, type GrepToolOptions, _resetBm25CorpusCacheForTests, _bm25CorpusCacheForTests, _bm25CacheBenchmark } from "../../src/grep-tool.js";
 import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../src/semantic-index-registry.js";
 
 function makeCtx(cwd: string) {
@@ -756,11 +756,13 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
             "utf8",
         );
         let built = false;
+        let getterRoot: string | undefined;
         // Simulate the runtime DI: an async getter that builds the shared graph
         // (with call graph) — the tool must await it before graphFilter.
         const { ContextGraph } = await import("../../src/context-graph.js");
         const tool = createGrepTool(makeOpts({
-            contextGraph: async () => {
+            contextGraph: async (root) => {
+                getterRoot = root;
                 const graph = new ContextGraph(workdir);
                 await graph.buildContextGraph({ includeCalls: true });
                 built = true;
@@ -776,6 +778,7 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
             makeCtx(workdir),
         );
         expect(built).toBe(true);
+        expect(getterRoot).toBe(workdir);
         const details = result.details as any;
         const resources = details.workspaceEvidence.resources;
         expect(resources).toHaveLength(1);
@@ -866,4 +869,113 @@ describe("grep tool — graphFilter single-pass over-fetch", () => {
         expect(spy.mock.calls.length).toBe(1);
         spy.mockRestore();
     });
+});
+
+describe("grep no-index BM25 corpus cache", () => {
+  it("short-circuits BM25 and structural fallback when exact hits fill the limit", async () => {
+    _resetBm25CorpusCacheForTests();
+    const graphPeek = vi.fn(() => null);
+    const tool = createGrepTool(makeOpts({
+      getWorkspaceRevision: () => 0,
+      getSharedContextGraphIfBuilt: graphPeek,
+    }));
+
+    const result = await tool.execute(
+      "exact-short-circuit",
+      { pattern: "export", path: "src", limit: 1 },
+      undefined,
+      undefined,
+      makeCtx(workdir),
+    );
+
+    // The literal pass found at least the requested one result. The no-index
+    // fallback must not build/read the BM25 corpus or even peek at the graph
+    // for the AST-symbol layer.
+    expect(_bm25CorpusCacheForTests().builds).toBe(0);
+    expect(graphPeek).not.toHaveBeenCalled();
+    expect((result.details as any).engines).toEqual(["lexical-passthrough"]);
+    expect((result.details as any).shownHits).toBe(1);
+  });
+
+  it("warm reuse builds the corpus once and reuses the cached result", async () => {
+    _resetBm25CorpusCacheForTests();
+    let revision = 0;
+    const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => revision }));
+    const p = { pattern: "createToken", path: "src" };
+    const r1 = await tool.execute("c1", p as any, undefined, undefined, makeCtx(workdir));
+    const buildsAfterCold = _bm25CorpusCacheForTests().builds;
+    const r2 = await tool.execute("c2", p as any, undefined, undefined, makeCtx(workdir));
+    const stats = _bm25CorpusCacheForTests();
+    expect(buildsAfterCold).toBe(1);
+    expect(stats.builds).toBe(1); // second query served from cache, no rebuild
+    expect(stats.size).toBe(1);
+    const t1 = (r1.content[0] as { text: string }).text;
+    const t2 = (r2.content[0] as { text: string }).text;
+    expect(t1).toContain("2 result(s)");
+    expect(t2).toContain("2 result(s)");
+    expect(t2).toContain("src/tokens.ts");
+  });
+
+  it("revision bump invalidates the cached corpus and rebuilds", async () => {
+    _resetBm25CorpusCacheForTests();
+    let revision = 0;
+    const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => revision }));
+    const p = { pattern: "createToken", path: "src" };
+    await tool.execute("c1", p as any, undefined, undefined, makeCtx(workdir));
+    expect(_bm25CorpusCacheForTests().builds).toBe(1);
+    revision = 1; // workspace mutated
+    await tool.execute("c2", p as any, undefined, undefined, makeCtx(workdir));
+    expect(_bm25CorpusCacheForTests().builds).toBe(2);
+  });
+
+  it("concurrent queries on the same revision coalesce onto one build", async () => {
+    _resetBm25CorpusCacheForTests();
+    const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => 0 }));
+    const p = { pattern: "createToken", path: "src" };
+    await Promise.all([
+      tool.execute("c1", p as any, undefined, undefined, makeCtx(workdir)),
+      tool.execute("c2", p as any, undefined, undefined, makeCtx(workdir)),
+      tool.execute("c3", p as any, undefined, undefined, makeCtx(workdir)),
+    ]);
+    expect(_bm25CorpusCacheForTests().builds).toBe(1);
+  });
+
+  it("isolates cache entries by glob/scope", async () => {
+    _resetBm25CorpusCacheForTests();
+    const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => 0 }));
+    await tool.execute("c1", { pattern: "createToken", path: "src", glob: "*.ts" } as any, undefined, undefined, makeCtx(workdir));
+    await tool.execute("c2", { pattern: "createToken", path: "src" } as any, undefined, undefined, makeCtx(workdir));
+    const stats = _bm25CorpusCacheForTests();
+    expect(stats.builds).toBe(2); // different glob => different corpus
+    expect(stats.size).toBe(2);
+  });
+
+  it("reuses the built structural symbol index for a simple identifier without an AST scan", async () => {
+    _resetBm25CorpusCacheForTests();
+    const graphPeek = vi.fn(() => ({
+      findExactSymbolDef: () => ({
+        file: join(workdir, "src", "tokens.ts"),
+        relFile: "src/tokens.ts",
+        line: 20,
+        name: "ghostSymbol",
+        kind: "symbol",
+      }),
+    }) as any);
+    const tool = createGrepTool(makeOpts({ getSharedContextGraphIfBuilt: graphPeek }));
+    const result = await tool.execute("c1", { pattern: "ghostSymbol", path: "src" } as any, undefined, undefined, makeCtx(workdir));
+    // handleSymbol would find nothing for "ghostSymbol"; a hit proves the
+    // structural-index fast path supplied the definition.
+    expect(graphPeek).toHaveBeenCalledTimes(1);
+    expect((result.content[0] as { text: string }).text).toContain("ghostSymbol");
+  });
+
+  it("benchmark harness: 100/1k/10k-file cold/warm corpus builds without a timing gate", async () => {
+    for (const n of [100, 1000, 10000]) {
+      const r = await _bm25CacheBenchmark(n);
+      // Deterministic assertions: warm hit is cached and adds no rebuild.
+      expect(r.cachedWarm).toBe(true);
+      expect(r.warmBuilds).toBe(r.coldBuilds);
+      console.log(`corpus-bench[${n} files]: cold=${r.coldMs}ms builds=${r.coldBuilds} warm=${r.warmMs}ms builds=${r.warmBuilds}`);
+    }
+  }, 120_000);
 });

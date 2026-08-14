@@ -328,6 +328,33 @@ export class ContextGraph {
   }
 
   /**
+   * Exact-definition lookup from the built symbol index (O(1)). Returns the
+   * first definition tag for a simple identifier, or null when the index is
+   * not yet built, the symbol is absent, or it has no `def` tag. Used by grep
+   * to avoid a full AST workspace scan for simple symbols when a graph is
+   * already built; callers must retain a fallback for qualified/partial
+   * identifiers and for the unbuilt-graph case.
+   */
+  findExactSymbolDef(
+    name: string,
+  ): { file: string; relFile: string; line: number; name: string; kind: string } | null {
+    const index = this.getSymbolIndex();
+    if (!index) return null;
+    const tags = index.get(name);
+    if (!tags) return null;
+    const def = tags.find((t) => t.kind === "def");
+    if (!def) return null;
+    const absFile = resolve(this.root, def.fname);
+    return {
+      file: absFile,
+      relFile: relative(this.root, absFile).replace(/\\/g, "/"),
+      line: def.line ?? 1,
+      name: def.name ?? name,
+      kind: "symbol",
+    };
+  }
+
+  /**
    * Returns the pre-built file tag index, or null if not yet built.
    */
   private getFileIndex(): LruCache<Tag[]> | null {
