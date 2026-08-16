@@ -58,7 +58,7 @@ describe("index extension wiring", () => {
     expect(handlers.session_shutdown).toBeDefined();
   });
 
-  it("guards large deep search tool results", () => {
+  it("guards large deep search tool results", async () => {
     // v3: deep search runs as inspect { query, depth: "deep" }.
     // The bash-context-guard should still cap oversized tool_result content for the
     // `inspect` tool name (which replaced `search` in v3).
@@ -77,7 +77,7 @@ describe("index extension wiring", () => {
     registerExtension(api);
 
     const text = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
-    const result = handlers.tool_result!({
+    const result = await handlers.tool_result!({
       toolName: "inspect",
       toolCallId: "deep-search-1",
       input: { query: "architecture", depth: "deep" },
@@ -90,7 +90,7 @@ describe("index extension wiring", () => {
     expect(result.details.bashContextGuard.toolName).toBe("inspect");
   });
 
-  it("applies bash context guard AFTER doom-loop warning injection (ordering fix)", () => {
+  it("applies bash context guard AFTER doom-loop warning injection (ordering fix)", async () => {
     const handlers: Record<string, (...args: any[]) => any> = {};
     const api = {
       registerTool: () => {},
@@ -114,19 +114,19 @@ describe("index extension wiring", () => {
       });
     }
     // First two: side effects only (build doom-loop state)
-    handlers.tool_result!({
+    await handlers.tool_result!({
       toolName: "inspect",
       toolCallId: "inspect-1",
       input,
       content: [{ type: "text", text: largeText }],
     });
-    handlers.tool_result!({
+    await handlers.tool_result!({
       toolName: "inspect",
       toolCallId: "inspect-2",
       input,
       content: [{ type: "text", text: largeText }],
     });
-    const result3 = handlers.tool_result!({
+    const result3 = await handlers.tool_result!({
       toolName: "inspect",
       toolCallId: "inspect-3",
       input,
@@ -148,7 +148,7 @@ describe("index extension wiring", () => {
     }
   });
 
-  it("marks read context stale after write results mutate the same file", () => {
+  it("marks read context stale after write results mutate the same file", async () => {
     const handlers: Record<string, (...args: any[]) => any> = {};
     const api = {
       registerTool: () => {},
@@ -159,13 +159,13 @@ describe("index extension wiring", () => {
 
     registerExtension(api);
 
-    handlers.tool_result!({
+    await handlers.tool_result!({
       toolName: "read",
       toolCallId: "read-1",
       input: { path: "src/foo.ts" },
       content: [{ type: "text", text: "export const value = 1;" }],
     });
-    handlers.tool_result!({
+    await handlers.tool_result!({
       toolName: "write",
       toolCallId: "write-1",
       input: { path: "src/foo.ts" },
@@ -180,6 +180,145 @@ describe("index extension wiring", () => {
           toolName: "read",
           content: [{ type: "text", text: "export const value = 1;" }],
         },
+      ],
+    });
+
+    expect(result.messages[0].content[0].text).toContain("Stale read context");
+  });
+
+  it("uses changedResources.canonicalPath as authoritative mutation paths for multi-file edit (raw input, no top-level path)", async () => {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const api = {
+      registerTool: () => {},
+      on: (event: string, handler: (...args: any[]) => any) => {
+        handlers[event] = handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerExtension(api);
+
+    await handlers.tool_result!({ toolName: "read", toolCallId: "read-a", input: { path: "src/a.ts" }, content: [{ type: "text", text: "a" }] });
+    await handlers.tool_result!({ toolName: "read", toolCallId: "read-b", input: { path: "src/b.ts" }, content: [{ type: "text", text: "b" }] });
+
+    // Raw edit input with NO top-level path; changedResources carries the paths.
+    await handlers.tool_result!({
+      toolName: "edit",
+      toolCallId: "edit-1",
+      input: { edits: [{ path: "src/a.ts" }, { path: "src/b.ts" }] },
+      details: { changedResources: [{ canonicalPath: "src/a.ts" }, { canonicalPath: "src/b.ts" }] },
+      content: [{ type: "text", text: "edited" }],
+    });
+
+    const result = handlers.context!({
+      messages: [
+        { role: "toolResult", toolCallId: "read-a", toolName: "read", content: [{ type: "text", text: "a" }] },
+        { role: "toolResult", toolCallId: "read-b", toolName: "read", content: [{ type: "text", text: "b" }] },
+      ],
+    });
+
+    expect(result.messages[0].content[0].text).toContain("Stale read context");
+    expect(result.messages[1].content[0].text).toContain("Stale read context");
+  });
+
+  it("does not mark read context stale for failed edits", async () => {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const api = {
+      registerTool: () => {},
+      on: (event: string, handler: (...args: any[]) => any) => {
+        handlers[event] = handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerExtension(api);
+
+    await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
+    await handlers.tool_result!({
+      toolName: "edit",
+      toolCallId: "edit-1",
+      input: { path: "src/foo.ts" },
+      isError: true,
+      details: { changedResources: [{ canonicalPath: "src/foo.ts" }] },
+      content: [{ type: "text", text: "edit failed" }],
+    });
+
+    const result = handlers.context!({
+      messages: [{ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "export const value = 1;" }] }],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("does not mark read context stale for failed writes", async () => {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const api = {
+      registerTool: () => {},
+      on: (event: string, handler: (...args: any[]) => any) => {
+        handlers[event] = handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerExtension(api);
+
+    await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
+    await handlers.tool_result!({
+      toolName: "write",
+      toolCallId: "write-1",
+      input: { path: "src/foo.ts" },
+      isError: true,
+      content: [{ type: "text", text: "write failed" }],
+    });
+
+    const result = handlers.context!({
+      messages: [{ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "export const value = 1;" }] }],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("does not mark read context stale for failed graph_mutate", async () => {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const api = {
+      registerTool: () => {},
+      on: (event: string, handler: (...args: any[]) => any) => {
+        handlers[event] = handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerExtension(api);
+
+    await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
+    await handlers.tool_result!({
+      toolName: "graph_mutate",
+      toolCallId: "gm-1",
+      input: { from: "src/foo.ts", to: "src/bar.ts" },
+      isError: true,
+      content: [{ type: "text", text: "graph_mutate failed" }],
+    });
+
+    const result = handlers.context!({
+      messages: [{ role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "export const value = 1;" }] }],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("ignores malformed changedResources and falls back to input path for edit", async () => {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const api = {
+      registerTool: () => {},
+      on: (event: string, handler: (...args: any[]) => any) => {
+        handlers[event] = handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerExtension(api);
+
+    await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
+
+    // Non-string canonicalPath entries are dropped; input.path is the fallback.
+    await handlers.tool_result!({
+      toolName: "edit",
+      toolCallId: "edit-1",
+      input: { path: "src/foo.ts" },
+      details: { changedResources: [{ canonicalPath: 123 }, { canonicalPath: "" }] },
+      content: [{ type: "text", text: "edited" }],
+    });
+
+    const result = handlers.context!({
+      messages: [
+        { role: "toolResult", toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "export const value = 1;" }] },
       ],
     });
 

@@ -577,7 +577,7 @@ const ReadSchema = Type.Object({
       offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line" })),
       limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
     }),
-    { minItems: 1, maxItems: 10000, description: "Multiple files to read in the exact order listed (max 10000)." },
+    { minItems: 1, maxItems: 100, description: "Multiple files to read in the exact order listed (max 100)." },
   )),
   query: Type.Optional(Type.String({ description: "Natural-language intent. Ranks and reads most relevant files in cwd/directory. Falls back to grep+AST when semantic search unavailable." })),
   directory: Type.Optional(Type.String({ description: "Directory to scan (only with query; default: cwd)." })),

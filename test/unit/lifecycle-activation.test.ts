@@ -3,13 +3,12 @@
  *
  * Covers the Pi extension activation path end-to-end:
  *   - eager MCP fallback registrations are overridden with Pi-runtime defs
- *   - inspect / grep / health are registered with live resolver + session wiring
+ *   - inspect / grep are registered with live resolver + session wiring
  *   - watcher mutation marks the graph dirty; the lazy getter consumes the
  *     dirty flag exactly once (rebuild once, not forever)
  *   - grep builds non-zero current-session evidence and publishes directly
  *   - resolver binds to the live bus synchronously at activation
  *   - low-result hint path fires once grepRegistered is true
- *   - health tool reports truthful state
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -57,7 +56,6 @@ let registerExtension: (pi: ExtensionAPI) => void;
 let resetSharedContextGraph: () => void;
 let getSharedEvidenceResolver: () => any;
 let resetSharedEvidenceResolver: () => void;
-let resetRuntimeHealth: () => void;
 
 beforeEach(async () => {
   workdir = realpathSync(mkdtempSync(join(tmpdir(), "lifecycle-")));
@@ -74,11 +72,8 @@ beforeEach(async () => {
   resetSharedContextGraph = mcp.resetSharedContextGraph;
   getSharedEvidenceResolver = mcp.getSharedEvidenceResolver as () => any;
   resetSharedEvidenceResolver = mcp.resetSharedEvidenceResolver;
-  const rh = await import("../../src/runtime-health.js");
-  resetRuntimeHealth = rh.resetRuntimeHealth;
   resetSharedContextGraph();
   resetSharedEvidenceResolver();
-  resetRuntimeHealth();
   registerExtension = (await import("../../src/index.js")).default;
 });
 
@@ -102,13 +97,13 @@ function makeApi(overrides?: Partial<ExtensionAPI>): { api: ExtensionAPI; regist
 }
 
 describe("lifecycle activation (confirmed defects)", () => {
-  it("registers inspect, grep, and health and overrides eager MCP fallbacks", async () => {
+  it("registers inspect and grep, without health, and overrides eager MCP fallbacks", async () => {
     const { api, registered } = makeApi();
     registerExtension(api);
     const names = registered.map((t) => t.name);
     expect(names).toContain("inspect");
     expect(names).toContain("grep");
-    expect(names).toContain("health");
+    expect(names).not.toContain("health");
     // The registered grep/inspect must be the Pi-runtime (dirty-aware) versions:
     // they must carry a lazy contextGraph getter, not a static instance.
     const grepDef = registered.find((t) => t.name === "grep")!;
@@ -120,7 +115,7 @@ describe("lifecycle activation (confirmed defects)", () => {
   it("fires the low-result hint for upstream grep once grepRegistered is true", async () => {
     const { api, handlers } = makeApi();
     registerExtension(api);
-    const result = handlers.tool_result!({
+    const result = await handlers.tool_result!({
       toolName: "grep",
       toolCallId: "g-1",
       isError: false,
@@ -287,68 +282,6 @@ describe("lifecycle activation (confirmed defects)", () => {
     expect(resolver).toBeDefined();
     const rpcHandlers = subs.get("pi.workspace.inspect_patch.rpc") ?? new Set();
     expect(rpcHandlers.size).toBeGreaterThan(0);
-  });
-
-  it("health tool reports truthful non-secret state via details.report", async () => {
-    const { api, registered } = makeApi();
-    registerExtension(api);
-    const healthTool = registered.find((t) => t.name === "health")!;
-    const result = await healthTool.execute("t-h", {}, undefined, undefined, { cwd: workdir } as any);
-    const text = result.content[0].text;
-    expect(text).toContain("graph: generation=");
-    expect(text).toContain("watcher: active=");
-    expect(text).toContain("semanticIndex: available=");
-    expect(text).toContain("embedding: enabled=");
-    expect(text).toContain("lsp: available=");
-    expect(text).toContain("recentDegradations:");
-    // Never leak urls/keys.
-    expect(text).not.toMatch(/https?:\/\//);
-    expect(text).not.toMatch(/api[_-]?key/i);
-
-    // Structured report fields, not just text presence.
-    const report = result.details.report;
-    expect(report).toBeDefined();
-    expect(report.graph).toHaveProperty("generation");
-    expect(typeof report.graph.generation).toBe("number");
-    expect(report.watcher).toHaveProperty("active");
-    expect(report.watcher).toHaveProperty("dirty");
-    expect(report.semanticIndex).toHaveProperty("available");
-    expect(report.semanticIndex).toHaveProperty("state");
-    expect(["not_initialized", "fresh", "updating", "stale_or_unavailable"]).toContain(report.semanticIndex.state);
-    expect(report.embedding).toHaveProperty("enabled");
-    expect(report.lsp).toHaveProperty("available");
-    expect(report.recentDegradations).toBeInstanceOf(Array);
-  });
-
-  it("health reports cwd-scoped semantic index state without creating one", async () => {
-    const { api, registered } = makeApi();
-    registerExtension(api);
-    const { getOrCreateSemanticIndex, disposeSemanticIndexes } = await import("../../src/semantic-index-registry.js");
-    // Test setup creates the index; health must only read it (never create).
-    getOrCreateSemanticIndex(workdir, { config: null });
-    const healthTool = registered.find((t) => t.name === "health")!;
-    const result = await healthTool.execute("t-h", {}, undefined, undefined, { cwd: workdir } as any);
-    const report = result.details.report;
-    // Index exists but is not initialized → stale_or_unavailable, not available.
-    expect(report.semanticIndex.available).toBe(false);
-    expect(report.semanticIndex.state).toBe("stale_or_unavailable");
-    disposeSemanticIndexes(workdir);
-  });
-
-  it("increments graph generation by exactly 1 per successful rebuild, not on instance creation", async () => {
-    const { currentGraphGeneration } = await import("../../src/context-graph.js");
-    const mcp = await import("../../src/mcp-registry.js");
-    const before = currentGraphGeneration();
-    // Dirty instance creation (the dirty lifecycle) must NOT bump generation —
-    // this is the double-increment regression (mcp-registry used to bump here).
-    const g = mcp.getSharedContextGraph(workdir, true);
-    expect(currentGraphGeneration() - before).toBe(0);
-    // A successful rebuild bumps by exactly 1.
-    await g.buildContextGraph({ skipGitPopulation: true });
-    expect(currentGraphGeneration() - before).toBe(1);
-    // A no-op rebuild (nothing changed) must NOT bump again.
-    await g.buildContextGraph({ skipGitPopulation: true });
-    expect(currentGraphGeneration() - before).toBe(1);
   });
 
   it("resetSharedContextGraph yields a distinct graph instance (replacement contract)", async () => {

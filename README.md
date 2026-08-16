@@ -15,7 +15,6 @@ Code intelligence extension for [Pi](https://github.com/mariozechner/pi-coding-a
 | `read` | Single-file, multi-file, query-selected file reads, or symbol-resolved code (via `symbol` param) with contextual enrichment and strong evidence. Only complete rendered read blocks provide strong evidence for patch. |
 | `inspect` | Two modes — directory (ranked repo map + clusters, layers, boundaries, routes) or file (structural facts + quality signals + call graph traversal, impact analysis, dead code detection, diff mapping). Returns search-match evidence — read a file before editing it. |
 | `grep` | Primary code search — BM25 ranking + AST symbol matching, with optional embedding semantic retrieval behind a grep-shaped interface, plus graph-aware filtering (`graphFilter`). Returns search-match evidence — read a file before editing it. |
-| `health` | Reports runtime graph/watcher/semantic-index/embedding/LSP status. |
 | `skill` | Manages agent skills. |
 | `graph_mutate` | [experimental] Records semantic coupling observations into the context graph. |
 

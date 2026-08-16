@@ -8,12 +8,13 @@ import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
 import type { ContextGraph } from "./context-graph.js";
-import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, getSharedContextGraphAsync, getSharedContextGraphHealth, isSharedGraphRebuildPending, invalidateSharedGraph, resetSharedContextGraph, getWorkspaceRevision, getSharedContextGraphIfBuilt } from "./mcp-registry.js";
+import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, getSharedContextGraphAsync, invalidateSharedGraph, resetSharedContextGraph, getWorkspaceRevision, getSharedContextGraphIfBuilt } from "./mcp-registry.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
-import { createHealthTool } from "./health-tool.js";
 import { createReadTool } from "./unified-read.js";
 import { fileURLToPath } from "node:url";
 import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
+import { runPostEditDiagnosticsFallback } from "./post-edit-fallback.js";
+import { isDiagnosticsClaimed } from "./mutation-ownership.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
 import { getIncrementalIndex } from "./incremental-index.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
@@ -91,6 +92,27 @@ ensureHashlineReady().catch((err) =>
  * Resolution order: LSP workspace/symbol first, then ContextGraph.findSymbolFiles() fallback.
  * `graphGetter` supplies the dirty-aware lazy ContextGraph (resets the dirty flag once).
  */
+/**
+ * Convert an LSP location URI to a filesystem path.
+ *
+ * Handles both `file://` URIs (via fileURLToPath) and raw filesystem paths.
+ * Windows drive-letter paths like `D:\src\a.ts` are NOT file URIs and must
+ * not be passed to fileURLToPath (which throws on them) — they are returned
+ * as-is. Malformed file URIs fall back to the raw string rather than throwing.
+ */
+export function lspUriToPath(uri: string): string {
+  if (typeof uri !== "string" || uri.length === 0) return uri;
+  if (uri.startsWith("file:")) {
+    try {
+      return fileURLToPath(uri);
+    } catch {
+      return uri;
+    }
+  }
+  // Raw filesystem path (POSIX or Windows drive-letter like D:\...).
+  return uri;
+}
+
 async function resolveSymbolForReadTool(symbol: string, cwd = process.cwd(), graphGetter?: (root: string) => ContextGraph | Promise<ContextGraph>): Promise<{ path: string; line?: number } | null> {
   const root = cwd;
   try {
@@ -101,7 +123,7 @@ async function resolveSymbolForReadTool(symbol: string, cwd = process.cwd(), gra
         const best = syms.find((s) => s.name === symbol) ?? syms[0];
         if (best) {
           const { uri, range } = best.location;
-          return { path: fileURLToPath(uri), line: range.start.line + 1 };
+          return { path: lspUriToPath(uri), line: range.start.line + 1 };
         }
       }
     }
@@ -200,7 +222,26 @@ export default async function (pi: ExtensionAPI) {
     return [];
   }
 
-  function mutationResourcesForTool(toolName: string, input: Record<string, unknown>): ContextHygieneResource[] {
+  /**
+   * Extract authoritative mutation paths from a tool result's
+   * `details.changedResources[*].canonicalPath`. ChangedResources is untrusted
+   * runtime data, so shape and string-ness are validated; malformed entries are
+   * dropped. Returns [] when absent or empty.
+   */
+  function changedPathsFromDetails(details: unknown): string[] {
+    if (!details || typeof details !== "object") return [];
+    const changedResources = (details as Record<string, unknown>).changedResources;
+    if (!Array.isArray(changedResources)) return [];
+    const paths: string[] = [];
+    for (const res of changedResources) {
+      if (!res || typeof res !== "object") continue;
+      const cp = (res as Record<string, unknown>).canonicalPath;
+      if (typeof cp === "string" && cp.length > 0) paths.push(cp);
+    }
+    return paths;
+  }
+
+  function mutationResourcesForTool(toolName: string, input: Record<string, unknown>, changedPaths: string[]): ContextHygieneResource[] {
     if (toolName === "graph_mutate") {
       const resources: ContextHygieneResource[] = [];
       if (typeof input.from === "string") resources.push(buildFileResource(input.from));
@@ -208,6 +249,8 @@ export default async function (pi: ExtensionAPI) {
       return resources;
     }
     if (toolName === "write" || toolName === "edit") {
+      // changedResources.canonicalPath is authoritative for edit results when present.
+      if (changedPaths.length > 0) return changedPaths.map((p) => buildFileResource(p));
       return resourcesForTool(toolName, input);
     }
     return [];
@@ -235,30 +278,36 @@ export default async function (pi: ExtensionAPI) {
   });
 
   // 2. tool_result: record context hygiene, inject doom-loop warnings, apply bash guard
-  pi.on("tool_result", (event: any): any => {
+  pi.on("tool_result", async (event: any): Promise<any> => {
     const toolName = event.toolName as string;
     const toolCallId = event.toolCallId as string;
     let outputEvent = event;
     let outputChanged = false;
+    const input = (event.input ?? {}) as Record<string, unknown>;
+    const details = (event.details ?? {}) as Record<string, unknown>;
+    // changedResources.canonicalPath is authoritative for edit results when present.
+    const changedPaths = toolName === "edit" && !event.isError ? changedPathsFromDetails(details) : [];
 
     // ── Context hygiene: record every tool result ──
     if (toolCallId) {
-      const input = (event.input ?? {}) as Record<string, unknown>;
-      const mutationResources = mutationResourcesForTool(toolName, input);
+      const failedMutation = event.isError && (toolName === "write" || toolName === "edit" || toolName === "graph_mutate");
+      const mutationResources = failedMutation
+        ? []
+        : mutationResourcesForTool(toolName, input, changedPaths);
       if (mutationResources.length > 0) {
         hygieneTracker.recordMutation(mutationResources, { resultId: toolCallId, tool: toolName });
       } else {
         const metadata = buildContextHygieneMetadata({
           tool: toolName,
-          classification: classificationForTool(toolName),
-          resources: resourcesForTool(toolName, input),
+          classification: failedMutation ? "read-context" : classificationForTool(toolName),
+          resources: failedMutation ? [] : resourcesForTool(toolName, input),
         });
         hygieneTracker.record(metadata, { resultId: toolCallId });
       }
 
       // ── Anchor hygiene: consume anchor delta from edit results ──
-      if (toolName === "edit" && (event.details as Record<string, unknown>)?.anchorDelta) {
-        const ad = (event.details as Record<string, unknown>).anchorDelta as {
+      if (toolName === "edit" && details.anchorDelta) {
+        const ad = details.anchorDelta as {
           summary: string;
           shifted: number;
           deleted: number;
@@ -266,9 +315,10 @@ export default async function (pi: ExtensionAPI) {
         };
         const totalChanges = (ad.shifted || 0) + (ad.deleted || 0) + (ad.changed || 0);
         if (totalChanges > 0) {
-          const input = (event.input ?? {}) as Record<string, unknown>;
-          const filePath = typeof input.path === "string" ? input.path : undefined;
-          if (filePath) {
+          const anchorPaths = changedPaths.length > 0
+            ? changedPaths
+            : (typeof input.path === "string" ? [input.path] : []);
+          for (const filePath of anchorPaths) {
             const entries: AnchorDeltaEntry[] = [];
             const event_: AnchorHygieneEvent = {
               file: filePath,
@@ -313,6 +363,21 @@ export default async function (pi: ExtensionAPI) {
             })
             .catch(() => {});
         }
+      } else if (toolName === "edit" && !event.isError) {
+        const editPaths = changedPaths.length > 0
+          ? changedPaths
+          : (typeof lspInput.path === "string" ? [lspInput.path] : []);
+        if (editPaths.length > 0) {
+          getLSPBridge()
+            .then((bridge) => {
+              if (!bridge) return;
+              const root = process.cwd();
+              for (const p of editPaths) {
+                bridge.closeFile(p, root).catch(() => {});
+              }
+            })
+            .catch(() => {});
+        }
       }
     }
 
@@ -323,16 +388,14 @@ export default async function (pi: ExtensionAPI) {
     // path for tool-driven mutations.
     if (toolName === "write" || toolName === "edit" || toolName === "graph_mutate") {
       if (!event.isError) {
-        const input = (event.input ?? {}) as Record<string, unknown>;
         if (toolName === "graph_mutate") {
           // Graph mutation must cause a graph rebuild on next use.
           invalidateSharedGraph();
         } else {
-          const target =
-            (typeof input.path === "string" && input.path) ||
-            (typeof input.filePath === "string" && input.filePath) ||
-            (typeof input.relative_path === "string" && input.relative_path);
-          if (target) {
+          const targets = toolName === "edit" && changedPaths.length > 0
+            ? changedPaths
+            : [input.path, input.filePath, input.relative_path].filter((p): p is string => typeof p === "string");
+          for (const target of targets) {
             invalidateFsScanCache(target);
             try {
               const semIdx = getSemanticIndex(process.cwd());
@@ -342,11 +405,11 @@ export default async function (pi: ExtensionAPI) {
             } catch {
               // semantic invalidation is advisory
             }
-            try {
-              getIncrementalIndex(process.cwd()).invalidate();
-            } catch {
-              // incremental-index invalidation is advisory
-            }
+          }
+          try {
+            getIncrementalIndex(process.cwd()).invalidate();
+          } catch {
+            // incremental-index invalidation is advisory
           }
           // A successful write/edit invalidates the graph: it must be rebuilt
           // on next graph-dependent use (revision-based, not a boolean flag).
@@ -514,6 +577,34 @@ export default async function (pi: ExtensionAPI) {
       }
     }
 
+    // ── Post-edit LSP diagnostics fallback ──
+    // Pi-SmartEdit owns post-mutation diagnostics for write/edit; only step
+    // in when it did not claim this toolCallId (not installed, or claimed
+    // nothing) so the model still sees LSP-detected issues.
+    if (
+      (toolName === "write" || toolName === "edit") &&
+      !event.isError &&
+      toolCallId &&
+      !isDiagnosticsClaimed(toolCallId)
+    ) {
+      try {
+        const fallback = await runPostEditDiagnosticsFallback({
+          toolName,
+          toolCallId,
+          isError: event.isError,
+          input: event.input as Record<string, unknown> | undefined,
+          content: outputEvent.content,
+          cwd: process.cwd(),
+        });
+        if (fallback) {
+          outputEvent = { ...outputEvent, content: fallback.content };
+          outputChanged = true;
+        }
+      } catch {
+        // Fallback diagnostics are best-effort; never block the tool result.
+      }
+    }
+
     return outputChanged ? outputEvent : undefined;
   });
 
@@ -578,19 +669,6 @@ export default async function (pi: ExtensionAPI) {
     inputSchema: grepDef.parameters as Record<string, unknown>,
     execute: grepDef.execute,
     category: ToolCategory.READ,
-  });
-
-  // 2.6 Health: additive public status tool (no smartread_ prefix).
-  const healthDef = createHealthTool({
-    getWatcherState: () => ({ active: !!watchState.stop, dirty: isSharedGraphRebuildPending() }),
-    getGraphState: (root) => getSharedContextGraphHealth(root),
-  });
-  ToolRegistry.getInstance().registerOrReplace({
-    name: "health",
-    description: healthDef.description,
-    inputSchema: healthDef.parameters as Record<string, unknown>,
-    execute: healthDef.execute,
-    category: ToolCategory.STATUS,
   });
 
   // 3. Core tools: the loop iterates all tools from ToolRegistry.getAll()

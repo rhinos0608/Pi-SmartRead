@@ -25,7 +25,8 @@
  */
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -67,6 +68,12 @@ export interface LSPWorkspaceSymbol {
   containerName?: string;
 }
 
+export interface LSPDiagnostic {
+  message: string;
+  severity?: number;
+  range?: { start: { line: number; character: number }; end: { line: number; character: number } };
+}
+
 export interface LSPDocumentChange {
   /** Absolute file path that changed */
   filePath: string;
@@ -93,26 +100,18 @@ export interface LSPBridge {
   /** Send full-text didChange to the LSP server for an open file */
   updateFile(filePath: string, text: string, root: string): Promise<void>;
 
+  /** Send didSave to the LSP server for an open file */
+  didSave(filePath: string, root: string): Promise<void>;
+
   /** Send didClose to release the file on the LSP server */
   closeFile(filePath: string, root: string): Promise<void>;
 
   /** Return absolute paths of all files currently open on any LSP connection */
   getOpenFiles(): string[];
 
-  /** Get stats for diagnostics */
-  getStats(): LSPBridgeStats;
+  /** Collect latest publishDiagnostics notifications for file. */
+  getDiagnostics(filePath: string, root: string): Promise<LSPDiagnostic[]>;
 
-  /** Get stats scoped to the manager root containing `cwd`, or null. */
-  getStatsForRoot(cwd: string): LSPBridgeStats | null;
-}
-
-export interface LSPBridgeStats {
-  /** Number of manager/repo roots cached */
-  managerCount: number;
-  /** Per-root connection counts */
-  connectionsByRoot: Record<string, number>;
-  /** Total open documents across all servers */
-  totalOpenDocuments: number;
 }
 
 export interface ProjectLSPInfo {
@@ -277,15 +276,27 @@ interface PendingRequest {
 
 const REQUEST_TIMEOUT_MS = 15_000;
 
-class LSPConnection {
+/**
+ * Exported for unit testing only (constructing a connection against a mocked
+ * child process). Not part of the public LSPBridge surface — external
+ * callers should go through getLSPBridge().
+ */
+export class LSPConnection {
+  /** Cap on accumulated stdout buffer size before we force-close the connection. */
+  private static readonly BUFFER_LIMIT_BYTES = 50 * 1024 * 1024; // 50MB
+
   private proc: ReturnType<typeof spawn> | null = null;
   private reqId = 1;
   private pending = new Map<number, PendingRequest>();
-  private buffer = "";
+  private buffer = Buffer.alloc(0);
   private closed = false;
 
   /** Track which files are open on this connection */
   private openDocuments = new Map<string, number>(); // filePath → version
+  private diagnostics = new Map<string, LSPDiagnostic[]>();
+
+  /** Registered handlers for server-initiated notifications, keyed by method */
+  private notificationHandlers = new Map<string, Array<(params: unknown) => void>>();
 
   /** The language IDs this server handles */
   languageIds: string[] = [];
@@ -341,11 +352,7 @@ class LSPConnection {
    */
   async openFile(filePath: string): Promise<void> {
     const resolved = resolve(filePath);
-    if (this.openDocuments.has(resolved)) {
-      // File is already open — its content is up-to-date from the last openFile call.
-      // No need to send didChange unless updateFile() was called explicitly.
-      return;
-    }
+    if (this.openDocuments.has(resolved)) return;
     const uri = `file://${resolved}`;
     const text = existsSync(resolved) ? readFileSync(resolved, "utf-8") : "";
     const version = (this.openDocuments.get(resolved) ?? 0) + 1;
@@ -357,11 +364,23 @@ class LSPConnection {
 
   /**
    * Send full-text didChange for an open file. If the file is not open yet,
-   * calls openFile instead.
+   * sends didOpen with the given content instead (a didChange is only valid
+   * once the server has seen a matching didOpen).
    */
   async didChange(filePath: string, text: string): Promise<void> {
     const resolved = resolve(filePath);
     const uri = `file://${resolved}`;
+    // Drop any diagnostics published for the previous document state so a
+    // post-edit poll cannot observe stale results from before this update.
+    this.diagnostics.delete(resolved);
+    if (!this.openDocuments.has(resolved)) {
+      const version = 1;
+      this.openDocuments.set(resolved, version);
+      await this.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: detectLanguageFromExtension(resolved) ?? "plaintext", version, text },
+      });
+      return;
+    }
     const currentVersion = this.openDocuments.get(resolved) ?? 0;
     const version = currentVersion + 1;
     this.openDocuments.set(resolved, version);
@@ -382,6 +401,37 @@ class LSPConnection {
     await this.notify("textDocument/didClose", { textDocument: { uri } });
   }
 
+  /**
+   * Notify the LSP server that an open file was saved. No-op if the file is
+   * not currently tracked as open on this connection.
+   */
+  async didSave(filePath: string): Promise<void> {
+    const resolved = resolve(filePath);
+    if (!this.openDocuments.has(resolved)) return;
+    const uri = `file://${resolved}`;
+    await this.notify("textDocument/didSave", { textDocument: { uri } });
+  }
+
+  /**
+   * Subscribe to server-initiated notifications for a given method (e.g.
+   * "window/logMessage"). Multiple handlers may be registered for the same
+   * method. Returns an unsubscribe function that removes only this handler.
+   */
+  onNotification(method: string, handler: (params: unknown) => void): () => void {
+    let handlers = this.notificationHandlers.get(method);
+    if (!handlers) {
+      handlers = [];
+      this.notificationHandlers.set(method, handlers);
+    }
+    handlers.push(handler);
+    return () => {
+      const list = this.notificationHandlers.get(method);
+      if (!list) return;
+      const idx = list.indexOf(handler);
+      if (idx !== -1) list.splice(idx, 1);
+    };
+  }
+
   /** Check if a file is currently open on this connection */
   isOpen(filePath: string): boolean {
     return this.openDocuments.has(resolve(filePath));
@@ -391,6 +441,9 @@ class LSPConnection {
   getOpenFilePaths(): string[] {
     return [...this.openDocuments.keys()];
   }
+
+  /** Get latest cached publishDiagnostics results for a document */
+  getDiagnostics(filePath: string): LSPDiagnostic[] { return this.diagnostics.get(resolve(filePath)) ?? []; }
 
   /** Get open document count */
   get openDocumentCount(): number {
@@ -433,17 +486,43 @@ class LSPConnection {
   }
 
   private _onData(chunk: Buffer): void {
-    this.buffer += chunk.toString("utf-8");
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+
+    if (this.buffer.length > LSPConnection.BUFFER_LIMIT_BYTES) {
+      console.error(
+        `[lsp-bridge] LSP connection stdout buffer exceeded ${LSPConnection.BUFFER_LIMIT_BYTES} bytes ` +
+        `without a complete message; forcibly closing the connection to prevent unbounded memory growth.`,
+      );
+      this.buffer = Buffer.alloc(0);
+      this.closed = true;
+      this._rejectAll(new Error("LSP connection buffer overflow"));
+      try { this.proc?.kill(); } catch { /* best effort */ }
+      return;
+    }
+
     while (true) {
-      const match = this.buffer.match(/^Content-Length: (\d+)\r\n\r\n/);
+      const headerEnd = this.buffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) break;
+      const headerText = this.buffer.subarray(0, headerEnd).toString("utf-8");
+      const match = /^Content-Length: (\d+)/.exec(headerText);
       if (!match) break;
       const contentLength = parseInt(match[1]!, 10);
-      const headerEnd = match[0].length;
-      if (this.buffer.length < headerEnd + contentLength) break;
-      const content = this.buffer.slice(headerEnd, headerEnd + contentLength);
-      this.buffer = this.buffer.slice(headerEnd + contentLength);
+      const bodyStart = headerEnd + 4;
+      if (this.buffer.length < bodyStart + contentLength) break;
+      const body = this.buffer.subarray(bodyStart, bodyStart + contentLength);
+      this.buffer = this.buffer.subarray(bodyStart + contentLength);
       try {
-        const msg = JSON.parse(content);
+        const msg = JSON.parse(body.toString("utf-8"));
+        if (msg.method === "textDocument/publishDiagnostics") {
+          const uri = msg.params?.uri as string | undefined;
+          if (typeof uri === "string" && uri.startsWith("file:")) {
+            try {
+              this.diagnostics.set(resolve(fileURLToPath(uri)), (msg.params?.diagnostics ?? []) as LSPDiagnostic[]);
+            } catch {
+              // Ignore malformed file URIs without updating the map.
+            }
+          }
+        }
         if (msg.id !== undefined && msg.id !== null) {
           const pending = this.pending.get(msg.id);
           if (pending) {
@@ -451,6 +530,14 @@ class LSPConnection {
             this.pending.delete(msg.id);
             if (msg.error) pending.reject(new Error(msg.error.message));
             else pending.resolve(msg.result);
+          }
+        } else if (typeof msg.method === "string") {
+          // Server-initiated notification (no id) — dispatch to registered handlers.
+          const handlers = this.notificationHandlers.get(msg.method);
+          if (handlers && handlers.length > 0) {
+            for (const handler of [...handlers]) {
+              try { handler(msg.params); } catch { /* isolate handler errors from the read loop */ }
+            }
           }
         }
       } catch { /* ignore malformed messages */ }
@@ -583,6 +670,24 @@ class LSPManager {
     await server.didClose(filePath);
   }
 
+  /** Route didSave to the right server */
+  async didSave(filePath: string): Promise<void> {
+    const langId = detectLanguageFromExtension(filePath);
+    if (!langId) return;
+    const server = await this.getServer(langId);
+    if (!server) return;
+    await server.didSave(filePath);
+  }
+
+  /** Route diagnostics lookup to the right server */
+  async getDiagnosticsFor(filePath: string): Promise<LSPDiagnostic[]> {
+    const langId = detectLanguageFromExtension(filePath);
+    if (!langId) return [];
+    const server = await this.getServer(langId);
+    if (!server) return [];
+    return server.getDiagnostics(filePath);
+  }
+
   /** Query workspace/symbol across all servers */
   async workspaceSymbol(query: string): Promise<LSPWorkspaceSymbol[]> {
     await this.startAll();
@@ -648,8 +753,12 @@ async function createBridge(): Promise<LSPBridge | null> {
   return {
     isAvailable: () => {
       try {
-        const mgr = managerCache.get("__default__");
-        return mgr ? mgr.connectedLanguageCount > 0 : false;
+        // Evaluate actual cached managers (keyed by workspace root), not the
+        // dead `__default__` sentinel that is never inserted into the cache.
+        for (const mgr of managerCache.values()) {
+          if (mgr.connectedLanguageCount > 0) return true;
+        }
+        return false;
       } catch { return false; }
     },
 
@@ -758,59 +867,26 @@ async function createBridge(): Promise<LSPBridge | null> {
       } catch { /* best effort */ }
     },
 
+    async didSave(filePath: string, root: string): Promise<void> {
+      try {
+        const mgr = cachedManager(root);
+        await mgr.didSave(filePath);
+      } catch { /* best effort */ }
+    },
+
+    async getDiagnostics(filePath: string, root: string): Promise<LSPDiagnostic[]> {
+      try {
+        const mgr = cachedManager(root);
+        return await mgr.getDiagnosticsFor(filePath);
+      } catch { return []; }
+    },
+
     getOpenFiles(): string[] {
       const files: string[] = [];
       for (const mgr of managerCache.values()) {
         files.push(...mgr.getAllOpenFiles());
       }
       return files;
-    },
-
-    getStats(): LSPBridgeStats {
-      const connectionsByRoot: Record<string, number> = {};
-      let totalOpenDocuments = 0;
-      for (const [root, mgr] of managerCache) {
-        const count = (mgr as any).connectedLanguageCount ?? 0;
-        connectionsByRoot[root] = count;
-        totalOpenDocuments += (mgr as any).getAllOpenFiles()?.length ?? 0;
-      }
-      return {
-        managerCount: managerCache.size,
-        connectionsByRoot,
-        totalOpenDocuments,
-      };
-    },
-
-    /**
-     * Stats scoped to the manager root that contains (or equals) `cwd`.
-     * Returns null when no cached root covers cwd. Used by health so LSP
-     * availability reflects the current workspace, not all roots.
-     */
-    getStatsForRoot(cwd: string): LSPBridgeStats | null {
-      const resolvedCwd = resolve(cwd);
-      let bestRoot: string | null = null;
-      let bestLen = -1;
-      for (const root of managerCache.keys()) {
-        // Sentinel keys (e.g. "__default__" used by isAvailable) are not
-        // filesystem paths — skip them during containment matching.
-        if (!isAbsolute(root)) continue;
-        const rel = relative(root, resolvedCwd);
-        const inside = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-        if (inside && root.length > bestLen) {
-          bestRoot = root;
-          bestLen = root.length;
-        }
-      }
-      if (!bestRoot) return null;
-      const mgr = managerCache.get(bestRoot);
-      if (!mgr) return null;
-      const count = (mgr as any).connectedLanguageCount ?? 0;
-      const openDocs = (mgr as any).getAllOpenFiles()?.length ?? 0;
-      return {
-        managerCount: 1,
-        connectionsByRoot: { [bestRoot]: count },
-        totalOpenDocuments: openDocs,
-      };
     },
   };
 }

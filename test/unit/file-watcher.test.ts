@@ -123,6 +123,16 @@ describe("file-watcher", () => {
       expect(mockWatch).not.toHaveBeenCalled();
       stop();
     });
+
+    it("does not start a watcher for the user's home directory", () => {
+      process.env.NODE_ENV = "development";
+      delete process.env.VITEST;
+
+      const stop = startWatching(os.homedir(), vi.fn(), { mode: "recursive" });
+
+      expect(mockWatch).not.toHaveBeenCalled();
+      stop();
+    });
   });
 
   describe("chokidar mode contract", () => {

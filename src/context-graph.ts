@@ -16,18 +16,6 @@ import { writeSnapshot, computeSourceHash } from "./index-snapshot.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
-// ── Graph generation (monotonic across instance replacement) ───────
-// Lives at module level so health reporting never resets to zero when the
-// shared singleton is replaced. Incremented after each successful rebuild.
-let graphGeneration = 0;
-export function nextGraphGeneration(): number {
-  graphGeneration += 1;
-  return graphGeneration;
-}
-export function currentGraphGeneration(): number {
-  return graphGeneration;
-}
-
 export type NodeType = "file" | "symbol" | "function";
 export type EdgeType =
   | "imports" | "imported_by"
@@ -231,10 +219,6 @@ export class ContextGraph {
       return;
     }
 
-    // Actual rebuild. Generation is bumped only after the rebuild completes
-    // successfully (empty-corpus and full paths below), so health's generation
-    // reflects real successful rebuild count.
-
     // Invalidate indices if the file set changed since last build (F-3 fix:
     // performed BEFORE any early-return so the indices actually rebuild when
     // incrementalIndex reports changes).
@@ -247,8 +231,6 @@ export class ContextGraph {
     if (allFiles.length === 0) {
       this.symbolIndex = new LruCache(1);
       this.fileIndex = new LruCache(1);
-      // Empty-corpus build is still a successful rebuild.
-      nextGraphGeneration();
       return;
     }
 
@@ -316,8 +298,6 @@ export class ContextGraph {
       }
     }
 
-    // Successful full rebuild — bump the monotonic generation counter.
-    nextGraphGeneration();
   }
 
   /**

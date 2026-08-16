@@ -46,11 +46,6 @@ let graphRevision = 0;
 // -1 until the first successful build. A graph is only fresh for a caller
 // when graphRevision === sharedGraphRevision (the mutation was included).
 let sharedGraphRevision = -1;
-// Health metadata is retained per root even though the legacy shared graph
-// cache still holds one active instance. This prevents health for workspace B
-// from inheriting B's built/generation state from workspace A when callers
-// switch roots in one process.
-const graphHealthByRoot = new Map<string, { generation: number; builtRevision: number }>();
 // In-flight build chain. A single tail promise; a rebuild triggered while a
 // build is running is chained after it, so concurrent callers coalesce onto
 // identical required builds but a mutation invalidating a mid-flight build
@@ -111,9 +106,6 @@ export function getSharedContextGraph(
         sharedContextGraph = new ContextGraph(root);
         sharedContextGraphRoot = root;
         sharedContextGraphBuilt = false;
-        // Generation is bumped only inside buildContextGraph() after an actual
-        // successful rebuild — NOT on instance creation — so health's
-        // generation reflects real rebuild count, not instance churn.
     }
     return sharedContextGraph;
 }
@@ -168,11 +160,6 @@ export async function getSharedContextGraphAsync(
                 sharedContextGraphRoot = root;
                 sharedContextGraphBuilt = true;
                 sharedGraphRevision = startRevision;
-                const previous = graphHealthByRoot.get(root);
-                graphHealthByRoot.set(root, {
-                    generation: (previous?.generation ?? 0) + 1,
-                    builtRevision: startRevision,
-                });
             }
         })();
         buildTail = tailPromise;
@@ -193,30 +180,6 @@ export async function getSharedContextGraphAsync(
     }
 }
 
-/** Report whether the shared graph for the current root is built (health). */
-export function isSharedContextGraphBuilt(root = process.cwd()): boolean {
-    return sharedContextGraphBuilt && sharedContextGraphRoot === root;
-}
-
-/**
- * Report whether a rebuild is pending: the graph is unbuilt or was built
- * before the latest invalidation. Used by health to surface a stale graph.
- */
-export function isSharedGraphRebuildPending(root = process.cwd()): boolean {
-    if (!sharedContextGraphBuilt || sharedContextGraphRoot !== root) return true;
-    return graphRevision > sharedGraphRevision;
-}
-
-/** Root-scoped graph state for health; never falls back to another root. */
-export function getSharedContextGraphHealth(root: string): { built: boolean; generation: number } {
-    const state = graphHealthByRoot.get(root);
-    const activeForRoot = sharedContextGraphRoot === root;
-    return {
-        built: activeForRoot && sharedContextGraphBuilt && state !== undefined,
-        generation: state?.generation ?? 0,
-    };
-}
-
 /** Dispose the shared ContextGraph (for test isolation / shutdown). */
 export function resetSharedContextGraph(): void {
     sharedContextGraph = null;
@@ -226,7 +189,6 @@ export function resetSharedContextGraph(): void {
     sharedGraphRevision = -1;
     buildTail = null;
     buildTailRoot = null;
-    graphHealthByRoot.clear();
 }
 
 // Explicitly initialize registry before declaring tools.

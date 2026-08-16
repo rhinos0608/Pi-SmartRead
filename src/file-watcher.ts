@@ -17,6 +17,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 
 // ESM-safe optional require: this package is `"type": "module"`, so a bare
 // `require` is undefined. createRequire yields a module-scoped require that
@@ -274,6 +275,13 @@ export function startWatching(
     return () => {};
   }
 
+  // A home directory is not a workspace: walking it at startup can take long
+  // enough to prevent Pi opening, and native modes can consume its watcher
+  // budget. This guard belongs here so every watcher mode is protected.
+  if (resolvedRoot === resolve(homedir())) {
+    return () => {};
+  }
+
   if (mode === "polling") {
     return startPollingWatch(resolvedRoot, onDirty);
   }
@@ -321,13 +329,14 @@ function startPollingWatch(
   root: string,
   onDirty: (paths: string[]) => void,
 ): () => void {
-  let previous = scanFileState(root);
+  const scan = (): Map<string, string> => scanFileState(root);
+  let previous = scan();
   const intervalMs = Number.isFinite(POLL_INTERVAL_MS) && POLL_INTERVAL_MS > 0
     ? POLL_INTERVAL_MS
     : 1000;
 
   const timer = setInterval(() => {
-    const next = scanFileState(root);
+    const next = scan();
     const dirtyPaths = new Set<string>();
     for (const [path, fingerprint] of next) {
       if (previous.get(path) !== fingerprint) dirtyPaths.add(path);

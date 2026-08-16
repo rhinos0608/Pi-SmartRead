@@ -110,8 +110,8 @@ const ReadManySchema = Type.Object({
 		}),
 		{
 			minItems: 1,
-			maxItems: 10000,
-			description: "Files to read in the exact order listed (max 10000). Required unless query is set.",
+			maxItems: 100,
+			description: "Files to read in the exact order listed (max 100). Required unless query is set.",
 		},
 	)),
 	query: Type.Optional(Type.String({ description: "Natural-language intent. When set, candidate files (from files, directory, or cwd) are ranked by hybrid BM25 + semantic relevance and only the most relevant are packed. Use when you know the goal but not the exact files." })),
