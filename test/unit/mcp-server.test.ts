@@ -81,9 +81,13 @@ function callMcpServer(
     // This handles the race where `close` can fire before the promise is resolved
     // (the Node.js event loop delivers the callback even to a settled promise).
     const responses: Array<Record<string, unknown>> = [];
+    let pendingLine = "";
 
     child.stdout.on("data", (data: Buffer) => {
-      for (const raw of data.toString().split("\n")) {
+      pendingLine += data.toString();
+      const lines = pendingLine.split("\n");
+      pendingLine = lines.pop() ?? "";
+      for (const raw of lines) {
         const line = raw.trim();
         if (!line) continue;
         try {
