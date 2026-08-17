@@ -16,7 +16,7 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { createReadToolDefinition } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { RepoMap } from "./repomap.js";
 import {
@@ -33,7 +33,8 @@ import {
    splitPathAndSelector,
 } from "./utils.js";
 import { buildFileContextLines } from "./file-context.js";
-import { computePathEvidence } from "./path-evidence.js";
+import { computePathEvidence, computeStructuralOutlineEvidence } from "./path-evidence.js";
+import { resolveAstOutlineConfig, outlineSupportsPath, buildAstOutline, renderAstOutline } from "./ast-outline.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./tool-guidance.js";
 import { startResourceDiagnostics, stopResourceDiagnostics } from "./resource-diagnostics.js";
@@ -380,6 +381,71 @@ export function shownMatchesAttested(args: {
 // ── Contextual read enrichment ────────────────────────────────────
 
 /**
+ * Attempt a structural AST outline for a large, unbounded, supported-
+ * language read. Returns null on any unsupported/oversized/parse-failure
+ * condition so the caller falls through to the normal full-file read.
+ * Evidence is best-effort and, unlike a normal path read, never full-file:
+ * only the rendered declaration lines are authorized (see
+ * computeStructuralOutlineEvidence).
+ */
+async function tryStructuralOutlineRead(
+   fullPath: string,
+   targetPath: string,
+   ctx: ExtensionContext,
+   opts: WrapReadToolOptions | undefined,
+): Promise<HookResponse | null> {
+   try {
+      const outlineConfig = resolveAstOutlineConfig();
+      if (!outlineConfig.enabled) return null;
+      if (!outlineSupportsPath(targetPath)) return null;
+
+      const stat = statSync(fullPath);
+      if (!stat.isFile() || stat.size <= outlineConfig.thresholdBytes) return null;
+
+      const content = readFileSync(fullPath, "utf8");
+      const outline = await buildAstOutline(content, targetPath);
+      if (!outline) return null;
+
+      const rendered = renderAstOutline(outline, targetPath, stat.size);
+      const response: HookResponse = {
+         content: [{ type: "text", text: rendered.text }],
+         details: {
+            structuralOutline: true,
+            path: targetPath,
+            symbolCount: rendered.symbolCount,
+            renderedCount: rendered.renderedCount,
+            totalLines: outline.totalLines,
+         },
+      };
+
+      const sessionFilePath = sessionFileFromCtx(ctx);
+      if (sessionFilePath && rendered.declarationLines.length > 0) {
+         try {
+            const evidence = computeStructuralOutlineEvidence({
+               path: targetPath,
+               cwd: ctx.cwd,
+               sessionFilePath,
+               fullContent: content,
+               declarationLines: rendered.declarationLines,
+            });
+            response.details.workspaceEvidence = evidence.workspaceEvidence;
+            try {
+               opts?.publishInspection?.(
+                  evidence.workspaceEvidence,
+                  sessionFilePath,
+                  evidence.workspaceEvidence.canonicalWorkspaceRoot,
+               );
+            } catch { /* publish is best-effort */ }
+         } catch { /* evidence is best-effort */ }
+      }
+
+      return response;
+   } catch {
+      return null; // any failure degrades cleanly to the normal read path
+   }
+}
+
+/**
  * Intercept a successful read result and append contextual annotations.
  *
  * Enriches every built-in read call with:
@@ -403,6 +469,9 @@ async function interceptContextualRead(
    onUpdate: unknown,
    ctx: ExtensionContext,
    opts?: WrapReadToolOptions,
+   /** True only for the top-level single-path dispatch; false for symbol-mode
+    * and internal batch reads, which must keep their existing read shape. */
+   allowStructuralOutline = false,
 ): Promise<unknown> {
    const filePath = params.path as string;
    if (!filePath) {
@@ -426,6 +495,18 @@ async function interceptContextualRead(
       return originalExecute(toolCallId, normalizedParams, signal, onUpdate, ctx);
    }
 
+   const fullPath = path.resolve(ctx.cwd, targetPath);
+
+   // Unbounded reads of large supported source files get a compact AST
+   // symbol outline instead of the full dump. Only the top-level single-path
+   // dispatch opts in (allowStructuralOutline=true); symbol-mode and internal
+   // batch reads keep their existing shape regardless of opts.
+   const unbounded = normalizedParams.offset === undefined && normalizedParams.limit === undefined;
+   if (allowStructuralOutline && unbounded) {
+      const outlineResponse = await tryStructuralOutlineRead(fullPath, targetPath, ctx, opts);
+      if (outlineResponse) return outlineResponse;
+   }
+
    // Explicit paths may cross cwd/workspace; external tooling owns permission.
    const result = (await originalExecute(
       toolCallId,
@@ -444,7 +525,6 @@ async function interceptContextualRead(
    await ensureHashlineReady();
 
    const cwd = path.resolve((params.directory as string) ?? ctx.cwd);
-   const fullPath = path.resolve(ctx.cwd, targetPath);
 
    if (!existsSync(fullPath)) return result;
 
@@ -630,7 +710,7 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
   return {
     name: "read",
     label: "read",
-    description: "Read files with strong workspace evidence. Single file: { path: \"src/auth.ts\" } or { path, offset, limit }. Multiple files: { paths: [{ path: \"a.ts\" }, { path: \"b.ts\" }] }. Query: { query: \"auth flow\" } — uses shared indexed BM25+embedding RRF and reads selected files, with grep+AST discovery only when semantic retrieval is unavailable. Batch evidence covers complete file blocks actually rendered; partial or omitted blocks are not authorized.",
+    description: "Read files with strong workspace evidence. Single file: { path: \"src/auth.ts\" } or { path, offset, limit }. Multiple files: { paths: [{ path: \"a.ts\" }, { path: \"b.ts\" }] }. Query: { query: \"auth flow\" } — uses shared indexed BM25+embedding RRF and reads selected files, with grep+AST discovery only when semantic retrieval is unavailable. Batch evidence covers complete file blocks actually rendered; partial or omitted blocks are not authorized. Large supported source files read without offset/limit return a compact AST symbol outline (signatures + line ranges, no bodies) instead of the full file — use offset/limit or symbol to read a specific part.",
     parameters: ReadSchema as unknown as Record<string, unknown>,
 
     async execute(
@@ -683,6 +763,7 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
           onUpdate,
           ctx,
           opts,
+          true, // top-level single-path dispatch: eligible for the large-file outline
         );
       }
 

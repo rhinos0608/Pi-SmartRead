@@ -47,6 +47,79 @@ function requirePositiveInt(v: number | undefined, name: string): void {
     }
 }
 
+export interface StructuralOutlineEvidenceInput {
+    readonly path: string;
+    readonly cwd: string;
+    readonly sessionFilePath: string;
+    /** Full file content already read by the caller (avoids a second disk read). */
+    readonly fullContent: string;
+    /** 1-based declaration lines actually shown in the rendered outline — the only lines authorized. */
+    readonly declarationLines: readonly number[];
+}
+
+export interface StructuralOutlineEvidenceResult {
+    readonly workspaceEvidence: WorkspaceEvidenceEnvelope;
+    readonly fullFileSha256: string;
+}
+
+/**
+ * Build evidence for a structural AST outline: one single-line "range"
+ * resource per rendered declaration line, never a full-file resource.
+ * This intentionally authorizes only the exact lines shown (signature
+ * lines), not the symbol bodies between them — a follow-up symbol/range
+ * read is required to gain edit authority over a body.
+ */
+export function computeStructuralOutlineEvidence(input: StructuralOutlineEvidenceInput): StructuralOutlineEvidenceResult {
+    if (typeof input.sessionFilePath !== "string" || input.sessionFilePath.length === 0) {
+        throw new Error(
+            "evidence requires a real session file path (in-memory/ephemeral identity is rejected)",
+        );
+    }
+    const cwd = realpathSync(input.cwd);
+    const absolutePath = pathResolve(cwd, input.path);
+    const canonicalFile = realpathSync(absolutePath);
+    const fullFileSha256 = sha256OfString(input.fullContent);
+    const canonicalRoot = canonicalizeWorkspaceRoot(cwd);
+    const sessionId = hashSessionFilePath(input.sessionFilePath);
+
+    const uniqueLines = [...new Set(input.declarationLines)]
+        .filter((line) => Number.isInteger(line) && line > 0)
+        .sort((a, b) => a - b);
+
+    const resources: InspectedResource[] = uniqueLines.map((line) => ({
+        resourceId: resourceIdFor({ canonicalPath: canonicalFile, kind: "range", range: { startLine: line, endLine: line } }),
+        canonicalPath: canonicalFile,
+        kind: "range",
+        coverage: "line-range",
+        allowedRanges: [{ startLine: line, endLine: line }],
+        fullFileSha256,
+        fresh: true,
+        lineCount: 1,
+    }));
+
+    const inspectionId = inspectionIdFor({
+        sessionId,
+        workspaceRoot: canonicalRoot,
+        resources: resources.map((r) => ({
+            canonicalPath: r.canonicalPath,
+            range: { startLine: r.allowedRanges[0]!.startLine, endLine: r.allowedRanges[0]!.endLine },
+        })),
+    });
+
+    const envelope: WorkspaceEvidenceEnvelope = {
+        schemaVersion: PROTOCOL_SCHEMA_VERSION,
+        inspectionId,
+        sessionId,
+        workspaceRoot: cwd,
+        canonicalWorkspaceRoot: canonicalRoot,
+        createdAt: new Date().toISOString(),
+        resources,
+        mode: "path",
+    };
+
+    return { workspaceEvidence: envelope, fullFileSha256 };
+}
+
 export function computePathEvidence(input: PathEvidenceInput): PathEvidenceResult {
     if (typeof input.sessionFilePath !== "string" || input.sessionFilePath.length === 0) {
         throw new Error(

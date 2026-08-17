@@ -129,7 +129,7 @@ const SYMBOL_NODE_TYPES = new Set([
 /**
  * Map tree-sitter node types to our chunker's symbol boundary types.
  */
-const NODE_TYPE_TO_SYMBOL_TYPE: Record<string, AstSymbolSpan["type"]> = {
+export const NODE_TYPE_TO_SYMBOL_TYPE: Record<string, AstSymbolSpan["type"]> = {
   "function_declaration": "function",
   "function_expression": "function",
   "arrow_function": "function",
@@ -170,7 +170,7 @@ const NODE_TYPE_TO_SYMBOL_TYPE: Record<string, AstSymbolSpan["type"]> = {
  *
  * Mirrors smart-edit's ast-resolver.ts findNameChild.
  */
-function getNameFromNode(node: {
+export function getNameFromNode(node: {
   childForFieldName: (field: string) => { text: string } | null;
   namedChildren: ReadonlyArray<{ type: string; text: string; isNamed: boolean }>;
 }): string | null {

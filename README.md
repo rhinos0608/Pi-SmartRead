@@ -61,6 +61,27 @@ Read files with strong workspace evidence. Supports four modes:
 
 Successful single-file reads and complete file blocks rendered by multi/query reads return strong schema-v3 evidence. Partial and omitted packed blocks are intentionally not authorized.
 
+### AST outline for large files
+
+An unbounded `read({ path })` on a supported source file above **20 KB** returns a compact AST symbol outline instead of dumping the full file: top-level and nested declarations with signature + line range (`[start-end]`), bodies omitted, indented by nesting depth, capped at 300 rendered symbols. Rendered via the same web-tree-sitter WASM grammars as chunking/code-summary — no external `ast-grep` binary.
+
+```
+Structural outline: src/big.ts (251 symbols, 1002 lines, 24KB)
+This is a compact AST outline, not the full file. Bodies are omitted.
+────────────────────────────────────────
+export class BigClass  [1-1002]
+  method0(x: number, y: number): number  [3-6]
+  method1(x: number, y: number): number  [8-11]
+────────────────────────────────────────
+Use read({ path: "src/big.ts", symbol: "<Name>" }) for one symbol's full source, or read({ path: "src/big.ts", offset, limit }) for a specific line range.
+```
+
+Behavior:
+- **Scope** — only the top-level single-path dispatch (`{ path }` with no `offset`/`limit`). Symbol-mode, batch `{ paths }`, explicit `offset`/`limit`, and `:raw` selector reads keep their existing shape.
+- **Fallback** — unsupported language, grammar load failure, parse errors, or zero symbols found degrades cleanly to the normal full-file read.
+- **Evidence** — never full-file. One single-line `range` resource per rendered declaration line (`coverage: "line-range"`), so only the shown signature lines are authorized; a follow-up `symbol` or `offset`/`limit` read is required to gain edit authority over a body. Evidence is published to the resolver like any read.
+- **Config** — `PI_SMARTREAD_AST_OUTLINE=0` disables the outline; `PI_SMARTREAD_AST_OUTLINE_BYTES` raises/lowers the size threshold (default 20000).
+
 An aider-style repo map is injected on start up, providing a high-level overview of the repository structure and symbol relationships, does not block start up, runs async and skips in home directories.
 
 ---
