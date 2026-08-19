@@ -56,7 +56,7 @@ const IntentReadSchema = Type.Object({
       { minItems: 1, maxItems: 500 },
     ),
   ),
-  directory: Type.Optional(Type.String({ description: "Directory to scan (non-recursive, max 20 files) — schema default is doc-only; runtime default applied in handler" })),
+  directory: Type.Optional(Type.String({ description: "Directory to scan (non-recursive, max 20 files)." })),
   topK: Type.Optional(Type.Number({ minimum: 1, maximum: 10000, description: "Max results to return (default 20)" })),
   stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first read error (default false)" })),
   defaultToCwd: Type.Optional(Type.Boolean({ description: "If true, scan current directory when neither files nor directory is provided (default false)" })),

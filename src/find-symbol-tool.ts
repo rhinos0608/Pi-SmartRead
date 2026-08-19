@@ -905,7 +905,7 @@ function createSymbolTool(): ToolDefinition {
   return toToolDefinition({
     name: "symbol",
     label: "symbol",
-    description: "Navigate code symbols: find candidates by name (default action), or get outline/declaration/references/implementations. Use when a symbol name is known or guessable, e.g. { query: \"AuthService.login\" } to locate it, { action: \"references\", query: \"AuthService.login\" } for usages, or { action: \"outline\", path: \"src/auth.ts\" } for file structure. Prefer search for raw text, structural patterns, or uncertain names, and read/read_files for known paths.",
+    description: "Navigate code symbols: find candidates by name (default), or get outline/declaration/references/implementations. Use when a symbol name is known or guessable, e.g. { query: \"AuthService.login\" }. Prefer search for raw text, structural patterns, or uncertain names, and read/read_files for known paths.",
     parameters: SymbolSchema,
 
     async execute(_toolCallId: string, params: any, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {

@@ -37,7 +37,7 @@ export const SkillToolSchema = Type.Object({
   name: Type.Optional(Type.String({ description: "Skill name to read. Exact, case-insensitive, and substring matches are accepted." })),
   query: Type.Optional(Type.String({ description: "Search text matched against skill names and descriptions." })),
   file: Type.Optional(Type.String({ description: "File inside skill directory to read. Defaults to SKILL.md.", default: DEFAULT_SKILL_FILE })),
-  includeHidden: Type.Optional(Type.Boolean({ description: "Include skills with disable-model-invocation: true in list/search output.", default: false })),
+  includeHidden: Type.Optional(Type.Boolean({ description: "Include hidden skills in list/search output.", default: false })),
   cwd: Type.Optional(Type.String({ description: "Working directory for project skill discovery. Defaults to tool context cwd." })),
 });
 

@@ -229,7 +229,7 @@ export function createReadManyTool(
 	return {
 		name: "read_files",
 		label: "read_files",
-		description: `Read several files in one call. With exact paths, e.g. { files: [{ path: "src/auth.ts" }, { path: "src/session.ts", offset: 40, limit: 80 }] }. With query: "your intent", candidate files are ranked by relevance and only the best are packed — use when you know the goal but not the exact files. Output is packed under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)} using adaptive ordering while preserving rendered request order. Prefer read for one known file, search for exact text/code patterns, and repo_map for a repository overview.`,
+		description: `Read several files in one call. With exact paths, pass { files: [{ path, offset?, limit? }] }; with query: "your intent", candidate files are ranked by relevance and only the best are packed — use when you know the goal but not the exact files. Output is packed under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)} using adaptive ordering while preserving rendered request order. Prefer read for one known file, search for exact text/code patterns, and repo_map for a repository overview.`,
 		parameters: ReadManySchema,
 
 		async execute(

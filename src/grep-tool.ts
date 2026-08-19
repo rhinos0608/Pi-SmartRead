@@ -61,33 +61,7 @@ const GrepSchema = Type.Object({
 type GrepInput = Static<typeof GrepSchema>;
 type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts.
-Use this as your primary tool for finding code — it handles exact matches,
-symbol lookups, and conceptual queries automatically.
-Example: grep('auth middleware') finds authentication code even if the
-function is named validateToken. Valid regex syntax such as 'TODO|FIXME' is
-auto-detected; set literal:true to search regex metacharacters as plain text.
-
-literal:true is deterministic — the pattern is matched as an exact substring
-(no regex interpretation), so metacharacters like '.' or '*' are literal.
-Regex auto-detection is best-effort: it only recognizes a small set of common
-regex constructs (alternation, anchors, character classes, quantifiers).
-Patterns that are not recognized are treated as literal substrings, so a
-pattern that looks like regex but is not in the recognized set will NOT be
-interpreted as regex. When no semantic index is configured, grep combines
-exact substring matches, an in-memory BM25 lexical ranker (token overlap),
-and AST symbol search.
-
-Provide exactly one of pattern (single search) or queries (1-10 search objects).
-Top-level options are shared defaults for batch queries; per-query options override them.
-Parameters: path (scope directory/file), glob (file filter), ignoreCase, literal,
-limit, contextLines, graphFilter. Results are ranked and deduplicated.
-
-Batch queries are executed sequentially (not in parallel).
-
-graphFilter: filter results by graph relationship. Format "EDGE_TYPE->target",
-e.g. "CALLS->auth.login" (only files that call auth.login) or
-"IMPORTED_BY->src/core" (only files imported by src/core).`;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. For semantic/fused multi-channel search use \`search\`; for structured symbol navigation use \`symbol\`.`;
 
 // ── Types ───────────────────────────────────────────────────────────
 

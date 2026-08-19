@@ -57,7 +57,7 @@ const SearchSchema = Type.Object({
     Type.Unsafe<SearchMatchMode>({
       type: "string",
       enum: ["literal", "regex", "boolean", "ast_pattern"],
-      description: "How grep mode matches the query. Default: literal substring search. Use 'ast_pattern' for structural code queries like 'fn * -> Result' or 'class * extends Base'.",
+      description: "How grep mode matches the query. Default: literal substring search. 'boolean' parses AND/OR/NOT query syntax; 'ast_pattern' matches structural code like 'fn * -> Result' or 'class * extends Base'.",
       default: "literal",
     }),
   ),
@@ -75,7 +75,7 @@ const SearchSchema = Type.Object({
   ),
   depth: Type.Optional(
     Type.Union([Type.Literal("quick"), Type.Literal("deep")], {
-      description: "quick (default): grep + AST code search. deep: grep + AST plus fused semantic, symbol, graph, and LSP channels with provenance — use for broad or uncertain questions, or when quick returned nothing. Deep depth ignores matchMode/caseSensitive/contextLines.",
+      description: "quick (default): grep + AST. deep: adds fused semantic, symbol, graph, and LSP channels with provenance; ignores matchMode/caseSensitive/contextLines.",
       default: "quick",
     }),
   ),
@@ -1932,7 +1932,7 @@ export default function createSearchTool(): ToolDefinition {
     name: "search",
     label: "search",
     description:
-        'Search repository text with grep and AST-aware code definitions by exact term, regex, boolean query, or structural ast_pattern. Use for precise lookups, e.g. { query: "refreshToken" }, { query: "TODO|FIXME", matchMode: "regex" }, or { query: "class * extends Base", matchMode: "ast_pattern" }. Use depth: "deep" for broad cross-file search that retains grep + AST while adding fused semantic, symbol, graph, and LSP evidence with provenance. Prefer symbol when a symbol name is known and relationships matter, and read/read_files once target paths are known.',
+        'Search repository text with grep and AST-aware code definitions by exact term, regex, boolean query, or structural ast_pattern. Use for precise lookups; use depth: "deep" for broad cross-file search that adds fused semantic, symbol, graph, and LSP evidence with provenance. For simple literal/regex code search use `grep`; prefer `symbol` when a symbol name is known and relationships matter; use read/read_files once target paths are known.',
     parameters: SearchSchema,
 
     async execute(

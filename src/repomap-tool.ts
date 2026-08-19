@@ -73,7 +73,7 @@ export function createRepoTool(): ToolDefinition {
   return {
     name: "repo_map",
     label: "repo_map",
-    description: `Create a compact, ranked repository map from AST symbols and dependency structure. Use for first-pass orientation, architecture questions, or choosing files to inspect, e.g. { mapTokens: 4096, focus: ["auth", "src/session.ts"] }. Prefer search for exact text/code lookup (depth: "deep" for evidence on a specific question), symbol for symbol navigation, and read/read_files once target files are known.`,
+    description: `Create a compact, ranked repository map from AST symbols and dependency structure. Use for first-pass orientation, architecture questions, or choosing files to inspect. Prefer search for exact text/code lookup (depth: "deep" for evidence on a specific question), symbol for symbol navigation, and read/read_files once target files are known.`,
     parameters: RepoMapSchema,
 
     async execute(

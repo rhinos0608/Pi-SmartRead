@@ -75,22 +75,7 @@ export interface InspectToolOptions {
     readonly contextGraph?: ContextGraph | ((cwd: string) => ContextGraph | Promise<ContextGraph>);
 }
 
-const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality.
-- Pass a directory to get a ranked repository map with key symbols and architecture.
-- Pass a file to get structural facts: external dependents (importing files), dependencies (imported modules), internal call sites, parent class, children, base classes, overrides, re-exports, plus quality signals (complexity, public API, deprecation, test presence, reuse breadth, recency).
-- callDepth/callDirection: BFS call graph traversal (file mode, depth 1-5, direction callers/callees/both).
-- impact: Compute blast radius — files/symbols reachable via call+import graph from target.
-- diff: Map git diff (unstaged/staged/HEAD) to affected symbols with risk classification.
-- deadCode: Return zero-caller functions in scope file or directory-wide.
-- clusters: Community detection on import graph (directory mode).
-- layers: Derive architectural layers from import structure (directory mode).
-- boundaries: Detect service boundaries from monorepo config (directory mode).
-- routes: Extract HTTP route → handler mappings (file or directory mode).
-- graphSchema: Return graph structure summary (node/edge counts, sample names, file or directory).
-- hotspots: Top-N functions by fan-in (file or directory mode).
-
-Every mode returns a details.workspaceEvidence envelope (schemaVersion 3).
-File mode produces weak (search-match) evidence — you must read a file before editing it. Map mode produces no file authorization.`;
+const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality. Pass a directory for a ranked repository map with key symbols and architecture; pass a file for structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) and quality signals. Analysis modes are set via schema params.`;
 
 function legacyParamError(params: Record<string, unknown>): string | undefined {
     if (params.query !== undefined) return "inspect no longer supports query mode. Use grep('pattern').";
