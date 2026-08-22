@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createGraphMutateTool } from "../../src/graph-mutate.js";
-import { ContextGraph } from "../../src/context-graph.js";
 
 describe("graph_mutate", () => {
   it("records absolute edge paths outside the selected root", async () => {
@@ -26,11 +25,8 @@ describe("graph_mutate", () => {
         { cwd: root } as any,
       );
 
-      expect((result as { isError?: boolean }).isError).toBeUndefined();
-      const graph = new ContextGraph(root);
-      await graph.buildContextGraph({ skipGitPopulation: true });
-      const neighbours = graph.getMutationNeighbours(outside);
-      expect(neighbours.map((n) => n.path)).toContain(target);
+      expect((result as { isError?: boolean }).isError).toBe(true);
+      expect((result.content[0] as { text: string }).text ?? "").toMatch(/outside|root|workspace/i);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

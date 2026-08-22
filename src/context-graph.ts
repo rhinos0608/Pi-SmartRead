@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { findSrcFiles } from "./file-discovery.js";
 import { getTagsBatch, initParser } from "./tags.js";
@@ -36,6 +37,8 @@ export interface Provenance {
   to: string;
   type: EdgeType;
   confidence: number;
+  source?: string;
+  impactEligible?: boolean;
 }
 
 export interface ContextGraphOptions {
@@ -732,6 +735,19 @@ export function findDirectImportNeighbours(cwd: string, paths: string[], maxCoun
   return neighbours;
 }
 
+function canonicalMutationPath(root: string, value: string): string | null {
+  const marker = value.indexOf(":");
+  const filePart = marker > 0 ? value.slice(0, marker) : value;
+  const suffix = marker > 0 ? value.slice(marker) : "";
+  try {
+    const realRoot = realpathSync(resolve(root));
+    const realFile = realpathSync(resolve(root, filePart));
+    const rel = relative(realRoot, realFile);
+    if (rel.startsWith("..") || isAbsolute(rel)) return null;
+    return realFile + suffix;
+  } catch { return null; }
+}
+
 // ── EdgeStore: Event-sourced graph mutation log ────────────────────
 
 /**
@@ -739,6 +755,7 @@ export function findDirectImportNeighbours(cwd: string, paths: string[], maxCoun
  * Each event is an append-only log entry: { type, data, timestamp }.
  */
 export interface MutationEvent {
+  id?: string;
   /** Edge type: "breakage" | "co_change" */
   type: "breakage" | "co_change";
   data: {
@@ -750,8 +767,8 @@ export interface MutationEvent {
     context?: string;
     /** Confidence score (0-1). Default 1.0 for observed breakage. */
     confidence?: number;
-    /** Source of observation: "diagnostics" | "git_history" | "manual". */
-    source?: string;
+    /** Source of observation. Omitted means legacy/untrusted. */
+    source?: "diagnostics" | "git_history" | "manual" | "same_transaction";
   };
   /** Unix timestamp in ms. */
   timestamp: number;
@@ -865,8 +882,8 @@ export class EdgeStore {
         const trimmed = line.trim();
         if (!trimmed) continue;
         try {
-          const event = JSON.parse(trimmed) as MutationEvent;
-          if (now - event.timestamp <= maxAgeMs) {
+          const event = EdgeStore.validateEvent(JSON.parse(trimmed), root);
+          if (event && now - event.timestamp <= maxAgeMs) {
             events.push(event);
             lineCount++;
           }
@@ -892,10 +909,11 @@ export class EdgeStore {
 
     for (const ev of events) {
       // Resolve relative paths against root
-      const fromPath = resolve(root, ev.data.from);
-      const toPath = resolve(root, ev.data.to);
+      const fromPath = canonicalMutationPath(root, ev.data.from);
+      const toPath = canonicalMutationPath(root, ev.data.to);
+      if (!fromPath || !toPath) continue;
 
-      const key = `${fromPath}||${toPath}||${ev.type}`;
+      const key = ev.id ?? `${fromPath}||${toPath}||${ev.type}`;
 
       const edgeType: EdgeType = ev.type === "breakage" ? "breakage" : "co_change";
       const existing = best.get(key);
@@ -907,6 +925,8 @@ export class EdgeStore {
           to: toPath,
           type: edgeType,
           confidence,
+          source: ev.data.source,
+          impactEligible: ev.data.source === "diagnostics",
         });
       }
     }
@@ -937,7 +957,28 @@ export class EdgeStore {
     }
   }
 
+  private static validateEvent(value: unknown, root: string): MutationEvent | null {
+    if (!value || typeof value !== "object") return null;
+    const v = value as Record<string, unknown>;
+    if (v.type !== "breakage" && v.type !== "co_change") return null;
+    if (!Number.isFinite(v.timestamp) || (v.timestamp as number) < 0 || (v.timestamp as number) > Date.now() + 86_400_000) return null;
+    if (!v.data || typeof v.data !== "object") return null;
+    const d = v.data as Record<string, unknown>;
+    if (typeof d.from !== "string" || typeof d.to !== "string" || d.from.length === 0 || d.to.length === 0 || d.from.length > 1000 || d.to.length > 1000) return null;
+    if (d.context !== undefined && (typeof d.context !== "string" || d.context.length > EdgeStore.EDGE_CONTEXT_MAX_CHARS)) return null;
+    if (d.confidence !== undefined && (!Number.isFinite(d.confidence) || (d.confidence as number) < 0 || (d.confidence as number) > 1)) return null;
+    const sources = ["diagnostics", "git_history", "manual", "same_transaction"];
+    if (d.source !== undefined && (typeof d.source !== "string" || !sources.includes(d.source))) return null;
+    const from = canonicalMutationPath(root, d.from);
+    const to = canonicalMutationPath(root, d.to);
+    if (!from || !to) return null;
+    const id = typeof v.id === "string" && v.id.length <= 200 ? v.id : createHash("sha256").update(JSON.stringify([v.type, from, to, d.context ?? "", d.confidence ?? null, d.source ?? "legacy", v.timestamp])).digest("hex");
+    return { id, type: v.type, data: { from, to, ...(typeof d.context === "string" ? { context: d.context } : {}), ...(typeof d.confidence === "number" ? { confidence: d.confidence } : {}), ...(typeof d.source === "string" ? { source: d.source as MutationEvent["data"]["source"] } : {}) }, timestamp: v.timestamp as number };
+  }
+
   private static append(root: string, event: MutationEvent): boolean {
+    const valid = EdgeStore.validateEvent(event, root);
+    if (!valid) return false;
     const logPath = EdgeStore.getLogPath(root);
     const dir = dirname(logPath);
 
@@ -947,7 +988,7 @@ export class EdgeStore {
       // Directory may already exist
     }
 
-    const line = JSON.stringify(event) + "\n";
+    const line = JSON.stringify(valid) + "\n";
     try {
       appendFileSync(logPath, line, "utf-8");
       return true;

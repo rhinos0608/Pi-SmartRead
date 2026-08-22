@@ -136,14 +136,14 @@ describe("classifyFileRisk", () => {
     expect(risk).toBe("medium");
   });
 
-  it("detects entry points by filename pattern", () => {
+  it("does not boost risk by filename pattern alone", () => {
     const risk = classifyFileRisk({
       filePath: "src/handler.ts",
       pageRank: 0.1,
       fanIn: 0,
       blastRadiusDepth: 3,
     });
-    expect(risk).toBe("critical");
+    expect(risk).toBe("medium");
   });
 });
 
@@ -186,7 +186,7 @@ describe("detectDeadCode", () => {
     expect(result.totalDeadFunctions).toBe(0);
   });
 
-  it("excludes entry point functions", () => {
+  it("reports entry-named functions without callers as dead", () => {
     const cg = makeCallGraph([
       makeFunctionInfo({ name: "main", file: "src/app.ts", calledBy: [] }),
       makeFunctionInfo({ name: "handler", file: "src/handler.ts", calledBy: [] }),
@@ -194,7 +194,7 @@ describe("detectDeadCode", () => {
     ]);
 
     const result = detectDeadCode("src/", cg);
-    expect(result.totalDeadFunctions).toBe(0);
+    expect(result.totalDeadFunctions).toBe(2); // main excluded by ENTRY_POINT_PATTERNS
   });
 
   it("scopes to target path", () => {

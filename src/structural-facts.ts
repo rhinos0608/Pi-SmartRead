@@ -225,38 +225,26 @@ function extractHeritage(
 // ── Override detection ────────────────────────────────────────
 
 function detectOverrides(
-  children: ChildSymbol[],
-  baseClasses: ParentInfo[],
-  lang: SupportedLanguage,
+  children: ChildSymbol[], baseClasses: ParentInfo[], lang: SupportedLanguage, code: string,
 ): OverrideInfo[] {
-  const overrides: OverrideInfo[] = [];
-  if (baseClasses.length === 0) return overrides;
-
-  const methods = children.filter((c) => c.kind === "method");
-
-  for (const method of methods) {
-    for (const base of baseClasses) {
-      if (method.isOverride) {
-        // TS `override` keyword
-        overrides.push({
-          methodName: method.name,
-          parentName: base.name,
-          line: method.line,
-          isExplicit: true,
-        });
-      } else if (lang === "python") {
-        // Python name-match → low confidence override
-        overrides.push({
-          methodName: method.name,
-          parentName: base.name,
-          line: method.line,
-          isExplicit: false,
-        });
-      }
-    }
+  if (!baseClasses.length) return [];
+  const grammar = loadGrammar(lang); if (!grammar) return [];
+  const parser = new Parser(); parser.setLanguage(grammar); const root = parseCode(parser, code).rootNode;
+  const classes = new Map<string, Parser.SyntaxNode>();
+  function walk(node: Parser.SyntaxNode): void {
+    if (["class_declaration", "abstract_class_declaration", "class_definition"].includes(node.type)) { const name = node.childForFieldName("name")?.text; if (name) classes.set(name, node); }
+    for (let i = 0; i < node.namedChildCount; i++) { const child = node.namedChild(i); if (child) walk(child); }
   }
-
-  return overrides;
+  walk(root);
+  function memberNames(node: Parser.SyntaxNode): Set<string> {
+    const body = node.childForFieldName("body") ?? node.namedChildren.find(child => child.type === "class_body" || child.type === "block");
+    const names = new Set<string>(); if (!body) return names;
+    for (let i = 0; i < body.namedChildCount; i++) { const member = body.namedChild(i); const name = member?.childForFieldName("name"); if (member && name && ["method_definition", "function_definition", "function_declaration"].includes(member.type)) names.add(name.text); }
+    return names;
+  }
+  const result: OverrideInfo[] = [];
+  for (const base of baseClasses) { const parent = classes.get(base.name); if (!parent) continue; const names = memberNames(parent); for (const child of children.filter(item => item.kind === "method")) if (names.has(child.name) && !result.some(item => item.methodName === child.name && item.parentName === base.name)) result.push({ methodName: child.name, parentName: base.name, line: child.line, isExplicit: lang !== "python" }); }
+  return result;
 }
 
 // ── Re-export / barrel resolution ──────────────────────────────
@@ -1017,7 +1005,7 @@ function extractTSJSFacts(
   }
 
   parentModule = detectParentModule(filePath);
-  const overrides = detectOverrides(children, baseClasses, lang);
+  const overrides = detectOverrides(children, baseClasses, lang, code);
 
   const reExportedBy = findBarrelReExports(
     filePath,
@@ -1122,7 +1110,7 @@ function extractPythonFacts(
   }
 
   parentModule = detectParentModule(filePath);
-  const overrides = detectOverrides(children, baseClasses, "python");
+  const overrides = detectOverrides(children, baseClasses, "python", code);
 
   const reExportedBy = findBarrelReExports(
     filePath,

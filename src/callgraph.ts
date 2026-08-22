@@ -1,442 +1,132 @@
-/**
- * Call graph extraction from tree-sitter ASTs.
- *
- * Builds a directed graph of function-call relationships:
- *   function X calls function Y, Z
- *
- * Enables queries like "find all callers of getConfig" or
- * "what does initApp call?"
- *
- * Works by post-processing tree-sitter parsed CSTs for
- * TypeScript/JavaScript/Python/Go/Rust — extracting call_expression
- * nodes and mapping them to the enclosing function definition.
- */
-
-import { readFileSync } from "node:fs";
+/** Static call graph extraction for TypeScript/JavaScript/Python/Go/Rust. */
+import { readFileSync, statSync } from "node:fs";
+import { dirname, extname, relative, resolve } from "node:path";
 import Parser from "tree-sitter";
-import { initParser } from "./tags.js";
-import type { SupportedLanguage } from "./languages.js";
-import { filenameToLang } from "./languages.js";
-
-// Re-use grammar loading from tags module
 import { createRequire } from "node:module";
+import { initParser } from "./tags.js";
+import { filenameToLang, type SupportedLanguage } from "./languages.js";
+
 const require = createRequire(import.meta.url);
-const TypeScriptGrammar = require("tree-sitter-typescript");
-const JavaScriptGrammar = require("tree-sitter-javascript");
-const PythonGrammar = require("tree-sitter-python");
-const GoGrammar = require("tree-sitter-go");
-const RustGrammar = require("tree-sitter-rust");
-
 type Grammar = Parameters<Parser["setLanguage"]>[0];
-const languageCache = new Map<string, Grammar>();
-const PARSE_CHUNK_SIZE = 1024;
-
-function loadGrammar(lang: SupportedLanguage): Grammar | null {
-  const cached = languageCache.get(lang);
-  if (cached) return cached;
-
-  let language: Grammar | undefined;
-  if (lang === "typescript") language = TypeScriptGrammar.typescript as Grammar;
-  else if (lang === "tsx") language = TypeScriptGrammar.tsx as Grammar;
-  else if (lang === "javascript") language = JavaScriptGrammar as Grammar;
-  else if (lang === "python") language = PythonGrammar as Grammar;
-  else if (lang === "go") language = GoGrammar as Grammar;
-  else if (lang === "rust") language = RustGrammar as Grammar;
-
-  if (!language) return null;
-
-  languageCache.set(lang, language);
-  return language;
+const grammars: Partial<Record<SupportedLanguage, Grammar>> = {
+  typescript: require("tree-sitter-typescript").typescript as Grammar,
+  tsx: require("tree-sitter-typescript").tsx as Grammar,
+  javascript: require("tree-sitter-javascript") as Grammar,
+  python: require("tree-sitter-python") as Grammar,
+  go: require("tree-sitter-go") as Grammar,
+  rust: require("tree-sitter-rust") as Grammar,
+};
+const grammarCache = new Map<SupportedLanguage, Grammar>();
+function grammar(lang: SupportedLanguage): Grammar | undefined {
+  const cached = grammarCache.get(lang); if (cached) return cached;
+  const value = grammars[lang]; if (value) grammarCache.set(lang, value); return value;
 }
 
-function parseCode(parser: Parser, code: string): ReturnType<Parser["parse"]> {
-  return parser.parse((offset) => code.slice(offset, offset + PARSE_CHUNK_SIZE));
+type NodeId = string;
+export type FunctionKind = "function" | "method";
+export interface FunctionInfo { name: string; file: string; line: number; calls: string[]; calledBy: string[]; id?: NodeId; qualifiedName?: string; kind?: FunctionKind; endLine?: number; isLeaf?: boolean; }
+export interface CallEdge { caller: string; callee: string; resolved: boolean; callerLine?: number; callerId?: NodeId; calleeId?: NodeId; calleeFile?: string; receiver?: string; importPath?: string; callSite?: { line: number; column: number }; diagnostic?: "external" | "ambiguous" | "unresolved" | "receiver-unknown"; }
+export interface CallGraphDiagnostics { total: number; resolved: number; unresolved: number; ambiguous: number; external: number; receiverUnknown: number; }
+export interface CallGraphResult { functions: FunctionInfo[]; callersOf: (nameOrId: string) => FunctionInfo[]; calleesOf: (nameOrId: string) => FunctionInfo[]; findById?: (id: NodeId) => FunctionInfo | undefined; edgeCount: number; edgeList?: CallEdge[]; diagnostics?: CallGraphDiagnostics; }
+
+type Decl = FunctionInfo & { id: NodeId; qualifiedName: string; kind: FunctionKind; start: number; end: number; scope: string[]; fileAbs: string; node: Parser.SyntaxNode };
+type Binding = { path?: string; imported: string; namespace?: boolean };
+type FileData = { path: string; rel: string; tree: Parser.Tree; lang: SupportedLanguage; decls: Decl[]; imports: Map<string, Binding> };
+const declarationTypes = new Set(["function_declaration", "function_definition", "function_item", "method_declaration", "method_definition"]);
+const classTypes = new Set(["class_declaration", "class_definition", "struct_item", "impl_item"]);
+function nodeName(n: Parser.SyntaxNode): string | undefined { return n.childForFieldName("name")?.text; }
+function commonRoot(files: string[]): string {
+  const paths = files.map(file => resolve(file)); if (!paths.length) return process.cwd();
+  if (paths.length === 1) return dirname(paths[0]!);
+  const parts = paths.map(p => p.split("/")); let i = 0;
+  while (i < parts[0]!.length && parts.every(p => p[i] === parts[0]![i])) i++;
+  return parts[0]!.slice(0, Math.max(1, i)).join("/") || "/";
 }
-
-// ── Types ─────────────────────────────────────────────────────────
-
-export interface CallEdge {
-  /** Fully qualified caller: file:functionName */
-  caller: string;
-  /** Fully qualified callee: file:functionName (or just name for external calls) */
-  callee: string;
-  /** True if callee was resolved to a definition somewhere */
-  resolved: boolean;
-  /** Source line of the call site (0 if unavailable) */
-  callerLine?: number;
+function classScope(n: Parser.SyntaxNode): string[] { const out: string[] = []; for (let p = n.parent; p; p = p.parent) if (classTypes.has(p.type)) { const name = nodeName(p); if (name) out.unshift(name); } return out; }
+function decls(root: Parser.SyntaxNode, rel: string, abs: string): Decl[] {
+  const out: Decl[] = [];
+  function walk(n: Parser.SyntaxNode): void {
+    if (declarationTypes.has(n.type) || (n.type === "function_expression" || n.type === "arrow_function" && n.parent?.type === "variable_declarator")) {
+      const parentName = n.parent?.type === "variable_declarator" ? n.parent.childForFieldName("name")?.text : undefined;
+      const name = nodeName(n) ?? parentName ?? "(anonymous)";
+      const scope = classScope(n), qualifiedName = [...scope, name].join(".");
+      const line = n.startPosition.row + 1, endLine = n.endPosition.row + 1;
+      const id = `${rel}::${qualifiedName}@${line}-${endLine}`;
+      out.push({ id, name, file: rel, line, endLine, calls: [], calledBy: [], qualifiedName, kind: scope.length || n.type === "method_declaration" || n.type === "method_definition" ? "method" : "function", start: n.startIndex, end: n.endIndex, scope, fileAbs: abs, node: n });
+    }
+    for (let i = 0; i < n.namedChildCount; i++) { const child = n.namedChild(i); if (child) walk(child); }
+  }
+  walk(root); return out;
 }
-
-export interface FunctionInfo {
-  name: string;
-  file: string;
-  line: number;
-  /** Other functions this function calls */
-  calls: string[];
-  /** Functions that call this one */
-  calledBy: string[];
+function resolveImport(from: string, spec: string): string | undefined {
+  if (!spec.startsWith(".")) return undefined;
+  const base = resolve(dirname(from), spec);
+  for (const suffix of ["", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", "/index.ts", "/index.js", "/__init__.py"]) { const p = `${base}${suffix}`; try { if (statSync(p).isFile()) return resolve(p); } catch { /* missing candidate */ } }
+  return undefined;
 }
-
-export interface CallGraphResult {
-  functions: FunctionInfo[];
-  callersOf: (name: string) => FunctionInfo[];
-  calleesOf: (name: string) => FunctionInfo[];
-  /** Total unique edges in the graph */
-  edgeCount: number;
-}
-
-// ── Tree-sitter AST walking helpers ───────────────────────────────
-
-/**
- * Find the enclosing function name for a node by walking up the tree.
- *
- * Supports TypeScript/JavaScript, Python, Go, and Rust AST node types.
- */
-function findEnclosingFunction(node: Parser.SyntaxNode): string | null {
-  let current: Parser.SyntaxNode | null = node;
-  while (current) {
-    // TypeScript/JavaScript: function_declaration, method_definition, etc.
-    if (
-      current.type === "function_declaration" ||
-      current.type === "method_definition" ||
-      current.type === "arrow_function" ||
-      current.type === "function_expression"
-    ) {
-      const nameNode = current.childForFieldName("name");
-      if (nameNode) return nameNode.text;
-
-      for (let i = 0; i < current.namedChildCount; i++) {
-        const child = current.namedChild(i);
-        if (child?.type === "property_identifier") {
-          return child.text;
+function quoted(text: string): string | undefined { const value = text.trim(); return value.length > 1 && ((value[0] === "\"" && value.at(-1) === "\"") || (value[0] === "'" && value.at(-1) === "'")) ? value.slice(1, -1) : undefined; }
+function imports(tree: Parser.Tree, file: string, lang: SupportedLanguage): Map<string, Binding> {
+  const out = new Map<string, Binding>();
+  function add(alias: string | undefined, imported: string, spec: string, namespace = false): void { if (alias) out.set(alias, { path: resolveImport(file, spec), imported, namespace }); }
+  function walk(n: Parser.SyntaxNode): void {
+    if (lang === "typescript" || lang === "tsx" || lang === "javascript") {
+      if (n.type === "import_statement") {
+        const source = quoted(n.childForFieldName("source")?.text ?? ""); if (source) {
+          const clause = n.childForFieldName("import");
+          if (clause) for (let i = 0; i < clause.namedChildCount; i++) { const c = clause.namedChild(i); if (!c) continue; if (c.type === "namespace_import") add(c.childForFieldName("name")?.text, "*", source, true); else if (c.type === "named_import") add(c.childForFieldName("alias")?.text ?? c.childForFieldName("name")?.text, c.childForFieldName("name")?.text ?? "", source); else if (c.type === "identifier") add(c.text, "default", source); }
         }
       }
-
-      const parent = current.parent;
-      if (parent?.type === "variable_declarator") {
-        const nameChild = parent.childForFieldName("name");
-        if (nameChild) return nameChild.text;
-      }
-
-      return "(anonymous)";
-    }
-
-    // Python: function_definition (def keyword, indentation-scoped)
-    if (current.type === "function_definition") {
-      const nameNode = current.childForFieldName("name");
-      if (nameNode) return nameNode.text;
-      return "(anonymous)";
-    }
-
-    // Go: function_declaration and method_declaration
-    if (
-      current.type === "function_declaration" ||
-      current.type === "method_declaration"
-    ) {
-      const nameNode = current.childForFieldName("name");
-      if (nameNode) return nameNode.text;
-      return "(anonymous)";
-    }
-
-    // Rust: function_item (fn keyword)
-    if (current.type === "function_item") {
-      const nameNode = current.childForFieldName("name");
-      if (nameNode) return nameNode.text;
-      return "(anonymous)";
-    }
-
-    // Stop at top-level containers
-    if (
-      current.type === "class_declaration" ||
-      current.type === "class_definition" ||
-      current.type === "impl_item" ||
-      current.type === "program" ||
-      current.type === "module" ||
-      current.type === "source_file"
-    ) {
-      return null;
-    }
-
-    current = current.parent;
+      if (n.type === "call_expression" && n.childForFieldName("function")?.text === "require") { const arg = n.childForFieldName("arguments")?.namedChild(0); const source = quoted(arg?.text ?? ""); const parent = n.parent; if (source && parent?.type === "variable_declarator") add(parent.childForFieldName("name")?.text, "*", source, true); }
+    } else if (lang === "python") {
+      if (n.type === "import_from_statement") { const module = n.childForFieldName("module_name")?.text; if (module) { const name = n.childForFieldName("name"); if (name) for (let i = 0; i < name.namedChildCount; i++) { const c = name.namedChild(i); if (c) add(c.text, c.text, module); } } }
+      if (n.type === "import_statement") for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c) add(c.text.split(" as ").at(-1), c.text, c.text); }
+    } else if (lang === "go" && n.type === "import_spec") { const path = quoted(n.childForFieldName("path")?.text ?? ""); if (path) add(n.childForFieldName("name")?.text ?? path.split("/").at(-1), "*", path, true); }
+    else if (lang === "rust" && n.type === "use_declaration") { const path = n.namedChildren.at(-1)?.text; if (path) { const alias = path.split("::").at(-1); if (alias) add(alias, alias, path, true); } }
+    for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c) walk(c); }
   }
-  return null;
+  walk(tree.rootNode); return out;
 }
-
-/**
- * Check if a call expression node's function name is a simple identifier
- * (not a property access or complex expression).
- *
- * Supports TS/JS member_expression, Python attribute, Go selector_expression,
- * and Rust scoped_identifier / field_expression.
- */
-function getCallTargetName(callNode: Parser.SyntaxNode): string | null {
-  const fnNode = callNode.childForFieldName("function");
-  if (!fnNode) return null;
-
-  // Simple identifier: foo()
-  if (fnNode.type === "identifier") {
-    return fnNode.text;
-  }
-
-  // TS/JS member_expression: obj.method()
-  if (fnNode.type === "member_expression") {
-    const property = fnNode.childForFieldName("property");
-    if (property?.type === "property_identifier") {
-      return property.text;
-    }
-  }
-
-  // Python attribute: obj.method() or self.repo.find()
-  // The attribute node has an "attribute" field for the method name
-  if (fnNode.type === "attribute") {
-    const attrNode = fnNode.childForFieldName("attribute");
-    if (attrNode) return attrNode.text;
-    // Fallback: last child is typically the attribute name
-    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
-    if (lastChild) return lastChild.text;
-  }
-
-  // Go selector_expression: pkg.Func() or obj.Method()
-  if (fnNode.type === "selector_expression") {
-    const field = fnNode.childForFieldName("field");
-    if (field) return field.text;
-    // Fallback: last child is the selected field
-    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
-    if (lastChild) return lastChild.text;
-  }
-
-  // Rust scoped_identifier: Module::func() or Type::method()
-  if (fnNode.type === "scoped_identifier") {
-    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
-    if (lastChild) return lastChild.text;
-  }
-
-  // Rust field_expression: obj.method()
-  if (fnNode.type === "field_expression") {
-    const field = fnNode.childForFieldName("field");
-    if (field) return field.text;
-    const lastChild = fnNode.namedChildren[fnNode.namedChildCount - 1];
-    if (lastChild) return lastChild.text;
-  }
-
-  return null;
+function target(n: Parser.SyntaxNode): { name: string; receiver?: string } | undefined {
+  const fn = n.childForFieldName("function"); if (!fn) return undefined;
+  if (fn.type === "identifier") return { name: fn.text };
+  const property = fn.childForFieldName("property") ?? fn.childForFieldName("attribute") ?? fn.childForFieldName("field");
+  if (property) { const object = fn.childForFieldName("object") ?? fn.childForFieldName("argument"); return { name: property.text, receiver: object?.text ?? fn.text.slice(0, -(property.text.length + 1)) }; }
+  const last = fn.namedChildren.at(-1); if (last) return { name: last.text, receiver: fn.text.slice(0, -(last.text.length + 2)) };
+  return undefined;
 }
+function enclosing(ds: Decl[], n: Parser.SyntaxNode): Decl | undefined { return ds.filter(d => d.start <= n.startIndex && d.end >= n.endIndex).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]; }
 
-/**
- * Walk a parsed tree and extract call edges.
- *
- * Handles call_expression (TS/JS/Python/Go/Rust) and
- * macro_invocation (Rust: println!, vec!, etc.).
- */
-function extractCallEdges(tree: Parser.Tree, file: string): CallEdge[] {
-  const edges: CallEdge[] = [];
-  const seen = new Set<string>();
-
-  function walk(node: Parser.SyntaxNode) {
-    // Standard call expressions (all supported languages)
-    // Python uses "call" instead of "call_expression"
-    if (node.type === "call_expression" || node.type === "call") {
-      const caller = findEnclosingFunction(node);
-      const callee = getCallTargetName(node);
-
-      if (caller && callee) {
-        const key = `${file}:${caller}→${callee}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          edges.push({
-            caller: `${file}:${caller}`,
-            callee,
-            resolved: false,
-            callerLine: node.startPosition.row + 1,
-          });
-        }
-      }
-    }
-
-    // Rust macro invocations: println!("..."), vec![...], format!(...)
-    // Treat macro name as a call target for completeness.
-    if (node.type === "macro_invocation") {
-      const caller = findEnclosingFunction(node);
-      const macroNameNode = node.childForFieldName("macro");
-      if (caller && macroNameNode) {
-        const callee = macroNameNode.text;
-        const key = `${file}:${caller}→${callee}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          edges.push({
-            caller: `${file}:${caller}`,
-            callee,
-            resolved: false,
-            callerLine: node.startPosition.row + 1,
-          });
-        }
-      }
-    }
-
-    for (let i = 0; i < node.namedChildCount; i++) {
-      const child = node.namedChild(i);
-      if (child) walk(child);
-    }
-  }
-
-  walk(tree.rootNode);
-  return edges;
-}
-
-/**
- * Build a call graph from the given files.
- *
- * For each file:
- *   1. Parse with tree-sitter
- *   2. Walk the AST for call_expression nodes
- *   3. Map each call to its enclosing function
- *
- * Returns a graph with query helpers.
- */
-export async function buildCallGraph(
-  files: string[],
-): Promise<CallGraphResult> {
-  await initParser();
-
-  const allEdges: CallEdge[] = [];
-  const allFunctions = new Map<string, FunctionInfo>();
-
-  for (const file of files) {
-    const lang = filenameToLang(file);
-    if (!lang) continue;
-
-    const grammar = loadGrammar(lang);
-    if (!grammar) continue;
-
-    let code: string;
-    try {
-      code = readFileSync(file, "utf-8");
-    } catch {
-      continue;
-    }
-
-    const parser = new Parser();
-    parser.setLanguage(grammar);
-    const tree = parseCode(parser, code);
-
-    const edges = extractCallEdges(tree, file);
-    allEdges.push(...edges);
-
-    // Register functions from caller edges
-    for (const edge of edges) {
-      if (!allFunctions.has(edge.caller)) {
-        const callerIdx = edge.caller.lastIndexOf(":");
-        const callerFile = edge.caller.slice(0, callerIdx);
-        const name = edge.caller.slice(callerIdx + 1);
-        allFunctions.set(edge.caller, {
-          name,
-          file: callerFile,
-          line: edge.callerLine ?? 0,
-          calls: [],
-          calledBy: [],
-        });
-      }
-    }
-  }
-
-  // ── Resolve callees to known functions ──
-  const allFunctionNames = new Set<string>();
-  for (const [, fn] of allFunctions) {
-    allFunctionNames.add(fn.name);
-  }
-
-  for (const edge of allEdges) {
-    const callerFn = allFunctions.get(edge.caller);
-    if (callerFn) {
-      callerFn.calls.push(edge.callee);
-    }
-
-    // Try to resolve callee to a known function
-    const calleeKey = [...allFunctions.keys()].find((k) => k.endsWith(`:${edge.callee}`));
-    if (calleeKey) {
-      const calleeFn = allFunctions.get(calleeKey);
-      if (calleeFn) {
-        const callerIdx = edge.caller.lastIndexOf(":");
-        calleeFn.calledBy.push(edge.caller.slice(callerIdx + 1));
-        edge.resolved = true;
-      }
-    }
-  }
-
-  return {
-    functions: [...allFunctions.values()],
-    callersOf: (name: string) =>
-      [...allFunctions.values()].filter((f) => f.calls.includes(name)),
-    calleesOf: (name: string) => {
-      const fn = [...allFunctions.values()].find((f) => f.name === name);
-      if (!fn) return [];
-      return fn.calls
-        .map((callee) =>
-          [...allFunctions.values()].find((f) => f.name === callee),
-        )
-        .filter(Boolean) as FunctionInfo[];
-    },
-    edgeCount: allEdges.length,
-  };
-}
-
-/**
- * Lightweight: find all callers of a specific function name.
- * This is the most useful query — doesn't need full graph construction.
- */
-export async function findCallers(
-  files: string[],
-  targetFunction: string,
-  signal?: AbortSignal,
-): Promise<{ file: string; callerFunction: string }[]> {
-  await initParser();
-
-  const results: { file: string; callerFunction: string }[] = [];
-  const seen = new Set<string>();
-
-  for (const file of files) {
-    if (signal?.aborted) return [];
-    const lang = filenameToLang(file);
-    if (!lang) continue;
-
-    const grammar = loadGrammar(lang);
-    if (!grammar) continue;
-
-    let code: string;
-    try {
-      code = readFileSync(file, "utf-8");
-    } catch {
-      continue;
-    }
-
-    const parser = new Parser();
-    parser.setLanguage(grammar);
-    const tree = parseCode(parser, code);
-
-    function walk(node: Parser.SyntaxNode) {
-      if (signal?.aborted) return;
-      // Python uses "call" instead of "call_expression"
-      if (node.type === "call_expression" || node.type === "call") {
-        const callee = getCallTargetName(node);
-        if (callee === targetFunction) {
-          const caller = findEnclosingFunction(node);
-          if (caller) {
-            const key = `${file}:${caller}`;
-            if (!seen.has(key)) {
-              seen.add(key);
-              results.push({ file, callerFunction: caller });
-            }
+export async function buildCallGraph(files: string[]): Promise<CallGraphResult> {
+  await initParser(); const root = commonRoot(files), data: FileData[] = [];
+  for (const input of files) { const path = resolve(input), lang = filenameToLang(path), g = lang && grammar(lang); if (!lang || !g) continue; let code: string; try { code = readFileSync(path, "utf8"); } catch { continue; } const parser = new Parser(); parser.setLanguage(g); const tree = parser.parse(code); const rel = relative(root, path) || extname(path); data.push({ path, rel, tree, lang, decls: decls(tree.rootNode, rel, path), imports: imports(tree, path, lang) }); }
+  const byFile = new Map(data.map(d => [d.path, d])), byId = new Map<string, Decl>();
+  for (const d of data) for (const fn of d.decls) byId.set(fn.id, fn);
+  const edges: CallEdge[] = [], counts: CallGraphDiagnostics = { total: 0, resolved: 0, unresolved: 0, ambiguous: 0, external: 0, receiverUnknown: 0 };
+  for (const file of data) { function walk(n: Parser.SyntaxNode): void { if (n.type === "call_expression" || n.type === "call") { const caller = enclosing(file.decls, n), t = target(n); if (caller && t) { const edge: CallEdge = { caller: caller.id, callee: t.name, resolved: false, callerId: caller.id, callerLine: n.startPosition.row + 1, callSite: { line: n.startPosition.row + 1, column: n.startPosition.column }, receiver: t.receiver }; counts.total++; let candidates: Decl[] = [];
+          const binding = file.imports.get(t.receiver ?? t.name);
+          if (t.receiver) { if (t.receiver === "this" || t.receiver === "self") candidates = file.decls.filter(d => d.name === t.name && d.scope.join(".") === caller.scope.join(".")); else if (binding?.path) { edge.importPath = binding.path; candidates = byFile.get(binding.path)?.decls.filter(d => d.name === t.name) ?? []; } else { edge.diagnostic = "receiver-unknown"; counts.receiverUnknown++; } }
+          else if (binding?.path) { edge.importPath = binding.path; candidates = byFile.get(binding.path)?.decls.filter(d => binding.imported === "*" || d.name === binding.imported) ?? []; }
+          else {
+            candidates = file.decls.filter(d => d.name === t.name && (d.scope.join(".") === caller.scope.join(".") || d.scope.length === 0));
+            if (candidates.length === 0) candidates = data.flatMap(item => item.decls.filter(d => d.name === t.name && d.scope.length === 0));
           }
-        }
-      }
-
-      for (let i = 0; i < node.namedChildCount; i++) {
-        const child = node.namedChild(i);
-        if (child) walk(child);
-      }
-    }
-
-    walk(tree.rootNode);
+          if (candidates.length === 1) { const callee = candidates[0]!; edge.resolved = true; edge.calleeId = callee.id; edge.callee = callee.id; edge.calleeFile = callee.file; caller.calls.push(callee.id); callee.calledBy.push(caller.id); counts.resolved++; }
+          else if (candidates.length > 1) { edge.diagnostic = "ambiguous"; counts.ambiguous++; }
+          else if (!edge.diagnostic) { edge.diagnostic = binding && !binding.path ? "external" : "unresolved"; if (edge.diagnostic === "external") counts.external++; }
+          if (!edge.resolved) counts.unresolved++; edges.push(edge); } } for (let i = 0; i < n.namedChildCount; i++) { const c = n.namedChild(i); if (c) walk(c); } } walk(file.tree.rootNode); }
+  const functions = [...byId.values()]; for (const fn of functions) fn.isLeaf = fn.calls.length === 0;
+  const findById = (id: string): FunctionInfo | undefined => byId.get(id);
+  const lookup = (q: string): Decl[] => byId.has(q) ? [byId.get(q)!] : functions.filter(f => f.name === q).length === 1 ? functions.filter(f => f.name === q) : [];
+  return { functions, findById, edgeList: edges, edgeCount: counts.resolved, diagnostics: counts, callersOf: q => { const ids = new Set(lookup(q).map(f => f.id)); return edges.filter(e => e.resolved && e.calleeId && ids.has(e.calleeId)).map(e => byId.get(e.callerId!)).filter((f): f is Decl => Boolean(f)); }, calleesOf: q => { const ids = new Set(lookup(q).map(f => f.id)); return edges.filter(e => e.resolved && e.callerId && ids.has(e.callerId)).map(e => byId.get(e.calleeId!)).filter((f): f is Decl => Boolean(f)); } };
+}
+export async function findCallers(files: string[], targetFunction: string, signal?: AbortSignal): Promise<{ file: string; callerFunction: string }[]> {
+  if (signal?.aborted) return [];
+  const graph = await buildCallGraph(files), out: { file: string; callerFunction: string }[] = [], seen = new Set<string>();
+  for (const edge of graph.edgeList ?? []) {
+    const callee = edge.calleeId ? graph.findById?.(edge.calleeId) : undefined;
+    if (edge.callee !== targetFunction && callee?.name !== targetFunction) continue;
+    const fn = edge.callerId ? graph.findById?.(edge.callerId) : undefined;
+    if (fn && !seen.has(fn.id!)) { seen.add(fn.id!); out.push({ file: fn.file, callerFunction: fn.name }); }
   }
-
-  return results;
+  return out;
 }

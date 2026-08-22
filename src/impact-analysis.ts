@@ -22,8 +22,11 @@ export type RiskLevel = "critical" | "high" | "medium" | "low";
 export interface ImpactResult {
   /** Target file path that was analyzed. */
   target: string;
-  /** Highest risk level across all affected files. */
-  risk: RiskLevel;
+  /** Highest risk level across all affected files; absent when evidence is incomplete. */
+  risk?: RiskLevel;
+  assessment: "complete" | "partial" | "unavailable";
+  coverageReasons: string[];
+  omittedEdgeCount: number;
   /** Affected files ranked by risk, then fan-in. */
   affectedFiles: Array<{ path: string; risk: RiskLevel; fanIn: number; depth: number }>;
   /** All affected symbol names (unique). */
@@ -83,14 +86,7 @@ const ENTRY_BLAST_CRITICAL_DEPTH = 3;
 const ENTRY_BLAST_HIGH_DEPTH = 2;
 
 /** Entry-point / public-API heuristics. */
-const ENTRY_POINT_PATTERNS = [
-  /main\b/i,
-  /handler\b/i,
-  /index\b/i,
-  /app\b/i,
-  /server\b/i,
-  /route\b/i,
-];
+const ENTRY_POINT_PATTERNS = [/^main$/i];
 const TEST_FILE_RE = /\.(test|spec)\.[^.]+$/;
 
 // ── Risk classification ──────────────────────────────────────────
@@ -143,9 +139,8 @@ function computeFanIn(targetFile: string, callGraph: CallGraphResult | null, wor
   return count;
 }
 
-function isEntryPoint(filePath: string, _functions: FunctionInfo[]): boolean {
-  const base = filePath.split("/").pop() ?? "";
-  return ENTRY_POINT_PATTERNS.some((re) => re.test(base));
+function isEntryPoint(_filePath: string, functions: FunctionInfo[]): boolean {
+  return functions.some((fn) => ENTRY_POINT_PATTERNS.some((re) => re.test(fn.name)));
 }
 
 function isPublicApi(filePath: string, callGraph: CallGraphResult | null, workspaceRoot?: string): boolean {
@@ -201,8 +196,12 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
   const affectedSymbols: Set<string> = new Set();
 
   const { callGraph } = params;
+  const assessment: ImpactResult["assessment"] = !callGraph ? "unavailable" : callGraph.diagnostics ? (callGraph.diagnostics.unresolved + callGraph.diagnostics.ambiguous + callGraph.diagnostics.receiverUnknown > 0 ? "partial" : "complete") : "partial";
+  const coverageReasons = !callGraph ? ["call graph unavailable"] : assessment === "partial" ? ["call graph contains omitted or unresolved edges"] : [];
+  const omittedEdgeCount = callGraph?.diagnostics ? callGraph.diagnostics.unresolved + callGraph.diagnostics.ambiguous + callGraph.diagnostics.receiverUnknown : 0;
   const targetFanIn = computeFanIn(normalizedTarget, callGraph ?? null, workspaceRoot);
-  const targetIsEntryPoint = isEntryPoint(normalizedTarget, []);
+  const targetFns = callGraph?.functions.filter((f) => normalizePath(f.file) === normalizedTarget) ?? [];
+  const targetIsEntryPoint = isEntryPoint(normalizedTarget, targetFns);
   const targetIsPublicApi = isPublicApi(normalizedTarget, callGraph ?? null, workspaceRoot);
   const targetPageRank = pageRankScores?.get(normalizedTarget) ?? pageRankScores?.get(targetFile) ?? 0;
 
@@ -214,10 +213,10 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
     transitiveCallees: 0,
   };
   if (callGraph) {
-    const targetFns = callGraph.functions.filter((f) => normalizePath(f.file) === normalizedTarget);
+    const graphTargetFns = callGraph.functions.filter((f) => normalizePath(f.file) === normalizedTarget);
     const directCallerSet = new Set<string>();
     const directCalleeSet = new Set<string>();
-    for (const fn of targetFns) {
+    for (const fn of graphTargetFns) {
       for (const caller of fn.calledBy) directCallerSet.add(caller);
       for (const callee of fn.calls) directCalleeSet.add(callee);
     }
@@ -264,7 +263,7 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
       pageRank: pageRankScores?.get(normalizedPath) ?? pageRankScores?.get(path) ?? 0,
       fanIn,
       blastRadiusDepth: depth,
-      isEntryPoint: isEntryPoint(path, []),
+      isEntryPoint: isEntryPoint(path, callGraph?.functions.filter((f) => normalizePath(f.file) === normalizePath(path)) ?? []),
       isPublicApi: isPublicApi(path, callGraph ?? null, workspaceRoot),
     });
     affectedFiles.push({ path, risk, fanIn, depth });
@@ -294,16 +293,19 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
   });
 
   // Final risk: highest severity across target and all affected files.
-  let finalRisk = targetRisk;
+  let finalRisk: RiskLevel | undefined = assessment === "complete" ? targetRisk : undefined;
   for (const af of affectedFiles) {
-    if (RISK_ORDER[af.risk] < RISK_ORDER[finalRisk]) {
+    if (finalRisk && RISK_ORDER[af.risk] < RISK_ORDER[finalRisk]) {
       finalRisk = af.risk;
     }
   }
 
   return {
     target: targetFile,
-    risk: finalRisk,
+    ...(finalRisk ? { risk: finalRisk } : {}),
+    assessment,
+    coverageReasons,
+    omittedEdgeCount,
     affectedFiles,
     affectedSymbols: [...affectedSymbols],
     blastRadiusDepth: maxDepthReached,

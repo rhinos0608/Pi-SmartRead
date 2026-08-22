@@ -7,7 +7,7 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { realpathSync, statSync, readFileSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { relative as pathRelative, resolve as pathResolve } from "node:path";
 import {
     PROTOCOL_SCHEMA_VERSION,
@@ -1101,7 +1101,7 @@ function findSectionName(sections: string[], index: number): string {
 export async function runGitDiff(
     diffTarget: DiffTarget,
     cwd: string
-): Promise<{ file: string; addedCount: number; addedLines: number[]; deletedLines: number; changedLineRanges: Array<{ startLine: number; endLine: number }> }[] | null> {
+): Promise<{ file: string; status?: string; oldFile?: string; addedCount: number; addedLines: number[]; deletedLines: number; changedLineRanges: Array<{ startLine: number; endLine: number }> }[] | null> {
     const gitRoot = await findGitRoot(cwd);
     if (!gitRoot) return null;
 
@@ -1213,89 +1213,19 @@ export async function renderDiffSection(
     ];
 
     for (const change of changes) {
-        const symbolCount = countSymbolsInRanges(change.file, cwd, change.changedLineRanges);
-        const symbolNote = symbolCount > 0
-            ? `${symbolCount} symbol${symbolCount !== 1 ? "s" : ""} modified`
-            : "0 symbols (comment only)";
+        const absPath = pathResolve(cwd, change.file);
+        const symbols = (callGraph?.functions ?? []).filter((fn) => {
+            const fnPath = pathResolve(cwd, fn.file);
+            return fnPath === absPath && change.changedLineRanges.some((r) => fn.line <= r.endLine && (fn.endLine ?? fn.line) >= r.startLine);
+        });
+        const symbolNote = symbols.length > 0
+            ? `${symbols.length} symbol${symbols.length !== 1 ? "s" : ""} modified: ${symbols.map((fn) => fn.qualifiedName ?? fn.name).join(", ")}`
+            : "symbols unavailable (AST coverage incomplete)";
         lines.push(`  ${change.file}  — ${symbolNote}`);
     }
 
-    // Risk summary: use classifyFileRisk for each changed file.
-    // First-match precedence — only highest risk bucket per file.
-    const riskBuckets = new Map<string, string[]>();
-    riskBuckets.set("critical", []);
-    riskBuckets.set("high", []);
-    riskBuckets.set("medium", []);
-    riskBuckets.set("low", []);
-    const riskOrder = ["critical", "high", "medium", "low"];
-
-    for (const c of changes) {
-        const absPath = pathResolve(cwd, c.file);
-        // Compute fanIn from callGraph if available.
-        let fanIn = 0;
-        if (callGraph) {
-            const normalizedAbs = pathResolve(cwd, c.file);
-            for (const fn of callGraph.functions) {
-                const fnAbs = pathResolve(cwd, fn.file);
-                if (fnAbs === normalizedAbs) fanIn += fn.calledBy.length;
-            }
-        }
-        let risk = classifyFileRisk({
-            filePath: absPath,
-            pageRank: 0,
-            fanIn,
-            blastRadiusDepth: 0,
-        });
-        // Fallback: when no graph-derived risk signal exists, use total-churn heuristic
-        const totalChurn = c.addedCount + c.deletedLines;
-        if (risk === "low" && totalChurn > 20) {
-            risk = "critical";
-        } else if (risk === "low" && totalChurn > 10) {
-            risk = "high";
-        }
-        // Each file classified once by classifyFileRisk — first-match = only highest bucket.
-        const existing = riskBuckets.get(risk);
-        if (existing) {
-            existing.push(c.file);
-        } else {
-            riskBuckets.set(risk, [c.file]);
-        }
-    }
-
-    lines.push("", "Risk Summary:");
-    for (const level of riskOrder) {
-        const names = riskBuckets.get(level) ?? [];
-        if (names.length > 0) {
-            lines.push(`  ${level.toUpperCase().padEnd(10)} ${names.length} file${names.length !== 1 ? "s" : ""}  ${names.join(", ")}`);
-        }
-    }
+    // Risk requires complete impact evidence; diff churn alone is not evidence.
+    lines.push("", "Impact assessment: unavailable (diff does not include complete callgraph coverage)");
 
     return { text: lines.join("\n"), emittedFiles: changes.map(c => pathResolve(cwd, c.file)) };
-}
-
-/**
- * Count function/class definitions in changed line ranges using basic regex.
- */
-function countSymbolsInRanges(
-    relPath: string,
-    cwd: string,
-    ranges: Array<{ startLine: number; endLine: number }>
-): number {
-    if (ranges.length === 0) return 0;
-    const absPath = pathResolve(cwd, relPath);
-    let content: string;
-    try {
-        content = readFileSync(absPath, "utf-8");
-    } catch {
-        return 0;
-    }
-    const lines = content.split("\n");
-    const funcRegex = /^(?:export\s+)?(?:async\s+)?function\s+\w+|^(?:export\s+)?(?:class|interface|type|enum)\s+\w+|^(?:export\s+)?const\s+\w+\s*[:=]\s*(?:\(|async|function)/m;
-    let count = 0;
-    for (const range of ranges) {
-        for (let i = range.startLine - 1; i < Math.min(range.endLine, lines.length); i++) {
-            if (funcRegex.test(lines[i] ?? "")) count++;
-        }
-    }
-    return count;
 }

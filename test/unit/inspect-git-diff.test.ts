@@ -105,14 +105,12 @@ describe("inspect diff internals", () => {
             );
             const section = await renderDiffSection("unstaged", repoRoot);
             expect(section.text).toContain("Diff Impact");
-            expect(section.text).toContain("Risk Summary");
-            // 2 added lines → LOW
-            expect(section.text).toContain("LOW");
+            expect(section.text).not.toContain("Risk Summary");
             expect(section.text).not.toContain("HIGH");
             expect(section.text).not.toContain("CRITICAL");
         });
 
-        it("renders HIGH risk when a file has >10 added lines", async () => {
+        it("does not emit churn-based HIGH risk for many added lines", async () => {
             writeFileSync(join(repoRoot, "test.ts"), "export const x = 1;\n");
             git(repoRoot, ["add", "."]);
             git(repoRoot, ["commit", "-m", "initial"]);
@@ -120,11 +118,11 @@ describe("inspect diff internals", () => {
             for (let i = 0; i < 11; i++) lines.push(`export const y${i} = ${i};`);
             writeFileSync(join(repoRoot, "test.ts"), lines.join("\n") + "\n");
             const section = await renderDiffSection("unstaged", repoRoot);
-            expect(section.text).toContain("HIGH");
+            expect(section.text).not.toContain("HIGH");
             expect(section.text).not.toContain("CRITICAL");
         });
 
-        it("renders CRITICAL risk when a file has >20 added lines in one hunk", async () => {
+        it("does not emit churn-based CRITICAL risk for many added lines", async () => {
             writeFileSync(join(repoRoot, "test.ts"), "export const x = 1;\n");
             git(repoRoot, ["add", "."]);
             git(repoRoot, ["commit", "-m", "initial"]);
@@ -132,7 +130,8 @@ describe("inspect diff internals", () => {
             for (let i = 0; i < 21; i++) lines.push(`export const y${i} = ${i};`);
             writeFileSync(join(repoRoot, "test.ts"), lines.join("\n") + "\n");
             const section = await renderDiffSection("unstaged", repoRoot);
-            expect(section.text).toContain("CRITICAL");
+            expect(section.text).not.toContain("CRITICAL");
+            expect(section.text).not.toContain("HIGH");
         });
 
         it("returns no-changes section for clean repo", async () => {
