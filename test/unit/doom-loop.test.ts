@@ -672,30 +672,25 @@ function suggestionToolHints(suggestions: readonly Suggestion[]): string[] {
 }
 
 describe("doom-loop suggestions", () => {
-  it("read suggestions point to read_files query mode and symbol", () => {
+  it("read suggestions point to inspect and read query mode", () => {
     const hints = suggestionToolHints(SUGGESTIONS.read ?? []);
-    expect(hints).toContain("read_files");
-    expect(hints).toContain("symbol");
+    expect(hints).toContain("inspect");
+    expect(hints).toContain("read");
   });
 
-  it("does not expose dead grep tool suggestions", () => {
-    expect(SUGGESTIONS["grep"]).toBeUndefined();
+  it("grep suggestions point to read query mode", () => {
+    const suggestions = SUGGESTIONS.grep ?? [];
+    expect(suggestionToolHints(suggestions)).toContain("read");
+    expect(suggestions).toContainEqual(expect.objectContaining({
+      toolHint: "read",
+      toolInput: { query: "<describe what you are looking for>" },
+    }));
   });
 
-  it("search suggestions offer deep depth and symbol alternatives", () => {
-    const hints = suggestionToolHints(SUGGESTIONS.search ?? []);
-    expect(hints).toContain("symbol");
-    const deepRetry = (SUGGESTIONS.search ?? []).find(
-      (s) => typeof s !== "string" && s.toolInput?.depth === "deep",
-    );
-    expect(deepRetry).toBeDefined();
-  });
-
-  it("read_files suggestions include query-mode hint", () => {
-    const withQuery = (SUGGESTIONS.read_files ?? []).find(
-      (s) => typeof s !== "string" && s.toolInput?.query !== undefined,
-    );
-    expect(withQuery).toBeDefined();
+  it("inspect suggestions offer read query and grep alternatives", () => {
+    const hints = suggestionToolHints(SUGGESTIONS.inspect ?? []);
+    expect(hints).toContain("read");
+    expect(hints).toContain("grep");
   });
 
   it("has no suggestions for removed tools", () => {
@@ -703,6 +698,10 @@ describe("doom-loop suggestions", () => {
     expect(SUGGESTIONS["deep_search"]).toBeUndefined();
     expect(SUGGESTIONS["find_symbol"]).toBeUndefined();
     expect(SUGGESTIONS["symbol_info"]).toBeUndefined();
+    expect(SUGGESTIONS["read_files"]).toBeUndefined();
+    expect(SUGGESTIONS["symbol"]).toBeUndefined();
+    expect(SUGGESTIONS["search"]).toBeUndefined();
+    expect(SUGGESTIONS["repo_map"]).toBeUndefined();
   });
 });
 
@@ -929,6 +928,57 @@ describe("action stagnation read-like threshold", () => {
       recordToolCall(state, "search", `call-${i + 1}`, { query: `x${i}` });
     }
     expect(state.pendingWarnings.size).toBe(0);
+  });
+});
+
+// ─── inspect/grep read-like threshold ──────────────────────────────────
+
+describe("inspect and grep use high-volume read-like threshold", () => {
+  let state: DoomLoopState;
+
+  beforeEach(() => {
+    state = createDoomLoopState();
+  });
+
+  it.each(["inspect", "grep"])(
+    "does not fire action-stagnation at 8 repeated low-diversity %s calls (read-like threshold 16)",
+    (tool) => {
+      const focuses = ["a", "b", "c", "a", "c", "b", "a", "b"];
+      const inputKey = tool === "inspect" ? "path" : "pattern";
+      for (let i = 0; i < focuses.length; i++) {
+        recordToolCall(state, tool, `call-${i + 1}`, { [inputKey]: focuses[i] });
+      }
+      for (let i = 0; i < focuses.length; i++) {
+        recordToolResult(state, `call-${i + 1}`, "same content");
+      }
+      // 8 calls < read-like threshold 16 → no stagnation
+      expect(state.pendingWarnings.size).toBe(0);
+    },
+  );
+});
+
+describe("mixed inspect/grep sequence triggers read-file-loop", () => {
+  let state: DoomLoopState;
+
+  beforeEach(() => {
+    state = createDoomLoopState();
+  });
+
+  it("fires read-file-loop warning for 15-call mixed inspect/grep sequence", () => {
+    // Alternate inspect and grep — both are read-like tools now
+    for (let i = 0; i < 15; i++) {
+      const tool = i % 2 === 0 ? "inspect" : "grep";
+      const input = i % 2 === 0
+        ? { path: `/file${i}.ts` }
+        : { pattern: `query${i}` };
+      recordToolCall(state, tool, `call-${i}`, input);
+    }
+    // Record results — enough identical content to promote the staged warning
+    for (let i = 0; i < 15; i++) {
+      recordToolResult(state, `call-${i}`, "same content");
+    }
+    const warnings = Array.from(state.pendingWarnings.values());
+    expect(warnings.some((w) => w.kind === "read-file-loop")).toBe(true);
   });
 });
 

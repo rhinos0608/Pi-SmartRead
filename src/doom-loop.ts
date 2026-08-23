@@ -151,6 +151,8 @@ const READ_LIKE_TOOLS = new Set([
   "read_files",
   "search",
   "symbol",
+  "inspect",
+  "grep",
 ]);
 
 const CONTEXT_GATHERING_TOOLS = new Set([

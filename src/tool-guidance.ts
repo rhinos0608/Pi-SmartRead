@@ -8,7 +8,7 @@ const TOOL_GUIDE_LINES = [
   "- inspect { path }: directory → ranked repo map; file → structural facts (callers, parent, children, overrides, re-exports) + quality signals (complexity, public API, reuse, recency, tests, deprecation). Inspect returns metadata evidence only — you must read a file before editing it.",
   "- grep { pattern }: primary code search — BM25 ranking + symbol matching + semantic fallback. Also accepts { queries: [...] } with 1-10 full search objects. Grep returns search-match evidence only — you must read a file before editing it.",
   "- skill: manage agent skills.",
-  "Prefer narrow params. After code changes, re-run reads/inspects that informed decisions.",
+  "Prefer narrow params. Large unbounded source reads may return a compact AST symbol outline instead of the full source body — use offset/limit or symbol for specific slices. After code changes, re-run reads/inspects that informed decisions.",
 ];
 
 export function renderSmartReadToolGuide(task?: string): string {

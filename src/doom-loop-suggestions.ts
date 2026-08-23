@@ -31,31 +31,22 @@ export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
   read: [
     str("if file is large, try offset + limit"),
     str("if file keeps being read identically, the content may already be what you expect"),
-    { text: 'if searching for a symbol, use symbol { query: "name" }', toolHint: "symbol" },
-    { text: 'use read_files with query: "your intent" to rank and read relevant files', toolHint: "read_files", toolInput: { query: "<describe what you are looking for>" } },
-    { text: "use repo_map to discover related files", toolHint: "repo_map" },
+    { text: 'if searching for a symbol, use inspect { path: "path/to/file.ts" } for structural facts', toolHint: "inspect" },
+    { text: 'use read { query: "your intent" } to rank and read relevant files', toolHint: "read", toolInput: { query: "<describe what you are looking for>" } },
+    { text: "use inspect to discover related files and repo structure", toolHint: "inspect" },
   ],
-  read_files: [
-    str("try reducing the number of files or use offset/limit to narrow focus"),
-    { text: 'add query: "your intent" to rank files by relevance instead of reading everything', toolHint: "read_files", toolInput: { query: "<describe what you are looking for>" } },
-    { text: "use repo_map to discover related files", toolHint: "repo_map" },
+  inspect: [
+    str("if a file is too large, read { path, offset, limit } to get a focused slice"),
+    str("if inspecting a directory, try focus: [\"src/auth.ts\", \"AuthService.login\"] to boost relevant files or symbols"),
+    { text: 'use read { query: "your intent" } to rank and read relevant files', toolHint: "read", toolInput: { query: "<describe what you are looking for>" } },
+    str("use inspect on a different file to check callers or children"),
+    { text: "use grep { pattern, path } to search across files for a name or concept", toolHint: "grep" },
   ],
-  symbol: [
-    str('try a shorter or unqualified name (e.g. "login" instead of "AuthService.login")'),
-    str("use action=outline for file structure, action=references for usages, action=implementations for subclass/impl finding"),
-    { text: 'try search with depth: "deep" when the symbol name is uncertain', toolHint: "search", toolInput: { depth: "deep" } },
-  ],
-  search: [
-    str("try a more specific query"),
-    str("try matchMode=literal if regex characters are accidental"),
-    str("try reducing contextLines or narrowing directory"),
-    { text: 'retry with depth: "deep" for grep + AST + semantic + symbol + graph + LSP search', toolHint: "search", toolInput: { depth: "deep" } },
-    { text: 'use symbol { query: "name" } if this is a known identifier', toolHint: "symbol" },
-  ],
-  repo_map: [
-    str("try compact: true for more token-efficient output"),
-    str("use focus to boost relevant symbols or files"),
-    str("use mapTokens to increase the token budget for larger repos"),
+  grep: [
+    str("try a more specific pattern or narrower path"),
+    str("try literal: true for exact substring match"),
+    str("try ignoreCase: true if casing is uncertain"),
+    { text: "use read { query: \"your intent\" } for semantic multi-channel search", toolHint: "read", toolInput: { query: "<describe what you are looking for>" } },
   ],
   graph_mutate: [
     str("verify the from/to paths exist"),

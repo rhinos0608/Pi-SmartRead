@@ -30,11 +30,10 @@ Pi-SmartRead is the Pi coding agent's code-intelligence extension — unified fi
 
 ## `/Users/rhinesharar/Pi-SmartEdit` (what it consumes from Pi-SmartRead)
 
-Pi-SmartEdit's `AGENTS.md` states it consumes:
-- `src/index.ts` subscribes to `tool_result` for `read`, `read_files`, `read_multiple_files`, and `intent_read`, then calls `recordRead`/`recordReadSession` from `src/core/read-cache.ts` so edits are allowed only against seen/read files.
-  - **In Pi-SmartRead**, the equivalent is `src/file-read-cache.ts` (`recordContiguous`, `recordSparse`, `getSnapshot`, `invalidate`, `clearSession`, `resolveSessionKey`), which stores per-session file snapshots for anchor-stale recovery. Pi-SmartEdit's `recordRead`/`recordReadSession` references should map to this module.
+Current SmartRead MCP evidence events are `pi.tool_result.inspect`, `pi.tool_result.read`, and `pi.tool_result.grep`.
+- **In Pi-SmartRead**, `src/file-read-cache.ts` (`recordContiguous`, `recordSparse`, `getSnapshot`, `invalidate`, `clearSession`, `resolveSessionKey`) stores per-session file snapshots for anchor-stale recovery. Pi-SmartEdit also consumes `read_files`, `read_multiple_files`, and `intent_read` compatibility events in its own extension wiring.
 - `src/patch.ts` queries Pi-SmartRead's resolver over `RPC_CHANNELS.inspectPatch` for evidence authorization.
-  - **In Pi-SmartRead**, this is served by `src/workspace-evidence-resolver.ts` and wired at `src/index.ts:441-450` via `installInspectAndResolver(bus)`.
+  - **In Pi-SmartRead**, this is served by `src/workspace-evidence-resolver.ts` and wired at `src/index.ts:702-706` via `installInspectAndResolver(bus)`.
 
 ## Coordination note
 

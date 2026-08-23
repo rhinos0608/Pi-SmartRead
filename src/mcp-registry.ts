@@ -210,7 +210,7 @@ let sharedResolverBus: EvidenceBus | null = null;
  * Install the inspect tool and the versioned evidence RPC resolver on the
  * extension's event bus. Called by the extension at activation time.
  *
- * - Registers `inspect` (query/symbol/map modes).
+ * - Registers path-based `inspect` mode.
  * - Subscribes to RPC `resolve_evidence` requests on `RPC_CHANNELS.inspectPatch`.
  * - Rebuilds the resolver cache from any `inspect`/`read` tool_result details seen
  *   on the bus. The tool result details are the durable source of truth.
