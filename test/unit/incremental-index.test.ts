@@ -739,3 +739,64 @@ describe("createIncrementalIndex updateGraphStats", () => {
     expect(graphStats.length).toBeGreaterThan(0);
   });
 });
+
+// ── WP-9: captureFileEntries snapshot adapter ────────────────────
+
+import { captureFileEntries } from "../../src/incremental-index.js";
+
+describe("captureFileEntries", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "capture-"));
+    mkdirSync(join(tmpDir, "src"), { recursive: true });
+    writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
+    writeFileSync(join(tmpDir, "src", "b.ts"), "export const b = 2;");
+    writeFileSync(join(tmpDir, "README.md"), "# Test");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns entries for all files in the directory", () => {
+    const entries = captureFileEntries(tmpDir);
+    const paths = entries.map((e) => e.path).sort();
+    expect(paths).toEqual(["README.md", "src/a.ts", "src/b.ts"]);
+  });
+
+  it("content hashes match hashFileSync on disk", () => {
+    const entries = captureFileEntries(tmpDir);
+    for (const entry of entries) {
+      const expected = hashFileSync(join(tmpDir, entry.path));
+      expect(entry.contentHash).toBe(expected);
+    }
+  });
+
+  it("returns deterministically ordered entries across calls", () => {
+    const first = captureFileEntries(tmpDir);
+    const second = captureFileEntries(tmpDir);
+    expect(first).toEqual(second);
+  });
+
+  it("uses cache when available (no fresh scan)", () => {
+    // Build cache via buildCache first
+    buildCache(tmpDir);
+
+    const entries = captureFileEntries(tmpDir);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(entry.contentHash).toHaveLength(64);
+    }
+  });
+
+  it("returns empty array for empty directory", () => {
+    const empty = mkdtempSync(join(tmpdir(), "capture-empty-"));
+    try {
+      const entries = captureFileEntries(empty);
+      expect(entries).toEqual([]);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+});

@@ -737,3 +737,32 @@ export function clearIncrementalIndexInstance(root?: string): void {
     _indexInstances.clear();
   }
 }
+
+// ── Snapshot adapter ──────────────────────────────────────────────
+
+/**
+ * Produce snapshot-compatible file entries from the current indexed state.
+ * Uses the on-disk cache when available (no re-scan); falls back to a
+ * one-shot hashDirectory when no cache exists.
+ *
+ * Returns entries sorted by path for deterministic ordering, suitable
+ * for feeding into computeFileLineage or workspace-snapshot-store.
+ */
+export function captureFileEntries(
+  root: string,
+): Array<{ path: string; contentHash: string }> {
+  const resolvedRoot = resolve(root);
+  const cachePath = cacheFilePath(resolvedRoot);
+  const { files } = loadCache(cachePath);
+
+  // Use cached state when available; fall back to a fresh scan.
+  const source: FileHashCache =
+    Object.keys(files).length > 0 ? files : hashDirectory(resolvedRoot);
+
+  return Object.keys(source)
+    .sort()
+    .map((filePath) => ({
+      path: filePath,
+      contentHash: source[filePath]!.hash,
+    }));
+}

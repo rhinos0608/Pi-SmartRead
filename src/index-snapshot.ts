@@ -27,12 +27,25 @@ export interface SnapshotVerification {
   manifest?: IndexSnapshotManifest;
 }
 
+export interface SourceEntry {
+  path: string;
+  contentHash: string;
+}
+
 export function snapshotPath(root: string, kind: string): string {
   return join(resolve(root), ".pi-smartread", `${kind}-snapshot.json.gz`);
 }
 
-export function computeSourceHash(paths: string[]): string {
-  return createHash("sha256").update([...paths].sort().join("\0")).digest("hex");
+export function computeSourceHash(entries: SourceEntry[]): string;
+export function computeSourceHash(paths: string[]): string;
+export function computeSourceHash(entriesOrPaths: (string | SourceEntry)[]): string {
+  const entries: SourceEntry[] = entriesOrPaths.map((e) =>
+    typeof e === "string" ? { path: e, contentHash: "" } : e,
+  );
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  return createHash("sha256")
+    .update(JSON.stringify(entries.map((e) => [e.path, e.contentHash])))
+    .digest("hex");
 }
 
 export function writeSnapshot<T>(root: string, kind: string, data: T, manifest: Omit<IndexSnapshotManifest, "schemaVersion" | "createdAt" | "root" | "kind">): string {
