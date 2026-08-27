@@ -6,6 +6,14 @@ import { createIntentReadTool } from "../../src/intent-read.js";
 import type { EmbedRequest, EmbedResult } from "../../src/embedding.js";
 import { writeAdr } from "../../src/adr-store.js";
 
+// Mock getSharedContextGraphAsync to avoid tree-sitter crashes on stub cwd paths like "\/"
+vi.mock("../../src/mcp-registry.js", () => ({
+  getSharedContextGraphAsync: vi.fn().mockResolvedValue({
+    getFileNeighbours: vi.fn().mockResolvedValue([]),
+    getMutationNeighbours: vi.fn().mockReturnValue([]),
+  }),
+}));
+
 // Stub fetchEmbeddings: returns unit vectors for easy scoring
 function makeEmbedder(vectors: number[][]): (req: EmbedRequest) => Promise<EmbedResult> {
   return async () => ({ vectors });
@@ -1118,5 +1126,39 @@ describe("intent_read: ADR boost (WP-8)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("intent_read: graph-provider consolidation (Keystone P1-W3)", () => {
+  it("intent-read.ts no longer contains new ContextGraph(", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(
+      path.resolve(import.meta.dirname ?? ".", "../../src/intent-read.ts"),
+      "utf-8",
+    );
+    expect(src).not.toContain("new ContextGraph(");
+  });
+
+  it("uses getSharedContextGraphAsync from mcp-registry", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(
+      path.resolve(import.meta.dirname ?? ".", "../../src/intent-read.ts"),
+      "utf-8",
+    );
+    expect(src).toContain("getSharedContextGraphAsync");
+    expect(src).toContain("await import(\"./mcp-registry.js\")");
+    expect(src).not.toContain('from "./mcp-registry.js"');
+  });
+
+  it("no longer has a module-level contextGraphCache LruCache", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(
+      path.resolve(import.meta.dirname ?? ".", "../../src/intent-read.ts"),
+      "utf-8",
+    );
+    expect(src).not.toContain("contextGraphCache");
   });
 });

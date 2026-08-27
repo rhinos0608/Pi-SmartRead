@@ -1,3 +1,15 @@
+/**
+ * intent-read.ts — context-driven multi-file read with semantic ranking.
+ *
+ * Import-cycle safety: this module MUST NOT static-import mcp-registry.ts
+ * -- doing so creates a circular ES module dependency:
+ *   mcp-registry.ts -> grep-tool.ts -> search-tool.ts -> hook.ts ->
+ *   read-many.ts -> intent-read.ts -> mcp-registry.ts
+ * which breaks runtime loading with a temporal-dead-zone ReferenceError.
+ * mcp-registry is instead imported lazily via dynamic `await import()`
+ * inside the function that needs it, after the module graph has
+ * finished resolving.
+ */
 import { existsSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
@@ -16,7 +28,6 @@ import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
 import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
 import {
   findDirectImportNeighbours,
-  ContextGraph,
 } from "./context-graph.js";
 import {
   type FileCandidate,
@@ -72,7 +83,6 @@ const MIN_RELEVANCE_SCORE = 0.05;
 const MAX_INTENT_READ_FILES = 500;
 const ADR_BOOST = 0.3;
 
-const contextGraphCache = new LruCache<ContextGraph>(10);
 
 function createEmbeddingCacheKey(config: EmbedRequest, query: string, inputs: string[]): string {
   return JSON.stringify({
@@ -279,16 +289,10 @@ export function createIntentReadTool(
 
       const candidateCountBeforeGraph = resolvedFiles.length;
 
-      // Build shared ContextGraph with symbol index for all graph-aware phases.
-      // This pre-builds the symbol → tags index so probing and symbol-neighbour
-      // expansion use the fast O(1) lookup path instead of full-repo rescans.
-      // Skip for directories that don't look like real projects (e.g. "/" in tests).
-      let sharedGraph = contextGraphCache.get(ctx.cwd);
-      if (!sharedGraph) {
-        sharedGraph = new ContextGraph(ctx.cwd);
-        contextGraphCache.set(ctx.cwd, sharedGraph);
-      }
-      
+      // Project marker detection — gates graph-heavy expansion phases
+      // (mutation edges, probe) to avoid wasted work on test stubs.
+      // MUST run before graph construction so we can skip the expensive
+      // buildContextGraph when no project root is present (e.g. cwd="/" in tests).
       const hasProjectMarker =
         existsSync(join(ctx.cwd, ".git")) ||
         existsSync(join(ctx.cwd, "package.json")) ||
@@ -296,10 +300,17 @@ export function createIntentReadTool(
         existsSync(join(ctx.cwd, "pyproject.toml")) ||
         existsSync(join(ctx.cwd, "Cargo.toml")) ||
         existsSync(join(ctx.cwd, "go.mod"));
-      
-      if (hasProjectMarker && embeddingConfig?.probeEnabled === true) {
-        await sharedGraph.buildContextGraph({ forceRefresh: false, includeSymbols: true, includeCalls: true });
-      }
+
+      // Shared ContextGraph from the canonical mcp-registry singleton (revision-gated,
+      // concurrent-build-coalescing). Only build when the graph will actually be
+      // consumed (probe needs symbol/call index, mutation needs edge store).
+      // Unconditionally building for e.g. cwd="/" triggers a full filesystem scan
+      // + tree-sitter parse of every source file, which crashes on adversarial files.
+      const needsGraph = hasProjectMarker || embeddingConfig?.probeEnabled === true;
+      const { getSharedContextGraphAsync } = await import("./mcp-registry.js");
+      const sharedGraph = needsGraph
+        ? await getSharedContextGraphAsync(ctx.cwd)
+        : null;
 
       // Tracking sets for structural signals (populated during expansion)
       const probeAddedSet = new Set<string>();
@@ -316,7 +327,7 @@ export function createIntentReadTool(
           try {
             probing = await probeQuery(query, {
               maxProbeAdded: Math.min(4, probeSlots),
-              graph: sharedGraph,
+              graph: sharedGraph!,
             });
             if (probing.status === "ok" && probing.addedPaths.length > 0) {
               const probeExisting = new Set(resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)));
@@ -385,7 +396,7 @@ export function createIntentReadTool(
         for (const seedFile of seedFiles) {
           if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
           try {
-            const neighbours = await sharedGraph.getFileNeighbours(seedFile.path, { includeSymbols: true });
+            const neighbours = await sharedGraph!.getFileNeighbours(seedFile.path, { includeSymbols: true });
             for (const n of neighbours) {
               if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
               const normalized = normalizeCandidatePath(ctx.cwd, n.path);
@@ -405,7 +416,7 @@ export function createIntentReadTool(
         for (const seedFile of callSeedFiles) {
           if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
           try {
-            const neighbours = await sharedGraph.getFileNeighbours(seedFile.path, { includeCalls: true });
+            const neighbours = await sharedGraph!.getFileNeighbours(seedFile.path, { includeCalls: true });
             for (const n of neighbours) {
               if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
               const normalized = normalizeCandidatePath(ctx.cwd, n.path);
@@ -457,7 +468,7 @@ export function createIntentReadTool(
         for (const seedFile of mutationSeedFiles) {
           if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
           try {
-            const neighbours = sharedGraph.getMutationNeighbours(seedFile.path);
+            const neighbours = sharedGraph!.getMutationNeighbours(seedFile.path);
             for (const n of neighbours) {
               if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
               const normalized = normalizeCandidatePath(ctx.cwd, n.path);
