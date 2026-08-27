@@ -16,6 +16,8 @@ import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.
 import { runPostEditDiagnosticsFallback } from "./post-edit-fallback.js";
 import { isDiagnosticsClaimed } from "./mutation-ownership.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
+import { registerRepositoryIntelligence } from "./repository-intelligence-registry.js";
+import { createRepositoryIntelligenceService } from "./repository-intelligence.js";
 import { getIncrementalIndex } from "./incremental-index.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
@@ -696,6 +698,12 @@ export default async function (pi: ExtensionAPI) {
     resolveSymbol: (s, cwd) => resolveSymbolForReadTool(s, cwd, freshGraphGetter),
   }));
 
+
+  // 3.8 RepositoryIntelligenceService: register the Phase-1 singleton
+  //     so downstream consumers can access it via getRepositoryIntelligence().
+  try {
+    registerRepositoryIntelligence(createRepositoryIntelligenceService());
+  } catch { /* already registered or module init issue — non-fatal */ }
   // 4. Versioned evidence RPC resolver install: best-effort, runs in the
   //    background. The extension still works without it — inspect just
   //    doesn't publish envelopes for patch to resolve.
