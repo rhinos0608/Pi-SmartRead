@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "src/tasks.py",
+      "contentHash": "python task implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "lib/tasks.py",
+      "contentHash": "python task implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/tasks.py",
+      "afterPath": "lib/tasks.py"
+    }
+  ],
+  "description": "Python pure move",
+  "category": "positive"
+}

@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "src/old.py",
+      "contentHash": "old content"
+    }
+  ],
+  "after": [],
+  "expected": [
+    {
+      "kind": "REMOVED",
+      "beforePath": "src/old.py"
+    }
+  ],
+  "description": "Empty after revision",
+  "category": "edge-case"
+}

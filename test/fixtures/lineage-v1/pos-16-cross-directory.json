@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "packages/core/index.ts",
+      "contentHash": "core index implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "src/core/index.ts",
+      "contentHash": "core index implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "packages/core/index.ts",
+      "afterPath": "src/core/index.ts"
+    }
+  ],
+  "description": "Cross-directory TypeScript move",
+  "category": "positive"
+}

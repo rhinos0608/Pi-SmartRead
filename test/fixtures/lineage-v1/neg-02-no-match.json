@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/index.js",
+      "contentHash": "red-black-tree"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/worker.py",
+      "contentHash": "blue-ocean"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

@@ -1,0 +1,23 @@
+{
+  "before": [
+    {
+      "path": "src/parser.ts",
+      "contentHash": "ts parser stable"
+    }
+  ],
+  "after": [
+    {
+      "path": "src/parser.ts",
+      "contentHash": "ts parser stable"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "src/parser.ts",
+      "afterPath": "src/parser.ts"
+    }
+  ],
+  "description": "TypeScript unchanged file",
+  "category": "positive"
+}

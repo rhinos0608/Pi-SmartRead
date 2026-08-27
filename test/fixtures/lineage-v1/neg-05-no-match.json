@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/auth.ts",
+      "contentHash": "token-authentication"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/billing.js",
+      "contentHash": "invoice-payment"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

@@ -1,0 +1,76 @@
+{
+  "before": [
+    {
+      "path": "src/a.ts",
+      "contentHash": "alpha implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "src/b.js",
+      "contentHash": "beta implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "lib/a.ts",
+      "contentHash": "alpha implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "lib/b.js",
+      "contentHash": "beta implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/a.ts",
+      "afterPath": "lib/a.ts"
+    },
+    {
+      "kind": "MOVED",
+      "beforePath": "src/b.js",
+      "afterPath": "lib/b.js"
+    }
+  ],
+  "description": "Multiple independent moves",
+  "category": "positive"
+}

@@ -1,0 +1,47 @@
+{
+  "before": [
+    {
+      "path": "src/bundle.py",
+      "contentHash": "split shared implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "src/part-a.py",
+      "contentHash": "split shared implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "src/part-b.py",
+      "contentHash": "new independent module"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/bundle.py",
+      "afterPath": "src/part-a.py"
+    }
+  ],
+  "description": "Split leaves one matched descendant and one addition",
+  "category": "positive"
+}

@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/parse.py",
+      "contentHash": "syntax-parser"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/render.ts",
+      "contentHash": "pixel-renderer"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

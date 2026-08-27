@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "src/client.js",
+      "contentHash": "js client implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "packages/client.js",
+      "contentHash": "js client implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/client.js",
+      "afterPath": "packages/client.js"
+    }
+  ],
+  "description": "JavaScript pure move",
+  "category": "positive"
+}

@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/small.js",
+      "contentHash": "aaaaa"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/large.ts",
+      "contentHash": "zzzzz"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

@@ -1,0 +1,25 @@
+{
+  "before": [
+    {
+      "path": "a.ts",
+      "contentHash": "alpha"
+    },
+    {
+      "path": "b.py",
+      "contentHash": "bravo"
+    }
+  ],
+  "after": [
+    {
+      "path": "c.js",
+      "contentHash": "charlie"
+    },
+    {
+      "path": "d.ts",
+      "contentHash": "delta"
+    }
+  ],
+  "expected": [],
+  "description": "All files differ with dissimilar names",
+  "category": "edge-case"
+}

@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/readme.md",
+      "contentHash": "documentation-sun"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/build.py",
+      "contentHash": "compiler-moon"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

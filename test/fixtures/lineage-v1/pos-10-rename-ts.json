@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "src/helper.ts",
+      "contentHash": "typescript helper implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "src/helpers.ts",
+      "contentHash": "typescript helper implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/helper.ts",
+      "afterPath": "src/helpers.ts"
+    }
+  ],
+  "description": "TypeScript rename with identical content",
+  "category": "positive"
+}

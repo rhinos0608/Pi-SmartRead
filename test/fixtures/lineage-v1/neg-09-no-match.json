@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/cache.ts",
+      "contentHash": "memory-cache"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/queue.js",
+      "contentHash": "disk-queue"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

@@ -1,0 +1,27 @@
+{
+  "before": [
+    {
+      "path": "src/a.ts",
+      "contentHash": "same"
+    },
+    {
+      "path": "src/a.ts",
+      "contentHash": "same"
+    }
+  ],
+  "after": [
+    {
+      "path": "src/a.ts",
+      "contentHash": "same"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "src/a.ts",
+      "afterPath": "src/a.ts"
+    }
+  ],
+  "description": "Duplicate before entry",
+  "category": "edge-case"
+}

@@ -1,0 +1,23 @@
+{
+  "before": [
+    {
+      "path": "src/one.ts",
+      "contentHash": "shared content token alpha beta gamma"
+    }
+  ],
+  "after": [
+    {
+      "path": "src/two.py",
+      "contentHash": "shared content token alpha beta gamma"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "POSSIBLE_MATCH",
+      "beforePath": "src/one.ts",
+      "afterPath": "src/two.py"
+    }
+  ],
+  "description": "Lower-confidence structural near match",
+  "category": "positive"
+}

@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/foo.ts",
+      "contentHash": "north-east"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/bar.py",
+      "contentHash": "south-west"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}
