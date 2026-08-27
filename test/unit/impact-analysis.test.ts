@@ -381,4 +381,84 @@ describe("computeImpact", () => {
     expect(paths).toEqual(["src/b.ts", "src/c.ts"]);
     expect(result.blastRadiusDepth).toBe(2);
   });
+
+  it("reports partial assessment when files skipped due to unsupported language", async () => {
+    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const cg = {
+      functions: [
+        { name: "fnA", file: "src/a.ts", line: 1, calls: [], calledBy: [] },
+      ],
+      callersOf: () => [],
+      calleesOf: () => [],
+      edgeCount: 0,
+      diagnostics: {
+        total: 0, resolved: 0, unresolved: 0,
+        ambiguous: 0, external: 0, receiverUnknown: 0,
+        skippedFileCount: 3,
+      } as any,
+    };
+
+    const result = await computeImpact({
+      targetFile: "src/a.ts",
+      callGraph: cg as any,
+    });
+    expect(result.assessment).toBe("partial");
+    expect(result.coverageReasons).toEqual(
+      expect.arrayContaining([expect.stringMatching(/skipped.*unsupported/)])
+    );
+  });
+
+  it("reports partial when skipped files AND unresolved edges exist", async () => {
+    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const cg = {
+      functions: [
+        { name: "fnA", file: "src/a.ts", line: 1, calls: ["fnB"], calledBy: [] },
+      ],
+      callersOf: () => [],
+      calleesOf: () => [],
+      edgeCount: 1,
+      diagnostics: {
+        total: 1, resolved: 0, unresolved: 1,
+        ambiguous: 0, external: 0, receiverUnknown: 0,
+        skippedFileCount: 2,
+      } as any,
+    };
+
+    const result = await computeImpact({
+      targetFile: "src/a.ts",
+      callGraph: cg as any,
+    });
+    expect(result.assessment).toBe("partial");
+    expect(result.coverageReasons.length).toBeGreaterThanOrEqual(2);
+    expect(result.coverageReasons).toEqual(
+      expect.arrayContaining([expect.stringMatching(/omitted or unresolved/)])
+    );
+    expect(result.coverageReasons).toEqual(
+      expect.arrayContaining([expect.stringMatching(/skipped.*unsupported/)])
+    );
+  });
+
+  it("still reports complete when diagnostics present but skippedFileCount is 0", async () => {
+    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const cg = {
+      functions: [
+        { name: "fnA", file: "src/a.ts", line: 1, calls: [], calledBy: [] },
+      ],
+      callersOf: () => [],
+      calleesOf: () => [],
+      edgeCount: 0,
+      diagnostics: {
+        total: 0, resolved: 0, unresolved: 0,
+        ambiguous: 0, external: 0, receiverUnknown: 0,
+        skippedFileCount: 0,
+      } as any,
+    };
+
+    const result = await computeImpact({
+      targetFile: "src/a.ts",
+      callGraph: cg as any,
+    });
+    expect(result.assessment).toBe("complete");
+    expect(result.coverageReasons).toEqual([]);
+  });
 });

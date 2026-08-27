@@ -26,7 +26,7 @@ type NodeId = string;
 export type FunctionKind = "function" | "method";
 export interface FunctionInfo { name: string; file: string; line: number; calls: string[]; calledBy: string[]; id?: NodeId; qualifiedName?: string; kind?: FunctionKind; endLine?: number; isLeaf?: boolean; }
 export interface CallEdge { caller: string; callee: string; resolved: boolean; callerLine?: number; callerId?: NodeId; calleeId?: NodeId; calleeFile?: string; receiver?: string; importPath?: string; callSite?: { line: number; column: number }; diagnostic?: "external" | "ambiguous" | "unresolved" | "receiver-unknown"; }
-export interface CallGraphDiagnostics { total: number; resolved: number; unresolved: number; ambiguous: number; external: number; receiverUnknown: number; }
+export interface CallGraphDiagnostics { total: number; resolved: number; unresolved: number; ambiguous: number; external: number; receiverUnknown: number; skippedFileCount: number; }
 export interface CallGraphResult { functions: FunctionInfo[]; callersOf: (nameOrId: string) => FunctionInfo[]; calleesOf: (nameOrId: string) => FunctionInfo[]; findById?: (id: NodeId) => FunctionInfo | undefined; edgeCount: number; edgeList?: CallEdge[]; diagnostics?: CallGraphDiagnostics; }
 
 type Decl = FunctionInfo & { id: NodeId; qualifiedName: string; kind: FunctionKind; start: number; end: number; scope: string[]; fileAbs: string; node: Parser.SyntaxNode };
@@ -97,11 +97,11 @@ function target(n: Parser.SyntaxNode): { name: string; receiver?: string } | und
 function enclosing(ds: Decl[], n: Parser.SyntaxNode): Decl | undefined { return ds.filter(d => d.start <= n.startIndex && d.end >= n.endIndex).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]; }
 
 export async function buildCallGraph(files: string[]): Promise<CallGraphResult> {
-  await initParser(); const root = commonRoot(files), data: FileData[] = [];
-  for (const input of files) { const path = resolve(input), lang = filenameToLang(path), g = lang && grammar(lang); if (!lang || !g) continue; let code: string; try { code = readFileSync(path, "utf8"); } catch { continue; } const parser = new Parser(); parser.setLanguage(g); const tree = parser.parse(code); const rel = relative(root, path) || extname(path); data.push({ path, rel, tree, lang, decls: decls(tree.rootNode, rel, path), imports: imports(tree, path, lang) }); }
+  await initParser(); const root = commonRoot(files), data: FileData[] = []; let skipped = 0;
+  for (const input of files) { const path = resolve(input), lang = filenameToLang(path), g = lang && grammar(lang); if (!lang || !g) { skipped++; continue; } let code: string; try { code = readFileSync(path, "utf8"); } catch { skipped++; continue; } const parser = new Parser(); parser.setLanguage(g); const tree = parser.parse(code); const rel = relative(root, path) || extname(path); data.push({ path, rel, tree, lang, decls: decls(tree.rootNode, rel, path), imports: imports(tree, path, lang) }); }
   const byFile = new Map(data.map(d => [d.path, d])), byId = new Map<string, Decl>();
   for (const d of data) for (const fn of d.decls) byId.set(fn.id, fn);
-  const edges: CallEdge[] = [], counts: CallGraphDiagnostics = { total: 0, resolved: 0, unresolved: 0, ambiguous: 0, external: 0, receiverUnknown: 0 };
+  const edges: CallEdge[] = [], counts: CallGraphDiagnostics = { total: 0, resolved: 0, unresolved: 0, ambiguous: 0, external: 0, receiverUnknown: 0, skippedFileCount: skipped };
   for (const file of data) { function walk(n: Parser.SyntaxNode): void { if (n.type === "call_expression" || n.type === "call") { const caller = enclosing(file.decls, n), t = target(n); if (caller && t) { const edge: CallEdge = { caller: caller.id, callee: t.name, resolved: false, callerId: caller.id, callerLine: n.startPosition.row + 1, callSite: { line: n.startPosition.row + 1, column: n.startPosition.column }, receiver: t.receiver }; counts.total++; let candidates: Decl[] = [];
           const binding = file.imports.get(t.receiver ?? t.name);
           if (t.receiver) { if (t.receiver === "this" || t.receiver === "self") candidates = file.decls.filter(d => d.name === t.name && d.scope.join(".") === caller.scope.join(".")); else if (binding?.path) { edge.importPath = binding.path; candidates = byFile.get(binding.path)?.decls.filter(d => d.name === t.name) ?? []; } else { edge.diagnostic = "receiver-unknown"; counts.receiverUnknown++; } }

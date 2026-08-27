@@ -196,9 +196,21 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
   const affectedSymbols: Set<string> = new Set();
 
   const { callGraph } = params;
-  const assessment: ImpactResult["assessment"] = !callGraph ? "unavailable" : callGraph.diagnostics ? (callGraph.diagnostics.unresolved + callGraph.diagnostics.ambiguous + callGraph.diagnostics.receiverUnknown > 0 ? "partial" : "complete") : "partial";
-  const coverageReasons = !callGraph ? ["call graph unavailable"] : assessment === "partial" ? ["call graph contains omitted or unresolved edges"] : [];
-  const omittedEdgeCount = callGraph?.diagnostics ? callGraph.diagnostics.unresolved + callGraph.diagnostics.ambiguous + callGraph.diagnostics.receiverUnknown : 0;
+  // ponytail: forward-compat bridge — reads skippedFileCount if present on diagnostics.
+  // Will become typed once callgraph.ts populates this field (cross-boundary: P1-W4).
+  const skippedFileCount = ((callGraph?.diagnostics as unknown as Record<string, unknown>)?.skippedFileCount as number) || 0;
+  const edgeDiagnosticCount = callGraph?.diagnostics ? callGraph.diagnostics.unresolved + callGraph.diagnostics.ambiguous + callGraph.diagnostics.receiverUnknown : 0;
+  const hasIncompleteCoverage = edgeDiagnosticCount > 0 || skippedFileCount > 0;
+  const assessment: ImpactResult["assessment"] = !callGraph ? "unavailable" : callGraph.diagnostics ? (hasIncompleteCoverage ? "partial" : "complete") : "partial";
+  const coverageReasons: string[] = !callGraph
+    ? ["call graph unavailable"]
+    : assessment === "partial"
+      ? [
+          ...(edgeDiagnosticCount > 0 ? ["call graph contains omitted or unresolved edges"] : []),
+          ...(skippedFileCount > 0 ? [`${skippedFileCount} file(s) skipped due to unsupported language(s)`] : []),
+        ]
+      : [];
+  const omittedEdgeCount = edgeDiagnosticCount;
   const targetFanIn = computeFanIn(normalizedTarget, callGraph ?? null, workspaceRoot);
   const targetFns = callGraph?.functions.filter((f) => normalizePath(f.file) === normalizedTarget) ?? [];
   const targetIsEntryPoint = isEntryPoint(normalizedTarget, targetFns);

@@ -365,5 +365,31 @@ fn baz() {}
       expect(result.functions).toHaveLength(0);
       expect(result.edgeCount).toBe(0);
     });
+
+    it("counts skipped files for unsupported languages and unreadable paths", async () => {
+      makeFile("a.ts", "function foo() { bar(); }\nfunction bar() {}");
+
+      // Unsupported language files
+      makeFile("a.md", "# hello");
+      makeFile("a.txt", "plain text");
+      makeFile("style.css", "body { color: red; }");
+
+      const { initParser } = await import("../../src/tags.js");
+      await initParser();
+
+      // Unreadable path
+      const unreadable = join(tmpDir, "nonexistent.ts");
+      const result = await buildCallGraph([
+        join(tmpDir, "a.ts"),
+        join(tmpDir, "a.md"),
+        join(tmpDir, "a.txt"),
+        join(tmpDir, "style.css"),
+        unreadable,
+      ]);
+
+      expect(result.diagnostics).toBeDefined();
+      expect(result.diagnostics!.skippedFileCount).toBe(4);
+      expect(result.diagnostics!.total).toBe(1);
+    });
   });
 });
