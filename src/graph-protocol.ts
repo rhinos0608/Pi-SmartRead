@@ -3,29 +3,18 @@
  *
  * Resolves graph://<node-type>/<name> by querying the context graph
  * using its public API (findSymbolFiles, getFileNeighbours).
+ *
+ * Import-cycle safety: this module MUST NOT static-import mcp-registry.ts
+ * -- doing so creates a circular ES module dependency:
+ *   mcp-registry.ts -> grep-tool.ts -> search-tool.ts -> hook.ts ->
+ *   read-many.ts -> graph-protocol.ts -> mcp-registry.ts
+ * which breaks runtime loading with a temporal-dead-zone ReferenceError.
+ * mcp-registry is instead imported lazily via dynamic `await import()`
+ * inside the function that needs it, after the module graph has
+ * finished resolving.
  */
 
-import { ContextGraph } from "./context-graph.js";
 import type { UrlHandler, UrlSourceInfo } from "./internal-url-router.js";
-
-// Lazily-created per-cwd graph instances (matches the pattern in hook.ts)
-const _graphCache = new Map<string, ContextGraph>();
-const MAX_CACHE_SIZE = 50;
-
-/** Get or create a shared ContextGraph for the given workspace. */
-function getSharedGraph(cwd: string): ContextGraph {
-	let g = _graphCache.get(cwd);
-	if (!g) {
-		g = new ContextGraph(cwd);
-		_graphCache.set(cwd, g);
-		// Evict oldest entry when cache exceeds limit
-		if (_graphCache.size > MAX_CACHE_SIZE) {
-			const oldest = _graphCache.keys().next().value;
-			if (oldest !== undefined) _graphCache.delete(oldest);
-		}
-	}
-	return g;
-}
 
 /** Query the context graph for a node of the given type and name. */
 export async function resolveGraphUrl(
@@ -37,16 +26,14 @@ export async function resolveGraphUrl(
 	if (!match) {
 		throw new Error(`Invalid graph URL: ${url}`);
 	}
-		const nodeType = match[1] ?? "";
+	const nodeType = match[1] ?? "";
 	const name = match[2] ?? "";
 	const workspace = cwd ?? process.cwd();
 
 	let text = "";
 	try {
-		const graph = getSharedGraph(workspace);
-
-		// Ensure graph is built (best-effort)
-		await graph.buildContextGraph({ forceRefresh: false, includeSymbols: true, includeCalls: false }).catch(err => { console.error(`ContextGraph build failed for ${workspace}: ${(err as Error)?.message ?? err}`); });
+		const { getSharedContextGraphAsync } = await import("./mcp-registry.js");
+		const graph = await getSharedContextGraphAsync(workspace);
 
 		if (nodeType === "file") {
 			// Look up file neighbours (imports / imported-by)

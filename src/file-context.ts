@@ -4,14 +4,19 @@
  * Every channel is best-effort: failures append a warning line or are
  * skipped; this function never throws.
  *
- * Import-cycle safety: this module imports only leaf-domain modules
- * (context-graph, git-history, git-context, config, git-notes,
- * graphify-enricher, lsp-bridge, utils). It must NOT import hook.ts,
- * inspect.ts, search-tool.ts, or mcp-registry.ts.
+ * Import-cycle safety: this module imports leaf-domain modules.
+ * It MUST NOT static-import hook.ts, inspect.ts, or search-tool.ts.
+ * It MUST NOT static-import mcp-registry.ts -- doing so creates a
+ * circular ES module dependency:
+ *   mcp-registry.ts -> grep-tool.ts -> search-tool.ts -> hook.ts ->
+ *   file-context.ts -> mcp-registry.ts
+ * which breaks top-level const initialisation (GREP_DESCRIPTION etc).
+ * mcp-registry is instead imported lazily via dynamic `await import()`
+ * inside the function that needs it, after the module graph has
+ * finished resolving.
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { ContextGraph } from "./context-graph.js";
 import { isRecentlyModified } from "./git-history.js";
 import {
    findGitRoot,
@@ -21,12 +26,7 @@ import { loadGitContextConfig, type ResolvedGitContextConfig } from "./config.js
 import { scanBranchNotes } from "./git-notes.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { getLSPBridge } from "./lsp-bridge.js";
-import { LruCache } from "./utils.js";
 import { projectWorkspaceForFile } from "./workspace-scope.js";
-
-// ── Shared ContextGraph cache (module-level) ──
-// Build once per repo, reuse across reads. Prevents O(repo_files * read_calls) parsing.
-const contextualGraphCache = new LruCache<ContextGraph>(3);
 
 // ── Public interface ──────────────────────────────────────────────
 
@@ -68,16 +68,8 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
   // later channels (git recency, recent commits, git notes, graphify, LSP).
   try {
     if (projectRoot) {
-      let graph = contextualGraphCache.get(projectRoot);
-      if (!graph) {
-        graph = new ContextGraph(projectRoot);
-        contextualGraphCache.set(projectRoot, graph);
-      }
-      await graph.buildContextGraph({
-        forceRefresh: false,
-        includeSymbols: true,
-        includeCalls: false,
-      });
+      const { getSharedContextGraphAsync } = await import("./mcp-registry.js");
+      const graph = await getSharedContextGraphAsync(projectRoot);
 
       const neighbours = await graph.getFileNeighbours(fullPath, {
         includeSymbols: false,
