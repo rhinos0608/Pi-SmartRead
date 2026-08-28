@@ -7,7 +7,7 @@ import type {
   RepositoryIntelligenceService,
   SnapshotId,
 } from "../../src/repository-intelligence-types.js";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -34,7 +34,7 @@ describe("RepositoryIntelligenceService", () => {
 
   // ── Stub methods: must throw, never return fake data ──────────
 
-  describe("compareSnapshots (Phase 2 stub)", () => {
+  describe("compareSnapshots (missing snapshot)", () => {
     it("throws IntelligenceServiceNotImplementedError", async () => {
       await expect(
         svc.compareSnapshots({
@@ -45,7 +45,7 @@ describe("RepositoryIntelligenceService", () => {
       ).rejects.toThrow(IntelligenceServiceNotImplementedError);
     });
 
-    it("error has code INTERNAL and retryable false", async () => {
+    it("error has code INTERNAL and retryable true", async () => {
       try {
         await svc.compareSnapshots({
           before: "aaa" as SnapshotId,
@@ -57,13 +57,83 @@ describe("RepositoryIntelligenceService", () => {
         expect(e).toBeInstanceOf(IntelligenceServiceNotImplementedError);
         const err = e as IntelligenceServiceNotImplementedError;
         expect(err.code).toBe("INTERNAL");
-        expect(err.retryable).toBe(false);
-        expect(err.message).toContain("Phase 2");
+        expect(err.retryable).toBe(true);
+        expect(err.message).toContain("snapshot not found");
       }
     });
   });
 
-  describe("rankWorkspace (Phase 3 stub)", () => {
+  describe("compareSnapshots (correctness)", () => {
+    it("detects changed, added, and removed files between snapshots", async () => {
+      // Initial workspace: two files
+      makeFile("src/a.ts", "export const a = 1;");
+      makeFile("src/b.ts", "export const b = 2;");
+
+      const snap1 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      // Mutate: modify a.ts, add c.ts, remove b.ts
+      writeFileSync(join(tmpDir, "src/a.ts"), "export const a = 999;", "utf-8");
+      makeFile("src/c.ts", "export const c = 3;");
+      unlinkSync(join(tmpDir, "src/b.ts"));
+
+      const snap2 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      const delta = await svc.compareSnapshots({
+        before: snap1.snapshot.snapshotId,
+        after: snap2.snapshot.snapshotId,
+        budget: { maxMs: 30_000, maxEntities: 2000 },
+      });
+
+      expect(delta.changedEntities).toContain("src/a.ts");
+      expect(delta.addedEntities).toContain("src/c.ts");
+      expect(delta.removedEntities).toContain("src/b.ts");
+    });
+
+    it("caps added and removed arrays to maxEntities budget", async () => {
+      // snapshot1: one file
+      makeFile("src/keep.ts", "export const keep = 1;");
+
+      const snap1 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      // snapshot2: keep.ts + 5 new files, remove nothing
+      makeFile("src/new1.ts", "export const n1 = 1;");
+      makeFile("src/new2.ts", "export const n2 = 2;");
+      makeFile("src/new3.ts", "export const n3 = 3;");
+      makeFile("src/new4.ts", "export const n4 = 4;");
+      makeFile("src/new5.ts", "export const n5 = 5;");
+
+      const snap2 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      const delta = await svc.compareSnapshots({
+        before: snap1.snapshot.snapshotId,
+        after: snap2.snapshot.snapshotId,
+        budget: { maxMs: 30_000, maxEntities: 2 },
+      });
+
+      // All three arrays should be bounded by maxEntities=2
+      expect(delta.addedEntities.length).toBeLessThanOrEqual(2);
+      expect(delta.removedEntities.length).toBeLessThanOrEqual(2);
+      expect(delta.changedEntities.length).toBeLessThanOrEqual(2);
+    });
+  });
+
+  describe("rankWorkspace (missing snapshot)", () => {
     it("throws IntelligenceServiceNotImplementedError", async () => {
       await expect(
         svc.rankWorkspace({
@@ -74,7 +144,7 @@ describe("RepositoryIntelligenceService", () => {
       ).rejects.toThrow(IntelligenceServiceNotImplementedError);
     });
 
-    it("error has code INTERNAL and retryable false", async () => {
+    it("error has code INTERNAL and retryable true", async () => {
       try {
         await svc.rankWorkspace({
           __phasePlaceholder: "RankRequest" as const,
@@ -86,9 +156,62 @@ describe("RepositoryIntelligenceService", () => {
         expect(e).toBeInstanceOf(IntelligenceServiceNotImplementedError);
         const err = e as IntelligenceServiceNotImplementedError;
         expect(err.code).toBe("INTERNAL");
-        expect(err.retryable).toBe(false);
-        expect(err.message).toContain("Phase 3");
+        expect(err.retryable).toBe(true);
+        expect(err.message).toContain("snapshot not found");
       }
+    });
+  });
+
+  describe("rankWorkspace (happy path)", () => {
+    it("ranks files and returns snapshot-consistent results", async () => {
+      makeFile("src/a.ts", "import './b';\nimport './c';\nexport const a = 1;");
+      makeFile("src/b.ts", "import './c';\nexport const b = 1;");
+      makeFile("src/c.ts", "export const c = 1;");
+
+      const snap = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      const result = await svc.rankWorkspace({
+        __phasePlaceholder: "RankRequest" as const,
+        snapshotId: snap.snapshot.snapshotId,
+        maxEntities: 100,
+      });
+
+      expect(result.snapshotId).toBe(snap.snapshot.snapshotId);
+      expect(result.rankedEntityIds.length).toBeGreaterThanOrEqual(3);
+      // All three files should be present in the ranking
+      expect(result.rankedEntityIds).toContain("src/a.ts");
+      expect(result.rankedEntityIds).toContain("src/b.ts");
+      expect(result.rankedEntityIds).toContain("src/c.ts");
+    });
+
+    it("returns snapshot-time file list, not live workspace state", async () => {
+      makeFile("src/a.ts", "export const a = 1;");
+      makeFile("src/b.ts", "export const b = 2;");
+
+      const snap = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      // Mutate workspace AFTER snapshot
+      makeFile("src/new.ts", "export const n = 1;");
+      unlinkSync(join(tmpDir, "src/b.ts"));
+
+      const result = await svc.rankWorkspace({
+        __phasePlaceholder: "RankRequest" as const,
+        snapshotId: snap.snapshot.snapshotId,
+        maxEntities: 100,
+      });
+
+      // Should contain files from snapshot time only
+      expect(result.rankedEntityIds).toContain("src/a.ts");
+      expect(result.rankedEntityIds).toContain("src/b.ts");
+      expect(result.rankedEntityIds).not.toContain("src/new.ts");
     });
   });
 
@@ -187,6 +310,29 @@ describe("RepositoryIntelligenceService", () => {
 
       expect(caps.filesObserved).toBe(snap.capabilities.filesObserved);
       expect(caps.byLanguage.length).toBe(snap.capabilities.byLanguage.length);
+    });
+
+    it("returns snapshot-time capabilities, not live workspace state", async () => {
+      makeFile("src/main.ts", "export const main = 1;");
+      makeFile("src/other.ts", "export const other = 2;");
+
+      const snap = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      const originalFilesObserved = snap.capabilities.filesObserved;
+
+      // Mutate workspace AFTER snapshot
+      makeFile("src/newfile.ts", "export const n = 1;");
+
+      const caps = await svc.getCapabilities({
+        snapshotId: snap.snapshot.snapshotId,
+      });
+
+      // Capabilities should reflect snapshot-time file count, not the new live state
+      expect(caps.filesObserved).toBe(originalFilesObserved);
     });
 
     it("returns unavailable for unknown snapshotId", async () => {

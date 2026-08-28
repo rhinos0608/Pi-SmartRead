@@ -43,6 +43,7 @@ import {
 } from "./utils.js";
 import { probeQuery, type ProbeResult } from "./query-probe.js";
 import { rerank, type RerankerInput } from "./rerank.js";
+import { enrichRerankSignals } from "./rerank-signal-bridge.js";
 import { chunkTextAst, type ChunkResult } from "./chunking.js";
 import { applyHyde, type HydeResult } from "./hyde.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
@@ -859,6 +860,12 @@ export function createIntentReadTool(
         if (embeddingConfig?.rerankEnabled === true && rankedSuccessOrder.length > 0) {
           const { isRecentlyModified } = await import("./git-history.js");
           
+          // Build body-by-path map for the signal bridge (no extra disk reads)
+          const bodyByPath = new Map<string, string>();
+          for (const f of successfulFiles) {
+            if (f.body) bodyByPath.set(f.path, f.body);
+          }
+          
           const rerankInputs: RerankerInput[] = await Promise.all(
             rankedSuccessOrder.map(async (path) => {
               const detail = fileDetails.get(path)!;
@@ -878,7 +885,10 @@ export function createIntentReadTool(
               };
             })
           );
-          const rerankResults = rerank(rerankInputs);
+          
+          // WP-7: enrich with halsteadComplexity, astProfile, minHashProximity from file bodies
+          const enrichedInputs = await enrichRerankSignals(rerankInputs, bodyByPath);
+          const rerankResults = rerank(enrichedInputs);
           const changedCount = rerankResults.filter((r) => r.changed).length;
           if (changedCount > 0) {
             const reordered = [...rerankResults].sort((a, b) => a.newRank - b.newRank);

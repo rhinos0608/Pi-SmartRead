@@ -1,13 +1,13 @@
 /**
- * RepositoryIntelligenceService — Phase 1 implementation.
+ * RepositoryIntelligenceService implementation.
  *
  * Delivers bounded capabilities, relationships, impact, immutable capture,
- * and views. Ranking (Phase 3) and cross-revision delta (Phase 2) are stubbed.
+ * cross-revision delta, and ranking.
  */
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
   getSharedContextGraphAsync,
   getWorkspaceRevision,
@@ -16,7 +16,8 @@ import { expandBlastRadius } from "./impact-analysis.js";
 import { filenameToLang, type SupportedLanguage } from "./languages.js";
 import { getSupportedExtensions as getGrammarExtensions } from "./grammar-loader.js";
 import { findSrcFiles } from "./file-discovery.js";
-import { computeSourceHash } from "./index-snapshot.js";
+import { computeSourceHash, type SourceEntry } from "./index-snapshot.js";
+import { getFsScanCache } from "./fs-scan-cache.js";
 import type {
   RepositoryIntelligenceService,
   SnapshotRef,
@@ -77,21 +78,26 @@ function readFileSafe(root: string, relPath: string): string {
   }
 }
 
-// ── Snapshot → root registry ────────────────────────────────────────
+// ── Snapshot data registry ──────────────────────────────────────────
 
 /**
- * Internal registry mapping snapshotId → workspace root.
- * Allows getCapabilities/getRelationshipEvidence to resolve the root
- * from a snapshotId without it being in the interface contract.
+ * Immutable per-snapshot data captured at snapshot time.
+ * CompareSnapshots diffs this stored data, not live filesystem.
  */
-const snapshotRoots = new Map<string, string>();
+interface CapturedSnapshot {
+  root: string;
+  fileEntries: SourceEntry[];
+}
+
+const MAX_SNAPSHOTS = 50;
+const snapshotData = new Map<string, CapturedSnapshot>();
 
 // ── Capability computation ──────────────────────────────────────────
 
 async function computeCapabilityReport(
-  root: string,
+  fileEntries: SourceEntry[],
 ): Promise<CapabilityReport> {
-  const allFiles = await findSrcFiles(root);
+  const allFiles = fileEntries.map((e) => e.path);
   const grammarExts = new Set(getGrammarExtensions());
 
   // Group files by language
@@ -220,8 +226,22 @@ class RepoIntelService implements RepositoryIntelligenceService {
       });
     }
 
-    // 3. Compute capabilities
-    const capabilities = await computeCapabilityReport(input.root);
+    // 3. Compute source files with content hashes
+    // Invalidate file-discovery cache so snapshot captures actual filesystem state
+    const scanCache = getFsScanCache();
+    scanCache.invalidatePath(input.root);
+    const allFiles = await findSrcFiles(input.root);
+    const fileEntries: SourceEntry[] = [];
+    for (const absPath of allFiles) {
+      if (Date.now() >= deadline) break;
+      fileEntries.push({
+        path: relative(input.root, absPath),
+        contentHash: sha256(readFileSafe(input.root, relative(input.root, absPath))),
+      });
+    }
+
+    // 4. Compute capabilities from captured files
+    const capabilities = await computeCapabilityReport(fileEntries);
 
     if (Date.now() >= deadline) {
       throw new IntelligenceServiceNotImplementedError({
@@ -230,16 +250,17 @@ class RepoIntelService implements RepositoryIntelligenceService {
         retryable: true,
       });
     }
-
-    // 4. Compute source hash
-    const allFiles = await findSrcFiles(input.root);
-    const sourceHash = computeSourceHash(allFiles);
+    const sourceHash = computeSourceHash(fileEntries);
 
     // 5. Snapshot ID: sha256(root + sourceHash)
     const snapshotId = sha256(`${input.root}:${sourceHash}`) as SnapshotId;
 
-    // 6. Register root for later lookups by snapshotId
-    snapshotRoots.set(snapshotId, input.root);
+    // 6. Register immutable snapshot data for later lookups (bounded eviction)
+    snapshotData.set(snapshotId, { root: input.root, fileEntries });
+    if (snapshotData.size > MAX_SNAPSHOTS) {
+      const oldest = snapshotData.keys().next().value;
+      if (oldest) snapshotData.delete(oldest);
+    }
 
     // 7. Truncate capabilities if they exceed byte budget
     let finalCapabilities = capabilities;
@@ -277,10 +298,10 @@ class RepoIntelService implements RepositoryIntelligenceService {
     after: SnapshotId;
     budget: { maxMs: number; maxEntities: number };
   }): Promise<SemanticDelta> {
-    const rootBefore = snapshotRoots.get(input.before);
-    const rootAfter = snapshotRoots.get(input.after);
+    const snapBefore = snapshotData.get(input.before);
+    const snapAfter = snapshotData.get(input.after);
 
-    if (!rootBefore || !rootAfter) {
+    if (!snapBefore || !snapAfter) {
       throw new IntelligenceServiceNotImplementedError({
         code: "INTERNAL",
         message: "snapshot not found; call getWorkspaceSnapshot first",
@@ -288,39 +309,27 @@ class RepoIntelService implements RepositoryIntelligenceService {
       });
     }
 
-    const deadline = Date.now() + input.budget.maxMs;
     const maxEntities = Math.min(input.budget.maxEntities, 2000);
 
-    // Scan both workspaces
-    const filesBefore = await findSrcFiles(rootBefore);
-    const filesAfter = await findSrcFiles(rootAfter);
+    // Diff against stored immutable snapshot data
+    const entriesBefore = snapBefore.fileEntries;
+    const entriesAfter = snapAfter.fileEntries;
 
-    if (Date.now() >= deadline) {
-      throw new IntelligenceServiceNotImplementedError({
-        code: "BUDGET_EXCEEDED",
-        message: "compareSnapshots exceeded budget during file scan",
-        retryable: true,
-      });
-    }
+    const mapBefore = new Map(entriesBefore.map((e) => [e.path, e.contentHash]));
+    const mapAfterByPath = new Map(entriesAfter.map((e) => [e.path, e.contentHash]));
 
-    const setBefore = new Set(filesBefore);
-    const setAfter = new Set(filesAfter);
+    const pathsBefore = entriesBefore.map((e) => e.path);
+    const pathsAfter = entriesAfter.map((e) => e.path);
 
-    const added = filesAfter.filter((f) => !setBefore.has(f));
-    const removed = filesBefore.filter((f) => !setAfter.has(f));
+    const added = pathsAfter.filter((f) => !mapBefore.has(f)).slice(0, maxEntities);
+    const removed = pathsBefore.filter((f) => !mapAfterByPath.has(f)).slice(0, maxEntities);
 
-    // For common files, compare content hashes to detect modifications
-    const common = filesBefore.filter((f) => setAfter.has(f));
     const modified: string[] = [];
-
-    // Batch hash computation within budget
-    const maxCommon = Math.min(common.length, maxEntities);
+    const commonPaths = pathsBefore.filter((f) => mapAfterByPath.has(f));
+    const maxCommon = Math.min(commonPaths.length, maxEntities);
     for (let i = 0; i < maxCommon; i++) {
-      if (Date.now() >= deadline) break;
-      const relPath = common[i]!;
-      const hashBefore = sha256(readFileSafe(rootBefore, relPath));
-      const hashAfter = sha256(readFileSafe(rootAfter, relPath));
-      if (hashBefore !== hashAfter) {
+      const relPath = commonPaths[i]!;
+      if (mapBefore.get(relPath) !== mapAfterByPath.get(relPath)) {
         modified.push(relPath);
       }
     }
@@ -337,21 +346,22 @@ class RepoIntelService implements RepositoryIntelligenceService {
   // ── Phase 3: relationship-count ranking ──────────────────────
 
   async rankWorkspace(input: RankRequest): Promise<RankResult> {
-    const root = snapshotRoots.get(input.snapshotId);
-    if (!root) {
+    const snapshot = snapshotData.get(input.snapshotId);
+    if (!snapshot) {
       throw new IntelligenceServiceNotImplementedError({
         code: "INTERNAL",
         message: "snapshot not found; call getWorkspaceSnapshot first",
         retryable: true,
       });
     }
+    const root = snapshot.root;
 
     const maxEntities = Math.min(input.maxEntities, 2000);
-    const files = await findSrcFiles(root);
+    const relFiles = snapshot.fileEntries.map((e) => e.path);
 
     // Count relationships per entity from the context graph
     const relCount = new Map<string, number>();
-    for (const f of files) {
+    for (const f of relFiles) {
       relCount.set(f, 0);
     }
 
@@ -359,8 +369,10 @@ class RepoIntelService implements RepositoryIntelligenceService {
       const graph = await getSharedContextGraphAsync(root);
       const edges = graph.getProvenanceEdges();
       for (const edge of edges) {
-        if (relCount.has(edge.from)) relCount.set(edge.from, (relCount.get(edge.from) ?? 0) + 1);
-        if (relCount.has(edge.to)) relCount.set(edge.to, (relCount.get(edge.to) ?? 0) + 1);
+        const from = relative(root, edge.from);
+        const to = relative(root, edge.to);
+        if (relCount.has(from)) relCount.set(from, (relCount.get(from) ?? 0) + 1);
+        if (relCount.has(to)) relCount.set(to, (relCount.get(to) ?? 0) + 1);
       }
     } catch {
       // Graph unavailable — fall back to file-order ranking
@@ -474,7 +486,7 @@ class RepoIntelService implements RepositoryIntelligenceService {
     }
 
     // Look up workspace root from snapshot registry
-    const root = snapshotRoots.get(input.snapshotId);
+    const root = snapshotData.get(input.snapshotId)?.root;
     if (!root) {
       return {
         schemaVersion: 1,
@@ -555,7 +567,7 @@ class RepoIntelService implements RepositoryIntelligenceService {
     const limit = Math.min(Math.max(1, input.limit), 500);
 
     // Look up root
-    const root = snapshotRoots.get(input.snapshotId);
+    const root = snapshotData.get(input.snapshotId)?.root;
     if (!root) {
       return {
         schemaVersion: 1,
@@ -610,8 +622,8 @@ class RepoIntelService implements RepositoryIntelligenceService {
   async getCapabilities(input: {
     snapshotId: SnapshotId;
   }): Promise<CapabilityReport> {
-    const root = snapshotRoots.get(input.snapshotId);
-    if (!root) {
+    const snapshot = snapshotData.get(input.snapshotId);
+    if (!snapshot) {
       return {
         filesObserved: 0,
         byLanguage: [],
@@ -622,6 +634,6 @@ class RepoIntelService implements RepositoryIntelligenceService {
         omittedEdgeCount: 0,
       };
     }
-    return computeCapabilityReport(root);
+    return computeCapabilityReport(snapshot.fileEntries);
   }
 }

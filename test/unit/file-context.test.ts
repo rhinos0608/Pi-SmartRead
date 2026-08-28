@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { buildFileContextLines } from "../../src/file-context.js";
-import { ContextGraph } from "../../src/context-graph.js";
+import { ContextGraph, EdgeStore } from "../../src/context-graph.js";
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
@@ -36,6 +36,42 @@ describe("buildFileContextLines", () => {
     expect(text).toContain("Constraint: keep the public API frozen");
     expect(text).toContain("Git notes:");
     expect(text).toContain("decision: keep a tiny");
+  });
+
+  it("joins top three EdgeStore co-change edges into nearby file rationale", async () => {
+    const target = path.join(repo, "a.ts");
+    const peers = ["b.ts", "c.ts", "d.ts", "e.ts"];
+    for (const peer of peers) writeFileSync(path.join(repo, peer), "export const peer = 1;\n");
+    EdgeStore.recordCoChange(repo, target, path.join(repo, "b.ts"), "correlation=0.90", 0.9);
+    EdgeStore.recordCoChange(repo, target, path.join(repo, "c.ts"), "correlation=0.80", 0.8);
+    EdgeStore.recordCoChange(repo, target, path.join(repo, "d.ts"), "correlation=0.70", 0.7);
+    EdgeStore.recordCoChange(repo, target, path.join(repo, "e.ts"), "correlation=0.60", 0.6);
+
+    const text = (await buildFileContextLines({ fullPath: target, cwd: repo })).join("\n");
+    expect(text).toContain("Nearby: b.ts");
+    expect(text).toContain("Nearby: c.ts");
+    expect(text).toContain("Nearby: d.ts");
+    expect(text).not.toContain("Nearby: e.ts");
+    expect(text).toContain("co-change/history (confidence 0.90, correlation 0.90)");
+  });
+
+  it("caps recent history enrichment at three follow commits", async () => {
+    const historyRepo = realpathSync(mkdtempSync(path.join(tmpdir(), "file-context-history-")));
+    try {
+      git(historyRepo, "init");
+      git(historyRepo, "config", "user.email", "t@example.com");
+      git(historyRepo, "config", "user.name", "t");
+      const tracked = path.join(historyRepo, "tracked.ts");
+      for (let i = 1; i <= 4; i++) {
+        writeFileSync(tracked, `export const version = ${i};\n`);
+        git(historyRepo, "add", ".");
+        git(historyRepo, "commit", "-m", `commit ${i}`);
+      }
+      const text = (await buildFileContextLines({ fullPath: tracked, cwd: historyRepo })).join("\n");
+      expect((text.match(/commit [1-4]/g) ?? []).length).toBe(3);
+    } finally {
+      rmSync(historyRepo, { recursive: true, force: true });
+    }
   });
 
   it("returns [] when the file does not exist", async () => {

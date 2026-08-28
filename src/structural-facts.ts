@@ -1312,7 +1312,9 @@ export async function extractStructuralFacts(
   if (contextGraph && typeof contextGraph.getProvenanceEdges === "function") {
     try {
       const normTarget = resolve(cwd, absolutePath);
-      const edges = contextGraph.getProvenanceEdges();
+      const edges = typeof (contextGraph as any).getImportDependents === "function"
+        ? (contextGraph as any).getImportDependents(absolutePath).map((from: string) => ({ from, to: normTarget }))
+        : contextGraph.getProvenanceEdges();
       const dependents: DependentInfo[] = [];
       const seen = new Set<string>();
       for (const edge of edges) {
@@ -1327,17 +1329,8 @@ export async function extractStructuralFacts(
           });
         }
       }
-      if (dependents.length > 0) {
-        facts.externalDependents = dependents;
-      } else {
-        // Graph has no matching edges — fall back to file scan
-        try {
-          const scanned = await findImportDependents(absolutePath, cwd, lang);
-          facts.externalDependents = scanned;
-        } catch {
-          // best-effort: leave externalDependents empty
-        }
-      }
+      // A built graph is authoritative, including an empty match; do not rescan.
+      facts.externalDependents = dependents;
     } catch {
       // best-effort: leave externalDependents empty
     }

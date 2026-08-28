@@ -32,6 +32,21 @@ describe("ContextGraph", () => {
     expect(prov?.from).toBe(fileA);
   });
 
+  it("returns reverse import neighbours from built adjacency", async () => {
+    const target = join(root, "target.ts");
+    const importer = join(root, "importer.ts");
+    writeFileSync(target, "export const target = 1;");
+    writeFileSync(importer, "import './target';");
+
+    await graph.buildContextGraph({ skipGitPopulation: true });
+    await graph.buildContextGraph({ skipGitPopulation: true });
+    const neighbours = await graph.getFileNeighbours(target);
+    expect(neighbours).toContainEqual(expect.objectContaining({
+      path: importer,
+      provenance: expect.objectContaining({ type: "imported_by" }),
+    }));
+  });
+
   it("finds symbol definitions across files", async () => {
     const fileA = join(root, "a.ts");
     const fileB = join(root, "b.ts");

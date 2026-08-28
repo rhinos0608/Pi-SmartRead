@@ -699,7 +699,7 @@ export default async function (pi: ExtensionAPI) {
   }));
 
 
-  // 3.8 RepositoryIntelligenceService: register the Phase-1 singleton
+  // 3.8 RepositoryIntelligenceService: register the singleton
   //     so downstream consumers can access it via getRepositoryIntelligence().
   try {
     registerRepositoryIntelligence(createRepositoryIntelligenceService());

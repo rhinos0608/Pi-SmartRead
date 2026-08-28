@@ -25,6 +25,7 @@ import {
 import { loadGitContextConfig, type ResolvedGitContextConfig } from "./config.js";
 import { scanBranchNotes } from "./git-notes.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
+import { EdgeStore } from "./context-graph.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { projectWorkspaceForFile } from "./workspace-scope.js";
 
@@ -75,22 +76,35 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
         includeSymbols: false,
         includeCalls: false,
       });
+      const nearby = new Map<string, string[]>();
+      const addReason = (file: string, reason: string) => {
+        const reasons = nearby.get(file) ?? [];
+        if (!reasons.includes(reason)) reasons.push(reason);
+        nearby.set(file, reasons);
+      };
+      for (const neighbour of neighbours) {
+        const relation = neighbour.provenance.type === "imported_by" ? "reverse import" : "import";
+        addReason(neighbour.path, relation);
+      }
 
-      const importedBy = neighbours
-        .filter((n) => n.provenance.type === "imported_by")
-        .map((n) => path.relative(projectRoot, n.path));
-      const imports = neighbours
-        .filter((n) => n.provenance.type === "imports")
-        .map((n) => path.relative(projectRoot, n.path));
+      // Temporal coupling comes from persisted EdgeStore observations, not a history rescan.
+      const target = path.resolve(fullPath);
+      const coChanges = EdgeStore.readEdges(projectRoot)
+        .filter((event) => event.type === "co_change" && event.data.source === "git_history")
+        .filter((event) => path.resolve(event.data.from) === target || path.resolve(event.data.to) === target)
+        .sort((a, b) => (b.data.confidence ?? 0) - (a.data.confidence ?? 0) || a.timestamp - b.timestamp)
+        .slice(0, 3);
+      for (const event of coChanges) {
+        const file = path.resolve(event.data.from) === target ? event.data.to : event.data.from;
+        const confidence = event.data.confidence ?? 0;
+        addReason(file, `co-change/history (confidence ${confidence.toFixed(2)}, correlation ${confidence.toFixed(2)})`);
+      }
 
-      if (importedBy.length > 0)
-        contextLines.push(
-          `• Imported by: ${importedBy.slice(0, 8).join(", ")}${importedBy.length > 8 ? "…" : ""}`,
-        );
-      if (imports.length > 0)
-        contextLines.push(
-          `• Imports: ${imports.slice(0, 8).join(", ")}${imports.length > 8 ? "…" : ""}`,
-        );
+      let shown = 0;
+      for (const [file, reasons] of nearby) {
+        if (shown++ >= 8) break;
+        contextLines.push(`• Nearby: ${path.relative(projectRoot, file)} — ${reasons.join("; ")}`);
+      }
     }
   } catch {
     // Structural context is best-effort; do not let it suppress later channels.

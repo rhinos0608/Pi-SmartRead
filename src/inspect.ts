@@ -319,7 +319,7 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
 
     // ── Render extra sections with token budget ────────────────
     const allSectionTexts: string[] = [];
-    let omittedSections: string[] = [];
+    const omittedSections: string[] = [];
     let budgetExhausted = false;
 
     for (let i = 0; i < extraSections.length; i++) {
@@ -386,7 +386,7 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
     const sessionId = hashSessionFilePath(sessionFilePath);
     const absolutePath = pathResolve(cwd, input.path);
 
-    // Structural facts + signals — stubs return empty data (P1/P2 engines WIP)
+    // Structural facts + signals
     let facts: StructuralFacts;
     try {
         facts = await extractStructuralFacts(absolutePath, cwd, input.signal, input.contextGraph);
@@ -778,7 +778,7 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
 
     // ── Render extra sections with token budget ────────────────
     const allSectionTexts: string[] = [];
-    let omittedSections: string[] = [];
+    const omittedSections: string[] = [];
     let budgetExhausted = false;
     const admittedSectionResources = new Map<string, InspectedResource>();
 

@@ -5,7 +5,9 @@ import type { SignalName, SignalResult, FileSignals } from "./signals-types.js";
 import type { TestLinkage } from "./signals-types.js";
 import type { ContextGraph } from "./context-graph.js";
 import type { DependentInfo } from "./structural-facts-types.js";
-import { findImportDependents } from "./structural-facts.js";
+import { findImportDependents, extractStructuralFacts } from "./structural-facts.js";
+import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
+import type { StructuralFacts, ChildSymbol } from "./structural-facts-types.js";
 import { filenameToLang, type SupportedLanguage } from "./languages.js";
 import { fileLastModifiedRelative } from "./git-history.js";
 
@@ -693,6 +695,115 @@ export function findTestLinkage(
 
   return results;
 }
+
+/** Count linked test files for a source file. */
+function linkageCount(absolutePath: string, cwd: string): number {
+  return findTestLinkage(absolutePath, cwd).length;
+}
+
+/** Compute the longest common root directory from absolute paths. */
+function commonRoot(files: string[]): string {
+  const paths = files.map(f => resolve(f));
+  if (paths.length === 1) return dirname(paths[0]!);
+  const parts = paths.map(p => p.split("/"));
+  let i = 0;
+  while (i < parts[0]!.length && parts.every(p => p[i] === parts[0]![i])) i++;
+  return parts[0]!.slice(0, Math.max(1, i)).join("/") || "/";
+}
+
+/** Callable-symbol kinds that should appear in coverage gaps. */
+const COVERAGE_KINDS = new Set<ChildSymbol["kind"]>(["function", "method", "class"]);
+
+/**
+ * Static test-coverage gap analysis.
+ *
+ * Uses linked test files from findTestLinkage() + extractStructuralFacts()
+ * to identify exported callables that are / are not statically referenced
+ * from any linked test file via the call graph.
+ *
+ * Returns three buckets:
+ *  - tested:         exported callables referenced from test files
+ *  - unreferenced:   exported callables with no test-file reference found
+ *  - unknown:        parser ambiguity or unsupported language (never untested)
+ *
+ * This is static call-graph linkage only — it does NOT detect runtime
+ * coverage, dynamic calls, mocks, aliases, or reflection.
+ */
+export async function findTestCoverageGaps(
+  absolutePath: string,
+  cwd: string,
+): Promise<{
+  tested: string[];
+  unreferenced: string[];
+  unknown: string[];
+}> {
+  // (1) Reuse linked tests from findTestLinkage
+  const linkage = findTestLinkage(absolutePath, cwd);
+  if (linkage.length === 0) {
+    return { tested: [], unreferenced: [], unknown: [] };
+  }
+  const testFiles = [...new Set(linkage.map(l => l.testFile))];
+
+  // (2) Use extractStructuralFacts to identify exported/callable symbols
+  let facts: StructuralFacts;
+  try {
+    facts = await extractStructuralFacts(absolutePath, cwd);
+  } catch {
+    // Parse failure → everything unknown, not untested
+    return { tested: [], unreferenced: [], unknown: [] };
+  }
+
+  // Unsupported language (parser returned notices about missing support)
+  const lang = filenameToLang(absolutePath);
+  if (!lang) {
+    return { tested: [], unreferenced: [], unknown: [] };
+  }
+
+  const exportedCallables = facts.children.filter(
+    c => c.isExported && COVERAGE_KINDS.has(c.kind),
+  );
+  if (exportedCallables.length === 0) {
+    return { tested: [], unreferenced: [], unknown: [] };
+  }
+
+  // (3) Build call graph with [source, ...directTests]
+  let callGraph: CallGraphResult;
+  try {
+    callGraph = await buildCallGraph([absolutePath, ...testFiles]);
+  } catch {
+    // Build failure → all exported callables are unknown
+    return {
+      tested: [],
+      unreferenced: [],
+      unknown: exportedCallables.map(c => c.name),
+    };
+  }
+
+  // Compute the common root to resolve relative file paths back to absolute
+  const root = commonRoot([absolutePath, ...testFiles]);
+  const testFileAbsSet = new Set(testFiles.map(f => resolve(f)));
+
+  const tested: string[] = [];
+  const unreferenced: string[] = [];
+
+  // (4) A callable counts as referenced only when a resolved caller
+  //     originates in one of the linked test files
+  for (const callable of exportedCallables) {
+    const callers = callGraph.callersOf(callable.name);
+    const hasTestCaller = callers.some(caller => {
+      const callerAbs = resolve(root, caller.file);
+      return testFileAbsSet.has(callerAbs);
+    });
+    if (hasTestCaller) {
+      tested.push(callable.name);
+    } else {
+      unreferenced.push(callable.name);
+    }
+  }
+
+  return { tested, unreferenced, unknown: [] };
+}
+
 /** Escape special regex characters in a string for use in RegExp constructor. */
 // ── Orchestrator ───────────────────────────────────────────────────────
 
@@ -735,6 +846,26 @@ export async function computeFileSignals(
           break;
         case "tests":
           result = detectTests(absolutePath, cwd);
+          // WP-8: enrich with static call-graph coverage gaps
+          if (result.confidence !== "none") {
+            try {
+              const gaps = await findTestCoverageGaps(absolutePath, cwd);
+              const totalExported = gaps.tested.length + gaps.unreferenced.length + gaps.unknown.length;
+              if (totalExported > 0) {
+                const referencedCount = gaps.tested.length;
+                const detailParts = [
+                  `Linked ${linkageCount(absolutePath, cwd)} tests; ${referencedCount}/${totalExported} exported callables statically referenced`,
+                ];
+                if (gaps.unreferenced.length > 0) {
+                  const shown = gaps.unreferenced.slice(0, 20);
+                  detailParts.push(`Unreferenced: ${shown.join(", ")}${gaps.unreferenced.length > 20 ? ` (+${gaps.unreferenced.length - 20} more)` : ""}`);
+                }
+                result = { ...result, detail: detailParts.join("; ") };
+              }
+            } catch {
+              // Best-effort: leave base signal unchanged
+            }
+          }
           break;
         case "deprecation":
           result = detectDeprecation(absolutePath);

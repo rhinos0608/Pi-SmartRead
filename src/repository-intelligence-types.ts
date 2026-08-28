@@ -2,8 +2,6 @@
  * RepositoryIntelligenceService type surface.
  *
  * Frozen contract from ARCHITECTURE.md §3G. Branded types from §3D (lines 148-152).
- * Placeholder types (RankRequest, RankResult, SemanticDelta) are stubs for §3H/§3P
- * which land in later phases — structurally valid for method signatures only.
  */
 
 // ── Branded string types (ARCHITECTURE.md §3D, lines 148-152) ───────
@@ -12,9 +10,7 @@ export type SnapshotId = string & { readonly __brand: "SnapshotId" };
 export type ArtifactRef = string & { readonly __brand: "ArtifactRef" };
 export type ISO8601 = string & { readonly __brand: "ISO8601" };
 
-// ── Placeholder types for later phases (§3H/§3P) ────────────────────
-// Structurally valid enough to typecheck in method signatures.
-// Will be replaced by full definitions in later worker slices.
+// ── §3G: Ranking and delta types ────────────────────────────────────
 
 export type RankRequest = {
   readonly __phasePlaceholder: "RankRequest";

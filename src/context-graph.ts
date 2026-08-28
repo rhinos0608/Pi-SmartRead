@@ -177,7 +177,6 @@ export class ContextGraph {
     // Always compute the current source-file set so the file-count safety
     // net below can detect divergence from the previous build (F-2 fix).
     const allFiles = await findSrcFiles(this.root);
-    this.importEdges = [];
 
     // When incremental indexing is enabled, query it for content-level changes.
     // The incremental index is the primary signal; the file-count delta below
@@ -221,6 +220,10 @@ export class ContextGraph {
       this.lastBuildFilesLength = allFiles.length;
       return;
     }
+
+    // Rebuild import adjacency only when rebuilding; preserve it across
+    // unchanged fast-path builds.
+    this.importEdges = [];
 
     // Invalidate indices if the file set changed since last build (F-3 fix:
     // performed BEFORE any early-return so the indices actually rebuild when
@@ -293,7 +296,6 @@ export class ContextGraph {
     // This produces typed IMPORT edges for buildImportEdges consumers
     // (community detection, layer analysis), replacing the earlier
     // mixed-provenance approach that conflated imports/symbols/calls.
-    this.importEdges = [];
     for (const file of allFiles) {
       const neighbours = this.getImportNeighbours(file);
       for (const n of neighbours) {
@@ -362,7 +364,17 @@ export class ContextGraph {
       }
     }
 
-    // 2. Symbol-based neighbours (Phase 1: definitions for symbols used in this file)
+    // 2. Reverse imports from built adjacency (no workspace rescan)
+    for (const n of this.getImportDependents(path)) {
+      if (!seen.has(resolve(n))) {
+        seen.add(resolve(n));
+        const provenance: Provenance = { from: path, to: n, type: "imported_by", confidence: 1.0 };
+        neighbours.push({ path: n, provenance });
+        this.recordProvenance(provenance);
+      }
+    }
+
+    // 3. Symbol-based neighbours (Phase 1: definitions for symbols used in this file)
     if (options.includeSymbols) {
       const symbolNeighbours = await this.getSymbolNeighbours(path, options);
       for (const n of symbolNeighbours) {
@@ -674,10 +686,19 @@ export class ContextGraph {
   }
 
   /**
+   * Return files importing target from already-built import adjacency.
+   * Does not scan workspace; empty means adjacency is not built or has no match.
+   */
+  getImportDependents(path: string): string[] {
+    const target = resolve(path);
+    return this.importEdges
+      .filter((edge) => resolve(edge.to) === target)
+      .map((edge) => edge.from);
+  }
+
+  /**
    * Return all recorded import edges as {from, to} pairs.
    * Used by buildImportEdges for community detection / layer analysis.
-   * Sources edges from actual import adjacency data (buildImportEdges step),
-   * filtering to only pairs of type imports.
    */
   getProvenanceEdges(): Array<{ from: string; to: string }> {
     return this.importEdges;
