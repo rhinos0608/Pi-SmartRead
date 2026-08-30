@@ -275,6 +275,26 @@ describe("RepositoryIntelligenceService", () => {
           r.includes("scala"),
         ),
       ).toBe(true);
+      // Scala unavailable capabilities must mark graphAssessment partial
+      expect(result.capabilities.graphAssessment).toBe("partial");
+    });
+
+    it("reports call-graph-only partial for TS+Java mix", async () => {
+      makeFile("src/index.ts", "export const x = 1;");
+      makeFile("src/Main.java", "public class Main { public static void main(String[] args) {} }");
+
+      const result = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      const javaLang = result.capabilities.byLanguage.find((l) => l.language === "java");
+      expect(javaLang).toBeDefined();
+      expect(javaLang!.tags).toBe("AVAILABLE");
+      expect(javaLang!.callGraph).toBe("UNAVAILABLE");
+      expect(result.capabilities.graphAssessment).toBe("partial");
+      expect(result.capabilities.coverageReasons.some((r) => r.includes("java"))).toBe(true);
     });
 
     it("reports empty workspace honestly", async () => {

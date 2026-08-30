@@ -153,8 +153,11 @@ async function computeCapabilityReport(
     });
   }
 
+  const hasPartial = byLanguage.some(
+    (l) => l.callGraph === "UNAVAILABLE" || l.tags === "UNAVAILABLE" || l.structuralFacts === "UNAVAILABLE",
+  );
   const graphAssessment: CapabilityReport["graphAssessment"] =
-    allFiles.length > 0 ? "complete" : "unavailable";
+    allFiles.length === 0 ? "unavailable" : hasPartial ? "partial" : "complete";
 
   const coverageReasons: string[] = [];
   if (allFiles.length === 0) {
