@@ -53,7 +53,7 @@ const RepoMapSchema = Type.Object({
 
 type RepoMapInput = Static<typeof RepoMapSchema>;
 
-function clampMapTokens(value: number | undefined): number {
+export function clampMapTokens(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return 4096;
   return Math.max(256, Math.min(32768, Math.trunc(value)));
 }

@@ -19,7 +19,7 @@ import {
     type InspectedResource,
     type InspectMode,
 } from "@rhinos0608/pi-workspace-protocol";
-import { createRepoTool } from "./repomap-tool.js";
+import { clampMapTokens, createRepoTool } from "./repomap-tool.js";
 import { extractStructuralFacts } from "./structural-facts.js";
 import { computeFileSignals } from "./signals.js";
 import type { InspectV4Input, InspectV4Mode, InspectV4Result, CallDirection, DiffTarget } from "./inspect-types.js";
@@ -41,6 +41,61 @@ const execFileAsync = promisify(execFile);
 function estimateTokens(text: string): number {
     // Rough estimate: ~4 chars per token
     return Math.ceil(Buffer.byteLength(text, "utf8") / 4);
+}
+
+const DIRECTORY_TRUNCATION_FOOTER =
+    "[truncated: ranked map or requested analysis omitted — rerun with higher mapTokens]";
+
+function assembleDirectoryOutput(coreText: string, sections: string[]): string {
+    if (sections.length === 0) return coreText;
+    return coreText + "\n\n" + sections.join("\n\n");
+}
+
+function fitDirectoryOutput(coreText: string, extraSections: string[], budget: number): { text: string; truncated: boolean } {
+    const footerSep = "\n\n" + DIRECTORY_TRUNCATION_FOOTER;
+    const totalSections = extraSections.length;
+    // Binary-search max k sections fitting with reserved footer
+    let lo = 0;
+    let hi = totalSections;
+    let bestK = -1;
+    while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const candidate = assembleDirectoryOutput(coreText, extraSections.slice(0, mid)) + (mid < totalSections ? footerSep : "");
+        if (estimateTokens(candidate) <= budget) {
+            bestK = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    if (bestK >= 0) {
+        const truncated = bestK < totalSections;
+        const text = assembleDirectoryOutput(coreText, extraSections.slice(0, bestK)) + (truncated ? footerSep : "");
+        return { text, truncated };
+    }
+    // Core alone exceeds budget — binary-search line prefix
+    const coreLines = coreText.split("\n");
+    let lLo = 0;
+    let lHi = coreLines.length;
+    let bestL = 0;
+    while (lLo <= lHi) {
+        const mid = Math.floor((lLo + lHi) / 2);
+        const candidate = coreLines.slice(0, mid).join("\n") + footerSep;
+        if (estimateTokens(candidate) <= budget) {
+            bestL = mid;
+            lLo = mid + 1;
+        } else {
+            lHi = mid - 1;
+        }
+    }
+    const text = coreLines.slice(0, bestL).join("\n") + footerSep;
+    // Ensure hard cap even if footer alone exceeds budget (clamped min 256 prevents this)
+    if (estimateTokens(text) > budget) {
+        // Last resort: truncate footer itself line-aligned (should not happen with valid budget)
+        const footerLines = DIRECTORY_TRUNCATION_FOOTER.split("\n");
+        return { text: footerLines.join("\n"), truncated: true };
+    }
+    return { text, truncated: true };
 }
 
 // ── Validation (spec §4) ─────────────────────────────────────────
@@ -96,9 +151,10 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
     const mapRoot = pathResolve(cwd, input.path);
     const repoTool = createRepoTool();
     const fakeCtx = { cwd, sessionManager: undefined } as any;
+    const clampedBudget = clampMapTokens(input.mapTokens);
     const params: Record<string, unknown> = {
         directory: mapRoot,
-        mapTokens: input.mapTokens ?? 4096,
+        mapTokens: clampedBudget,
         compact: input.compact ?? true,
     };
     if (input.focus && input.focus.length > 0) {
@@ -113,10 +169,8 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
     );
     const contentText = (result.content?.[0] as { type: "text"; text: string } | undefined)?.text ?? "";
 
-    // Token budget tracking
-    const budget = input.mapTokens ?? 4096;
-    let usedTokens = estimateTokens(contentText);
-    const coreLines = contentText.split("\n");
+    // Hard budget enforcement (foveated: ranked core + complete optional sections)
+    const budget = clampedBudget;
 
     // ── Compute sections for directory mode ─────────────────────
     const extraSections: string[] = [];
@@ -317,38 +371,8 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
         }
     }
 
-    // ── Render extra sections with token budget ────────────────
-    const allSectionTexts: string[] = [];
-    const omittedSections: string[] = [];
-    let budgetExhausted = false;
-
-    for (let i = 0; i < extraSections.length; i++) {
-        const sectionText = extraSections[i]!;
-        const tokens = estimateTokens(sectionText);
-        if (!budgetExhausted && usedTokens + tokens <= budget) {
-            allSectionTexts.push(sectionText);
-            usedTokens += tokens;
-        } else {
-            budgetExhausted = true;
-            // Find section name from order
-            const sectionName = findSectionName(extraSections, i);
-            omittedSections.push(sectionName);
-        }
-    }
-
-    // Build final content
-    const finalSections = [...coreLines];
-    if (allSectionTexts.length > 0) {
-        finalSections.push("", ...allSectionTexts.map(s => s).flatMap(s => s.split("\n")));
-    }
-    if (omittedSections.length > 0) {
-        finalSections.push("");
-        for (const name of omittedSections) {
-            finalSections.push(`## ${name} (omitted: token budget reached — rerun with higher mapTokens)`);
-        }
-    }
-
-    const finalText = finalSections.join("\n");
+    // ── Hard budget fitting (preserves ranked order, complete sections only) ──
+    const { text: finalText, truncated } = fitDirectoryOutput(contentText, extraSections, budget);
 
     const inspectionId = inspectionIdFor({
         sessionId,
@@ -372,7 +396,7 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
         workspaceEvidence: envelope,
         lineCount: finalText === "" ? 0 : finalText.split("\n").length,
         byteLength: Buffer.byteLength(finalText, "utf8"),
-        truncated: budgetExhausted,
+        truncated,
         upstreamDetails: result.details as Record<string, unknown>,
     };
 }

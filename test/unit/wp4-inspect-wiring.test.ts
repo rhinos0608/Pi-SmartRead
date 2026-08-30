@@ -210,6 +210,8 @@ describe("token budget", () => {
     });
     expect(result.truncated).toBe(true);
     expect(result.contentText).toContain("rerun with higher mapTokens");
+    // hard budget: estimated tokens <= requested mapTokens (UTF-8 bytes/4)
+    expect(Math.ceil(Buffer.byteLength(result.contentText, "utf8") / 4)).toBeLessThanOrEqual(256);
   });
 
   it("large budget renders all sections", async () => {
