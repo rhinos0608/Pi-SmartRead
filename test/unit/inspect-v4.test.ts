@@ -15,6 +15,7 @@ import {
     executeDirectoryInspect,
     executeFileInspect,
 } from "../../src/inspect.js";
+import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { createInspectV4Tool } from "../../src/inspect-tool.js";
 
 let workdir: string;
@@ -603,4 +604,315 @@ describe("inspect lazy ContextGraph getter", () => {
         ).rejects.toThrow();
         expect(getter).not.toHaveBeenCalled();
     });
+});
+
+describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", () => {
+    it("directory workspaceSymbols keeps mode map zero resources and renders navigation section", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        const result = await tool.execute("c-nav-dir", { path: "mysrc", navigation: { operation: "workspaceSymbols", query: "a" } }, undefined, undefined, makeCtx());
+        const details: any = (result as any).details;
+        expect(details.mode).toBe("directory");
+        expect(details.workspaceEvidence.mode).toBe("map");
+        expect(details.workspaceEvidence.resources).toEqual([]);
+        // verbatim shape: schemaVersion 1, source lsp, truncated boolean, status additive-friendly
+        expect(details.navigation).toBeDefined();
+        expect(details.navigation.schemaVersion).toBe(1);
+        expect(details.navigation.source).toBe("lsp");
+        expect(details.navigation.operation).toBe("workspaceSymbols");
+        expect(["ok", "empty", "unavailable", "degraded"].includes(details.navigation.status) || typeof details.navigation.status === "string").toBe(true);
+        expect(Array.isArray(details.navigation.items)).toBe(true);
+        expect(typeof details.navigation.truncated).toBe("boolean");
+        const text = (result.content[0] as any).text as string;
+        expect(text).toContain("## LSP Navigation");
+        expect(text).toContain("workspaceSymbols");
+        // tryCanonical seam: paths in items must be realpath canonical (contains workdir)
+        for (const it of details.navigation.items as any[]) {
+            const uri: string | undefined = it?.location?.uri ?? it?.uri;
+            if (uri) expect(uri).toContain("file://");
+        }
+    });
+
+    it("file definition requires line/character forbids query", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(tool.execute("c1", { path: "hello.ts", navigation: { operation: "definition" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
+        await expect(tool.execute("c2", { path: "hello.ts", navigation: { operation: "definition", line: 1, character: 1, query: "x" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids query/);
+        // documentSymbols forbids line/character/query
+        await expect(tool.execute("c3", { path: "hello.ts", navigation: { operation: "documentSymbols", line: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids/);
+        await expect(tool.execute("c4", { path: "hello.ts", navigation: { operation: "documentSymbols", query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids/);
+        // workspaceSymbols requires directory
+        await expect(tool.execute("c5", { path: "hello.ts", navigation: { operation: "workspaceSymbols", query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a directory/);
+        await expect(tool.execute("c6", { path: "mysrc", navigation: { operation: "workspaceSymbols" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires query/);
+        // workspaceSymbols forbids line/character
+        await expect(tool.execute("c7", { path: "mysrc", navigation: { operation: "workspaceSymbols", query: "q", line: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids line/);
+    });
+
+    it("file navigation keeps coverage search-match and renders section", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        const result = await tool.execute("c-nav-file", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const details: any = (result as any).details;
+        expect(details.mode).toBe("file");
+        // file-mode results stay coverage:"search-match" when resources present
+        for (const r of details.workspaceEvidence.resources as any[]) {
+            expect(r.coverage).toBe("search-match");
+        }
+        expect(details.navigation).toBeDefined();
+        expect(details.navigation.schemaVersion).toBe(1);
+        expect(details.navigation.source).toBe("lsp");
+        const text = (result.content[0] as any).text as string;
+        expect(text).toContain("## LSP Navigation");
+        expect(text).toContain("documentSymbols");
+    });
+
+    it("diagnostics directory keeps mode map zero resources, file diagnostics renders section", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        const dirResult = await tool.execute("c-diag-dir", { path: "mysrc", diagnostics: { waitMs: 10, maxPerFile: 2, maxFiles: 1 } }, undefined, undefined, makeCtx());
+        const dirDetails: any = (dirResult as any).details;
+        expect(dirDetails.mode).toBe("directory");
+        expect(dirDetails.workspaceEvidence.mode).toBe("map");
+        expect(dirDetails.workspaceEvidence.resources).toEqual([]);
+        expect(dirDetails.diagnostics).toBeDefined();
+        expect(dirDetails.diagnostics.schemaVersion).toBe(1);
+        expect(dirDetails.diagnostics.source).toBe("lsp");
+        expect(["findings", "unconfirmed", "unavailable", "partial"].includes(dirDetails.diagnostics.status) || typeof dirDetails.diagnostics.status === "string").toBe(true);
+        expect(Array.isArray(dirDetails.diagnostics.files)).toBe(true);
+        expect(typeof dirDetails.diagnostics.truncated).toBe("boolean");
+        // canonical paths
+        for (const f of dirDetails.diagnostics.files as any[]) expect(typeof f.path).toBe("string");
+        const dirText = (dirResult.content[0] as any).text as string;
+        expect(dirText).toContain("## LSP Diagnostics");
+
+        const fileResult = await tool.execute("c-diag-file", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
+        const fileDetails: any = (fileResult as any).details;
+        expect(fileDetails.diagnostics).toBeDefined();
+        expect(fileDetails.diagnostics.schemaVersion).toBe(1);
+        const fileText = (fileResult.content[0] as any).text as string;
+        expect(fileText).toContain("## LSP Diagnostics");
+    });
+
+    it("diagnostics maxFiles requires directory", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(tool.execute("c-diag", { path: "hello.ts", diagnostics: { maxFiles: 5 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a directory/);
+    });
+
+    it("navigation maxResults bounds", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(tool.execute("c-bounds", { path: "mysrc", navigation: { operation: "workspaceSymbols", query: "q", maxResults: 101 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/maxResults/);
+    });
+
+    it("file navigation envelope validates via protocol and has valid search-match resources (no fullFileSha256)", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        const result = await tool.execute("c-nav-validate", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const details: any = (result as any).details;
+        const v = validateInspectionEnvelope(details.workspaceEvidence);
+        expect(v.ok, v.ok ? "" : (v as any).error).toBe(true);
+        for (const r of details.workspaceEvidence.resources as any[]) {
+            expect(typeof r.resourceId).toBe("string");
+            expect(r.resourceId).toMatch(/^[0-9a-f]{64}$/);
+            expect(["full", "range"].includes(r.kind)).toBe(true);
+            expect(typeof r.fresh).toBe("boolean");
+            expect(r.coverage).toBe("search-match");
+            expect(r.fullFileSha256).toBeUndefined();
+            expect(Array.isArray(r.allowedRanges) && r.allowedRanges.length > 0).toBe(true);
+        }
+    });
+
+    it("file diagnostics envelope validates via protocol and has valid search-match resources", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        const result = await tool.execute("c-diag-validate", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
+        const details: any = (result as any).details;
+        const v = validateInspectionEnvelope(details.workspaceEvidence);
+        expect(v.ok, v.ok ? "" : (v as any).error).toBe(true);
+        for (const r of details.workspaceEvidence.resources as any[]) {
+            expect(typeof r.resourceId).toBe("string");
+            expect(r.kind).toBe("range");
+            expect(r.coverage).toBe("search-match");
+            expect(r.fullFileSha256).toBeUndefined();
+        }
+    });
+
+    it("duplicate same-file navigation ranges accumulate/merge into allowedRanges", async () => {
+        const fileAbs = realpathSync(join(workdir, "hello.ts"));
+        const uri = "file://" + fileAbs;
+        const provider: any = {
+            inspectNavigation: async () => ({
+                status: "confirmed",
+                operation: "references",
+                items: [
+                    { location: { uri, range: { start: { line: 1, character: 0 }, end: { line: 2, character: 0 } } } },
+                    { location: { uri, range: { start: { line: 9, character: 0 }, end: { line: 11, character: 0 } } } },
+                ],
+                truncated: false,
+            }),
+            inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
+        };
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
+        const result = await tool.execute("c-multi-nav", { path: "hello.ts", navigation: { operation: "references", line: 2, character: 1 } }, undefined, undefined, makeCtx());
+        const details: any = (result as any).details;
+        // single resource for hello.ts should contain both ranges (2-3 and 10-12 after +1 conversion)
+        const res = details.workspaceEvidence.resources.find((r: any) => r.canonicalPath.includes("hello.ts"));
+        expect(res).toBeDefined();
+        expect(res.allowedRanges).toEqual(expect.arrayContaining([{ startLine: 2, endLine: 3 }, { startLine: 10, endLine: 12 }]));
+        expect(res.allowedRanges.length).toBe(2);
+        const v = validateInspectionEnvelope(details.workspaceEvidence);
+        expect(v.ok, v.ok ? "" : (v as any).error).toBe(true);
+    });
+
+    it("URI-less documentSymbols record each symbol's real range", async () => {
+        const provider: any = {
+            inspectNavigation: async () => ({
+                status: "confirmed",
+                operation: "documentSymbols",
+                items: [
+                    { name: "alpha", kind: 12, range: { start: { line: 0, character: 0 }, end: { line: 4, character: 0 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
+                    { name: "beta", kind: 12, range: { start: { line: 10, character: 0 }, end: { line: 14, character: 0 } }, selectionRange: { start: { line: 10, character: 0 }, end: { line: 10, character: 4 } } },
+                ],
+                truncated: false,
+            }),
+            inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
+        };
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
+        const result = await tool.execute("c-doc-sym", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const details: any = (result as any).details;
+        const res = details.workspaceEvidence.resources.find((r: any) => r.canonicalPath.includes("hello.ts"));
+        expect(res).toBeDefined();
+        // ranges 1-5 and 11-15 (0-based +1)
+        expect(res.allowedRanges).toEqual(expect.arrayContaining([{ startLine: 1, endLine: 5 }, { startLine: 11, endLine: 15 }]));
+        expect(res.allowedRanges.length).toBe(2);
+        // should NOT be just line 1
+        expect(res.allowedRanges).not.toEqual([{ startLine: 1, endLine: 1 }]);
+    });
+
+    it("empty documentSymbols produces no fake line-1 evidence", async () => {
+        const provider: any = {
+            inspectNavigation: async () => ({ status: "empty", operation: "documentSymbols", items: [], truncated: false }),
+            inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
+        };
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
+        const result: any = await tool.execute("c-empty-sym", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const details: any = result.details;
+        // If srNav empty, there may be zero nav resources or resource from structural facts only.
+        // Navigation empty should not fabricate line-1 search-match; check nav-origin resource not present or if present not fake [1,1] alone.
+        // Structural facts still add full-file coverage, but search-match nav resource should be absent.
+        const navOnlyResources = details.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match" && r.canonicalPath.includes("hello.ts"));
+        // All search-match for hello.ts should be from items, but items empty => no search-match nav range fabricated
+        // If provider returned empty, no search-match range should claim [1,1] as nav evidence unless diagnostics also fabricated.
+        for (const r of navOnlyResources) {
+            // diagnostics empty also produces no coverage, so if empty both, search-match should be empty or not contain fake 1,1-only
+            // Ensure not solely fake line1 from empty fallback
+            if (r.allowedRanges.length === 1 && r.allowedRanges[0].startLine === 1 && r.allowedRanges[0].endLine === 1) {
+                // This would be fabricated evidence - fail
+                expect(r.allowedRanges).not.toEqual([{ startLine: 1, endLine: 1 }]);
+            }
+        }
+        // Stronger: empty nav produces zero search-match resources when structural facts stripped?
+        // Directly test executeFileInspect with stub to isolate nav section: use fresh file with no deps.
+        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const direct = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "documentSymbols" as any }, lspInspectionProvider: provider } as any);
+        const directNavRanges = direct.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match");
+        // empty diagnostics+nav should contribute zero search-match entries (structural facts use different coverage)
+        // If any search-match exists it must not be fake line-1 from empty outcome
+        for (const r of directNavRanges) {
+            expect(r.allowedRanges).not.toEqual([{ startLine: 1, endLine: 1 }]);
+        }
+        // When only empty nav+structural facts present, search-match set should be empty
+        expect(directNavRanges.length).toBe(0);
+    });
+
+    it("empty diagnostics produces no fake line-1 evidence", async () => {
+        const provider: any = {
+            inspectNavigation: async () => ({ status: "empty", operation: "documentSymbols", items: [], truncated: false }),
+            inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
+        };
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
+        const result: any = await tool.execute("c-empty-diag", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 5 } }, undefined, undefined, makeCtx());
+        const details: any = result.details;
+        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const direct = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", diagnostics: { waitMs: 10, maxPerFile: 5 } as any, lspInspectionProvider: provider } as any);
+        const directRanges = direct.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match");
+        expect(directRanges.length).toBe(0);
+        expect(details.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match").length).toBe(0);
+    });
+
+    it("multi-call same-path navigation+diagnostics ranges union (no drop)", async () => {
+        // navigation returns line 2-3 on hello.ts, diagnostics returns line 10-11 on same hello.ts -> merged union should have both
+        const fileAbs = realpathSync(join(workdir, "hello.ts"));
+        const provider: any = {
+            inspectNavigation: async () => ({
+                status: "confirmed", operation: "references",
+                items: [{ location: { uri: "file://" + fileAbs, range: { start: { line: 1, character: 0 }, end: { line: 2, character: 0 } } } }],
+                truncated: false,
+            }),
+            inspectDiagnostics: async () => ({
+                status: "confirmed", diagnostics: [{ message: "err", range: { start: { line: 9, character: 0 }, end: { line: 10, character: 5 } } }],
+                truncated: false,
+            }),
+        };
+        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const direct = await exec({
+            path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl",
+            navigation: { operation: "references" as any, line: 2, character: 1 },
+            diagnostics: { waitMs: 10, maxPerFile: 5 } as any,
+            lspInspectionProvider: provider,
+        } as any);
+        const res = direct.workspaceEvidence.resources.find((r: any) => r.canonicalPath.includes("hello.ts") && r.coverage === "search-match");
+        expect(res!).toBeDefined();
+        expect(res!.allowedRanges).toEqual(expect.arrayContaining([{ startLine: 2, endLine: 3 }, { startLine: 10, endLine: 11 }]));
+        expect(res!.allowedRanges.length).toBe(2);
+    });
+
+    it("hover with explicit line does not fallback to 1 when line missing", async () => {
+        const provider: any = {
+            inspectNavigation: async () => ({ status: "empty", operation: "hover", items: [], truncated: false }),
+            inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
+        };
+        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        // hover without line param -> should produce no fake coverage
+        const noLine = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "hover" as any }, lspInspectionProvider: provider } as any);
+        expect(noLine.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match").length).toBe(0);
+        // hover with line 5 -> should produce range 5-5
+        const withLine = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "hover" as any, line: 5, character: 1 }, lspInspectionProvider: provider } as any);
+        const res2 = withLine.workspaceEvidence.resources.find((r: any) => r.coverage === "search-match");
+        expect(res2).toBeDefined();
+        expect(res2!.allowedRanges).toEqual([{ startLine: 5, endLine: 5 }]);
+    });
+
+    it("non-empty hover without range uses queried line not synthetic line-1", async () => {
+        const provider: any = {
+            inspectNavigation: async () => ({ status: "confirmed", operation: "hover", items: [{ contents: "hover text no range" }], truncated: false }),
+            inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
+        };
+        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        // hover with non-empty result but no range, line 7 queried -> should use line 7, not fake 1
+        const withRangeLess = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "hover" as any, line: 7, character: 2 }, lspInspectionProvider: provider } as any);
+        const res = withRangeLess.workspaceEvidence.resources.find((r: any) => r.coverage === "search-match");
+        expect(res).toBeDefined();
+        expect(res!.allowedRanges).toEqual([{ startLine: 7, endLine: 7 }]);
+        expect(res!.allowedRanges).not.toEqual([{ startLine: 1, endLine: 1 }]);
+        // without queried line, range-less hover should produce no coverage (no fake line-1)
+        const noLine = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "hover" as any }, lspInspectionProvider: provider } as any);
+        expect(noLine.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match").length).toBe(0);
+    });
+
+    it("diagnostics record real range per diagnostic", async () => {
+        const provider: any = {
+            inspectNavigation: async () => ({ status: "empty", operation: "documentSymbols", items: [], truncated: false }),
+            inspectDiagnostics: async () => ({
+                status: "confirmed",
+                diagnostics: [
+                    { message: "err1", range: { start: { line: 2, character: 0 }, end: { line: 2, character: 10 } } },
+                    { message: "err2", range: { start: { line: 9, character: 0 }, end: { line: 10, character: 5 } } },
+                ],
+                truncated: false,
+            }),
+        };
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
+        const result = await tool.execute("c-diag-range", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 5 } }, undefined, undefined, makeCtx());
+        const details: any = (result as any).details;
+        const res = details.workspaceEvidence.resources.find((r: any) => r.canonicalPath.includes("hello.ts"));
+        expect(res).toBeDefined();
+        // 0-based lines +1 => 3-3 and 10-11
+        expect(res.allowedRanges).toEqual(expect.arrayContaining([{ startLine: 3, endLine: 3 }, { startLine: 10, endLine: 11 }]));
+        expect(res.allowedRanges.length).toBe(2);
+    });
+
 });

@@ -60,6 +60,26 @@ const InspectV4Schema = Type.Object({
     layers: Type.Optional(Type.Boolean({
         description: "Derive architectural layers. Directory mode only.",
     })),
+    // ── WP-SR3 LSP params (decision §1 §2 verbatim) ─────────────────
+    navigation: Type.Optional(Type.Object({
+        operation: Type.Union([
+            Type.Literal("definition"),
+            Type.Literal("references"),
+            Type.Literal("implementation"),
+            Type.Literal("hover"),
+            Type.Literal("documentSymbols"),
+            Type.Literal("workspaceSymbols"),
+        ], { description: "LSP navigation operation" }),
+        line: Type.Optional(Type.Number({ minimum: 1, description: "1-based line; file-target ops" })),
+        character: Type.Optional(Type.Number({ minimum: 1, description: "1-based character; file-target ops" })),
+        query: Type.Optional(Type.String({ description: "workspaceSymbols only" })),
+        maxResults: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: "default 20, max 100" })),
+    }, { description: "LSP navigation" })),
+    diagnostics: Type.Optional(Type.Object({
+        waitMs: Type.Optional(Type.Number({ minimum: 0, description: "waitMs default 1500" })),
+        maxPerFile: Type.Optional(Type.Number({ minimum: 1, description: "max per file default 12" })),
+        maxFiles: Type.Optional(Type.Number({ minimum: 1, description: "max files default 20, dir only" })),
+    }, { description: "LSP diagnostics" })),
 });
 
 type InspectV4ToolInput = Static<typeof InspectV4Schema>;
@@ -73,6 +93,8 @@ export interface InspectToolOptions {
     readonly getSessionFilePath: () => string | null | undefined;
     /** ContextGraph instance or getter for graph-dependent inspect params (WP-5 DI). */
     readonly contextGraph?: ContextGraph | ((cwd: string) => ContextGraph | Promise<ContextGraph>);
+    /** Shared LSP inspection provider — injected by runtime, threaded lazily to inspect (WP-SR5 DI). */
+    readonly lspInspectionProvider?: import("./lsp-inspection.js").LspInspectionProvider;
 }
 
 const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality. Pass a directory for a ranked repository map with key symbols and architecture; pass a file for structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) and quality signals. Analysis modes are set via schema params.`;
@@ -123,6 +145,50 @@ function validateCrossParams(params: InspectV4ToolInput): string | undefined {
     return undefined;
 }
 
+// ── WP-SR3 navigation/diagnostics validation (decision §1 §2 verbatim matrix) ──
+function validateNavigation(params: Record<string, unknown>, mode: "file" | "directory"): string | undefined {
+    const nav = params.navigation as Record<string, unknown> | undefined;
+    if (!nav) return undefined;
+    const op = nav.operation as string;
+    const hasLine = nav.line !== undefined;
+    const hasChar = nav.character !== undefined;
+    const hasQuery = nav.query !== undefined;
+    const hasMax = nav.maxResults !== undefined;
+    if (hasMax) {
+        const v = nav.maxResults as number;
+        if (typeof v !== "number" || v < 1 || v > 100) return "Error: inspect navigation.maxResults must be 1..100";
+    }
+    const fileOps = new Set(["definition", "references", "implementation", "hover"]);
+    const docOps = new Set(["documentSymbols"]);
+    const wsOps = new Set(["workspaceSymbols"]);
+    if (fileOps.has(op)) {
+        if (mode !== "file") return `Error: inspect navigation operation "${op}" requires a file target`;
+        if (!hasLine || !hasChar) return `Error: inspect navigation operation "${op}" requires line and character`;
+        if (hasQuery) return `Error: inspect navigation operation "${op}" forbids query`;
+        return undefined;
+    }
+    if (docOps.has(op)) {
+        if (mode !== "file") return `Error: inspect navigation operation "${op}" requires a file target`;
+        if (hasLine || hasChar) return `Error: inspect navigation operation "${op}" forbids line/character`;
+        if (hasQuery) return `Error: inspect navigation operation "${op}" forbids query`;
+        return undefined;
+    }
+    if (wsOps.has(op)) {
+        if (mode !== "directory") return `Error: inspect navigation operation "${op}" requires a directory target`;
+        if (!hasQuery) return `Error: inspect navigation operation "${op}" requires query`;
+        if (hasLine || hasChar) return `Error: inspect navigation operation "${op}" forbids line/character`;
+        return undefined;
+    }
+    // unknown operation — let inspect handle as degraded rather than throw
+    return undefined;
+}
+function validateDiagnostics(params: Record<string, unknown>, mode: "file" | "directory"): string | undefined {
+    const d = params.diagnostics as Record<string, unknown> | undefined;
+    if (!d) return undefined;
+    if (mode === "file" && d.maxFiles !== undefined) return "Error: inspect diagnostics.maxFiles requires a directory target";
+    return undefined;
+}
+
 /**
  * Whether this request actually consumes ContextGraph and therefore justifies
  * awaiting the async `opts.contextGraph` getter. Only directory
@@ -138,6 +204,10 @@ function needsContextGraph(
         return params.clusters === true || params.layers === true || params.graphSchema === true;
     }
     return params.impact === true || params.graphSchema === true;
+}
+
+function needsLspInspection(params: InspectV4ToolInput): boolean {
+    return params.navigation !== undefined || params.diagnostics !== undefined;
 }
 
 export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
@@ -189,6 +259,9 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                 boundaries: params.boundaries,
                 routes: params.routes,
                 layers: params.layers,
+                // WP-SR3
+                navigation: params.navigation as any,
+                diagnostics: params.diagnostics as any,
             };
 
             // Resolve the target mode and run mode-specific validation BEFORE
@@ -198,6 +271,10 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             const resolvedMode = resolveInspectV4Mode(inspectInput);
             const modeErr = validateDirOnlyParams(params, resolvedMode, params.path);
             if (modeErr) throw new Error(modeErr);
+            const navErr = validateNavigation(params as Record<string, unknown>, resolvedMode);
+            if (navErr) throw new Error(navErr);
+            const diagErr = validateDiagnostics(params as Record<string, unknown>, resolvedMode);
+            if (diagErr) throw new Error(diagErr);
 
             // Only params that actually consume ContextGraph justify awaiting the
             // async getter: directory clusters/layers/graphSchema and file
@@ -210,6 +287,10 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                     typeof opts.contextGraph === "function"
                         ? await opts.contextGraph(ctx.cwd)
                         : opts.contextGraph;
+            }
+            if (needsLspInspection(params) && opts.lspInspectionProvider) {
+                // WP-SR5: thread shared LSP provider — lazy, no server start unless navigation/diagnostics used
+                inspectInput.lspInspectionProvider = opts.lspInspectionProvider;
             }
 
             const details = await executeInspectV4(inspectInput);
@@ -231,6 +312,12 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                 }
             }
 
+            // expose WP-SR3 structured details additively (do not close off future status values)
+            const navDetails = (details as any).navigation;
+            const diagDetails = (details as any).diagnostics;
+            const extraUpstream: Record<string, unknown> = { ...(details.upstreamDetails ?? {}) };
+            if (navDetails) extraUpstream.navigation = navDetails;
+            if (diagDetails) extraUpstream.diagnostics = diagDetails;
             return {
                 content: [{ type: "text" as const, text: details.contentText }],
                 details: {
@@ -240,9 +327,9 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                     byteLength: details.byteLength,
                     truncated: details.truncated,
                     toolCallId,
-                    ...(details.upstreamDetails !== undefined
-                        ? { upstreamDetails: details.upstreamDetails }
-                        : {}),
+                    ...(Object.keys(extraUpstream).length > 0 ? { upstreamDetails: extraUpstream } : details.upstreamDetails !== undefined ? { upstreamDetails: details.upstreamDetails } : {}),
+                    ...(navDetails ? { navigation: navDetails } : {}),
+                    ...(diagDetails ? { diagnostics: diagDetails } : {}),
                 },
             };
         },

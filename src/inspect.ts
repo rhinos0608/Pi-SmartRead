@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { realpathSync, statSync } from "node:fs";
 import { relative as pathRelative, resolve as pathResolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
     PROTOCOL_SCHEMA_VERSION,
     hashSessionFilePath,
@@ -33,6 +34,11 @@ import { detectServiceBoundaries } from "./monorepo-detector.js";
 import { findGitRoot } from "./git-history.js";
 import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
 import { findSrcFiles } from "./file-discovery.js";
+import { inspectNavigation as directInspectNavigation, inspectDiagnostics as directInspectDiagnostics, type LspInspectionProvider } from "./lsp-inspection.js";
+
+function resolveLspProvider(input: InspectV4Input): LspInspectionProvider | null {
+  return (input.lspInspectionProvider as LspInspectionProvider | undefined) ?? null;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -51,7 +57,181 @@ function assembleDirectoryOutput(coreText: string, sections: string[]): string {
     return coreText + "\n\n" + sections.join("\n\n");
 }
 
-function fitDirectoryOutput(coreText: string, extraSections: string[], budget: number): { text: string; truncated: boolean } {
+// ── WP-SR3 helpers — always canonicalize via tryCanonical(realpathSync(...)) ──
+function uriToFsPath(uri: string): string {
+    if (uri.startsWith("file://")) {
+        try { return fileURLToPath(uri); } catch { return uri.slice(7); }
+    }
+    return uri;
+}
+function canonicalizeNavigationItems(items: unknown[], _cwd: string): unknown[] {
+    return (items as any[]).map((it) => {
+        if (it && typeof it === "object") {
+            const loc = (it as any).location ?? it;
+            if (loc && typeof loc.uri === "string") {
+                const fsPath = uriToFsPath(loc.uri);
+                const canon = tryCanonical(fsPath);
+                const newUri = "file://" + canon;
+                if ((it as any).location) return { ...(it as any), location: { ...(it as any).location, uri: newUri } };
+                return { ...(it as any), uri: newUri };
+            }
+            if ((it as any).uri && typeof (it as any).uri === "string") {
+                const fsPath = uriToFsPath((it as any).uri);
+                const canon = tryCanonical(fsPath);
+                return { ...(it as any), uri: "file://" + canon };
+            }
+        }
+        return it;
+    });
+}
+function addSearchMatchResource(map: Map<string, InspectedResource>, filePath: string, _cwd: string, _loc: unknown) {
+    try {
+        const canon = tryCanonical(filePath);
+        let startLine: number | undefined;
+        let endLine: number | undefined;
+        try {
+            const rawRange =
+                (_loc as any)?.range ??
+                (_loc as any)?.location?.range ??
+                (_loc as any)?.selectionRange ??
+                (_loc as any)?.location?.selectionRange;
+            if (rawRange?.start?.line !== undefined) {
+                startLine = (rawRange.start.line as number) + 1;
+                if (rawRange?.end?.line !== undefined) endLine = (rawRange.end.line as number) + 1;
+                else endLine = startLine;
+            } else if ((_loc as any)?.line !== undefined) {
+                startLine = (_loc as any).line as number;
+                endLine = ((_loc as any).endLine as number | undefined) ?? startLine;
+                // legacy line is already 1-based; if endLine provided but seems 0-based, keep as is
+            }
+        } catch {}
+        if (startLine === undefined || endLine === undefined) return;
+        const newRange = { startLine, endLine };
+        const existing = map.get(canon);
+        if (existing) {
+            const merged = mergeRanges([...existing.allowedRanges, newRange]);
+            map.set(canon, { ...existing, allowedRanges: merged });
+            return;
+        }
+        map.set(canon, {
+            resourceId: resourceIdFor({ canonicalPath: canon, kind: "range", range: newRange }),
+            canonicalPath: canon,
+            kind: "range",
+            coverage: "search-match",
+            allowedRanges: [newRange],
+            fresh: false,
+        });
+    } catch {}
+}
+function toDiagnosticsOverallStatus(files: Array<{ status: string; diagnostics: unknown[] }>): string {
+    // Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values (e.g. "needs-triage") without closing switch/default paths.
+    const hasFindings = files.some((f) => (f.diagnostics as unknown[]).length > 0);
+    if (hasFindings) return "findings";
+    const allUnavailable = files.every((f) => f.status === "unavailable");
+    if (allUnavailable) return "unavailable";
+    const allEmpty = files.every((f) => f.status === "empty");
+    if (allEmpty) return "unconfirmed";
+    return "partial";
+}
+function renderNavigationSection(details: { operation: string; status: string; items: unknown[]; truncated: boolean }, _cwd: string): string {
+    const lines: string[] = [];
+    lines.push("## LSP Navigation");
+    lines.push("");
+    lines.push(`Operation: ${details.operation} — status: ${details.status} — source: lsp${details.truncated ? " — truncated" : ""}`);
+    lines.push("");
+    if (details.status === "empty") lines.push("_empty \u2260 clean/complete — never treat as proof of absence._");
+    if (details.status === "unavailable") lines.push("_LSP unavailable for this file/query._");
+    if (details.status === "degraded") lines.push("_LSP degraded (timeout/error)._"
+    );
+    if (details.items.length === 0) {
+        lines.push("No results.");
+    } else {
+        lines.push(`Results (${details.items.length}${details.truncated ? ", truncated" : ""}):`);
+        for (const it of details.items as any[]) {
+            if (it?.name) {
+                const loc = it.location?.uri ? uriToFsPath(it.location.uri) : it.uri ? uriToFsPath(it.uri) : "";
+                const range = it.location?.range ?? it.range;
+                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
+                lines.push(`- ${it.name} (kind ${it.kind})${loc ? ` — ${loc}${pos}` : ""}`);
+            } else if (it?.contents !== undefined) {
+                const text = typeof it.contents === "string" ? it.contents : Array.isArray(it.contents) ? (it.contents as any[]).map((c: any) => typeof c === "string" ? c : c.value ?? "").join("\n") : (it.contents as any).value ?? "";
+                const preview = String(text).slice(0, 200).replace(/\n/g, " ");
+                lines.push(`- hover: ${preview}`);
+            } else if (it?.uri) {
+                const p = uriToFsPath(it.uri);
+                const range = it.range;
+                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
+                lines.push(`- ${p}${pos}`);
+            } else if (it?.location?.uri) {
+                const p = uriToFsPath(it.location.uri);
+                const range = it.location.range;
+                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
+                lines.push(`- ${p}${pos}`);
+            } else {
+                lines.push(`- ${JSON.stringify(it).slice(0, 200)}`);
+            }
+        }
+    }
+    return lines.join("\n");
+}
+function renderDiagnosticsSection(details: { status: string; files: Array<{ path: string; diagnostics: unknown[]; truncated?: boolean }>; truncated: boolean }, _cwd: string): string {
+    const lines: string[] = [];
+    lines.push("## LSP Diagnostics");
+    lines.push("");
+    lines.push(`Status: ${details.status} — source: lsp${details.truncated ? " — truncated" : ""}`);
+    lines.push("");
+    if (details.status === "unconfirmed") lines.push("_unconfirmed \u2260 clean/complete — not proof of absence._");
+    if (details.status === "unavailable") lines.push("_LSP unavailable._");
+    if (details.status === "partial") lines.push("_Partial results (some files unavailable/degraded)._"
+    );
+    if (details.files.length === 0) {
+        lines.push("No files.");
+    } else {
+        for (const f of details.files) {
+            const diags = f.diagnostics as any[];
+            lines.push(`- ${f.path}: ${diags.length} diagnostic(s)${f.truncated ? " (truncated)" : ""}`);
+            for (const d of diags) {
+                const msg = (d as any).message ?? JSON.stringify(d).slice(0, 200);
+                const sev = (d as any).severity !== undefined ? ` [severity ${(d as any).severity}]` : "";
+                const range = (d as any).range;
+                const pos = range ? ` @ ${range.start.line + 1}:${range.start.character + 1}` : "";
+                lines.push(`  - ${msg}${sev}${pos}`);
+            }
+        }
+    }
+    return lines.join("\n");
+}
+async function buildDirectoryDiagnostics(opts: { cwd: string; dirPath: string; waitMs: number; maxPerFile: number; maxFiles: number; signal?: AbortSignal; lspInspectionProvider?: LspInspectionProvider }): Promise<{ details: any; sectionText: string }> {
+    const { cwd, dirPath, waitMs, maxPerFile, maxFiles, signal, lspInspectionProvider } = opts as any;
+    const allFiles = await findSrcFiles(dirPath);
+    allFiles.sort();
+    const truncatedByFiles = allFiles.length > maxFiles;
+    const selected = allFiles.slice(0, maxFiles);
+    const files: Array<{ path: string; diagnostics: unknown[]; truncated?: boolean }> = [];
+    let anyTruncated = truncatedByFiles;
+    const perFileStatuses: Array<{ status: string; diagnostics: unknown[] }> = [];
+    for (const fp of selected) {
+        try {
+            const fileAbs = fp.startsWith("/") ? fp : pathResolve(fp);
+            const diagFn = lspInspectionProvider ? lspInspectionProvider.inspectDiagnostics : directInspectDiagnostics;
+            const outcome = await diagFn({ path: fileAbs, root: cwd, waitMs, maxPerFile, signal } as any);
+            const canon = tryCanonical(fileAbs);
+            files.push({ path: canon, diagnostics: outcome.diagnostics, truncated: outcome.truncated });
+            perFileStatuses.push({ status: outcome.status, diagnostics: outcome.diagnostics });
+            if (outcome.truncated) anyTruncated = true;
+        } catch {
+            const canon = (() => { try { return tryCanonical(fp); } catch { return fp; } })();
+            files.push({ path: canon, diagnostics: [], truncated: false });
+            perFileStatuses.push({ status: "degraded", diagnostics: [] });
+        }
+    }
+    const status = toDiagnosticsOverallStatus(perFileStatuses.length ? perFileStatuses : [{ status: "unavailable", diagnostics: [] }]);
+    const details = { schemaVersion: 1 as const, status, source: "lsp" as const, files, truncated: anyTruncated };
+    const sectionText = renderDiagnosticsSection(details, cwd);
+    return { details, sectionText };
+}
+
+function fitDirectoryOutput(coreText: string, extraSections: string[], budget: number): { text: string; truncated: boolean; admittedCount: number } {
     const footerSep = "\n\n" + DIRECTORY_TRUNCATION_FOOTER;
     const totalSections = extraSections.length;
     // Binary-search max k sections fitting with reserved footer
@@ -71,7 +251,7 @@ function fitDirectoryOutput(coreText: string, extraSections: string[], budget: n
     if (bestK >= 0) {
         const truncated = bestK < totalSections;
         const text = assembleDirectoryOutput(coreText, extraSections.slice(0, bestK)) + (truncated ? footerSep : "");
-        return { text, truncated };
+        return { text, truncated, admittedCount: bestK };
     }
     // Core alone exceeds budget — binary-search line prefix
     const coreLines = coreText.split("\n");
@@ -93,9 +273,9 @@ function fitDirectoryOutput(coreText: string, extraSections: string[], budget: n
     if (estimateTokens(text) > budget) {
         // Last resort: truncate footer itself line-aligned (should not happen with valid budget)
         const footerLines = DIRECTORY_TRUNCATION_FOOTER.split("\n");
-        return { text: footerLines.join("\n"), truncated: true };
+        return { text: footerLines.join("\n"), truncated: true, admittedCount: 0 };
     }
-    return { text, truncated: true };
+    return { text, truncated: true, admittedCount: 0 };
 }
 
 // ── Validation (spec §4) ─────────────────────────────────────────
@@ -160,6 +340,8 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
     if (input.focus && input.focus.length > 0) {
         params.focus = input.focus;
     }
+    // Lazy-start contract: repomap LSP fallback only when navigation/diagnostics requested
+    (params as any).allowLspFallback = !!(input.navigation || input.diagnostics);
     const result = await repoTool.execute(
         "inspect-v4-map",
         params as any,
@@ -371,8 +553,78 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
         }
     }
 
+    // ── WP-SR3 navigation (directory: workspaceSymbols only) ──
+    let __navDetails: any = undefined;
+    if (input.navigation) {
+        try {
+            const op = input.navigation.operation;
+            const maxResults = Math.min(Math.max(input.navigation.maxResults ?? 20, 1), 100);
+            const navFn = resolveLspProvider(input)?.inspectNavigation ?? directInspectNavigation;
+            const outcome = await navFn({
+                operation: op as any,
+                query: input.navigation.query,                line: input.navigation.line,
+                character: input.navigation.character,
+                maxResults,
+                path: pathResolve(cwd, input.path),
+                root: cwd,
+                signal: input.signal as any,
+            });
+            const status = outcome.status === "confirmed" ? "ok" : outcome.status;
+            // Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values without closing switch/default paths.
+            const items = canonicalizeNavigationItems(outcome.items, cwd);
+            __navDetails = { schemaVersion: 1 as const, operation: op, status, source: "lsp" as const, items, truncated: outcome.truncated };
+            extraSections.push(renderNavigationSection(__navDetails, cwd));
+        } catch {
+            extraSections.push("## LSP Navigation\n\n(computation failed)");
+        }
+    }
+
+    // ── WP-SR3 diagnostics (directory) ──
+    let __diagDetails: any = undefined;
+    if (input.diagnostics) {
+        try {
+            const waitMs = input.diagnostics.waitMs ?? 1500;
+            const maxPerFile = input.diagnostics.maxPerFile ?? 12;
+            const maxFiles = input.diagnostics.maxFiles ?? 20;
+            const r = await buildDirectoryDiagnostics({ cwd, dirPath: pathResolve(cwd, input.path), waitMs, maxPerFile, maxFiles, signal: input.signal as any, lspInspectionProvider: resolveLspProvider(input) ?? undefined } as any);
+            __diagDetails = r.details;
+            extraSections.push(r.sectionText);
+        } catch {
+            extraSections.push("## LSP Diagnostics\n\n(computation failed)");
+        }
+    }
+
     // ── Hard budget fitting (preserves ranked order, complete sections only) ──
-    const { text: finalText, truncated } = fitDirectoryOutput(contentText, extraSections, budget);
+    const { text: fittedText, truncated, admittedCount } = fitDirectoryOutput(contentText, extraSections, budget);
+    void admittedCount;
+    // Keep LSP text/details in sync when budget trimming drops their sections.
+    // MCP clients only see rendered text, so a dropped section with retained
+    // details would silently lose information.
+    const renderDroppedNav = __navDetails !== undefined && !fittedText.includes("## LSP Navigation");
+    const renderDroppedDiag = __diagDetails !== undefined && !fittedText.includes("## LSP Diagnostics");
+    let finalText = fittedText;
+    let navDetails: typeof __navDetails = __navDetails;
+    let diagDetails: typeof __diagDetails = __diagDetails;
+    const omissionNotes: string[] = [];
+    if (renderDroppedNav) {
+        omissionNotes.push("Note: LSP Navigation section omitted due to token-budget fitting (mapTokens too low to include it).");
+        navDetails = undefined;
+    }
+    if (renderDroppedDiag) {
+        omissionNotes.push("Note: LSP Diagnostics section omitted due to token-budget fitting (mapTokens too low to include it).");
+        diagDetails = undefined;
+    }
+    if (omissionNotes.length > 0) {
+        const footerIdx = finalText.indexOf(DIRECTORY_TRUNCATION_FOOTER);
+        const noteBlock = omissionNotes.join("\n") + "\n";
+        const candidate = footerIdx >= 0
+            ? finalText.slice(0, footerIdx) + noteBlock + finalText.slice(footerIdx)
+            : finalText + "\n" + noteBlock;
+        if (estimateTokens(candidate) <= budget) {
+            finalText = candidate;
+        }
+        // else: note block omitted to preserve hard budget; fittedText already carries truncation footer when truncated
+    }
 
     const inspectionId = inspectionIdFor({
         sessionId,
@@ -390,15 +642,23 @@ export async function executeDirectoryInspect(input: InspectV4Input): Promise<In
         mode: "map",
     };
 
+    const upstream: Record<string, unknown> = { ...(result.details as Record<string, unknown> ?? {}) };
+    if (navDetails) upstream.navigation = navDetails;
+    if (diagDetails) upstream.diagnostics = diagDetails;
+    // Remove stale LSP keys when their sections were budget-dropped
+    if (renderDroppedNav) delete (upstream as any).navigation;
+    if (renderDroppedDiag) delete (upstream as any).diagnostics;
     return {
         mode: "directory",
         contentText: finalText,
         workspaceEvidence: envelope,
         lineCount: finalText === "" ? 0 : finalText.split("\n").length,
         byteLength: Buffer.byteLength(finalText, "utf8"),
-        truncated,
-        upstreamDetails: result.details as Record<string, unknown>,
-    };
+        truncated: truncated || omissionNotes.length > 0,
+        upstreamDetails: upstream,
+        navigation: navDetails,
+        diagnostics: diagDetails,
+    } as any;
 }
 
 // ── File inspect ─────────────────────────────────────────────────
@@ -408,7 +668,7 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
     const cwd = realpathSync(input.cwd);
     const canonicalRoot = canonicalizeWorkspaceRoot(cwd);
     const sessionId = hashSessionFilePath(sessionFilePath);
-    const absolutePath = pathResolve(cwd, input.path);
+    const absolutePath = tryCanonical(pathResolve(cwd, input.path));
 
     // Structural facts + signals
     let facts: StructuralFacts;
@@ -436,7 +696,7 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
 
     // External dependents => each file that imports/re-exports us gets a resource on the importer file
     for (const dep of facts.externalDependents ?? []) {
-        const canonical = pathResolve(cwd, dep.file);
+        const canonical = tryCanonical(pathResolve(cwd, dep.file));
         setResourceRanges(resourcesByPath, canonical, dep.line);
     }
 
@@ -463,7 +723,7 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
 
     // Re-exports => each barrel file
     for (const reexport of facts.reExportedBy) {
-        const canonical = pathResolve(cwd, reexport.barrelFile);
+        const canonical = tryCanonical(pathResolve(cwd, reexport.barrelFile));
         setResourceRanges(resourcesByPath, canonical, reexport.line);
     }
 
@@ -751,6 +1011,73 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
         }
     }
 
+    // ── WP-SR3 navigation (file) ──
+    let __navDetails: any = undefined;
+    if (input.navigation) {
+        try {
+            const op = input.navigation.operation;
+            const maxResults = Math.min(Math.max(input.navigation.maxResults ?? 20, 1), 100);
+            const navFn2 = resolveLspProvider(input)?.inspectNavigation ?? directInspectNavigation;
+            const outcome = await navFn2({
+                operation: op as any,
+                line: input.navigation.line,
+                character: input.navigation.character,
+                query: input.navigation.query,
+                maxResults,
+                path: absolutePath,
+                root: cwd,
+                signal: input.signal as any,
+            });
+            const status = outcome.status === "confirmed" ? "ok" : outcome.status;
+            // Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values without closing switch/default paths.
+            const items = canonicalizeNavigationItems(outcome.items, cwd);
+            __navDetails = { schemaVersion: 1 as const, operation: op, status, source: "lsp" as const, items, truncated: outcome.truncated };
+            extraSections.push(renderNavigationSection(__navDetails, cwd));
+            const srNav = new Map<string, InspectedResource>();
+            // file-mode results stay coverage:"search-match" — add per-location resources
+            for (const it of items as any[]) {
+                const p: string | undefined = (it as any)?.location?.uri ? uriToFsPath((it as any).location.uri) : (it as any)?.uri ? uriToFsPath((it as any).uri) : undefined;
+                if (p) addSearchMatchResource(srNav, p, cwd, it);
+                else addSearchMatchResource(srNav, absolutePath, cwd, it);
+            }
+            if (op === "hover" && input.navigation.line !== undefined) {
+                addSearchMatchResource(srNav, absolutePath, cwd, { line: input.navigation.line });
+            }
+            // empty non-hover navigations produce no coverage (no fake line-1)
+            // when items empty and not hover, srNav stays empty
+            sectionResources.push(srNav);
+        } catch {
+            extraSections.push("## LSP Navigation\n\n(computation failed)");
+            sectionResources.push(new Map());
+        }
+    }
+
+    // ── WP-SR3 diagnostics (file) ──
+    let __diagDetails: any = undefined;
+    if (input.diagnostics) {
+        try {
+            const waitMs = input.diagnostics.waitMs ?? 1500;
+            const maxPerFile = input.diagnostics.maxPerFile ?? 12;
+            const diagFnFile = resolveLspProvider(input)?.inspectDiagnostics ?? directInspectDiagnostics;
+            const outcome = await diagFnFile({ path: absolutePath, root: cwd, waitMs, maxPerFile, signal: input.signal as any });
+            const status = toDiagnosticsOverallStatus([{ status: outcome.status, diagnostics: outcome.diagnostics }]);
+            const canonPath = tryCanonical(absolutePath);
+            const files = [{ path: canonPath, diagnostics: outcome.diagnostics, truncated: outcome.truncated }];
+            __diagDetails = { schemaVersion: 1 as const, status, source: "lsp" as const, files, truncated: !!outcome.truncated };
+            extraSections.push(renderDiagnosticsSection(__diagDetails, cwd));
+            const srD = new Map<string, InspectedResource>();
+            if (outcome.diagnostics.length === 0) {
+                // empty diagnostics -> no coverage, do not fabricate line-1
+            } else {
+                for (const d of outcome.diagnostics as any[]) addSearchMatchResource(srD, absolutePath, cwd, d);
+            }
+            sectionResources.push(srD);
+        } catch {
+            extraSections.push("## LSP Diagnostics\n\n(computation failed)");
+            sectionResources.push(new Map());
+        }
+    }
+
     // graphSchema (file scope)
     if (input.graphSchema) {
         try {
@@ -814,7 +1141,11 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
             usedTokens += tokens;
             // Merge this section's resources into admitted set
             for (const [key, val] of sectionResources[i]!) {
-                if (!admittedSectionResources.has(key)) {
+                const existing = admittedSectionResources.get(key);
+                if (existing) {
+                    const merged = mergeRanges([...existing.allowedRanges, ...val.allowedRanges]);
+                    admittedSectionResources.set(key, { ...existing, allowedRanges: merged });
+                } else {
                     admittedSectionResources.set(key, val);
                 }
             }
@@ -842,7 +1173,11 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
     const contentText = finalParts.join("\n");
     // Merge structural facts resources with admitted section resources
     for (const [key, val] of admittedSectionResources) {
-        if (!resourcesByPath.has(key)) {
+        const existing = resourcesByPath.get(key);
+        if (existing) {
+            const merged = mergeRanges([...existing.allowedRanges, ...val.allowedRanges]);
+            resourcesByPath.set(key, { ...existing, allowedRanges: merged });
+        } else {
             resourcesByPath.set(key, val);
         }
     }
@@ -866,6 +1201,9 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
         mode: "symbol" as InspectMode,
     };
 
+    const upstreamFile: Record<string, unknown> = {};
+    if (__navDetails) upstreamFile.navigation = __navDetails;
+    if (__diagDetails) upstreamFile.diagnostics = __diagDetails;
     return {
         mode: "file",
         contentText,
@@ -873,7 +1211,10 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
         lineCount: finalParts.length,
         byteLength: Buffer.byteLength(contentText, "utf8"),
         truncated: budgetExhausted,
-    };
+        upstreamDetails: Object.keys(upstreamFile).length ? upstreamFile : undefined,
+        navigation: __navDetails,
+        diagnostics: __diagDetails,
+    } as any;
 }
 
 // ── Section renderers ────────────────────────────────────────────
@@ -1003,14 +1344,15 @@ function setResourceRanges(
     canonical: string,
     line: number,
 ): void {
-    const existing = resourcesByPath.get(canonical);
+    const canon = tryCanonical(canonical);
+    const existing = resourcesByPath.get(canon);
     if (existing) {
         const merged = mergeRanges([...existing.allowedRanges, { startLine: line, endLine: line }]);
-        resourcesByPath.set(canonical, { ...existing, allowedRanges: merged });
+        resourcesByPath.set(canon, { ...existing, allowedRanges: merged });
     } else {
-        resourcesByPath.set(canonical, {
-            resourceId: resourceIdFor({ canonicalPath: canonical, kind: "range", range: { startLine: line, endLine: line } }),
-            canonicalPath: canonical,
+        resourcesByPath.set(canon, {
+            resourceId: resourceIdFor({ canonicalPath: canon, kind: "range", range: { startLine: line, endLine: line } }),
+            canonicalPath: canon,
             kind: "range",
             coverage: "search-match",
             allowedRanges: [{ startLine: line, endLine: line }],
