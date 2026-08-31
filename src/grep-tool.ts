@@ -27,11 +27,21 @@ import type { ContextGraph } from "./context-graph.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
 import { sessionFileFromContext } from "./inspect-tool.js";
 import { recordDegradation } from "./runtime-health.js";
+import { structuralSearch, resolveStructuralLang, STRUCTURAL_SEARCH_MAX_LIMIT, STRUCTURAL_SEARCH_RAW_CEILING } from "./structural-search.js";
+export const GREP_STRUCTURAL_FETCH_SIZE = STRUCTURAL_SEARCH_MAX_LIMIT;
+export const GREP_STRUCTURAL_MAX_ITERATIONS = 20000;
+import type { StructuralSearchMatch } from "./structural-search.js";
 import { tokenize, compileBm25Corpus, type Bm25Corpus } from "./scoring.js";
 import { findCodeFiles } from "./file-discovery.js";
 import { LruCache } from "./utils.js";
 
 // ── Schema ──────────────────────────────────────────────────────────
+
+const StructuralSchema = Type.Object({
+    language: Type.Optional(Type.String({ description: "Structural language override (e.g. 'typescript', 'python')." })),
+    skip: Type.Optional(Type.Number({ description: "Matches to skip (pagination).", minimum: 0 })),
+    groupByFile: Type.Optional(Type.Boolean({ description: "Group matches by file." })),
+}, { description: "Structural search options (ast-grep)." });
 
 const GrepOptionProperties = {
     path: Type.Optional(Type.String({ description: "Directory or file to search in (default: cwd)." })),
@@ -41,11 +51,17 @@ const GrepOptionProperties = {
     limit: Type.Optional(Type.Number({ description: "Max results (default: 20, max: 100).", default: 20, minimum: 1, maximum: 100 })),
     contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 10).", default: 2, minimum: 0, maximum: 10 })),
     graphFilter: Type.Optional(Type.String({ description: 'Filter results by graph relationship. Format: "EDGE_TYPE->target" e.g. "CALLS->auth.login" or "IMPORTED_BY->src/core".' })),
+    structural: Type.Optional(StructuralSchema),
+};
+// Top-level skip routes into structural.skip (WP-SR4 fix: wiring for pagination when combined with graphFilter)
+const TopLevelSkipProperty = {
+    skip: Type.Optional(Type.Number({ description: "Matches to skip (pagination) for structural search — routes into structural.skip.", minimum: 0 })),
 };
 
 const GrepQuerySchema = Type.Object({
     pattern: Type.String({ description: "Text, symbol name, or concept to search for.", minLength: 1 }),
     ...GrepOptionProperties,
+    ...TopLevelSkipProperty,
 });
 
 const GrepSchema = Type.Object({
@@ -56,6 +72,7 @@ const GrepSchema = Type.Object({
         maxItems: 10,
     })),
     ...GrepOptionProperties,
+    ...TopLevelSkipProperty,
 });
 
 type GrepInput = Static<typeof GrepSchema>;
@@ -86,6 +103,20 @@ interface GrepExecutionResult {
     elapsedMs: number;
     graphFilterNotes: string[];
     degradation?: GrepDegradation[];
+    structuralSearch?: StructuralDetails;
+}
+
+export interface StructuralDetails {
+    schemaVersion: 1;
+    status: "ok" | "unavailable";
+    skip: number;
+    groupByFile: boolean;
+    totalMatches: number;
+    shownMatches: number;
+    truncated: boolean;
+    matches: Array<StructuralSearchMatch & { read: { path: string; offset: number; limit: number } }>;
+    groupedByFile?: Record<string, Array<StructuralSearchMatch & { read: { path: string; offset: number; limit: number } }>>;
+    reason?: string;
 }
 
 /** Structured, non-secret per-query degradation reason. */
@@ -153,9 +184,29 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             if (params.limit !== undefined) shared.limit = params.limit;
             if (params.contextLines !== undefined) shared.contextLines = params.contextLines;
             if (params.graphFilter !== undefined) shared.graphFilter = params.graphFilter;
+            if ((params as any).structural !== undefined) (shared as any).structural = (params as any).structural;
+            if ((params as any).skip !== undefined) (shared as any).skip = (params as any).skip;
+            // Route top-level skip into structural.skip when structural present and structural.skip not already set
+            if ((shared as any).skip !== undefined && (shared as any).structural !== undefined && (shared as any).structural.skip === undefined) {
+                (shared as any).structural = { ...(shared as any).structural, skip: (shared as any).skip };
+            }
+            function mergeQueryWithShared(shared: Record<string, unknown>, query: Record<string, unknown>): GrepQueryInput {
+                const merged: Record<string, unknown> = { ...shared, ...query };
+                // Route top-level skip into structural.skip for batch queries too
+                const qSkip = (query as any).skip;
+                const sSkip = (shared as any).skip;
+                const effectiveSkip = qSkip !== undefined ? qSkip : sSkip;
+                if (effectiveSkip !== undefined) {
+                    const existing = (merged as any).structural ?? {};
+                    if (existing.skip === undefined) (merged as any).structural = { ...existing, skip: effectiveSkip };
+                    // keep top-level skip for fallback in executeStructuralQuery as well
+                    (merged as any).skip = effectiveSkip;
+                }
+                return merged as unknown as GrepQueryInput;
+            }
             const queries: GrepQueryInput[] = hasQueries
-                ? params.queries!.map((query) => ({ ...shared, ...query }))
-                : [{ ...shared, pattern: params.pattern! }];
+                ? params.queries!.map((query) => mergeQueryWithShared(shared, query as unknown as Record<string, unknown>))
+                : [{ ...shared, pattern: params.pattern! }] as unknown as GrepQueryInput[];
             const queryResults: GrepExecutionResult[] = [];
             for (const query of queries) {
                 queryResults.push(await executeGrepQuery(query, cwd, opts, signal));
@@ -179,6 +230,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         truncated: result.truncated,
                         engines: result.engines,
                         ...(result.degradation ? { degradation: result.degradation } : {}),
+                        ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
                     },
                 };
             }
@@ -201,6 +253,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         engines: result.engines,
                         elapsedMs: result.elapsedMs,
                         ...(result.degradation ? { degradation: result.degradation } : {}),
+                        ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
                     })),
                 },
             };
@@ -208,12 +261,210 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
     };
 }
 
+async function executeStructuralQuery(
+    params: GrepQueryInput & { structural: { language?: string; skip?: number; groupByFile?: boolean } },
+    cwd: string,
+    opts: GrepToolOptions,
+): Promise<GrepExecutionResult> {
+    const structural = params.structural;
+    if (params.literal) throw new Error("structural search cannot be combined with literal: choose one");
+    if (params.ignoreCase) throw new Error("structural search cannot be combined with ignoreCase");
+    if (structural.language !== undefined) {
+        const resolved = resolveStructuralLang(structural.language);
+        if (!resolved) throw new Error(`unsupported language: ${structural.language}`);
+    }
+    const topK = clamp(params.limit ?? 20, 1, 100);
+    const skip = (structural.skip ?? (params as any).skip ?? 0) as number;
+    if (!Number.isInteger(skip) || skip < 0) throw new Error("structural.skip must be an integer >= 0");
+    const groupByFile = Boolean(structural.groupByFile);
+    const hasGraphFilter = params.graphFilter !== undefined;
+    const startTime = Date.now();
+    const MAX_STRUCTURAL_FETCH = GREP_STRUCTURAL_FETCH_SIZE;
+    const MAX_STRUCTURAL_ITERATIONS = GREP_STRUCTURAL_MAX_ITERATIONS;
+    // When graphFilter present, fetch full raw match set first then filter — otherwise cap at 1000 before filtering loses hits.
+    let matches: StructuralSearchMatch[];
+    let totalMatches: number;
+    let truncated: boolean;
+    let graphFilterNotes: string[] = [];
+    if (hasGraphFilter) {
+        if (!parseGraphFilter(params.graphFilter!)) throw new Error('Invalid graphFilter: expected "EDGE_TYPE->target" format');
+        const contextGraph: any = typeof opts.contextGraph === "function" ? await (opts.contextGraph as any)(cwd) : opts.contextGraph;
+        if (!contextGraph) throw new Error("graphFilter requires an indexed context graph");
+        const allRaw: StructuralSearchMatch[] = [];
+        let offset = 0;
+        let iterations = 0;
+        let rawCeilingHit = false;
+        // MAX_STRUCTURAL_ITERATIONS already defined above — hard cap prevents hang
+        // STRUCTURAL_SEARCH_RAW_CEILING prevents skip-clamp repetition above ~10M raw matches
+        while (true) {
+            if (iterations++ >= MAX_STRUCTURAL_ITERATIONS) break;
+            if (offset >= STRUCTURAL_SEARCH_RAW_CEILING) { rawCeilingHit = true; break; }
+            if (allRaw.length >= STRUCTURAL_SEARCH_RAW_CEILING) { rawCeilingHit = true; break; }
+            const chunk = await structuralSearch({
+                pattern: params.pattern,
+                language: structural.language,
+                skip: offset,
+                limit: MAX_STRUCTURAL_FETCH,
+                groupByFile: false,
+                cwd,
+                path: params.path,
+                glob: params.glob,
+            });
+            if (chunk.status === "unavailable") {
+                const details: StructuralDetails = {
+                    schemaVersion: 1,
+                    status: "unavailable",
+                    skip,
+                    groupByFile,
+                    totalMatches: 0,
+                    shownMatches: 0,
+                    truncated: false,
+                    matches: [],
+                    reason: chunk.reason,
+                };
+                return {
+                    pattern: params.pattern,
+                    shown: [],
+                    totalHits: 0,
+                    engines: ["structural"],
+                    truncated: false,
+                    elapsedMs: Date.now() - startTime,
+                    graphFilterNotes: [],
+                    structuralSearch: details,
+                };
+            }
+            // Hard ceiling: structuralSearch clamps skip to MAX_SKIP, so above ceiling same page repeats.
+            // Detect clamp/ceiling and terminate with truncated:true instead of looping.
+            if ((chunk as any).skip !== undefined && (chunk as any).skip !== offset) { rawCeilingHit = true; break; }
+            if (chunk.truncated && chunk.totalMatches >= STRUCTURAL_SEARCH_RAW_CEILING) rawCeilingHit = true; // hint: total beyond ceiling, but keep paginating until allRaw hits ceiling
+            allRaw.push(...chunk.matches);
+            if (allRaw.length >= STRUCTURAL_SEARCH_RAW_CEILING) {
+                allRaw.length = STRUCTURAL_SEARCH_RAW_CEILING;
+                rawCeilingHit = true;
+                break;
+            }
+            // Do not break on hint alone — continue paginating until allRaw reaches ceiling
+            if (!chunk.truncated) break;
+            if (chunk.matches.length === 0) break;
+            // always advance by fixed fetch size — guarantees forward progress even
+            // when clamp or truncated logic mis-reports; never re-scan same window
+            const nextOffset = offset + MAX_STRUCTURAL_FETCH;
+            if (nextOffset <= offset) break;
+            if (nextOffset > STRUCTURAL_SEARCH_RAW_CEILING) { rawCeilingHit = true; break; }
+            offset = nextOffset;
+        }
+        const hitsForFilter: GrepHit[] = allRaw.map((m) => ({
+            file: m.path,
+            relFile: relative(cwd, m.path).replace(/\\/g, "/"),
+            line: m.line,
+            endLine: m.endLine,
+            name: "",
+            kind: "structural",
+            snippet: m.text,
+            engines: ["structural"],
+            score: 0,
+        }));
+        const filtered = await applyGraphFilter(hitsForFilter, params.graphFilter!, contextGraph);
+        graphFilterNotes = filtered.notes;
+        const kept = new Set(filtered.hits.map((h) => `${h.file}:${h.line}:${h.endLine}`));
+        const keptSimple = new Set(filtered.hits.map((h) => `${h.file}:${h.line}`));
+        const filteredMatches = allRaw.filter((m) => kept.has(`${m.path}:${m.line}:${m.endLine}`) || keptSimple.has(`${m.path}:${m.line}`));
+        totalMatches = filteredMatches.length;
+        const paged = filteredMatches.slice(skip, skip + topK);
+        truncated = rawCeilingHit ? true : skip + paged.length < totalMatches;
+        matches = paged;
+    } else {
+        const result = await structuralSearch({
+            pattern: params.pattern,
+            language: structural.language,
+            skip,
+            limit: topK,
+            groupByFile,
+            cwd,
+            path: params.path,
+            glob: params.glob,
+        });
+        if (result.status === "unavailable") {
+            const details: StructuralDetails = {
+                schemaVersion: 1,
+                status: "unavailable",
+                skip,
+                groupByFile,
+                totalMatches: 0,
+                shownMatches: 0,
+                truncated: false,
+                matches: [],
+                reason: result.reason,
+            };
+            return {
+                pattern: params.pattern,
+                shown: [],
+                totalHits: 0,
+                engines: ["structural"],
+                truncated: false,
+                elapsedMs: Date.now() - startTime,
+                graphFilterNotes: [],
+                structuralSearch: details,
+            };
+        }
+        matches = result.matches;
+        totalMatches = result.totalMatches;
+        truncated = result.truncated;
+    }
+    const enriched: Array<StructuralSearchMatch & { read: { path: string; offset: number; limit: number } }> = matches.map((m) => {
+        const rel = relative(cwd, m.path).replace(/\\/g, "/");
+        const limit = Math.max(1, m.endLine - m.line + 1);
+        return { ...m, path: rel, read: { path: rel, offset: m.line, limit } };
+    });
+    const groupedByFile = groupByFile ? (() => {
+        const g: Record<string, typeof enriched> = {};
+        for (const e of enriched) (g[e.path] ??= []).push(e);
+        return g;
+    })() : undefined;
+    const details: StructuralDetails = {
+        schemaVersion: 1,
+        status: "ok",
+        skip,
+        groupByFile,
+        totalMatches,
+        shownMatches: enriched.length,
+        truncated,
+        matches: enriched,
+        ...(groupedByFile ? { groupedByFile } : {}),
+    };
+    const hits: GrepHit[] = enriched.map((m) => ({
+        file: tryCanonical(resolve(cwd, m.path)),
+        relFile: m.path,
+        line: m.line,
+        endLine: m.endLine,
+        name: m.text.slice(0, 80),
+        kind: "structural",
+        snippet: m.text,
+        engines: ["structural"],
+        score: 0,
+    }));
+    return {
+        pattern: params.pattern,
+        shown: hits,
+        totalHits: totalMatches,
+        engines: ["structural"],
+        truncated,
+        elapsedMs: Date.now() - startTime,
+        graphFilterNotes,
+        structuralSearch: details,
+    };
+}
+
 async function executeGrepQuery(
-    params: GrepQueryInput,
+    params: GrepQueryInput & { structural?: { language?: string; skip?: number; groupByFile?: boolean } },
     cwd: string,
     opts: GrepToolOptions,
     signal: AbortSignal | undefined,
 ): Promise<GrepExecutionResult> {
+    // Structural branch — validate combos before any IO
+    if ((params as any).structural !== undefined) {
+        return executeStructuralQuery(params as any, cwd, opts);
+    }
     const { searchDir, scopedFile } = resolveSearchScope(cwd, params.path);
     const topK = clamp(params.limit ?? 20, 1, 100);
     const contextLines = clamp(params.contextLines ?? 2, 0, 10);
@@ -1030,6 +1281,9 @@ function buildEvidence(
 // ── Output formatting ──────────────────────────────────────────────
 
 function formatExecutionOutput(result: GrepExecutionResult): string {
+    if (result.structuralSearch) {
+        return formatStructuralOutput(result);
+    }
     return formatOutput(
         result.pattern,
         result.shown,
@@ -1040,6 +1294,30 @@ function formatExecutionOutput(result: GrepExecutionResult): string {
         result.graphFilterNotes,
         result.degradation,
     );
+}
+
+function formatStructuralOutput(result: GrepExecutionResult): string {
+    const d = result.structuralSearch!;
+    const engineStr = result.engines.join(" + ");
+    const lines: string[] = [
+        `${result.totalHits} result(s) for "${result.pattern}" (${engineStr}, ${(result.elapsedMs / 1000).toFixed(1)}s) [structural]`,
+        `structural: status=${d.status} skip=${d.skip} groupByFile=${d.groupByFile} total=${d.totalMatches} shown=${d.shownMatches} truncated=${d.truncated}`,
+        "",
+    ];
+    if (d.status === "unavailable") {
+        lines.push(`structural search unavailable: ${d.reason ?? "@ast-grep/napi not available"}`);
+        if (result.graphFilterNotes.length > 0) for (const n of result.graphFilterNotes) lines.push(`graphFilter note: ${n}`);
+        return lines.join("\n");
+    }
+    for (const m of d.matches) {
+        lines.push(`${m.path}:${m.line}:${m.character}-${m.endLine}:${m.endCharacter} ${JSON.stringify(m.text)} read={path:"${m.read.path}",offset:${m.read.offset},limit:${m.read.limit}}`);
+    }
+    if (d.matches.length === 0) lines.push("(no structural matches)");
+    lines.push("");
+    if (d.truncated) lines.push(`(truncated: ${d.shownMatches} of ${d.totalMatches}, use skip for more)`);
+    if (result.graphFilterNotes.length > 0) for (const n of result.graphFilterNotes) lines.push(`graphFilter note: ${n}`);
+    if (result.degradation && result.degradation.length > 0) lines.push(`degraded: ${result.degradation.map((x) => `${x.backend}_${x.code}`).join(", ")}`);
+    return lines.join("\n");
 }
 
 function formatBatchOutput(results: GrepExecutionResult[]): string {
