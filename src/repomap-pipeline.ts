@@ -51,6 +51,8 @@ export interface RepoMapOptions {
   mentionedIdents?: string[];
   mentionedFnames?: string[];
   delta?: boolean;
+  /** Lazy-start contract: only navigation/diagnostics may trigger LSP spawn. Gated fallback. */
+  allowLspFallback?: boolean;
 }
 
 export interface RepoMapResult {
@@ -539,17 +541,19 @@ export class RepoMap {
             }
           }
 
-          const lspFallbackFiles = [
-            ...focusFiles,
-            ...additionalFiles,
-            ...priorityFiles,
-          ];
-          await augmentWithLspSymbols(
-            allTags,
-            lspFallbackFiles,
-            this.root,
-            this.verbose,
-          );
+          if (options.allowLspFallback) {
+            const lspFallbackFiles = [
+              ...focusFiles,
+              ...additionalFiles,
+              ...priorityFiles,
+            ];
+            await augmentWithLspSymbols(
+              allTags,
+              lspFallbackFiles,
+              this.root,
+              this.verbose,
+            );
+          }
         }
       } catch (err) {
         if (autoFallback) {
@@ -678,6 +682,7 @@ export class RepoMap {
       priorityFiles: options.priorityFiles ?? [],
       mentionedIdents: options.mentionedIdents ?? [],
       mentionedFnames: options.mentionedFnames ?? [],
+      allowLspFallback: options.allowLspFallback ?? false,
     });
   }
 

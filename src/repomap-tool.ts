@@ -49,6 +49,11 @@ const RepoMapSchema = Type.Object({
         "Return only the diff (new/changed entries) since the last call instead of the full map. Useful for iterative re-ranking. (default: false).",
     }),
   ),
+  allowLspFallback: Type.Optional(
+    Type.Boolean({
+      description: "When true, allow LSP symbol fallback for sparse files (lazy-start gate).",
+    }),
+  ),
 });
 
 type RepoMapInput = Static<typeof RepoMapSchema>;
@@ -107,6 +112,7 @@ export function createRepoTool(): ToolDefinition {
         compact: params.compact ?? false,
         verbose: false,
         delta: params.delta ?? false,
+        allowLspFallback: (params as any).allowLspFallback ?? false,
       });
 
       if (!result.map) {

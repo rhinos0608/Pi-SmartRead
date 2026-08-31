@@ -42,6 +42,7 @@ describe("RepoMap LSP fallback", () => {
     const result = await new RepoMap(root).getRepoMap({
       compact: true,
       focusFiles: ["index.ts"],
+      allowLspFallback: true,
     });
 
     expect(result.map).toContain("index.ts");

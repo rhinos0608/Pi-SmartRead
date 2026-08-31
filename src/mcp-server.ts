@@ -93,80 +93,59 @@ const LenientCallToolRequestSchema = RequestSchema.extend({
   }),
 });
 
-server.setRequestHandler(LenientCallToolRequestSchema, async (request, extra) => {
-  const { name, arguments: rawArgs } = request.params;
-  // Reject null arguments at the request boundary — never silently accepted.
+// Single handler body used by both the MCP stdio server and in-process
+// parity tests. Exported so tests exercise the real path, not a copy.
+export async function handleMcpToolCall(
+  name: string,
+  rawArgs: Record<string, unknown> | null | undefined,
+  ctx: ReturnType<typeof toExtensionContext>,
+  signal?: AbortSignal,
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError: boolean }> {
   if (rawArgs === null) {
     throw new McpError(ErrorCode.InvalidParams, "arguments must be an object, not null");
   }
-  // Normalize missing/omitted arguments to {} so TypeBox schema validation runs
-  // uniformly (e.g. a missing required field is rejected as Invalid params).
-  const args = rawArgs ?? {};
-
+  const args = (rawArgs ?? {}) as Record<string, unknown>;
   const tool = tools.find((t) => t.name === name);
   if (!tool) {
-    return {
-      content: [{ type: "text" as const, text: `Error: Unknown tool: ${name}` }],
-      isError: true,
-    };
+    return { content: [{ type: "text" as const, text: `Error: Unknown tool: ${name}` }], isError: true };
   }
-
   try {
-    // Validate tool args against inputSchema
     if (tool.parameters) {
       try {
-        // Simple type-based validation using Value.Check
         const valid = (Value as any).Check(tool.parameters, args);
         if (!valid) {
           const errors = [...(Value as any).Errors(tool.parameters, args)];
-          return {
-            content: [{ type: "text" as const, text: `Invalid params: ${errors.map((e: { message: string }) => e.message).join("; ")}` }],
-            isError: true,
-          };
+          return { content: [{ type: "text" as const, text: `Invalid params: ${errors.map((e: { message: string }) => e.message).join("; ")}` }], isError: true };
         }
-      } catch {
-        // Validation not supported for this schema type — skip
-      }
+      } catch { /* skip when schema unsupported */ }
     }
-
     const toolCallId = `mcp-${++toolCallCounter}`;
-    const ctx = toExtensionContext(SERVER_CWD);
-    (ctx.sessionManager as unknown as { getSessionFile: () => string }).getSessionFile = () => MCP_SESSION_FILE;
-
-    const rawResult = await tool.execute(toolCallId, args, extra.signal ?? undefined, undefined, ctx);
-
+    const rawResult = await tool.execute(toolCallId, args, signal, undefined, ctx);
     if (rawResult === undefined) {
-      return {
-        content: [{ type: "text" as const, text: "Tool executed successfully (no output)" }],
-        isError: false,
-      };
+      return { content: [{ type: "text" as const, text: "Tool executed successfully (no output)" }], isError: false };
     }
-
-    // ToolDefinition's base result type omits the optional error flag used by
-    // graph_mutate, so retain that extension at the MCP boundary.
     const result = rawResult as typeof rawResult & { isError?: boolean | null };
-
-    // Convert tool result to MCP content format
     const content: Array<{ type: "text"; text: string }> = (result.content ?? []).map((item: any) => {
-      if (item.type === "text") {
-        return { type: "text" as const, text: coerceText(item.text) };
-      }
+      if (item.type === "text") return { type: "text" as const, text: coerceText(item.text) };
       return { type: "text" as const, text: JSON.stringify(item) };
     });
-
-    return {
-      content,
-      // Preserve the tool's own error state (graph_mutate sets isError: true on
-      // EdgeStore persistence failure). Absent/null states remain protocol
-      // success, matching the MCP SDK's optional result flag semantics.
-      isError: result.isError ?? false,
-    };
+    return { content, isError: result.isError ?? false };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      content: [{ type: "text" as const, text: `Error: ${message}` }],
-      isError: true,
-    };
+    return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
+  }
+}
+
+server.setRequestHandler(LenientCallToolRequestSchema, async (request, extra) => {
+  const { name, arguments: rawArgs } = request.params;
+  const ctx = toExtensionContext(SERVER_CWD);
+  (ctx.sessionManager as unknown as { getSessionFile: () => string }).getSessionFile = () => MCP_SESSION_FILE;
+  try {
+    return await handleMcpToolCall(name, rawArgs as any, ctx, extra.signal ?? undefined);
+  } catch (err) {
+    if (err instanceof McpError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
   }
 });
 
