@@ -9,6 +9,7 @@ import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js"; // registers skill, graph_mutate, git_notes with ToolRegistry
 import type { ContextGraph } from "./context-graph.js";
 import { buildInspectToolForExtension as buildInspectTool, installInspectAndResolver, getSharedEvidenceResolver, getSharedContextGraph, getSharedContextGraphAsync, invalidateSharedGraph, resetSharedContextGraph, getWorkspaceRevision, getSharedContextGraphIfBuilt } from "./mcp-registry.js";
+import { getSharedLspInspectionProvider } from "./lsp-inspection.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
 import { createReadTool } from "./unified-read.js";
 import { fileURLToPath } from "node:url";
@@ -640,7 +641,7 @@ export default async function (pi: ExtensionAPI) {
   //    WP-5: pass ContextGraph for graph-dependent params.
   // 2. Inspect: unconditionally replace the eager MCP fallback with a
   //    Pi-runtime definition wired to the dirty-aware freshGraphGetter.
-  const inspectDef = buildInspectTool(() => null, freshGraphGetter);
+  const inspectDef = buildInspectTool(() => null, freshGraphGetter, getSharedLspInspectionProvider());
   ToolRegistry.getInstance().registerOrReplace({
     name: "inspect",
     description: inspectDef.description,

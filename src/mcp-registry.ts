@@ -21,6 +21,7 @@ import { createGrepTool } from "./grep-tool.js";
 import { createEvidenceResolver } from "./workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
 import { ContextGraph } from "./context-graph.js";
+import { getSharedLspInspectionProvider, type LspInspectionProvider } from "./lsp-inspection.js";
 
 // ── Shared ContextGraph (lazy) ─────────────────────────────────────
 // Module-level singleton. Built lazily on first access. Rebuilt when
@@ -325,6 +326,7 @@ export function registerInspectToolWithBus(bus: { emit: (c: string, d: unknown) 
         },
         getSessionFilePath: () => null, // Overridden by extension
         contextGraph: (root) => getSharedContextGraphAsync(root),
+        lspInspectionProvider: getSharedLspInspectionProvider(),
     });
     // Override the tool factory in the extension path: see registerInspectToolExtension below
     registry.register({
@@ -343,6 +345,7 @@ export function registerInspectToolWithBus(bus: { emit: (c: string, d: unknown) 
 export function buildInspectToolForExtension(
     getSessionFilePath: () => string | null,
     contextGraphOverride?: ContextGraph | (() => ContextGraph | Promise<ContextGraph>),
+    lspInspectionProviderOverride?: LspInspectionProvider,
 ): ToolDefinition {
     return createInspectTool({
         resolver: {
@@ -352,6 +355,7 @@ export function buildInspectToolForExtension(
         },
         getSessionFilePath,
         contextGraph: contextGraphOverride ?? ((root) => getSharedContextGraphAsync(root)),
+        lspInspectionProvider: lspInspectionProviderOverride ?? getSharedLspInspectionProvider(),
     });
 }
 
