@@ -168,6 +168,15 @@ describe("compat: grep literal search", () => {
     expect(Array.isArray(env.resources)).toBe(true);
   });
 
+  it("structural search returns valid envelope and details", async () => {
+    writeFileSync(join(workdir, "src", "struct.ts"), "console.log(a)\n", "utf8");
+    const tool = createGrepTool({});
+    const result: any = await tool.execute("compat-grep-struct", { pattern: "console.log($ARG)", structural: {} } as any, undefined, undefined, makeCtx(workdir));
+    expect(result.details.workspaceEvidence).toBeDefined();
+    expect(result.details.structuralSearch).toBeDefined();
+    expect(result.details.structuralSearch.schemaVersion).toBe(1);
+    expect(typeof (result.content[0] as any).text).toBe("string");
+  });
   it("restricts results when path is specified", async () => {
     const tool = createGrepTool({});
 

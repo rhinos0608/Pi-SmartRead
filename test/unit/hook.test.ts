@@ -172,7 +172,7 @@ describe("createExtendedReadTool", () => {
     expect(text).toContain("export function a()");
     // Context annotations should be appended
     expect(text).toContain("🔍 Context for");
-    expect(text).toContain("Imports:");
+    expect(text).toContain("Nearby:");
     expect(text).toContain("src/b.ts");
   });
 });

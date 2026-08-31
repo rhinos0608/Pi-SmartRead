@@ -291,6 +291,33 @@ describe("grep evidence envelopes", () => {
     expect(env.mode).toBe("query");
   });
 
+  it("grep structural search produces valid envelope with search-match and structuralSearch details", async () => {
+    writeFileSync(path.join(dir, "c.ts"), "console.log(a)\n", "utf8");
+    const tool = createGrepTool({});
+    const ctx = { cwd: dir, sessionManager: { getSessionFile: () => session } } as any;
+    const result: any = await tool.execute("g-struct", { pattern: "console.log($ARG)", structural: {} } as any, undefined, undefined, ctx);
+    expect(result.details.workspaceEvidence).toBeDefined();
+    expect(validateInspectionEnvelope(result.details.workspaceEvidence).ok).toBe(true);
+    expect(result.details.structuralSearch).toBeDefined();
+    if (result.details.structuralSearch.status === "unavailable") {
+      expect(result.details.structuralSearch.reason).toBeTruthy();
+      expect(result.content[0].text).toContain("structural search unavailable");
+    } else {
+      expect(result.details.workspaceEvidence.resources[0].coverage).toBe("search-match");
+      expect(result.content[0].text).toContain("read=");
+    }
+    const { _setUnavailableForTests, _resetAstGrepCacheForTests } = await import("../../src/structural-search.js");
+    try {
+      _setUnavailableForTests("forced unavailable for envelope test");
+      const unav: any = await tool.execute("g-struct-unav", { pattern: "console.log($ARG)", structural: {} } as any, undefined, undefined, ctx);
+      expect(unav.details.workspaceEvidence).toBeDefined();
+      expect(validateInspectionEnvelope(unav.details.workspaceEvidence).ok).toBe(true);
+      expect(unav.details.structuralSearch.status).toBe("unavailable");
+      expect(unav.details.workspaceEvidence.resources.length).toBe(0);
+    } finally {
+      _resetAstGrepCacheForTests();
+    }
+  });
   it("grep zero matches produces valid envelope with zero resources in query mode", async () => {
     const tool = createGrepTool({});
     const ctx = {
