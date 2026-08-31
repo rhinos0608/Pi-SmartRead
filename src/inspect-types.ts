@@ -40,8 +40,46 @@ export interface InspectV4Input {
   /** Derive architectural layers. Directory mode only. */
   layers?: boolean;
 
+  // ── WP-SR3 LSP params (decision §1 & §2 verbatim) ─────────────────
+  navigation?: NavigationParams;
+  diagnostics?: DiagnosticsParams;
+
   // ── ContextGraph injection (WP-4 owns the type; WP-5 populates at runtime) ──
   contextGraph?: ContextGraph;
+  // ── WP-SR5: shared LSP inspection provider (lazy; only used when navigation/diagnostics requested) ──
+  lspInspectionProvider?: import("./lsp-inspection.js").LspInspectionProvider;
+}
+
+export type NavigationOperation = "definition" | "references" | "implementation" | "hover" | "documentSymbols" | "workspaceSymbols";
+export interface NavigationParams {
+  operation: NavigationOperation;
+  line?: number;
+  character?: number;
+  query?: string;
+  maxResults?: number;
+}
+export interface DiagnosticsParams {
+  waitMs?: number;
+  maxPerFile?: number;
+  maxFiles?: number;
+}
+// Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values (e.g. "needs-triage") and result fields without closing switch/default paths.
+export type NavigationStatus = "ok" | "empty" | "unavailable" | "degraded" | (string & {});
+export type DiagnosticsStatus = "findings" | "unconfirmed" | "unavailable" | "partial" | (string & {});
+export interface InspectNavigationDetails {
+  schemaVersion: 1;
+  operation: NavigationOperation | (string & {});
+  status: NavigationStatus;
+  source: "lsp";
+  items: unknown[];
+  truncated: boolean;
+}
+export interface InspectDiagnosticsDetails {
+  schemaVersion: 1;
+  status: DiagnosticsStatus;
+  source: "lsp";
+  files: Array<{ path: string; diagnostics: unknown[]; truncated?: boolean }>;
+  truncated: boolean;
 }
 
 export interface InspectV4Result {
@@ -52,6 +90,8 @@ export interface InspectV4Result {
   byteLength: number;
   truncated: boolean;
   upstreamDetails?: Record<string, unknown>;
+  navigation?: InspectNavigationDetails;
+  diagnostics?: InspectDiagnosticsDetails;
 }
 
 // ── Re-export compute-module result types for consumers ──

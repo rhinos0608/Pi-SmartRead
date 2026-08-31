@@ -81,6 +81,48 @@ export interface LSPDocumentChange {
   text: string;
 }
 
+// Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values (e.g. "needs-triage") and result fields without closing switch/default paths.
+// Additive-friendly honesty status — use string union with (string & {}) so future values like "needs-triage" do not break existing consumers.
+export type LspOutcomeStatus = "unavailable" | "empty" | "confirmed" | "degraded" | (string & {});
+
+export interface LspNavigationOutcomeSingle {
+  status: LspOutcomeStatus;
+  location: LSPLocation | null;
+}
+
+export interface LspNavigationOutcomeList {
+  status: LspOutcomeStatus;
+  locations: LSPLocation[];
+}
+
+export interface LspDocumentSymbolsOutcome {
+  status: LspOutcomeStatus;
+  symbols: LSPDocumentSymbol[];
+}
+
+export interface LspWorkspaceSymbolsOutcome {
+  status: LspOutcomeStatus;
+  symbols: LSPWorkspaceSymbol[];
+}
+
+export interface LspHoverOutcome {
+  status: LspOutcomeStatus;
+  hover: LSPHoverResult | null;
+}
+
+export interface LspDiagnosticsOutcome {
+  status: LspOutcomeStatus;
+  diagnostics: LSPDiagnostic[];
+  truncated?: boolean;
+}
+
+export interface LspOutcomeOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  waitMs?: number;
+  maxPerFile?: number;
+}
+
 export interface LSPBridge {
   isAvailable(): boolean;
   goToDefinition(filePath: string, line: number, character: number, root: string): Promise<LSPLocation | null>;
@@ -111,6 +153,15 @@ export interface LSPBridge {
 
   /** Collect latest publishDiagnostics notifications for file. */
   getDiagnostics(filePath: string, root: string): Promise<LSPDiagnostic[]>;
+
+  // ── Outcome (honesty-labeled) navigation + diagnostics — additive, bounded by timeout + AbortSignal ──
+  goToDefinitionOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeSingle>;
+  findReferencesOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeList>;
+  getDocumentSymbolsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDocumentSymbolsOutcome>;
+  goToImplementationOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeList>;
+  workspaceSymbolOutcome(query: string, root: string, opts?: LspOutcomeOptions): Promise<LspWorkspaceSymbolsOutcome>;
+  hoverOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspHoverOutcome>;
+  getFreshDiagnosticsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDiagnosticsOutcome>;
 
 }
 
@@ -445,6 +496,12 @@ export class LSPConnection {
   /** Get latest cached publishDiagnostics results for a document */
   getDiagnostics(filePath: string): LSPDiagnostic[] { return this.diagnostics.get(resolve(filePath)) ?? []; }
 
+  /** Clear cached publishDiagnostics for a document (used before fresh poll to avoid stale confirmed). */
+  clearDiagnostics(filePath: string): void { this.diagnostics.delete(resolve(filePath)); }
+
+  /** Whether a publishDiagnostics receipt exists for file (distinguishes confirmed-empty from unconfirmed). */
+  hasDiagnostics(filePath: string): boolean { return this.diagnostics.has(resolve(filePath)); }
+
   /** Get open document count */
   get openDocumentCount(): number {
     return this.openDocuments.size;
@@ -688,6 +745,14 @@ class LSPManager {
     return server.getDiagnostics(filePath);
   }
 
+  async hasDiagnosticsFor(filePath: string): Promise<boolean> {
+    const langId = detectLanguageFromExtension(filePath);
+    if (!langId) return false;
+    const server = await this.getServer(langId);
+    if (!server) return false;
+    return server.hasDiagnostics(filePath);
+  }
+
   /** Query workspace/symbol across all servers */
   async workspaceSymbol(query: string): Promise<LSPWorkspaceSymbol[]> {
     await this.startAll();
@@ -748,6 +813,19 @@ const managerCache = new Map<string, LSPManager>();
 
 let bridgeInstance: LSPBridge | null = null;
 let initAttempted = false;
+
+function toZeroBased(line1: number): number { return Math.max(0, line1 - 1); }
+const DEFAULT_OUTCOME_TIMEOUT_MS = 5000;
+async function withBudget<T>(promise: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw Object.assign(new Error("Aborted"), { name: "AbortError" });
+  return await new Promise<T>((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => { if (done) return; done = true; reject(new Error(`timed out after ${timeoutMs}ms`)); }, timeoutMs);
+    const onAbort = () => { if (done) return; done = true; clearTimeout(timer); reject(Object.assign(new Error("Aborted"), { name: "AbortError" })); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    promise.then((v) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener("abort", onAbort); resolve(v); }, (e) => { if (done) return; done = true; clearTimeout(timer); signal?.removeEventListener("abort", onAbort); reject(e); });
+  });
+}
 
 async function createBridge(): Promise<LSPBridge | null> {
   return {
@@ -881,6 +959,169 @@ async function createBridge(): Promise<LSPBridge | null> {
       } catch { return []; }
     },
 
+    async goToDefinitionOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeSingle> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", location: null };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", location: null };
+        const loc = await withBudget(serverGoToDefinition(server, filePath, line0, char0), timeoutMs, opts?.signal);
+        if (!loc) return { status: "empty", location: null };
+        return { status: "confirmed", location: loc };
+      } catch { return { status: "degraded", location: null }; }
+    },
+
+    async findReferencesOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeList> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", locations: [] };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", locations: [] };
+        const locs = await withBudget((async () => {
+          await server.openFile(filePath);
+          const result = await server.request("textDocument/references", { textDocument: { uri: `file://${resolve(filePath)}` }, position: { line: line0, character: char0 }, context: { includeDeclaration: true } }) as LSPLocation[] | null;
+          return result ?? [];
+        })(), timeoutMs, opts?.signal);
+        if (locs.length === 0) return { status: "empty", locations: [] };
+        return { status: "confirmed", locations: locs };
+      } catch { return { status: "degraded", locations: [] }; }
+    },
+
+    async getDocumentSymbolsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDocumentSymbolsOutcome> {
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", symbols: [] };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", symbols: [] };
+        const symbols = await withBudget((async () => {
+          await server.openFile(filePath);
+          const result = await server.request("textDocument/documentSymbol", { textDocument: { uri: `file://${resolve(filePath)}` } }) as LSPDocumentSymbol[] | null;
+          return result ?? [];
+        })(), timeoutMs, opts?.signal);
+        if (symbols.length === 0) return { status: "empty", symbols: [] };
+        return { status: "confirmed", symbols };
+      } catch { return { status: "degraded", symbols: [] }; }
+    },
+
+    async goToImplementationOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeList> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", locations: [] };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", locations: [] };
+        const locs = await withBudget((async () => {
+          await server.openFile(filePath);
+          const result = await server.request("textDocument/implementation", { textDocument: { uri: `file://${resolve(filePath)}` }, position: { line: line0, character: char0 } }) as LSPLocation | LSPLocation[] | null;
+          if (!result) return [];
+          return Array.isArray(result) ? result : [result];
+        })(), timeoutMs, opts?.signal);
+        if (locs.length === 0) return { status: "empty", locations: [] };
+        return { status: "confirmed", locations: locs };
+      } catch { return { status: "degraded", locations: [] }; }
+    },
+
+    async workspaceSymbolOutcome(query: string, root: string, opts?: LspOutcomeOptions): Promise<LspWorkspaceSymbolsOutcome> {
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      try {
+        const mgr = cachedManager(root);
+        const symbols = await withBudget(mgr.workspaceSymbol(query), timeoutMs, opts?.signal);
+        if (symbols.length === 0) {
+          // distinguish no server vs empty: if no connected languages then unavailable
+          if (!mgr.connectedLanguageCount) return { status: "unavailable", symbols: [] };
+          return { status: "empty", symbols: [] };
+        }
+        return { status: "confirmed", symbols };
+      } catch { return { status: "degraded", symbols: [] }; }
+    },
+
+    async hoverOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspHoverOutcome> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      try {
+        const mgr = cachedManager(root);
+        const result = await withBudget(mgr.hover(filePath, line0, char0), timeoutMs, opts?.signal);
+        if (!result) {
+          const langId = detectLanguageFromExtension(filePath);
+          if (!langId) return { status: "unavailable", hover: null };
+          const server = await mgr.getServer(langId).catch(() => null);
+          if (!server) return { status: "unavailable", hover: null };
+          return { status: "empty", hover: null };
+        }
+        return { status: "confirmed", hover: result };
+      } catch { return { status: "degraded", hover: null }; }
+    },
+
+    async getFreshDiagnosticsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDiagnosticsOutcome> {
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const waitMs = opts?.waitMs ?? 1500;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", diagnostics: [] };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", diagnostics: [] };
+        const resolved = resolve(filePath);
+        // clear stale cached diagnostics before refresh — only diagnostics observed after this point count as confirmed
+        server.clearDiagnostics(resolved);
+        // force refresh if already open (openFile is idempotent otherwise)
+        if (server.isOpen(resolved)) {
+          try { await withBudget(server.didClose(resolved), Math.min(500, timeoutMs), opts?.signal); } catch {}
+        }
+        await withBudget(server.openFile(filePath), timeoutMs, opts?.signal);
+        const start = Date.now();
+        let pullSucceeded = false;
+        // poll cached diagnostics with budget respecting waitMs + timeout; distinguish confirmed-empty (receipt exists) from unconfirmed
+        const poll = async (): Promise<LSPDiagnostic[]> => {
+          while (Date.now() - start < waitMs) {
+            if (opts?.signal?.aborted) throw Object.assign(new Error("Aborted"), { name: "AbortError" });
+            const hasReceipt = server.hasDiagnostics(resolved);
+            if (hasReceipt) return server.getDiagnostics(resolved);
+            const diags = await mgr.getDiagnosticsFor(filePath);
+            if (diags.length > 0) return diags;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          return await mgr.getDiagnosticsFor(filePath);
+        };
+        let diagnostics = await withBudget(poll(), timeoutMs, opts?.signal);
+        const hasPublishReceipt = server.hasDiagnostics(resolved);
+        // pull fallback: try textDocument/diagnostic if no publish receipt and no diagnostics yet
+        if (diagnostics.length === 0 && !hasPublishReceipt) {
+          try {
+            const uri = `file://${resolved}`;
+            const pull = await withBudget((server as any).request("textDocument/diagnostic", { textDocument: { uri }, previousResultId: "" }), Math.min(400, timeoutMs), opts?.signal) as any;
+            if (pull !== null) {
+              pullSucceeded = true;
+              const items: LSPDiagnostic[] = pull?.items ?? pull?.diagnostics ?? (Array.isArray(pull) ? pull : []);
+              if (items.length > 0) diagnostics = items;
+            }
+            // empty items with successful pull counts as confirmed-empty via pullSucceeded
+          } catch {}
+        }
+        if (diagnostics.length > 0) {
+          const maxPer = opts?.maxPerFile;
+          if (maxPer !== undefined && diagnostics.length > maxPer) return { status: "confirmed", diagnostics: diagnostics.slice(0, maxPer), truncated: true };
+          return { status: "confirmed", diagnostics };
+        }
+        if (hasPublishReceipt || pullSucceeded) return { status: "empty", diagnostics: [] };
+        return { status: "degraded", diagnostics: [] };
+      } catch { return { status: "degraded", diagnostics: [] }; }
+    },
+
     getOpenFiles(): string[] {
       const files: string[] = [];
       for (const mgr of managerCache.values()) {
@@ -921,8 +1162,6 @@ function cachedManager(root: string): LSPManager {
     mgr = new LSPManager(root);
     managerCache.set(root, mgr);
     managerAccessOrder.push(root);
-    // Eagerly start all available servers, but don't block the return
-    mgr.startAll().catch(() => {});
   } else {
     // Move to end of access order (most-recently-used)
     const idx = managerAccessOrder.indexOf(root);
@@ -930,33 +1169,6 @@ function cachedManager(root: string): LSPManager {
     managerAccessOrder.push(root);
   }
   return mgr;
-}
-
-// ── Module-level eager init ───────────────────────────────────────
-
-// Kick off LSP server startup at module load time for the current
-// working directory (typically the project root). Servers start in
-// the background before the first tool call.
-const EAGER_INIT_TIMEOUT_MS = 8000;
-
-const eagerRoot = process.cwd();
-if (eagerRoot && existsSync(eagerRoot)) {
-  let timedOut = false;
-  setTimeout(() => { timedOut = true; }, EAGER_INIT_TIMEOUT_MS);
-  (async () => {
-    try {
-      const info = detectProjectLanguages(eagerRoot);
-      if (timedOut) return;
-      if (info.supportedLanguages.length > 0) {
-        const mgr = new LSPManager(eagerRoot);
-        managerCache.set(eagerRoot, mgr);
-        await Promise.race([
-          mgr.startAll(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("eager init timeout")), EAGER_INIT_TIMEOUT_MS)),
-        ]);
-      }
-    } catch { /* LSP initialization is best-effort */ }
-  })().catch(() => {});
 }
 
 // ── Public API ────────────────────────────────────────────────────

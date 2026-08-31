@@ -254,3 +254,252 @@ describe("LSPConnection diagnostics plumbing", () => {
     expect(conn.getDiagnostics(filePath)).toHaveLength(0);
   });
 });
+
+describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "lsp-bridge-outcome-")); });
+  afterEach(async () => { rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
+
+  it("goToDefinitionOutcome: 1-based public pos translated to 0-based internally", async () => {
+    // fake server echoes position so we can assert wire format
+    void (spawn as unknown as ReturnType<typeof vi.fn>).getMockImplementation();
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      const proc = makeFakeProc();
+      const origWrite = proc.stdin.write as any;
+      proc.stdin.write = vi.fn((data: string) => {
+        origWrite(data);
+        const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+        if (!m) return true;
+        const len = parseInt(m[1]!, 10);
+        const body = String(data).slice(m[0].length, m[0].length + len);
+        try {
+          const msg = JSON.parse(body);
+          if (msg.method === "textDocument/definition") {
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: [{ uri: `file://${resolve(join(root, "a.ts"))}`, range: { start: msg.params.position, end: msg.params.position } }] }));
+          }
+        } catch {}
+        return true;
+      });
+      return proc as any;
+    });
+    const bridge = await getLSPBridge();
+    const filePath = join(root, "a.ts");
+    writeFileSync(filePath, "export const a = 1;");
+    const r: any = await (bridge as any).goToDefinitionOutcome(filePath, 5, 10, root, { timeoutMs: 2000 });
+    // capture outbound LSP position on any spawned proc
+    const calls = (spawn as unknown as ReturnType<typeof vi.fn>).mock.results;
+    let outbound: any = null;
+    for (const cr of calls) {
+      const p = cr.value as FakeProc;
+      for (const msg of writtenMessages(p)) if (msg.method === "textDocument/definition") outbound = msg;
+    }
+    expect(outbound).toBeTruthy();
+    expect(outbound.params.position).toEqual({ line: 4, character: 9 });
+    expect(r.status).toBe("confirmed");
+    // unavailable still distinct
+    const un = await (bridge as any).goToDefinitionOutcome(join(root, "a.xyz"), 1, 1, root, { timeoutMs: 200 });
+    expect(un.status).toBe("unavailable");
+  });
+
+  it("empty vs confirmed vs degraded via fake server", async () => {
+    let mode: "empty" | "confirmed" | "hang" = "empty";
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      const proc = makeFakeProc();
+      const orig = proc.stdin.write as any;
+      proc.stdin.write = vi.fn((data: string) => {
+        orig(data);
+        const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+        if (!m) return true;
+        const len = parseInt(m[1]!, 10);
+        const body = String(data).slice(m[0].length, m[0].length + len);
+        try {
+          const msg = JSON.parse(body);
+          if (msg.method === "textDocument/definition") {
+            if (mode === "empty") queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: null }));
+            else if (mode === "confirmed") queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: [{ uri: `file://${resolve(join(root, "a.ts"))}`, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }] }));
+            else if (mode === "hang") { /* never respond -> timeout */ }
+          }
+          if (msg.method === "textDocument/diagnostic") {
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { items: [] } }));
+          }
+        } catch {}
+        return true;
+      });
+      return proc as any;
+    });
+    const bridge = await getLSPBridge();
+    const filePath = join(root, "a.ts");
+    writeFileSync(filePath, "export const a = 1;");
+    mode = "empty";
+    const empty = await (bridge as any).goToDefinitionOutcome(filePath, 1, 1, root, { timeoutMs: 800 });
+    expect(empty.status).toBe("empty");
+    mode = "confirmed";
+    // need fresh manager cache for new proc mode -> reset bridge to pick up new mock
+    await shutdownAllManagers(); resetLSPBridge();
+    const bridge2 = await getLSPBridge();
+    const conf = await (bridge2 as any).goToDefinitionOutcome(filePath, 1, 1, root, { timeoutMs: 800 });
+    expect(conf.status).toBe("confirmed");
+    mode = "hang";
+    await shutdownAllManagers(); resetLSPBridge();
+    const bridge3 = await getLSPBridge();
+    const degraded = await (bridge3 as any).goToDefinitionOutcome(filePath, 1, 1, root, { timeoutMs: 120 });
+    expect(degraded.status).toBe("degraded");
+  });
+
+  it("getFreshDiagnosticsOutcome clears stale cached diagnostics before confirming", async () => {
+    // Seed stale diagnostics then verify fresh poll does NOT return stale and is degraded when no fresh receipt
+    let activeProc: FakeProc | null = null;
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      const proc = makeFakeProc();
+      activeProc = proc;
+      // Make pull explicitly unsupported so unconfirmed stays degraded, not empty via pull
+      const orig = proc.stdin.write as any;
+      proc.stdin.write = vi.fn((data: string) => {
+        orig(data);
+        const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+        if (!m) return true;
+        const len = parseInt(m[1]!, 10);
+        const body = String(data).slice(m[0].length, m[0].length + len);
+        try {
+          const msg = JSON.parse(body);
+          if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } }));
+          }
+        } catch {}
+        return true;
+      });
+      return proc as any;
+    });
+    const bridge = await getLSPBridge();
+    const filePath = join(root, "a.ts");
+    writeFileSync(filePath, "export const a = 1;");
+    await bridge!.openFile(filePath, root);
+    // Seed stale diagnostics via publishDiagnostics for the current file
+    sendToStdout(activeProc!, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: `file://${resolve(filePath)}`, diagnostics: [{ message: "stale", severity: 1 }] } });
+    // stale seeded via publishDiagnostics above; fresh outcome must clear it
+    // Now call fresh outcome with short wait and no fresh publish -> must clear stale and return degraded (unconfirmed), not empty
+    const r = await (bridge as any).getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 120 });
+    expect(r.status).toBe("degraded");
+  });
+
+  it("distinguishes confirmed-empty from unconfirmed no-response", async () => {
+    // Case 1: unconfirmed no-response -> degraded
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      const proc = makeFakeProc();
+      void proc;
+      const orig = proc.stdin.write as any;
+      proc.stdin.write = vi.fn((data: string) => {
+        orig(data);
+        const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+        if (!m) return true;
+        const len = parseInt(m[1]!, 10);
+        const body = String(data).slice(m[0].length, m[0].length + len);
+        try {
+          const msg = JSON.parse(body);
+          if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } }));
+          }
+        } catch {}
+        return true;
+      });
+      return proc as any;
+    });
+    let bridge: any = await getLSPBridge();
+    let filePath = join(root, "unconfirmed.ts");
+    writeFileSync(filePath, "export const a = 1;");
+    const unconfirmed = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 600, waitMs: 80 });
+    expect(unconfirmed.status).toBe("degraded");
+    expect(unconfirmed.diagnostics).toEqual([]);
+
+    // Case 2: confirmed-empty via publishDiagnostics empty set -> empty
+    await shutdownAllManagers(); resetLSPBridge();
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      const proc = makeFakeProc();
+      void proc;
+      const orig = proc.stdin.write as any;
+      proc.stdin.write = vi.fn((data: string) => {
+        orig(data);
+        const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+        if (!m) return true;
+        const len = parseInt(m[1]!, 10);
+        const body = String(data).slice(m[0].length, m[0].length + len);
+        try {
+          const msg = JSON.parse(body);
+          if (msg.method === "textDocument/didOpen") {
+            const uri = msg.params?.textDocument?.uri;
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: [] } }));
+          }
+        } catch {}
+        return true;
+      });
+      return proc as any;
+    });
+    bridge = await getLSPBridge();
+    filePath = join(root, "confirmed.ts");
+    writeFileSync(filePath, "export const b = 1;");
+    const confirmed = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 400 });
+    expect(confirmed.status).toBe("empty");
+    expect(confirmed.diagnostics).toEqual([]);
+  });
+
+  it("timeout yields degraded and respects AbortSignal", async () => {
+    const { getLSPBridge } = await import("../../src/lsp-bridge.js");
+    const bridge = await getLSPBridge();
+    const ac = new AbortController();
+    ac.abort();
+    const r = await (bridge as any).goToDefinitionOutcome(join(root, "a.ts"), 1, 1, root, { timeoutMs: 50, signal: ac.signal });
+    expect(["degraded", "unavailable"]).toContain(r.status);
+  });
+
+  it("closed connection null pull returns degraded not empty (distinguished from successful empty pull)", async () => {
+    // Simulate LSP connection already closed: request("textDocument/diagnostic") returns null synchronously.
+    // Before fix this set pullSucceeded=true and returned empty; after fix it stays degraded.
+    // Also verify a non-null empty pull still returns empty.
+    const { LSPConnection: LSPConn } = await import("../../src/lsp-bridge.js");
+    const origRequest = (LSPConn.prototype as any).request;
+    const spy = (vi as any).spyOn(LSPConn.prototype as any, "request").mockImplementation(function (this: any, method: string, params: unknown) {
+      if (method === "textDocument/diagnostic") return Promise.resolve(null);
+      return (origRequest as any).call(this, method, params);
+    });
+    // Ensure pull path is reached: make diagnostic pull unsupported via error not used, but our spy overrides to null;
+    // need poll to have no receipt and no diags, so keep default fake proc with no publishDiagnostics.
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc() as any);
+    await shutdownAllManagers(); resetLSPBridge();
+    let bridge: any = await getLSPBridge();
+    let filePath = join(root, "closed-null.ts");
+    writeFileSync(filePath, "export const a = 1;");
+    const degraded = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
+    expect(degraded.status).toBe("degraded");
+    expect(degraded.diagnostics).toEqual([]);
+    spy.mockRestore();
+    // Now verify successful empty pull (non-null) still yields empty, not degraded
+    const { LSPConnection: LSPConn2 } = await import("../../src/lsp-bridge.js");
+    const orig2 = (LSPConn2.prototype as any).request;
+    const spy2 = (vi as any).spyOn(LSPConn2.prototype as any, "request").mockImplementation(function (this: any, method: string, params: unknown) {
+      if (method === "textDocument/diagnostic") return Promise.resolve({ items: [] });
+      return (orig2 as any).call(this, method, params);
+    });
+    await shutdownAllManagers(); resetLSPBridge();
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc() as any);
+    bridge = await getLSPBridge();
+    filePath = join(root, "closed-success-empty.ts");
+    writeFileSync(filePath, "export const b = 1;");
+    const empty = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
+    expect(empty.status).toBe("empty");
+    expect(empty.diagnostics).toEqual([]);
+    spy2.mockRestore();
+  });
+
+  it("status enum additive: needs-triage does not break consumer", async () => {
+    function classify(status: string): string {
+      if (status === "unavailable") return "no-server";
+      if (status === "empty") return "zero";
+      if (status === "confirmed") return "ok";
+      if (status === "degraded") return "retry";
+      return `future:${status}`;
+    }
+    expect(classify("needs-triage")).toBe("future:needs-triage");
+    expect(classify("empty")).toBe("zero");
+  });
+});
+
