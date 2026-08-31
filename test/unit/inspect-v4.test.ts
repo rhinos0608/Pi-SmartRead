@@ -632,6 +632,35 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
         }
     });
 
+    it("call hierarchy operations require line/character and forbid query, respect maxResults bounding", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(tool.execute("c-ch1", { path: "hello.ts", navigation: { operation: "prepareCallHierarchy" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
+        await expect(tool.execute("c-ch2", { path: "hello.ts", navigation: { operation: "incomingCalls", line: 1, character: 1, query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids query/);
+        await expect(tool.execute("c-ch3", { path: "mysrc", navigation: { operation: "prepareCallHierarchy", line: 1, character: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a file/);
+        await expect(tool.execute("c-ch-bounds", { path: "hello.ts", navigation: { operation: "outgoingCalls", line: 1, character: 1, maxResults: 101 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/maxResults/);
+        const fileAbs = realpathSync(join(workdir, "hello.ts"));
+        const item = { name: "fn", kind: 12, uri: "file://" + fileAbs, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } } };
+        const inc = { from: item, fromRanges: [{ start: { line: 1, character: 0 }, end: { line: 1, character: 2 } }] };
+        const provider: any = {
+            inspectNavigation: async (inp: any) => {
+                if (inp.operation === "prepareCallHierarchy") return { status: "confirmed", operation: inp.operation, items: [item], truncated: false };
+                if (inp.operation === "incomingCalls") return { status: "confirmed", operation: inp.operation, items: [inc], truncated: false };
+                return { status: "empty", operation: inp.operation, items: [], truncated: false };
+            },
+            inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
+        };
+        const tool2 = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
+        const r = await tool2.execute("c-ch-ok", { path: "hello.ts", navigation: { operation: "prepareCallHierarchy", line: 1, character: 1 } }, undefined, undefined, makeCtx());
+        const details: any = (r as any).details;
+        expect(details.navigation.status).toBe("ok");
+        expect(details.navigation.operation).toBe("prepareCallHierarchy");
+        for (const res of details.workspaceEvidence.resources as any[]) expect(res.coverage).toBe("search-match");
+        const r2 = await tool2.execute("c-ch-inc", { path: "hello.ts", navigation: { operation: "incomingCalls", line: 1, character: 1 } }, undefined, undefined, makeCtx());
+        const d2: any = (r2 as any).details;
+        expect(d2.navigation.status).toBe("ok");
+        expect((r2.content[0] as any).text).toContain("incoming from");
+    });
+
     it("file definition requires line/character forbids query", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
         await expect(tool.execute("c1", { path: "hello.ts", navigation: { operation: "definition" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);

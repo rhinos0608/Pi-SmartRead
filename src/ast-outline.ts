@@ -66,6 +66,15 @@ const C_KINDS = ["function_definition", "struct_specifier", "enum_specifier"];
 const CPP_KINDS = [...C_KINDS, "class_specifier"];
 const RUBY_KINDS = ["class", "module", "method", "singleton_method"];
 const SH_KINDS = ["function_definition"];
+const CSHARP_KINDS = [
+	"class_declaration", "interface_declaration", "enum_declaration",
+	"struct_declaration", "record_declaration", "method_declaration",
+	"constructor_declaration", "namespace_declaration",
+];
+const PHP_KINDS = [
+	"class_declaration", "interface_declaration", "function_definition",
+	"method_declaration", "trait_declaration", "namespace_definition",
+];
 
 const EXT_KINDS: Record<string, string[]> = {
 	".ts": TS_KINDS, ".tsx": TS_KINDS, ".mts": TS_KINDS, ".cts": TS_KINDS,
@@ -75,7 +84,9 @@ const EXT_KINDS: Record<string, string[]> = {
 	".go": GO_KINDS,
 	".java": JAVA_KINDS,
 	".c": C_KINDS, ".h": C_KINDS,
-	".cpp": CPP_KINDS, ".hpp": CPP_KINDS,
+	".cpp": CPP_KINDS, ".hpp": CPP_KINDS, ".cc": CPP_KINDS, ".cxx": CPP_KINDS, ".hh": CPP_KINDS, ".hxx": CPP_KINDS,
+	".cs": CSHARP_KINDS,
+	".php": PHP_KINDS,
 	".rb": RUBY_KINDS,
 	".sh": SH_KINDS, ".bash": SH_KINDS,
 };

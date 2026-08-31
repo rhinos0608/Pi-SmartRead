@@ -23,10 +23,45 @@
  * The LSP protocol is a standard — this module is self-contained and
  * does not import from smart-edit.
  */
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, basename } from "node:path";
+import { resolveLanguageServer } from "./language-intelligence-runtime.js";
 import { fileURLToPath } from "node:url";
+
+// ── Language intelligence wiring ───────────────────────────────────────
+// Cache of resolved executable/args per `${root}:${languageId}` so that
+// LSPManager can spawn the exact resolved binary (project-local path or
+// override) rather than the bare PATH command. Key: `${root}:${languageId}`
+export const resolvedServerCache = new Map<string, { executable: string; args: string[] }>();
+
+const EXT_FOR_LANGUAGE: Record<string, string> = {
+  typescript: ".ts",
+  typescriptreact: ".tsx",
+  javascript: ".js",
+  javascriptreact: ".jsx",
+  python: ".py",
+  rust: ".rs",
+  go: ".go",
+  java: ".java",
+  c: ".c",
+  cpp: ".cpp",
+  csharp: ".cs",
+  php: ".php",
+  bash: ".sh",
+  shellscript: ".sh",
+  json: ".json",
+  yaml: ".yaml",
+  html: ".html",
+  css: ".css",
+  lua: ".lua",
+  ruby: ".rb",
+};
+
+function dummyFileForLanguage(languageId: string, root: string): string {
+  const ext = EXT_FOR_LANGUAGE[languageId] ?? ".txt";
+  return join(root, `__probe__${ext}`);
+}
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -110,10 +145,46 @@ export interface LspHoverOutcome {
   hover: LSPHoverResult | null;
 }
 
+export interface LSPCallHierarchyItem {
+  name: string;
+  kind: number;
+  uri: string;
+  range: LSPRange;
+  selectionRange: LSPRange;
+  detail?: string;
+  tags?: number[];
+  data?: unknown;
+}
+
+export interface LSPCallHierarchyIncomingCall {
+  from: LSPCallHierarchyItem;
+  fromRanges: LSPRange[];
+}
+
+export interface LSPCallHierarchyOutgoingCall {
+  to: LSPCallHierarchyItem;
+  fromRanges: LSPRange[];
+}
+
 export interface LspDiagnosticsOutcome {
   status: LspOutcomeStatus;
   diagnostics: LSPDiagnostic[];
   truncated?: boolean;
+}
+
+export interface LspCallHierarchyPrepareOutcome {
+  status: LspOutcomeStatus;
+  items: LSPCallHierarchyItem[];
+}
+
+export interface LspIncomingCallsOutcome {
+  status: LspOutcomeStatus;
+  calls: LSPCallHierarchyIncomingCall[];
+}
+
+export interface LspOutgoingCallsOutcome {
+  status: LspOutcomeStatus;
+  calls: LSPCallHierarchyOutgoingCall[];
 }
 
 export interface LspOutcomeOptions {
@@ -129,6 +200,9 @@ export interface LSPBridge {
   findReferences(filePath: string, line: number, character: number, root: string): Promise<LSPLocation[]>;
   getDocumentSymbols(filePath: string, root: string): Promise<LSPDocumentSymbol[]>;
   goToImplementation(filePath: string, line: number, character: number, root: string): Promise<LSPLocation[]>;
+  prepareCallHierarchy(filePath: string, line: number, character: number, root: string): Promise<LSPCallHierarchyItem[]>;
+  incomingCalls(item: LSPCallHierarchyItem, root: string): Promise<LSPCallHierarchyIncomingCall[]>;
+  outgoingCalls(item: LSPCallHierarchyItem, root: string): Promise<LSPCallHierarchyOutgoingCall[]>;
 
   /** Query workspace/symbol across all active LSP servers */
   workspaceSymbol(query: string, root: string): Promise<LSPWorkspaceSymbol[]>;
@@ -162,6 +236,10 @@ export interface LSPBridge {
   workspaceSymbolOutcome(query: string, root: string, opts?: LspOutcomeOptions): Promise<LspWorkspaceSymbolsOutcome>;
   hoverOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspHoverOutcome>;
   getFreshDiagnosticsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDiagnosticsOutcome>;
+  // Call hierarchy — raw item-based incoming/outgoing, outcome position-based (internally resolves via prepareCallHierarchy)
+  prepareCallHierarchyOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspCallHierarchyPrepareOutcome>;
+  incomingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspIncomingCallsOutcome>;
+  outgoingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspOutgoingCallsOutcome>;
 
 }
 
@@ -189,6 +267,12 @@ export function detectProjectLanguages(root: string): ProjectLSPInfo {
   const hasCargoToml = existsSync(join(root, "Cargo.toml"));
   const hasBuildGradle = existsSync(join(root, "build.gradle")) || existsSync(join(root, "build.gradle.kts"));
   const hasPomXml = existsSync(join(root, "pom.xml"));
+  const hasCMakeLists = existsSync(join(root, "CMakeLists.txt"));
+  const hasMakefile = existsSync(join(root, "Makefile")) || existsSync(join(root, "makefile")) || existsSync(join(root, "GNUMakefile"));
+  const hasCompileCommands = existsSync(join(root, "compile_commands.json"));
+  const hasComposerJson = existsSync(join(root, "composer.json"));
+  const hasCSharpProject = hasCSharpMarker(root);
+  const hasGemfile = existsSync(join(root, "Gemfile"));
 
   if (hasPkgJson || hasTsconfig) {
     detected.push("typescript", "javascript");
@@ -205,16 +289,34 @@ export function detectProjectLanguages(root: string): ProjectLSPInfo {
   if (hasBuildGradle || hasPomXml) {
     detected.push("java");
   }
+  if (hasCMakeLists || hasMakefile || hasCompileCommands) {
+    detected.push("c", "cpp");
+  }
+  if (hasCSharpProject) {
+    detected.push("csharp");
+  }
+  if (hasComposerJson) {
+    detected.push("php");
+  }
+  if (hasGemfile) {
+    detected.push("ruby");
+  }
 
-  // If no project-config detected, sample source files
-  if (detected.length === 0) {
+  // Sample source extensions unconditionally and UNION with marker-based detection
+  // (caps at 200 top-level entries so perf remains cheap for large projects).
+  {
     const exts = sampleSourceExtensions(root);
     const langMap: Record<string, string[]> = {
       ts: ["typescript"], tsx: ["typescriptreact", "typescript"],
       js: ["javascript"], jsx: ["javascriptreact", "javascript"],
       py: ["python"], rs: ["rust"], go: ["go"], java: ["java"],
+      c: ["c"], h: ["c"], cpp: ["cpp"], hpp: ["cpp"], cc: ["cpp"], cxx: ["cpp"], hh: ["cpp"], hxx: ["cpp"],
+      cs: ["csharp"], php: ["php"], sh: ["bash"], bash: ["bash"],
+      json: ["json"], jsonc: ["json"], yaml: ["yaml"], yml: ["yaml"], html: ["html"], htm: ["html"],
+      css: ["css"], scss: ["css"], less: ["css"], lua: ["lua"], rb: ["ruby"],
     };
-    for (const ext of exts) {
+    for (const extRaw of exts) {
+      const ext = extRaw.toLowerCase();
       const langs = langMap[ext];
       if (langs) for (const l of langs) if (!detected.includes(l)) detected.push(l);
     }
@@ -222,8 +324,7 @@ export function detectProjectLanguages(root: string): ProjectLSPInfo {
 
   // Deduplicate
   const unique = [...new Set(detected)];
-  const availableServers = findAvailableServers(unique);
-  const supported = intersection(availableServers, unique);
+  const { commands: availableServers, languages: supported } = findAvailableServers(unique, root);
 
   return {
     detectedLanguages: unique,
@@ -248,20 +349,25 @@ function sampleSourceExtensions(root: string): string[] {
   return [...exts];
 }
 
-function intersection(a: string[], b: string[]): string[] {
-  const set = new Set(b);
-  return a.filter((x) => set.has(x));
+function hasCSharpMarker(root: string): boolean {
+  try {
+    const entries = readdirSync(root, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isFile() && (e.name.endsWith(".csproj") || e.name.endsWith(".sln"))) return true;
+    }
+  } catch { /* ignore */ }
+  return false;
 }
 
 // ── LSP server availability detection ──────────────────────────────
 
-interface ServerConfig {
+export interface ServerConfig {
   command: string;
   args: string[];
   languageIds: string[];
 }
 
-const ALL_SERVER_CONFIGS: ServerConfig[] = [
+export const ALL_SERVER_CONFIGS: ServerConfig[] = [
   { command: "typescript-language-server", args: ["--stdio"], languageIds: ["typescript", "typescriptreact", "javascript", "javascriptreact"] },
   { command: "typescriptlangserver", args: ["--stdio"], languageIds: ["typescript", "typescriptreact", "javascript", "javascriptreact"] },
   { command: "pyright", args: ["--stdio"], languageIds: ["python"] },
@@ -270,41 +376,56 @@ const ALL_SERVER_CONFIGS: ServerConfig[] = [
   { command: "jedi-language-server", args: ["--stdio"], languageIds: ["python"] },
   { command: "rust-analyzer", args: ["--stdio"], languageIds: ["rust"] },
   { command: "gopls", args: [], languageIds: ["go"] },
-  { command: "java", args: [], languageIds: ["java"] }, // jdtls is typically a shell script
+  { command: "jdtls", args: [], languageIds: ["java"] },
+  { command: "clangd", args: [], languageIds: ["c", "cpp"] },
+  { command: "omnisharp", args: ["--languageserver"], languageIds: ["csharp"] },
+  { command: "csharp-ls", args: [], languageIds: ["csharp"] },
+  { command: "bash-language-server", args: ["start"], languageIds: ["bash", "shellscript"] },
+  { command: "intelephense", args: ["--stdio"], languageIds: ["php"] },
+  { command: "phpactor", args: ["language-server"], languageIds: ["php"] },
+  // 6 net-new languages from LANGUAGE_SERVER_CATALOG — synced, not duplicated (see catalog)
+  { command: "vscode-json-language-server", args: ["--stdio"], languageIds: ["json"] },
+  { command: "yaml-language-server", args: ["--stdio"], languageIds: ["yaml"] },
+  { command: "vscode-html-language-server", args: ["--stdio"], languageIds: ["html"] },
+  { command: "vscode-css-language-server", args: ["--stdio"], languageIds: ["css"] },
+  { command: "lua-language-server", args: [], languageIds: ["lua"] },
+  { command: "solargraph", args: ["stdio"], languageIds: ["ruby"] },
 ];
 
-function findAvailableServers(neededLanguages: string[]): string[] {
-  const neededSet = new Set(neededLanguages);
+function findAvailableServers(neededLanguages: string[], root: string = process.cwd()): { commands: string[]; languages: string[] } {
   const available: string[] = [];
-
-  for (const config of ALL_SERVER_CONFIGS) {
-    // Only check servers whose languages are needed
-    if (!config.languageIds.some((id) => neededSet.has(id))) continue;
-    if (binaryExists(config.command)) {
-      available.push(config.command);
-    }
-  }
-
-  return available;
-}
-
-function binaryExists(command: string): boolean {
-  try {
-    execFileSync("which", [command], { stdio: "ignore", timeout: 2000 });
-    return true;
-  } catch {
+  const resolvedLanguages: string[] = [];
+  const seenLangs = new Set<string>();
+  for (const lang of neededLanguages) {
+    if (seenLangs.has(lang)) continue;
+    seenLangs.add(lang);
+    const dummy = dummyFileForLanguage(lang, root);
     try {
-      execFileSync("where", [command], { stdio: "ignore", timeout: 2000 });
-      return true;
+      const res = resolveLanguageServer(dummy, root);
+      if (res.status === "available") {
+        resolvedServerCache.set(`${root}:${lang}`, { executable: res.executable, args: res.args });
+        const cmd = res.executable.includes("/") || res.executable.includes("\\") ? basename(res.executable) : res.executable;
+        // Push the exact executable for overrides (e.g. my-pyright) so caller sees it; for project-local push basename for compat
+        if (res.executable.includes("/") || res.executable.includes("\\")) {
+          available.push(cmd);
+        } else {
+          available.push(res.executable);
+        }
+        resolvedLanguages.push(lang);
+      } else {
+        resolvedServerCache.delete(`${root}:${lang}`);
+      }
     } catch {
-      return false;
+      resolvedServerCache.delete(`${root}:${lang}`);
     }
   }
+  return { commands: available, languages: resolvedLanguages };
 }
+
 
 // ── Language ID detection ──────────────────────────────────────────
 
-function detectLanguageFromExtension(filePath: string): string | null {
+export function detectLanguageFromExtension(filePath: string): string | null {
   const ext = filePath.toLowerCase();
   if (ext.endsWith(".ts") || ext.endsWith(".mts") || ext.endsWith(".cts")) return "typescript";
   if (ext.endsWith(".tsx")) return "typescriptreact";
@@ -314,6 +435,24 @@ function detectLanguageFromExtension(filePath: string): string | null {
   if (ext.endsWith(".rs")) return "rust";
   if (ext.endsWith(".go")) return "go";
   if (ext.endsWith(".java")) return "java";
+  if (ext.endsWith(".c")) return "c";
+  if (ext.endsWith(".h")) return "c";
+  if (ext.endsWith(".cpp")) return "cpp";
+  if (ext.endsWith(".hpp")) return "cpp";
+  if (ext.endsWith(".cc")) return "cpp";
+  if (ext.endsWith(".cxx")) return "cpp";
+  if (ext.endsWith(".hh")) return "cpp";
+  if (ext.endsWith(".hxx")) return "cpp";
+  if (ext.endsWith(".cs")) return "csharp";
+  if (ext.endsWith(".php")) return "php";
+  if (ext.endsWith(".sh")) return "bash";
+  if (ext.endsWith(".bash")) return "bash";
+  if (ext.endsWith(".json") || ext.endsWith(".jsonc")) return "json";
+  if (ext.endsWith(".yaml") || ext.endsWith(".yml")) return "yaml";
+  if (ext.endsWith(".html") || ext.endsWith(".htm")) return "html";
+  if (ext.endsWith(".css") || ext.endsWith(".scss") || ext.endsWith(".less")) return "css";
+  if (ext.endsWith(".lua")) return "lua";
+  if (ext.endsWith(".rb")) return "ruby";
   return null;
 }
 
@@ -368,6 +507,7 @@ export class LSPConnection {
           documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           implementation: { dynamicRegistration: false },
           hover: { dynamicRegistration: false },
+          callHierarchy: { dynamicRegistration: false },
         },
         workspace: {
           symbol: { dynamicRegistration: false },
@@ -612,17 +752,52 @@ export class LSPConnection {
 
 // ── LSP Manager ────────────────────────────────────────────────────
 
-class LSPManager {
+export class LSPManager {
   private connections = new Map<string, LSPConnection>();
   private rootUri: string;
   private availableConfigs: ServerConfig[];
   private _startupPromise: Promise<void> | null = null;
 
+  /** Exposes merged configs for behavioral regression tests. */
+  getAvailableConfigs(): ServerConfig[] { return this.availableConfigs; }
+
   constructor(root: string) {
     this.rootUri = root;
     const info = detectProjectLanguages(root);
     const availableSet = new Set(info.availableServers);
-    this.availableConfigs = ALL_SERVER_CONFIGS.filter((cfg) => availableSet.has(cfg.command));
+    // Build from resolver cache so project-local/override executables are honored.
+    // Resolver maps languageId -> {executable, args}; merge with legacy filter as fallback.
+    const resolverConfigs: ServerConfig[] = [];
+    for (const lang of info.detectedLanguages) {
+      const cached = resolvedServerCache.get(`${root}:${lang}`);
+      if (cached) {
+        resolverConfigs.push({ command: cached.executable, args: cached.args, languageIds: [lang] });
+      }
+    }
+    if (resolverConfigs.length > 0) {
+      // GROUP by resolved (executable, args) identity and MERGE languageIds before coverage filtering.
+      const byKey = new Map<string, ServerConfig>();
+      for (const cfg of resolverConfigs) {
+        const key = `${cfg.command}\0${JSON.stringify(cfg.args)}`;
+        const existing = byKey.get(key);
+        if (existing) {
+          for (const lid of cfg.languageIds) if (!existing.languageIds.includes(lid)) existing.languageIds.push(lid);
+        } else {
+          byKey.set(key, { command: cfg.command, args: [...cfg.args], languageIds: [...cfg.languageIds] });
+        }
+      }
+      const deduped = [...byKey.values()];
+      // Dedupe legacy by LANGUAGE ID coverage, not command string — a resolver config resolving to
+      // /repo/node_modules/.bin/pyright covers "python" so any legacy config for python must be excluded
+      // even though its bare command "pyright" != full path.
+      const coveredLanguages = new Set(deduped.flatMap((c) => c.languageIds));
+      const legacy = ALL_SERVER_CONFIGS.filter(
+        (cfg) => availableSet.has(cfg.command) && !cfg.languageIds.some((lang) => coveredLanguages.has(lang)),
+      );
+      this.availableConfigs = [...deduped, ...legacy];
+    } else {
+      this.availableConfigs = ALL_SERVER_CONFIGS.filter((cfg) => availableSet.has(cfg.command));
+    }
   }
 
   /** Eagerly start all available LSP servers in parallel. */
@@ -908,6 +1083,52 @@ async function createBridge(): Promise<LSPBridge | null> {
       } catch { return []; }
     },
 
+    async prepareCallHierarchy(
+      filePath: string, line: number, character: number, root: string,
+    ): Promise<LSPCallHierarchyItem[]> {
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return [];
+      try {
+        const mgr = cachedManager(root);
+        const server = await mgr.getServer(langId);
+        if (!server) return [];
+        await server.openFile(filePath);
+        const result = await server.request("textDocument/prepareCallHierarchy", {
+          textDocument: { uri: `file://${resolve(filePath)}` },
+          position: { line, character },
+        }) as LSPCallHierarchyItem[] | null;
+        return result ?? [];
+      } catch { return []; }
+    },
+
+    async incomingCalls(
+      item: LSPCallHierarchyItem, root: string,
+    ): Promise<LSPCallHierarchyIncomingCall[]> {
+      const langId = detectLanguageFromExtension(item.uri.replace(/^file:\/\//, ""));
+      if (!langId) return [];
+      try {
+        const mgr = cachedManager(root);
+        const server = await mgr.getServer(langId);
+        if (!server) return [];
+        const result = await server.request("callHierarchy/incomingCalls", { item }) as LSPCallHierarchyIncomingCall[] | null;
+        return result ?? [];
+      } catch { return []; }
+    },
+
+    async outgoingCalls(
+      item: LSPCallHierarchyItem, root: string,
+    ): Promise<LSPCallHierarchyOutgoingCall[]> {
+      const langId = detectLanguageFromExtension(item.uri.replace(/^file:\/\//, ""));
+      if (!langId) return [];
+      try {
+        const mgr = cachedManager(root);
+        const server = await mgr.getServer(langId);
+        if (!server) return [];
+        const result = await server.request("callHierarchy/outgoingCalls", { item }) as LSPCallHierarchyOutgoingCall[] | null;
+        return result ?? [];
+      } catch { return []; }
+    },
+
     async workspaceSymbol(query: string, root: string): Promise<LSPWorkspaceSymbol[]> {
       try {
         const mgr = cachedManager(root);
@@ -1066,6 +1287,86 @@ async function createBridge(): Promise<LSPBridge | null> {
       } catch { return { status: "degraded", hover: null }; }
     },
 
+    async prepareCallHierarchyOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspCallHierarchyPrepareOutcome> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", items: [] };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", items: [] };
+        const items = await withBudget((async () => {
+          await server.openFile(filePath);
+          const result = await server.request("textDocument/prepareCallHierarchy", {
+            textDocument: { uri: `file://${resolve(filePath)}` },
+            position: { line: line0, character: char0 },
+          }) as LSPCallHierarchyItem[] | null;
+          return result ?? [];
+        })(), timeoutMs, opts?.signal);
+        if (items.length === 0) return { status: "empty", items: [] };
+        return { status: "confirmed", items };
+      } catch { return { status: "degraded", items: [] }; }
+    },
+
+    // Design choice: outcome-level incoming/outgoing are position-based.
+    // They internally call prepareCallHierarchy to resolve the CallHierarchyItem, then call the calls request.
+    // Raw item-based incomingCalls/outgoingCalls remain available for callers that already have an item (avoiding redundant prepare).
+    async incomingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspIncomingCallsOutcome> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", calls: [] };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", calls: [] };
+        const calls = await withBudget((async () => {
+          await server.openFile(filePath);
+          const items = await server.request("textDocument/prepareCallHierarchy", {
+            textDocument: { uri: `file://${resolve(filePath)}` },
+            position: { line: line0, character: char0 },
+          }) as LSPCallHierarchyItem[] | null;
+          if (!items || items.length === 0) return null;
+          const item = items[0]!;
+          const result = await server.request("callHierarchy/incomingCalls", { item }) as LSPCallHierarchyIncomingCall[] | null;
+          return result ?? [];
+        })(), timeoutMs, opts?.signal);
+        if (calls === null) return { status: "empty", calls: [] };
+        if (calls.length === 0) return { status: "empty", calls: [] };
+        return { status: "confirmed", calls };
+      } catch { return { status: "degraded", calls: [] }; }
+    },
+
+    async outgoingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspOutgoingCallsOutcome> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", calls: [] };
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", calls: [] };
+        const calls = await withBudget((async () => {
+          await server.openFile(filePath);
+          const items = await server.request("textDocument/prepareCallHierarchy", {
+            textDocument: { uri: `file://${resolve(filePath)}` },
+            position: { line: line0, character: char0 },
+          }) as LSPCallHierarchyItem[] | null;
+          if (!items || items.length === 0) return null;
+          const item = items[0]!;
+          const result = await server.request("callHierarchy/outgoingCalls", { item }) as LSPCallHierarchyOutgoingCall[] | null;
+          return result ?? [];
+        })(), timeoutMs, opts?.signal);
+        if (calls === null) return { status: "empty", calls: [] };
+        if (calls.length === 0) return { status: "empty", calls: [] };
+        return { status: "confirmed", calls };
+      } catch { return { status: "degraded", calls: [] }; }
+    },
+
     async getFreshDiagnosticsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDiagnosticsOutcome> {
       const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
       const waitMs = opts?.waitMs ?? 1500;
@@ -1188,6 +1489,22 @@ export async function getLSPBridge(): Promise<LSPBridge | null> {
 
 export function getProjectLSPInfo(root: string): ProjectLSPInfo {
   return detectProjectLanguages(root);
+}
+
+export function invalidateResolvedServerCacheForRoot(root: string): void {
+  const prefix = `${root}:`;
+  for (const key of [...resolvedServerCache.keys()]) {
+    if (key.startsWith(prefix)) resolvedServerCache.delete(key);
+  }
+}
+
+export async function evictManagerForRoot(root: string): Promise<void> {
+  const mgr = managerCache.get(root);
+  if (!mgr) return;
+  try { await mgr.shutdown(); } catch { /* best effort */ }
+  managerCache.delete(root);
+  const idx = managerAccessOrder.indexOf(root);
+  if (idx !== -1) managerAccessOrder.splice(idx, 1);
 }
 
 export function resetLSPBridge(): void {

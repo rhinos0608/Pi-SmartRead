@@ -69,6 +69,9 @@ const InspectV4Schema = Type.Object({
             Type.Literal("hover"),
             Type.Literal("documentSymbols"),
             Type.Literal("workspaceSymbols"),
+            Type.Literal("prepareCallHierarchy"),
+            Type.Literal("incomingCalls"),
+            Type.Literal("outgoingCalls"),
         ], { description: "LSP navigation operation" }),
         line: Type.Optional(Type.Number({ minimum: 1, description: "1-based line; file-target ops" })),
         character: Type.Optional(Type.Number({ minimum: 1, description: "1-based character; file-target ops" })),
@@ -158,7 +161,7 @@ function validateNavigation(params: Record<string, unknown>, mode: "file" | "dir
         const v = nav.maxResults as number;
         if (typeof v !== "number" || v < 1 || v > 100) return "Error: inspect navigation.maxResults must be 1..100";
     }
-    const fileOps = new Set(["definition", "references", "implementation", "hover"]);
+    const fileOps = new Set(["definition", "references", "implementation", "hover", "prepareCallHierarchy", "incomingCalls", "outgoingCalls"]);
     const docOps = new Set(["documentSymbols"]);
     const wsOps = new Set(["workspaceSymbols"]);
     if (fileOps.has(op)) {

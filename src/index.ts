@@ -15,11 +15,13 @@ import { createReadTool } from "./unified-read.js";
 import { fileURLToPath } from "node:url";
 import { getLSPBridge, resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
 import { runPostEditDiagnosticsFallback } from "./post-edit-fallback.js";
+import { runPostEditImpactSummary } from "./post-edit-impact.js";
 import { isDiagnosticsClaimed } from "./mutation-ownership.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
 import { registerRepositoryIntelligence } from "./repository-intelligence-registry.js";
 import { createRepositoryIntelligenceService } from "./repository-intelligence.js";
 import { getIncrementalIndex } from "./incremental-index.js";
+import { registerLanguageIntelligenceCommand } from "./language-intelligence-command.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
   isInternalUrl,
@@ -608,6 +610,27 @@ export default async function (pi: ExtensionAPI) {
       }
     }
 
+    // ── Post-edit impact summary (SmartRead-only, advisory, always additive) ──
+    // Runs regardless of diagnostics ownership; never blocks the tool result.
+    if ((toolName === "write" || toolName === "edit") && !event.isError) {
+      try {
+        const impact = await runPostEditImpactSummary({
+          toolName,
+          isError: event.isError,
+          input: event.input as Record<string, unknown> | undefined,
+          details: (event.details ?? {}) as Record<string, unknown>,
+          content: outputEvent.content,
+          cwd: process.cwd(),
+        });
+        if (impact) {
+          outputEvent = { ...outputEvent, content: impact.content };
+          outputChanged = true;
+        }
+      } catch {
+        // Impact summary is best-effort; never block the tool result.
+      }
+    }
+
     return outputChanged ? outputEvent : undefined;
   });
 
@@ -708,6 +731,8 @@ export default async function (pi: ExtensionAPI) {
   // 4. Versioned evidence RPC resolver install: best-effort, runs in the
   //    background. The extension still works without it — inspect just
   //    doesn't publish envelopes for patch to resolve.
+  registerLanguageIntelligenceCommand(pi as any);
+
   if (pi.events && typeof pi.events.on === "function") {
     void (async () => {
       try {

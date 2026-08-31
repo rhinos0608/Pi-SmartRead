@@ -67,6 +67,21 @@ function uriToFsPath(uri: string): string {
 function canonicalizeNavigationItems(items: unknown[], _cwd: string): unknown[] {
     return (items as any[]).map((it) => {
         if (it && typeof it === "object") {
+            // callHierarchy incoming/outgoing: { from/to: { uri, range } }
+            if ((it as any).from?.uri && typeof (it as any).from.uri === "string") {
+                const fsPath = uriToFsPath((it as any).from.uri);
+                const canon = tryCanonical(fsPath);
+                const newUri = "file://" + canon;
+                const base = { ...(it as any), from: { ...(it as any).from, uri: newUri } };
+                // also canonicalize target uri of from-range host if present as top-level? keep as is
+                return base;
+            }
+            if ((it as any).to?.uri && typeof (it as any).to.uri === "string") {
+                const fsPath = uriToFsPath((it as any).to.uri);
+                const canon = tryCanonical(fsPath);
+                const newUri = "file://" + canon;
+                return { ...(it as any), to: { ...(it as any).to, uri: newUri } };
+            }
             const loc = (it as any).location ?? it;
             if (loc && typeof loc.uri === "string") {
                 const fsPath = uriToFsPath(loc.uri);
@@ -148,7 +163,19 @@ function renderNavigationSection(details: { operation: string; status: string; i
     } else {
         lines.push(`Results (${details.items.length}${details.truncated ? ", truncated" : ""}):`);
         for (const it of details.items as any[]) {
-            if (it?.name) {
+            if (it?.from?.uri) {
+                const p = uriToFsPath(it.from.uri);
+                const range = it.from.range ?? it.fromRanges?.[0];
+                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
+                const fromRanges = it.fromRanges ? ` (${it.fromRanges.length} range(s))` : "";
+                lines.push(`- incoming from ${it.from.name} (kind ${it.from.kind}) — ${p}${pos}${fromRanges}`);
+            } else if (it?.to?.uri) {
+                const p = uriToFsPath(it.to.uri);
+                const range = it.to.range ?? it.fromRanges?.[0];
+                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
+                const fromRanges = it.fromRanges ? ` (${it.fromRanges.length} range(s))` : "";
+                lines.push(`- outgoing to ${it.to.name} (kind ${it.to.kind}) — ${p}${pos}${fromRanges}`);
+            } else if (it?.name) {
                 const loc = it.location?.uri ? uriToFsPath(it.location.uri) : it.uri ? uriToFsPath(it.uri) : "";
                 const range = it.location?.range ?? it.range;
                 const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
@@ -1034,10 +1061,14 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
             __navDetails = { schemaVersion: 1 as const, operation: op, status, source: "lsp" as const, items, truncated: outcome.truncated };
             extraSections.push(renderNavigationSection(__navDetails, cwd));
             const srNav = new Map<string, InspectedResource>();
-            // file-mode results stay coverage:"search-match" — add per-location resources
+            // file-mode results stay coverage:"search-match" — add per-location resources (including call hierarchy from/to)
             for (const it of items as any[]) {
-                const p: string | undefined = (it as any)?.location?.uri ? uriToFsPath((it as any).location.uri) : (it as any)?.uri ? uriToFsPath((it as any).uri) : undefined;
-                if (p) addSearchMatchResource(srNav, p, cwd, it);
+                let p: string | undefined;
+                let loc: unknown = it;
+                if ((it as any)?.from?.uri) { p = uriToFsPath((it as any).from.uri); loc = (it as any).from; }
+                else if ((it as any)?.to?.uri) { p = uriToFsPath((it as any).to.uri); loc = (it as any).to; }
+                else p = (it as any)?.location?.uri ? uriToFsPath((it as any).location.uri) : (it as any)?.uri ? uriToFsPath((it as any).uri) : undefined;
+                if (p) addSearchMatchResource(srNav, p, cwd, loc);
                 else addSearchMatchResource(srNav, absolutePath, cwd, it);
             }
             if (op === "hover" && input.navigation.line !== undefined) {

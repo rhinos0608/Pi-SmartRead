@@ -95,3 +95,6 @@ describe("WP-SR5 lazy LSP start", () => {
     expect(provider.inspectNavigation).toHaveBeenCalledTimes(1);
   });
 });
+
+// runtime wiring verified in lsp-bridge-catalog.test.ts (no bare-java, 6 new languages)
+// kept here as placeholder to avoid cross-mock pollution from vi.doMock in this file

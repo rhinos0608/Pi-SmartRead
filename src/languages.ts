@@ -74,6 +74,7 @@ const EXTENSION_MAP: Record<string, SupportedLanguage> = {
   ".cxx": "cpp",
   ".hpp": "cpp",
   ".hxx": "cpp",
+  ".hh": "cpp",
 
   // CSS
   ".css": "css",

@@ -143,21 +143,14 @@ export async function initHashline(): Promise<void> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Unicode-aware letter-or-digit regex (covers all scripts via Unicode property escapes) — matches SmartEdit's LETTER_OR_DIGIT_RE */
+const LETTER_OR_DIGIT_RE = /[\p{L}\p{N}]/u;
+
 /**
- * Returns true if line contains any letter or digit (ASCII fast path).
+ * Returns true if line contains at least one letter or digit (Unicode-aware).
  */
 function hasSignificantChar(line: string): boolean {
-  for (let i = 0; i < line.length; i++) {
-    const c = line.charCodeAt(i);
-    if (
-      (c >= 48 && c <= 57) ||  // 0-9
-      (c >= 65 && c <= 90) ||  // A-Z
-      (c >= 97 && c <= 122)    // a-z
-    ) {
-      return true;
-    }
-  }
-  return false;
+  return LETTER_OR_DIGIT_RE.test(line);
 }
 
 /**
@@ -212,7 +205,7 @@ export function computeLineHashSync(
     );
   }
 
-  const normalized = line.replace(/\r/g, "").trimEnd();
+  const normalized = line.replace(/\uFEFF/g, "").replace(/\r/g, "").trimEnd();
 
   // Structural lines → ordinal bigram
   if (isStructural(normalized)) {

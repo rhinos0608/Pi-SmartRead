@@ -10,7 +10,7 @@ import type { LSPDiagnostic, LspOutcomeStatus } from "./lsp-bridge.js";
 export type { LspOutcomeStatus };
 export type OutcomeStatus = LspOutcomeStatus;
 
-export type NavigationOperation = "definition" | "references" | "implementation" | "hover" | "documentSymbols" | "workspaceSymbols";
+export type NavigationOperation = "definition" | "references" | "implementation" | "hover" | "documentSymbols" | "workspaceSymbols" | "prepareCallHierarchy" | "incomingCalls" | "outgoingCalls";
 
 export interface NavigationInput {
   path?: string;
@@ -139,6 +139,44 @@ export async function inspectNavigation(input: NavigationInput): Promise<Navigat
         const syms = await withBudget(bridge.workspaceSymbol(input.query, input.root), timeoutMs, input.signal);
         if (syms.length === 0) return { status: "empty", operation: input.operation, items: [], truncated: false };
         return { status: "confirmed", operation: input.operation, items: sliceLimit(syms, input.maxResults), truncated: syms.length > (input.maxResults ?? 20) };
+      }
+      case "prepareCallHierarchy": {
+        if (input.line === undefined || input.character === undefined) return { status: "degraded", operation: input.operation, items: [], truncated: false };
+        if (!bridge) return { status: "unavailable", operation: input.operation, items: [], truncated: false };
+        if (bridgeAny.prepareCallHierarchyOutcome) {
+          const r = await bridgeAny.prepareCallHierarchyOutcome(input.path!, input.line!, input.character!, input.root, { timeoutMs, signal: input.signal });
+          return { status: r.status, operation: input.operation, items: sliceLimit(r.items, input.maxResults), truncated: r.items.length > (input.maxResults ?? 20) };
+        }
+        const _prItems = await withBudget((bridge as any).prepareCallHierarchy(input.path!, toZeroBased(input.line)!, toZeroBased(input.character)!, input.root), timeoutMs, input.signal) as unknown as any[];
+        if ((_prItems as any[]).length === 0) return { status: "empty", operation: input.operation, items: [], truncated: false };
+        return { status: "confirmed", operation: input.operation, items: sliceLimit(_prItems as unknown[], input.maxResults), truncated: (_prItems as any[]).length > (input.maxResults ?? 20) };
+      }
+      case "incomingCalls": {
+        if (input.line === undefined || input.character === undefined) return { status: "degraded", operation: input.operation, items: [], truncated: false };
+        if (!bridge) return { status: "unavailable", operation: input.operation, items: [], truncated: false };
+        if (bridgeAny.incomingCallsOutcome) {
+          const r = await bridgeAny.incomingCallsOutcome(input.path!, input.line!, input.character!, input.root, { timeoutMs, signal: input.signal });
+          return { status: r.status, operation: input.operation, items: sliceLimit(r.calls, input.maxResults), truncated: r.calls.length > (input.maxResults ?? 20) };
+        }
+        // fallback: resolve via prepare then incoming
+        const _icItems = await withBudget((bridge as any).prepareCallHierarchy(input.path!, toZeroBased(input.line)!, toZeroBased(input.character)!, input.root), timeoutMs, input.signal) as unknown as any[];
+        if ((_icItems as any[]).length === 0) return { status: "empty", operation: input.operation, items: [], truncated: false };
+        const _icCalls = await withBudget((bridge as any).incomingCalls((_icItems as any[])[0], input.root), timeoutMs, input.signal) as unknown as any[];
+        if ((_icCalls as any[]).length === 0) return { status: "empty", operation: input.operation, items: [], truncated: false };
+        return { status: "confirmed", operation: input.operation, items: sliceLimit(_icCalls as unknown[], input.maxResults), truncated: (_icCalls as any[]).length > (input.maxResults ?? 20) };
+      }
+      case "outgoingCalls": {
+        if (input.line === undefined || input.character === undefined) return { status: "degraded", operation: input.operation, items: [], truncated: false };
+        if (!bridge) return { status: "unavailable", operation: input.operation, items: [], truncated: false };
+        if (bridgeAny.outgoingCallsOutcome) {
+          const r = await bridgeAny.outgoingCallsOutcome(input.path!, input.line!, input.character!, input.root, { timeoutMs, signal: input.signal });
+          return { status: r.status, operation: input.operation, items: sliceLimit(r.calls, input.maxResults), truncated: r.calls.length > (input.maxResults ?? 20) };
+        }
+        const _ocItems = await withBudget((bridge as any).prepareCallHierarchy(input.path!, toZeroBased(input.line)!, toZeroBased(input.character)!, input.root), timeoutMs, input.signal) as unknown as any[];
+        if ((_ocItems as any[]).length === 0) return { status: "empty", operation: input.operation, items: [], truncated: false };
+        const _ocCalls = await withBudget((bridge as any).outgoingCalls((_ocItems as any[])[0], input.root), timeoutMs, input.signal) as unknown as any[];
+        if ((_ocCalls as any[]).length === 0) return { status: "empty", operation: input.operation, items: [], truncated: false };
+        return { status: "confirmed", operation: input.operation, items: sliceLimit(_ocCalls as unknown[], input.maxResults), truncated: (_ocCalls as any[]).length > (input.maxResults ?? 20) };
       }
       default: {
         // additive-friendly: unknown operation treated as degraded, not thrown

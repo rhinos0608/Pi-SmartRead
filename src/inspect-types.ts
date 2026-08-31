@@ -50,7 +50,7 @@ export interface InspectV4Input {
   lspInspectionProvider?: import("./lsp-inspection.js").LspInspectionProvider;
 }
 
-export type NavigationOperation = "definition" | "references" | "implementation" | "hover" | "documentSymbols" | "workspaceSymbols";
+export type NavigationOperation = "definition" | "references" | "implementation" | "hover" | "documentSymbols" | "workspaceSymbols" | "prepareCallHierarchy" | "incomingCalls" | "outgoingCalls";
 export interface NavigationParams {
   operation: NavigationOperation;
   line?: number;

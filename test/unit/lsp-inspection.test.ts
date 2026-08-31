@@ -99,6 +99,50 @@ describe("lsp-inspection engine", () => {
     expect(r.status).toBe("degraded");
   });
 
+  it("call hierarchy: unavailable when no bridge, degraded when missing line/character", async () => {
+    vi.doMock("../../src/lsp-bridge.js", () => ({
+      getLSPBridge: vi.fn(async () => null),
+    }));
+    const { inspectNavigation: navU } = await import("../../src/lsp-inspection.js");
+    const unavailable = await navU({ path: "x.ts", operation: "prepareCallHierarchy", line: 1, character: 1, root: "/" });
+    expect(unavailable.status).toBe("unavailable");
+    expect(unavailable.items).toEqual([]);
+    vi.resetModules();
+    vi.doMock("../../src/lsp-bridge.js", () => ({
+      getLSPBridge: vi.fn(async () => ({ isAvailable: () => true })),
+    }));
+    const { inspectNavigation: navD } = await import("../../src/lsp-inspection.js");
+    const degraded = await navD({ path: "x.ts", operation: "incomingCalls", root: "/" } as any);
+    expect(degraded.status).toBe("degraded");
+    const degraded2 = await navD({ path: "x.ts", operation: "outgoingCalls", root: "/", line: 1 } as any);
+    expect(degraded2.status).toBe("degraded");
+  });
+
+  it("call hierarchy: mocked-bridge confirmed/empty + maxResults bounding", async () => {
+    const item = { name: "foo", kind: 12, uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } } };
+    const outgoing = { to: item, fromRanges: [{ start: { line: 2, character: 0 }, end: { line: 2, character: 3 } }] };
+    vi.doMock("../../src/lsp-bridge.js", () => ({
+      getLSPBridge: vi.fn(async () => ({
+        isAvailable: () => true,
+        prepareCallHierarchyOutcome: vi.fn(async () => ({ status: "confirmed", items: [item, item] })),
+        incomingCallsOutcome: vi.fn(async () => ({ status: "empty", calls: [] })),
+        outgoingCallsOutcome: vi.fn(async () => ({ status: "confirmed", calls: [outgoing, outgoing, outgoing] })),
+      })),
+    }));
+    const { inspectNavigation } = await import("../../src/lsp-inspection.js");
+    const prep = await inspectNavigation({ path: "x.ts", operation: "prepareCallHierarchy", line: 1, character: 1, root: "/", maxResults: 1 });
+    expect(prep.status).toBe("confirmed");
+    expect(prep.items.length).toBe(1);
+    expect(prep.truncated).toBe(true);
+    const inc = await inspectNavigation({ path: "x.ts", operation: "incomingCalls", line: 1, character: 1, root: "/" });
+    expect(inc.status).toBe("empty");
+    expect(inc.items).toEqual([]);
+    const out = await inspectNavigation({ path: "x.ts", operation: "outgoingCalls", line: 1, character: 1, root: "/", maxResults: 2 });
+    expect(out.status).toBe("confirmed");
+    expect(out.items.length).toBe(2);
+    expect(out.truncated).toBe(true);
+  });
+
   it("additive-friendly: unknown status like needs-triage does not throw closed switch", async () => {
     vi.doMock("../../src/lsp-bridge.js", () => ({
       getLSPBridge: vi.fn(async () => ({

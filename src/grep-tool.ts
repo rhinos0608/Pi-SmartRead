@@ -1327,6 +1327,19 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
     ].join("\n")).join("\n\n");
 }
 
+function enginesKey(engines: string[]): string {
+    return [...engines].sort().join("+");
+}
+
+function shouldShowPerHitEngines(shown: GrepHit[]): boolean {
+    if (shown.length === 0) return false;
+    // Informative when any hit has multiple engines (confidence signal)
+    if (shown.some((h) => h.engines.length > 1)) return true;
+    // Or when hits diverge (different engine combos across hits)
+    const first = enginesKey(shown[0]!.engines);
+    return shown.some((h) => enginesKey(h.engines) !== first);
+}
+
 function formatOutput(
     pattern: string,
     shown: GrepHit[],
@@ -1343,10 +1356,12 @@ function formatOutput(
         "",
     ];
 
+    const showProvenance = shouldShowPerHitEngines(shown);
     for (const hit of shown) {
         const symbolPart = hit.name ? `  ${hit.name}` : "";
         const lineRange = hit.endLine > hit.line ? `L${hit.line}-${hit.endLine}` : `L${hit.line}`;
-        lines.push(`${hit.relFile}  ${lineRange}${symbolPart}`);
+        const provenance = showProvenance && hit.engines.length > 0 ? `  [${hit.engines.join("+")}]` : "";
+        lines.push(`${hit.relFile}  ${lineRange}${symbolPart}${provenance}`);
         if (hit.snippet) {
             lines.push(hit.snippet);
         }
@@ -1436,4 +1451,19 @@ export async function _bm25CacheBenchmark(
     const warmBuilds = _bm25CorpusCacheForTests().builds;
     fs.rmSync(dir, { recursive: true, force: true });
     return { coldMs, warmMs, coldBuilds, warmBuilds, cachedWarm: warm.cached };
+}
+
+export function _shouldShowPerHitEnginesForTests(shown: GrepHit[]): boolean {
+    return shouldShowPerHitEngines(shown);
+}
+
+export function _formatOutputForTests(
+    pattern: string,
+    shown: GrepHit[],
+    totalHits: number,
+    engines: string[],
+    truncated: boolean,
+    elapsedMs: number,
+): string {
+    return formatOutput(pattern, shown, totalHits, engines, truncated, elapsedMs);
 }

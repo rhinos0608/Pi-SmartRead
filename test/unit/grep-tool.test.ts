@@ -177,6 +177,63 @@ describe("grep tool — literal mode", () => {
     });
 });
 
+describe("grep tool — per-hit engine provenance rendering", () => {
+  it("uniform single-engine result set renders no per-hit annotation", async () => {
+    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const hits: any[] = [
+      { relFile: "src/a.ts", line: 1, endLine: 1, name: "foo", snippet: "", engines: ["bm25"] },
+      { relFile: "src/b.ts", line: 2, endLine: 2, name: "", snippet: "", engines: ["bm25"] },
+    ];
+    const text = _formatOutputForTests("foo", hits, hits.length, ["bm25"], false, 5);
+    expect(text).toContain('(bm25');
+    expect(text).not.toContain("[bm25]");
+    expect(text).toContain("src/a.ts  L1  foo");
+    expect(text).toContain("src/b.ts  L2");
+  });
+
+  it("divergent engines across hits render per-hit annotations accurately", async () => {
+    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const hits: any[] = [
+      { relFile: "src/a.ts", line: 1, endLine: 1, name: "", snippet: "hit a", engines: ["bm25"] },
+      { relFile: "src/b.ts", line: 10, endLine: 12, name: "Bar", snippet: "hit b", engines: ["symbol"] },
+      { relFile: "src/c.ts", line: 3, endLine: 3, name: "", snippet: "", engines: ["semantic"] },
+    ];
+    const text = _formatOutputForTests("q", hits, hits.length, ["bm25", "symbol", "semantic"], false, 7);
+    expect(text).toContain("src/a.ts  L1  [bm25]");
+    expect(text).toContain("src/b.ts  L10-12  Bar  [symbol]");
+    expect(text).toContain("src/c.ts  L3  [semantic]");
+  });
+
+  it("single hit with multiple engines shows combined provenance", async () => {
+    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const hits: any[] = [
+      { relFile: "src/a.ts", line: 5, endLine: 5, name: "doThing", snippet: "code", engines: ["lexical", "bm25"] },
+    ];
+    const text = _formatOutputForTests("doThing", hits, 1, ["lexical", "bm25"], false, 3);
+    expect(text).toContain("src/a.ts  L5  doThing  [lexical+bm25]");
+  });
+
+  it("uniform multi-engine hits still show provenance (confidence signal)", async () => {
+    const { _formatOutputForTests, _shouldShowPerHitEnginesForTests } = await import("../../src/grep-tool.js");
+    const hits: any[] = [
+      { relFile: "src/a.ts", line: 1, endLine: 1, name: "", snippet: "", engines: ["lexical", "bm25"] },
+      { relFile: "src/b.ts", line: 2, endLine: 2, name: "", snippet: "", engines: ["lexical", "bm25"] },
+    ];
+    expect(_shouldShowPerHitEnginesForTests(hits)).toBe(true);
+    const text = _formatOutputForTests("q", hits, hits.length, ["lexical", "bm25"], false, 2);
+    expect(text).toContain("[lexical+bm25]");
+  });
+
+  it("empty engines array never renders brackets", async () => {
+    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const hits: any[] = [
+      { relFile: "src/a.ts", line: 1, endLine: 1, name: "", snippet: "", engines: [] },
+    ];
+    const text = _formatOutputForTests("q", hits, 1, [], false, 1);
+    expect(text).not.toContain("[");
+  });
+});
+
 // ── Batch queries ──────────────────────────────────────────────────
 
 describe("grep tool — batch queries", () => {

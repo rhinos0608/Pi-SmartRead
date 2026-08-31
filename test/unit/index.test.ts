@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { resetSessionState } from "../../src/hook.js";
 import { GUARD_HINT_DEEP_SEARCH } from "../../src/bash-context-guard.js";
 
@@ -323,5 +323,62 @@ describe("index extension wiring", () => {
     });
 
     expect(result.messages[0].content[0].text).toContain("Stale read context");
+  });
+
+  it("post-edit impact wiring: does not throw and is additive for write (no graph data -> no-op)", async () => {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const api = {
+      registerTool: () => {},
+      on: (event: string, handler: (...args: any[]) => any) => {
+        handlers[event] = handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerExtension(api);
+
+    // No graph built -> impact summary should no-op without affecting result
+    const result = await handlers.tool_result!({
+      toolName: "write",
+      toolCallId: "write-impact-noop",
+      input: { path: "src/foo.ts" },
+      content: [{ type: "text", text: "wrote file" }],
+    });
+    // tool_result should still resolve (either undefined or same content); no throw
+    if (result) {
+      expect(result.content[0].text).toContain("wrote file");
+    }
+  });
+
+  it("post-edit impact wiring: appends impact block when graph data exists (mocked)", async () => {
+    // Mock post-edit-impact to return a block for this test via vi.mock-like override
+    const impactMod = await import("../../src/post-edit-impact.js");
+    const spy = vi.spyOn(impactMod, "runPostEditImpactSummary").mockResolvedValue({
+      content: [{ type: "text", text: "wrote file" }, { type: "text", text: "[Possibly affected: src/b.ts — advisory, based on prior graph data]" }],
+    });
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const api = {
+      registerTool: () => {},
+      on: (event: string, handler: (...args: any[]) => any) => {
+        handlers[event] = handler;
+      },
+    } as unknown as ExtensionAPI;
+    registerExtension(api);
+    const result = await handlers.tool_result!({
+      toolName: "write",
+      toolCallId: "write-impact-mocked",
+      input: { path: "src/foo.ts" },
+      content: [{ type: "text", text: "wrote file" }],
+    });
+    expect(result).toBeDefined();
+    expect(result.content).toHaveLength(2);
+    expect((result.content[1] as { text: string }).text).toContain("Possibly affected");
+    spy.mockRestore();
+    // Also ensure subsequent write without mock still works (diagnostics fallback not broken)
+    const result2 = await handlers.tool_result!({
+      toolName: "write",
+      toolCallId: "write-impact-2",
+      input: { path: "src/foo.ts" },
+      content: [{ type: "text", text: "wrote again" }],
+    });
+    if (result2) expect(result2.content[0].text).toContain("wrote again");
   });
 });
