@@ -211,7 +211,7 @@ export interface LSPBridge {
   hover(filePath: string, line: number, character: number, root: string): Promise<LSPHoverResult | null>;
 
   /** Open a file on the LSP server (idempotent — no-op if already open) */
-  openFile(filePath: string, root: string): Promise<void>;
+  openFile(filePath: string, root: string, purpose?: "warmup" | "request"): Promise<void>;
 
   /** Send full-text didChange to the LSP server for an open file */
   updateFile(filePath: string, text: string, root: string): Promise<void>;
@@ -402,7 +402,7 @@ function findAvailableServers(neededLanguages: string[], root: string = process.
     const dummy = dummyFileForLanguage(lang, root);
     try {
       const res = resolveLanguageServer(dummy, root);
-      if (res.status === "available") {
+      if (res && res.status === "available") {
         resolvedServerCache.set(`${root}:${lang}`, { executable: res.executable, args: res.args });
         const cmd = res.executable.includes("/") || res.executable.includes("\\") ? basename(res.executable) : res.executable;
         // Push the exact executable for overrides (e.g. my-pyright) so caller sees it; for project-local push basename for compat
@@ -852,7 +852,7 @@ export class LSPManager {
     return this.connections.size;
   }
 
-  async getServer(languageId: string): Promise<LSPConnection | null> {
+  async getServer(languageId: string, opts?: { purpose?: "warmup" | "request" }): Promise<LSPConnection | null> {
     // Await eager startup if still in progress
     if (this._startupPromise) await this._startupPromise;
 
@@ -872,14 +872,43 @@ export class LSPManager {
         return conn;
       } catch { /* try next server config */ }
     }
+    // Managed auto-install orchestration (purpose-aware, never for warmup)
+    try {
+      const purpose = opts?.purpose ?? "warmup";
+      const dummy = dummyFileForLanguage(languageId, this.rootUri);
+      const { ensureLanguageServerAvailable } = await import("./language-intelligence-runtime.js");
+      let res: Awaited<ReturnType<typeof ensureLanguageServerAvailable>> | null = null;
+      try {
+        res = await withBudget(ensureLanguageServerAvailable(dummy, this.rootUri, { purpose }), 10000);
+      } catch { res = null; }
+      if (res && res.status === "available" && (res as unknown as { tier: string }).tier === "managed") {
+        // Check if already in availableConfigs; if not, add and start
+        const already = this.availableConfigs.some((c) => c.command === res.executable && JSON.stringify(c.args) === JSON.stringify(res.args));
+        if (!already) {
+          const newCfg: ServerConfig = { command: res.executable, args: res.args, languageIds: [languageId] };
+          this.availableConfigs.push(newCfg);
+          resolvedServerCache.set(`${this.rootUri}:${languageId}`, { executable: res.executable, args: res.args });
+        }
+        try {
+          const conn = new LSPConnection();
+          conn.languageIds = [languageId];
+          await conn.start(res.executable, res.args, this.rootUri);
+          this.connections.set(languageId, conn);
+          return conn;
+        } catch { /* spawn failed after install */ }
+      }
+    } catch { /* ensure is best-effort */ }
     return null;
   }
 
   /** Route to the right server for a file and open it */
-  async openFile(filePath: string): Promise<void> {
+  async openFile(filePath: string, _root?: string, opts?: { purpose?: "warmup" | "request" }): Promise<void>;
+  async openFile(filePath: string, _root?: string, purpose?: "warmup" | "request"): Promise<void>;
+  async openFile(filePath: string, _root?: string, optsOrPurpose?: { purpose?: "warmup" | "request" } | "warmup" | "request"): Promise<void> {
+    const purpose = typeof optsOrPurpose === "string" ? optsOrPurpose : (optsOrPurpose?.purpose ?? "warmup");
     const langId = detectLanguageFromExtension(filePath);
     if (!langId) return;
-    const server = await this.getServer(langId);
+    const server = await this.getServer(langId, { purpose });
     if (!server) return;
     await server.openFile(filePath);
   }
@@ -1145,10 +1174,10 @@ async function createBridge(): Promise<LSPBridge | null> {
       } catch { return null; }
     },
 
-    async openFile(filePath: string, root: string): Promise<void> {
+    async openFile(filePath: string, root: string, purpose?: "warmup" | "request"): Promise<void> {
       try {
         const mgr = cachedManager(root);
-        await mgr.openFile(filePath);
+        await mgr.openFile(filePath, root, purpose ?? "warmup");
       } catch { /* best effort */ }
     },
 
@@ -1188,7 +1217,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", location: null };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", location: null };
         const loc = await withBudget(serverGoToDefinition(server, filePath, line0, char0), timeoutMs, opts?.signal);
         if (!loc) return { status: "empty", location: null };
@@ -1204,7 +1233,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", locations: [] };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", locations: [] };
         const locs = await withBudget((async () => {
           await server.openFile(filePath);
@@ -1222,7 +1251,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", symbols: [] };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", symbols: [] };
         const symbols = await withBudget((async () => {
           await server.openFile(filePath);
@@ -1242,7 +1271,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", locations: [] };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", locations: [] };
         const locs = await withBudget((async () => {
           await server.openFile(filePath);
@@ -1273,16 +1302,17 @@ async function createBridge(): Promise<LSPBridge | null> {
       const line0 = toZeroBased(line);
       const char0 = toZeroBased(character);
       const timeoutMs = opts?.timeoutMs ?? DEFAULT_OUTCOME_TIMEOUT_MS;
+      const langId = detectLanguageFromExtension(filePath);
+      if (!langId) return { status: "unavailable", hover: null };
       try {
         const mgr = cachedManager(root);
-        const result = await withBudget(mgr.hover(filePath, line0, char0), timeoutMs, opts?.signal);
-        if (!result) {
-          const langId = detectLanguageFromExtension(filePath);
-          if (!langId) return { status: "unavailable", hover: null };
-          const server = await mgr.getServer(langId).catch(() => null);
-          if (!server) return { status: "unavailable", hover: null };
-          return { status: "empty", hover: null };
-        }
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
+        if (!server) return { status: "unavailable", hover: null };
+        const result = await withBudget((async () => {
+          await server.openFile(filePath);
+          return server.hover(filePath, line0, char0);
+        })(), timeoutMs, opts?.signal);
+        if (!result) return { status: "empty", hover: null };
         return { status: "confirmed", hover: result };
       } catch { return { status: "degraded", hover: null }; }
     },
@@ -1295,7 +1325,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", items: [] };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", items: [] };
         const items = await withBudget((async () => {
           await server.openFile(filePath);
@@ -1321,7 +1351,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", calls: [] };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", calls: [] };
         const calls = await withBudget((async () => {
           await server.openFile(filePath);
@@ -1348,7 +1378,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", calls: [] };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", calls: [] };
         const calls = await withBudget((async () => {
           await server.openFile(filePath);
@@ -1374,7 +1404,7 @@ async function createBridge(): Promise<LSPBridge | null> {
       if (!langId) return { status: "unavailable", diagnostics: [] };
       try {
         const mgr = cachedManager(root);
-        const server = await withBudget(mgr.getServer(langId), timeoutMs, opts?.signal);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs, opts?.signal);
         if (!server) return { status: "unavailable", diagnostics: [] };
         const resolved = resolve(filePath);
         // clear stale cached diagnostics before refresh — only diagnostics observed after this point count as confirmed

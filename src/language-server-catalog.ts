@@ -8,6 +8,7 @@ export interface CommandCandidate {
   args: string[];
   platforms?: NodeJS.Platform[];
   requiredEnv?: string[];
+  managedInstall?: { type: "npm"; packageName: string; version: string; bin: string };
 }
 
 export interface ServerDescriptor {
@@ -32,7 +33,7 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
     rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
     commandCandidates: [
-      { command: "typescript-language-server", args: ["--stdio"] },
+      { command: "typescript-language-server", args: ["--stdio"], managedInstall: { type: "npm", packageName: "typescript-language-server", version: "6.0.0", bin: "typescript-language-server" } },
       { command: "typescriptlangserver", args: ["--stdio"] },
     ],
     priority: 100,
@@ -45,7 +46,7 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     extensions: [".py", ".pyi", ".pyx"],
     rootMarkers: ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"],
     commandCandidates: [
-      { command: "pyright", args: ["--stdio"] },
+      { command: "pyright", args: ["--stdio"], managedInstall: { type: "npm", packageName: "pyright", version: "1.1.413", bin: "pyright-langserver" } },
       { command: "pylsp", args: ["--stdio"] },
       { command: "pyls", args: ["--stdio"] },
       { command: "jedi-language-server", args: ["--stdio"] },
@@ -139,7 +140,7 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     languageIds: ["bash", "shellscript"],
     extensions: [".sh", ".bash"],
     rootMarkers: [".git"],
-    commandCandidates: [{ command: "bash-language-server", args: ["start"] }],
+    commandCandidates: [{ command: "bash-language-server", args: ["start"], managedInstall: { type: "npm", packageName: "bash-language-server", version: "5.6.0", bin: "bash-language-server" } }],
     priority: 100,
     expectedCapabilities: ["definition", "references", "hover"],
   },
@@ -149,7 +150,7 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     languageIds: ["json"],
     extensions: [".json", ".jsonc"],
     rootMarkers: ["package.json", ".git"],
-    commandCandidates: [{ command: "vscode-json-language-server", args: ["--stdio"] }],
+    commandCandidates: [{ command: "vscode-json-language-server", args: ["--stdio"], managedInstall: { type: "npm", packageName: "vscode-langservers-extracted", version: "4.10.0", bin: "vscode-json-language-server" } }],
     priority: 100,
     expectedCapabilities: ["hover", "documentSymbol"],
   },
@@ -159,7 +160,7 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     languageIds: ["yaml"],
     extensions: [".yaml", ".yml"],
     rootMarkers: [".git"],
-    commandCandidates: [{ command: "yaml-language-server", args: ["--stdio"] }],
+    commandCandidates: [{ command: "yaml-language-server", args: ["--stdio"], managedInstall: { type: "npm", packageName: "yaml-language-server", version: "1.24.0", bin: "yaml-language-server" } }],
     priority: 100,
     expectedCapabilities: ["hover", "documentSymbol"],
   },
@@ -169,7 +170,7 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     languageIds: ["html"],
     extensions: [".html", ".htm"],
     rootMarkers: [".git"],
-    commandCandidates: [{ command: "vscode-html-language-server", args: ["--stdio"] }],
+    commandCandidates: [{ command: "vscode-html-language-server", args: ["--stdio"], managedInstall: { type: "npm", packageName: "vscode-langservers-extracted", version: "4.10.0", bin: "vscode-html-language-server" } }],
     priority: 100,
     expectedCapabilities: ["hover", "documentSymbol"],
   },
@@ -179,7 +180,7 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     languageIds: ["css"],
     extensions: [".css", ".scss", ".less"],
     rootMarkers: [".git"],
-    commandCandidates: [{ command: "vscode-css-language-server", args: ["--stdio"] }],
+    commandCandidates: [{ command: "vscode-css-language-server", args: ["--stdio"], managedInstall: { type: "npm", packageName: "vscode-langservers-extracted", version: "4.10.0", bin: "vscode-css-language-server" } }],
     priority: 100,
     expectedCapabilities: ["hover", "documentSymbol"],
   },

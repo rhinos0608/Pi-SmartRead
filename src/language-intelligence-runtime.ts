@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { join, dirname, resolve, extname, delimiter } from "node:path";
 import { LANGUAGE_SERVER_CATALOG, type ServerDescriptor, getDescriptorsForLanguage } from "./language-server-catalog.js";
 import { loadConfig, isRootTrusted } from "./language-intelligence-config.js";
+import { isServerInstalled, getInstalledBinPath } from "./language-intelligence-installer.js";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -18,7 +19,7 @@ export type ResolutionResult =
   | {
       status: "degraded";
       languageId: string;
-      reasonCode: "unsupported-language" | "no-server-descriptor" | "project-local-untrusted" | "executable-missing" | "invalid-override";
+      reasonCode: "unsupported-language" | "no-server-descriptor" | "language-disabled" | "project-local-untrusted" | "executable-missing" | "invalid-override";
       message: string;
       attemptedDescriptorIds: string[];
       fallback: "ast" | "text";
@@ -174,7 +175,7 @@ export function resolveLanguageServer(
     return {
       status: "degraded",
       languageId,
-      reasonCode: "no-server-descriptor",
+      reasonCode: "language-disabled",
       message: `language disabled via config: ${languageId}`,
       attemptedDescriptorIds: descriptors.map((d) => d.id),
       fallback: fallbackForLanguage(languageId),
@@ -224,7 +225,8 @@ export function resolveLanguageServer(
     if (tier2) return tier2;
     const tier3 = trySystemPath(reordered, root, languageId, checkExecutable);
     if (tier3) return tier3;
-    // Phase 4 managed skipped — Phase 3 placeholder (no network code)
+    const tier4 = tryManaged(reordered, root, languageId, opts.homedir);
+    if (tier4) return tier4;
     return degradedFallback(languageId, attemptedDescriptorIds, reordered, isTrusted, root);
   }
 
@@ -236,8 +238,9 @@ export function resolveLanguageServer(
   const systemResult = trySystemPath(descriptors, root, languageId, checkExecutable);
   if (systemResult) return systemResult;
 
-  // Tier 4: Pi-managed — skipped this phase (no network/install code)
-  // Intentionally not implemented; would resolve managed installs in Phase 3.
+  // Tier 4: Pi-managed — synchronous check for already-installed managed binaries (no spawn/network)
+  const tier4 = tryManaged(descriptors, root, languageId, opts.homedir);
+  if (tier4) return tier4;
 
   // Tier 5: Degraded
   return degradedFallback(languageId, attemptedDescriptorIds, descriptors, isTrusted, root);
@@ -302,6 +305,108 @@ function trySystemPath(
     }
   }
   return null;
+}
+
+function tryManaged(
+  descriptors: ServerDescriptor[],
+  root: string,
+  languageId: string,
+  homedir?: string,
+): ResolutionResult | null {
+  for (const desc of descriptors) {
+    for (const cand of desc.commandCandidates) {
+      if (cand.platforms && !cand.platforms.includes(process.platform)) continue;
+      if (cand.requiredEnv && cand.requiredEnv.some((k: string) => !process.env[k])) continue;
+      if (cand.managedInstall) {
+        const { packageName, version, bin } = cand.managedInstall;
+        // fast sync check: lockfile read + stat
+        if (isServerInstalled(packageName, version, homedir as string | undefined)) {
+          const binPath = getInstalledBinPath(packageName, bin, homedir as string | undefined);
+          if (binPath) {
+            return {
+              status: "available",
+              languageId,
+              root,
+              descriptorId: desc.id,
+              executable: binPath,
+              args: cand.args,
+              tier: "managed",
+            };
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// ── Async orchestration (install on demand) ─────────────────────────
+// Retry-storm guard: per (languageId, root) failed installs not retried within same session.
+const failedInstallAttempts = new Set<string>();
+export function _clearFailedInstallAttempts(): void {
+  failedInstallAttempts.clear();
+}
+export function _getFailedInstallAttempts(): Set<string> {
+  return failedInstallAttempts;
+}
+function failedKey(languageId: string, root: string): string {
+  return `${languageId}:${root}`;
+}
+function findManagedCandidate(descriptors: ServerDescriptor[]): { desc: ServerDescriptor; cand: NonNullable<ServerDescriptor["commandCandidates"][number]>; } | null {
+  for (const desc of descriptors) {
+    for (const cand of desc.commandCandidates) {
+      if (cand.managedInstall) return { desc, cand: cand as NonNullable<typeof cand> };
+    }
+  }
+  return null;
+}
+const inFlightInstalls = new Map<string, Promise<ResolutionResult>>();
+export function _clearInFlightInstalls(): void { inFlightInstalls.clear(); }
+export async function ensureLanguageServerAvailable(
+  filePath: string,
+  cwd: string,
+  opts: { purpose: "warmup" | "request"; homedir?: string; checkExecutable?: ResolveOptions["checkExecutable"]; fileExists?: ResolveOptions["fileExists"]; isRootTrustedFn?: ResolveOptions["isRootTrustedFn"] },
+): Promise<ResolutionResult> {
+  const initial = resolveLanguageServer(filePath, cwd, { homedir: opts.homedir, checkExecutable: opts.checkExecutable, fileExists: opts.fileExists, isRootTrustedFn: opts.isRootTrustedFn });
+  if (initial.status === "available") return initial;
+  // Config-disabled languages must never trigger auto-install — violates explicit user configuration.
+  if (initial.status === "degraded" && initial.reasonCode === "language-disabled") {
+    return initial;
+  }
+  if (opts.purpose !== "request") return initial;
+  const cfg = loadConfig(opts.homedir as string | undefined);
+  if (cfg.installMode !== "auto") return initial;
+  // need root for guard key — use cwd canonical fallback if degraded has no root; initial is degraded so compute root via file's language descriptors
+  const languageId = initial.languageId;
+  // try to get root from Tier 2/3 logic: if unsupported-language, no install candidate anyway
+  if (languageId === "unknown") return initial;
+  const descs = getDescriptorsForLanguage(languageId);
+  const managed = findManagedCandidate(descs);
+  if (!managed) return initial;
+  // Determine root for guard — compute nearest-marker root for accurate per (language, root) key
+  const markers = allMarkersForLanguage(languageId);
+  const rootForKey = detectRoot(filePath, cwd, markers);
+  const key = failedKey(languageId, rootForKey);
+  if (failedInstallAttempts.has(key)) return initial;
+  const existing = inFlightInstalls.get(key);
+  if (existing) return existing;
+  const promise = (async (): Promise<ResolutionResult> => {
+    const { installServer } = await import("./language-intelligence-installer.js");
+    const result = await installServer(managed.cand.managedInstall!, { homedir: opts.homedir });
+    if (!result.ok) {
+      failedInstallAttempts.add(key);
+      return initial;
+    }
+    // re-resolve synchronously — Tier 4 will now find the newly installed binary
+    const after = resolveLanguageServer(filePath, cwd, { homedir: opts.homedir, checkExecutable: opts.checkExecutable, fileExists: opts.fileExists, isRootTrustedFn: opts.isRootTrustedFn });
+    return after;
+  })();
+  inFlightInstalls.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inFlightInstalls.delete(key);
+  }
 }
 
 function degradedFallback(

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -171,6 +171,73 @@ describe("LSP catalog expansion", () => {
     expect(findCfg("vscode-css-language-server")).toBeDefined();
     expect(findCfg("lua-language-server")).toBeDefined();
     expect(findCfg("solargraph")).toBeDefined();
+  });
+
+  describe("outcome purpose wiring (behavioral)", () => {
+    async function assertOutcomePassesRequestPurpose(
+      outcomeMethod: "hoverOutcome" | "incomingCallsOutcome" | "outgoingCallsOutcome" | "getFreshDiagnosticsOutcome",
+    ) {
+      const root = mkdtempSync(join(tmpdir(), `lsp-purpose-${outcomeMethod}-`));
+      const filePath = join(root, "a.ts");
+      writeFileSync(filePath, "export const a = 1;", "utf8");
+      const mod = await import("../../src/lsp-bridge.js");
+      const { LSPManager, getLSPBridge, resetLSPBridge, shutdownAllManagers } = mod as any;
+      // ensure clean bridge/manager cache for this root
+      await shutdownAllManagers();
+      resetLSPBridge();
+      const captured: any[] = [];
+      const spy = (vi.spyOn(LSPManager.prototype, "getServer") as any).mockImplementation(async function (this: any, _langId: string, opts?: any) {
+        captured.push(opts);
+        // return minimal fake server so outcome can proceed to its withBudget paths;
+        // returning null would also prove purpose but we return a fake that resolves to empty to exercise full path.
+        // For hover/incoming/outgoing/diagnostics the outcome opens file then requests; stub those.
+        return {
+          openFile: async () => {},
+          request: async () => null,
+          hover: async () => null,
+          isOpen: () => false,
+          clearDiagnostics: () => {},
+          hasDiagnostics: () => false,
+          getDiagnostics: () => [],
+          didClose: async () => {},
+        };
+      });
+      try {
+        const bridge: any = await getLSPBridge();
+        expect(bridge).not.toBeNull();
+        if (outcomeMethod === "hoverOutcome") {
+          await bridge.hoverOutcome(filePath, 1, 1, root, { timeoutMs: 800, waitMs: 20 });
+        } else if (outcomeMethod === "incomingCallsOutcome") {
+          await bridge.incomingCallsOutcome(filePath, 1, 1, root, { timeoutMs: 800 });
+        } else if (outcomeMethod === "outgoingCallsOutcome") {
+          await bridge.outgoingCallsOutcome(filePath, 1, 1, root, { timeoutMs: 800 });
+        } else {
+          await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 20 });
+        }
+        expect(captured.length).toBeGreaterThanOrEqual(1);
+        // at least one call must carry request purpose (getFreshDiagnosticsOutcome also does internal warmup-status calls via getDiagnosticsFor)
+        expect(captured).toEqual(expect.arrayContaining([{ purpose: "request" }]));
+        expect(captured[0]).toEqual({ purpose: "request" });
+      } finally {
+        spy.mockRestore();
+        await shutdownAllManagers();
+        resetLSPBridge();
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+
+    it("hoverOutcome passes { purpose: \"request\" } to getServer at runtime", async () => {
+      await assertOutcomePassesRequestPurpose("hoverOutcome");
+    });
+    it("incomingCallsOutcome passes { purpose: \"request\" } to getServer at runtime", async () => {
+      await assertOutcomePassesRequestPurpose("incomingCallsOutcome");
+    });
+    it("outgoingCallsOutcome passes { purpose: \"request\" } to getServer at runtime", async () => {
+      await assertOutcomePassesRequestPurpose("outgoingCallsOutcome");
+    });
+    it("getFreshDiagnosticsOutcome passes { purpose: \"request\" } to getServer at runtime", async () => {
+      await assertOutcomePassesRequestPurpose("getFreshDiagnosticsOutcome");
+    });
   });
 
   it("ruby detected via Gemfile marker", () => {

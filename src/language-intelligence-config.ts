@@ -13,6 +13,7 @@ export interface LanguageOverride {
 export interface LanguageIntelligenceConfig {
   overrides?: Record<string, LanguageOverride>;
   disabled?: string[];
+  installMode?: "off" | "auto";
 }
 
 function configPath(home = homedir()): string {
@@ -46,6 +47,9 @@ export function loadConfig(home = homedir()): LanguageIntelligenceConfig {
     }
     if (Array.isArray(parsed.disabled) && parsed.disabled.every((x: unknown) => typeof x === "string")) {
       out.disabled = parsed.disabled as string[];
+    }
+    if (parsed.installMode === "off" || parsed.installMode === "auto") {
+      out.installMode = parsed.installMode;
     }
     return out;
   } catch {
@@ -134,6 +138,37 @@ export function trustRoot(root: string, home = homedir()): void {
     const files = readdirSync(dir);
     for (const f of files) {
       if (f.startsWith("trust.json.tmp.")) {
+        try { unlinkSync(join(dir, f)); } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+export function setInstallMode(mode: "off" | "auto", home = homedir()): void {
+  const p = configPath(home);
+  const dir = dirname(p);
+  try { mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
+  let existing: Record<string, unknown> = {};
+  try {
+    if (existsSync(p)) {
+      const raw = readFileSync(p, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+    }
+  } catch { existing = {}; }
+  const next = { ...existing, installMode: mode };
+  const tmp = `${p}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  try {
+    writeFileSync(tmp, JSON.stringify(next, null, 2), "utf-8");
+    renameSync(tmp, p);
+  } catch {
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+    throw new Error("failed to persist installMode");
+  }
+  try {
+    const files = readdirSync(dir);
+    for (const f of files) {
+      if (f.startsWith("language-intelligence.json.tmp.")) {
         try { unlinkSync(join(dir, f)); } catch { /* ignore */ }
       }
     }

@@ -22,6 +22,7 @@ import { registerRepositoryIntelligence } from "./repository-intelligence-regist
 import { createRepositoryIntelligenceService } from "./repository-intelligence.js";
 import { getIncrementalIndex } from "./incremental-index.js";
 import { registerLanguageIntelligenceCommand } from "./language-intelligence-command.js";
+import { createLanguageIntelligenceProvider } from "./language-intelligence-provider.js";
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
   isInternalUrl,
@@ -210,7 +211,10 @@ export default async function (pi: ExtensionAPI) {
   // Language servers are long-lived during an interactive session, but must
   // be stopped when Pi closes (especially in --print mode) or their child
   // processes keep the harness alive after the tool result has returned.
+  let languageIntelligenceDispose: (() => void) | null = null;
   pi.on("session_shutdown", async () => {
+    try { languageIntelligenceDispose?.(); } catch { /* ignore */ }
+    languageIntelligenceDispose = null;
     watchState.stop?.();
     watchState.stop = undefined;
     try { resetSharedContextGraph(); } catch { /* may not be loaded */ }
@@ -742,5 +746,11 @@ export default async function (pi: ExtensionAPI) {
         try { (pi as any).ui?.notify?.(`pi-workspace-protocol resolver unavailable: ${(err as Error).message}`); } catch { /* ignore */ }
       }
     })();
+    // Language intelligence RPC provider (post-edit diagnostics)
+    try {
+      const liBus = pi.events as { emit: (c: string, d: unknown) => void; on: (c: string, h: (d: unknown) => void) => () => void };
+      const provider = createLanguageIntelligenceProvider(liBus as any);
+      languageIntelligenceDispose = () => provider.dispose();
+    } catch { /* non-fatal */ }
   }
 }
