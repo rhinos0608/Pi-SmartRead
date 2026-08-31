@@ -1,5 +1,6 @@
 import { realpathSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { dirname, resolve } from "node:path";
 import {
     RPC_CHANNELS,
     LANGUAGE_INTELLIGENCE_RPC_METHODS,
@@ -170,7 +171,7 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                     const resp: RenamePreviewResponse = { ok: false, error: "no-server" };
                     return resp;
                 }
-                const workspaceRoot = req.filePath.includes("/") ? req.filePath.slice(0, req.filePath.lastIndexOf("/")) || "/" : "/";
+                const workspaceRoot = dirname(resolve(req.filePath));
                 let rawEdit: LspWorkspaceEdit | null = null;
                 try {
                     rawEdit = await withBudget(
@@ -195,6 +196,97 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 return resp;
             }
 
+            if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.organizeImports) {
+                const v = validateOrganizeImportsRequest(payload);
+                if (!v.ok) throw new Error(v.error);
+                const req = v.value;
+                const bridge = await getLSPBridge();
+                if (!bridge || typeof (bridge as unknown as { organizeImports?: unknown }).organizeImports !== "function") {
+                    return { ok: false, error: "no-server" };
+                }
+                const workspaceRoot = dirname(resolve(req.filePath));
+                let rawEdit: LspWorkspaceEdit | null = null;
+                try {
+                    rawEdit = await withBudget(
+                        (bridge as unknown as { organizeImports: (f: string, r: string) => Promise<LspWorkspaceEdit | null> }).organizeImports(req.filePath, workspaceRoot),
+                        10_000,
+                    );
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    return { ok: false, error: msg.includes("timed out") ? "timeout" : "organize imports failed" };
+                }
+                if (!rawEdit) return { ok: false, error: "no edits" };
+                const validated = validateWorkspaceEdit(rawEdit);
+                if (!validated.ok) return { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
+                return { ok: true, workspaceEdit: validated.value as unknown as LspWorkspaceEdit };
+            }
+
+            if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting) {
+                const v = validateFormattingRequest(payload);
+                if (!v.ok) throw new Error(v.error);
+                const req = v.value;
+                const bridge = await getLSPBridge();
+                if (!bridge || typeof (bridge as unknown as { formatting?: unknown }).formatting !== "function") {
+                    return { ok: false, error: "no-server" };
+                }
+                const workspaceRoot = dirname(resolve(req.filePath));
+                let rawEdit: LspWorkspaceEdit | null = null;
+                try {
+                    rawEdit = await withBudget(
+                        (bridge as unknown as { formatting: (f: string, r: string, t?: number, s?: boolean) => Promise<LspWorkspaceEdit | null> }).formatting(req.filePath, workspaceRoot, req.tabSize, req.insertSpaces),
+                        10_000,
+                    );
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    return { ok: false, error: msg.includes("timed out") ? "timeout" : "formatting failed" };
+                }
+                if (!rawEdit) return { ok: false, error: "no edits" };
+                const validated = validateWorkspaceEdit(rawEdit);
+                if (!validated.ok) return { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
+                return { ok: true, workspaceEdit: validated.value as unknown as LspWorkspaceEdit };
+            }
+
+            if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction) {
+                const v = validateCodeActionRequest(payload);
+                if (!v.ok) throw new Error(v.error);
+                const req = v.value;
+                const bridge = await getLSPBridge();
+                if (!bridge || typeof (bridge as unknown as { codeActions?: unknown }).codeActions !== "function") {
+                    return { ok: false, error: "no-server" };
+                }
+                const workspaceRoot = dirname(resolve(req.filePath));
+                const line0 = Math.max(0, req.line - 1);
+                const char0 = Math.max(0, req.character - 1);
+                const endLine0 = req.endLine !== undefined ? Math.max(0, req.endLine - 1) : line0;
+                const endChar0 = req.endCharacter !== undefined ? Math.max(0, req.endCharacter - 1) : char0;
+                const range = { start: { line: line0, character: char0 }, end: { line: endLine0, character: endChar0 } };
+                const context: { diagnostics?: unknown[]; only?: string[] } = {};
+                if (req.diagnostics !== undefined) context.diagnostics = req.diagnostics as unknown as unknown[];
+                if (req.only !== undefined) context.only = req.only as unknown as string[];
+                let actionsRaw: Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }> = [];
+                try {
+                    actionsRaw = await withBudget(
+                        (bridge as unknown as { codeActions: (f: string, r: unknown, c: unknown, root: string) => Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>> }).codeActions(req.filePath, range, context, workspaceRoot),
+                        10_000,
+                    );
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    return { ok: false, error: msg.includes("timed out") ? "timeout" : "code action failed" };
+                }
+                if (!actionsRaw || actionsRaw.length === 0) return { ok: true, actions: [] };
+                const actions: Array<{ title: string; kind?: string; workspaceEdit?: LspWorkspaceEdit; isPreferred?: boolean }> = [];
+                for (const a of actionsRaw) {
+                    let workspaceEdit: LspWorkspaceEdit | undefined;
+                    if (a.edit) {
+                        const vEdit = validateWorkspaceEdit(a.edit);
+                        if (vEdit.ok) workspaceEdit = vEdit.value as unknown as LspWorkspaceEdit;
+                        else continue;
+                    }
+                    actions.push({ title: a.title, kind: a.kind, workspaceEdit, isPreferred: a.isPreferred });
+                }
+                return { ok: true, actions };
+            }
+
             throw new Error(`unknown rpc method: ${String(rpc)}`);
         },
     });
@@ -210,6 +302,44 @@ function validatedOrDegraded(resp: CheckPostEditDiagnosticsResponse): CheckPostE
     const v = validateCheckPostEditDiagnosticsResponse(resp);
     if (v.ok) return resp;
     return { status: "degraded", reason: "unconfirmed", diagnostics: [], truncated: false };
+}
+
+function validateOrganizeImportsRequest(v: unknown): { ok: true; value: { filePath: string } } | { ok: false; error: string } {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "OrganizeImportsRequest must be object" };
+    const o = v as Record<string, unknown>;
+    const { filePath } = o;
+    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "OrganizeImportsRequest.filePath must be non-empty string" };
+    if (filePath.includes("\0")) return { ok: false, error: "OrganizeImportsRequest.filePath must not contain NUL" };
+    return { ok: true, value: v as { filePath: string } };
+}
+
+function validateFormattingRequest(v: unknown): { ok: true; value: { filePath: string; tabSize?: number; insertSpaces?: boolean } } | { ok: false; error: string } {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "FormattingRequest must be object" };
+    const o = v as Record<string, unknown>;
+    const { filePath, tabSize, insertSpaces } = o;
+    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "FormattingRequest.filePath must be non-empty string" };
+    if (filePath.includes("\0")) return { ok: false, error: "FormattingRequest.filePath must not contain NUL" };
+    if (tabSize !== undefined && (typeof tabSize !== "number" || !Number.isInteger(tabSize) || tabSize < 1 || tabSize > 16)) return { ok: false, error: "FormattingRequest.tabSize must be integer 1..16 if present" };
+    if (insertSpaces !== undefined && typeof insertSpaces !== "boolean") return { ok: false, error: "FormattingRequest.insertSpaces must be boolean if present" };
+    return { ok: true, value: v as { filePath: string; tabSize?: number; insertSpaces?: boolean } };
+}
+
+function validateCodeActionRequest(v: unknown): { ok: true; value: { filePath: string; line: number; character: number; endLine?: number; endCharacter?: number; diagnostics?: unknown[]; only?: string[] } } | { ok: false; error: string } {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "CodeActionRequest must be object" };
+    const o = v as Record<string, unknown>;
+    const { filePath, line, character, endLine, endCharacter, diagnostics, only } = o;
+    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "CodeActionRequest.filePath must be non-empty string" };
+    if (filePath.includes("\0")) return { ok: false, error: "CodeActionRequest.filePath must not contain NUL" };
+    if (typeof line !== "number" || !Number.isInteger(line) || line < 1) return { ok: false, error: "CodeActionRequest.line must be integer >=1" };
+    if (typeof character !== "number" || !Number.isInteger(character) || character < 1) return { ok: false, error: "CodeActionRequest.character must be integer >=1" };
+    if (endLine !== undefined && (typeof endLine !== "number" || !Number.isInteger(endLine) || endLine < 1)) return { ok: false, error: "CodeActionRequest.endLine must be integer >=1 if present" };
+    if (endCharacter !== undefined && (typeof endCharacter !== "number" || !Number.isInteger(endCharacter) || endCharacter < 1)) return { ok: false, error: "CodeActionRequest.endCharacter must be integer >=1 if present" };
+    if (diagnostics !== undefined && !Array.isArray(diagnostics)) return { ok: false, error: "CodeActionRequest.diagnostics must be array if present" };
+    if (only !== undefined) {
+        if (!Array.isArray(only)) return { ok: false, error: "CodeActionRequest.only must be array if present" };
+        for (let i=0;i<(only as unknown[]).length;i++) if (typeof (only as unknown[])[i] !== "string") return { ok: false, error: `CodeActionRequest.only[${i}] must be string` };
+    }
+    return { ok: true, value: v as { filePath: string; line: number; character: number; endLine?: number; endCharacter?: number; diagnostics?: unknown[]; only?: string[] } };
 }
 
 function validateRenamePreviewRequest(v: unknown): { ok: true; value: RenamePreviewRequest } | { ok: false; error: string } {

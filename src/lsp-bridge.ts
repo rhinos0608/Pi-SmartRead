@@ -239,6 +239,9 @@ export interface LSPBridge {
   getFreshDiagnosticsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDiagnosticsOutcome>;
   rename(filePath: string, line: number, character: number, newName: string, root: string): Promise<LspWorkspaceEdit | null>;
   prepareRename(filePath: string, line: number, character: number, root: string): Promise<{ range: LSPRange; placeholder?: string } | null>;
+  organizeImports(filePath: string, root: string): Promise<LspWorkspaceEdit | null>;
+  formatting(filePath: string, root: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null>;
+  codeActions(filePath: string, range: LSPRange, context: { diagnostics?: unknown[]; only?: string[] }, root: string): Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>>;
   // Call hierarchy — raw item-based incoming/outgoing, outcome position-based (internally resolves via prepareCallHierarchy)
   prepareCallHierarchyOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspCallHierarchyPrepareOutcome>;
   incomingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspIncomingCallsOutcome>;
@@ -741,6 +744,88 @@ export class LSPConnection {
     return null;
   }
 
+  async organizeImports(filePath: string): Promise<LspWorkspaceEdit | null> {
+    const uri = pathToFileURL(resolve(filePath)).href;
+    let result: unknown;
+    try {
+      result = await this.request("textDocument/codeAction", {
+        textDocument: { uri },
+        range: { start: { line: 0, character: 0 }, end: { line: Number.MAX_SAFE_INTEGER, character: 0 } },
+        context: { only: ["source.organizeImports"] },
+      });
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(result)) return null;
+    const actions = result as Array<Record<string, unknown>>;
+    let editRaw: unknown = null;
+    for (const a of actions) {
+      if (a && typeof a === "object" && "edit" in a && (a as Record<string, unknown>).edit) {
+        editRaw = (a as Record<string, unknown>).edit;
+        break;
+      }
+    }
+    if (!editRaw) return null;
+    return convertWorkspaceEdit(editRaw);
+  }
+
+  async formatting(filePath: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null> {
+    const uri = pathToFileURL(resolve(filePath)).href;
+    let result: unknown;
+    try {
+      result = await this.request("textDocument/formatting", {
+        textDocument: { uri },
+        options: { tabSize: tabSize ?? 2, insertSpaces: insertSpaces ?? true },
+      });
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(result) || (result as unknown[]).length === 0) return null;
+    const editsRaw = result as Array<Record<string, unknown>>;
+    const fp = resolve(filePath);
+    const edits: Array<{ range: LSPRange; newText: string }> = [];
+    for (const e of editsRaw) {
+      if (!e || typeof e !== "object") continue;
+      const range = (e as Record<string, unknown>).range as LSPRange | undefined;
+      const newText = (e as Record<string, unknown>).newText as string | undefined;
+      if (!range || typeof newText !== "string") continue;
+      edits.push({ range, newText });
+    }
+    if (edits.length === 0) return null;
+    return { fileEdits: [{ filePath: fp, edits: edits.map((ed) => ({ filePath: fp, range: ed.range, newText: ed.newText })) }] } as unknown as LspWorkspaceEdit;
+  }
+
+  async codeActions(
+    filePath: string,
+    range: LSPRange,
+    context: { diagnostics?: unknown[]; only?: string[] },
+  ): Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>> {
+    const uri = pathToFileURL(resolve(filePath)).href;
+    let result: unknown;
+    try {
+      result = await this.request("textDocument/codeAction", {
+        textDocument: { uri },
+        range,
+        context,
+      });
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(result) || result === null) return [];
+    const actions = result as Array<Record<string, unknown>>;
+    return actions.map((a) => {
+      const title = typeof a.title === "string" ? (a.title as string) : "";
+      const kind = typeof a.kind === "string" ? (a.kind as string) : undefined;
+      const isPreferred = typeof a.isPreferred === "boolean" ? (a.isPreferred as boolean) : undefined;
+      let edit: LspWorkspaceEdit | undefined;
+      if (a.edit) {
+        const converted = convertWorkspaceEdit(a.edit);
+        if (converted) edit = converted;
+      }
+      return { title, kind, edit, isPreferred };
+    });
+  }
+
   /**
    * Query workspace/symbol on this server.
    */
@@ -1028,6 +1113,34 @@ export class LSPManager {
     return server.prepareRename(filePath, line0, character0);
   }
 
+  async organizeImports(filePath: string): Promise<LspWorkspaceEdit | null> {
+    const langId = detectLanguageFromExtension(filePath);
+    if (!langId) return null;
+    const server = await this.getServer(langId, { purpose: "request" });
+    if (!server) return null;
+    return server.organizeImports(filePath);
+  }
+
+  async formatting(filePath: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null> {
+    const langId = detectLanguageFromExtension(filePath);
+    if (!langId) return null;
+    const server = await this.getServer(langId, { purpose: "request" });
+    if (!server) return null;
+    return server.formatting(filePath, tabSize, insertSpaces);
+  }
+
+  async codeActions(
+    filePath: string,
+    range: LSPRange,
+    context: { diagnostics?: unknown[]; only?: string[] },
+  ): Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>> {
+    const langId = detectLanguageFromExtension(filePath);
+    if (!langId) return [];
+    const server = await this.getServer(langId, { purpose: "request" });
+    if (!server) return [];
+    return server.codeActions(filePath, range, context);
+  }
+
   /** Route closeFile to the right server */
   async closeFile(filePath: string): Promise<void> {
     const langId = detectLanguageFromExtension(filePath);
@@ -1123,6 +1236,58 @@ const managerCache = new Map<string, LSPManager>();
 
 let bridgeInstance: LSPBridge | null = null;
 let initAttempted = false;
+
+function convertWorkspaceEdit(raw: unknown): LspWorkspaceEdit | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const toPath = (u: string): string | null => {
+    try {
+      return fileURLToPath(u);
+    } catch {
+      return null;
+    }
+  };
+  const fileEdits: Array<{ filePath: string; edits: Array<{ range: LSPRange; newText: string }> }> = [];
+  if (Array.isArray((obj as Record<string, unknown>).documentChanges)) {
+    for (const dc of (obj as Record<string, unknown>).documentChanges as unknown[]) {
+      const entry = dc as Record<string, unknown>;
+      // Reject resource operations (CreateFile/RenameFile/DeleteFile) — return null for whole edit
+      if (typeof entry.kind === "string") return null;
+      const td = entry.textDocument as Record<string, unknown> | undefined;
+      const editsRaw = entry.edits as unknown[] | undefined;
+      if (!td || !Array.isArray(editsRaw)) return null;
+      const fp = toPath(td.uri as string);
+      if (!fp) continue;
+      const normEdits: Array<{ range: LSPRange; newText: string }> = [];
+      for (const er of editsRaw) {
+        const e = er as Record<string, unknown>;
+        const range = e.range as LSPRange | undefined;
+        const newText = e.newText as string | undefined;
+        if (!range || typeof newText !== "string") continue;
+        normEdits.push({ range, newText });
+      }
+      fileEdits.push({ filePath: fp, edits: normEdits });
+    }
+  }
+  if (obj.changes && typeof obj.changes === "object") {
+    for (const [uriKey, editsRaw] of Object.entries(obj.changes as Record<string, unknown>)) {
+      const fp = toPath(uriKey);
+      if (!fp) continue;
+      if (!Array.isArray(editsRaw)) continue;
+      const normEdits: Array<{ range: LSPRange; newText: string }> = [];
+      for (const er of editsRaw as unknown[]) {
+        const e = er as Record<string, unknown>;
+        const range = e.range as LSPRange | undefined;
+        const newText = e.newText as string | undefined;
+        if (!range || typeof newText !== "string") continue;
+        normEdits.push({ range, newText });
+      }
+      fileEdits.push({ filePath: fp, edits: normEdits });
+    }
+  }
+  if (fileEdits.length === 0) return null;
+  return { fileEdits: fileEdits.map((fe) => ({ filePath: fe.filePath, edits: fe.edits.map((ed) => ({ filePath: fe.filePath, range: ed.range, newText: ed.newText })) })) } as unknown as LspWorkspaceEdit;
+}
 
 function toZeroBased(line1: number): number { return Math.max(0, line1 - 1); }
 const DEFAULT_OUTCOME_TIMEOUT_MS = 5000;
@@ -1344,6 +1509,42 @@ async function createBridge(): Promise<LSPBridge | null> {
         if (!server) return null;
         return await withBudget(server.prepareRename(filePath, line0, char0), timeoutMs);
       } catch { return null; }
+    },
+    async organizeImports(filePath: string, root: string): Promise<LspWorkspaceEdit | null> {
+      let langId: string | null;
+      try { langId = detectLanguageFromExtension(filePath); } catch { return null; }
+      if (!langId) return null;
+      const timeoutMs = 10_000;
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs);
+        if (!server) return null;
+        return await withBudget(server.organizeImports(filePath), timeoutMs);
+      } catch { return null; }
+    },
+    async formatting(filePath: string, root: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null> {
+      let langId: string | null;
+      try { langId = detectLanguageFromExtension(filePath); } catch { return null; }
+      if (!langId) return null;
+      const timeoutMs = 10_000;
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs);
+        if (!server) return null;
+        return await withBudget(server.formatting(filePath, tabSize, insertSpaces), timeoutMs);
+      } catch { return null; }
+    },
+    async codeActions(filePath: string, range: LSPRange, context: { diagnostics?: unknown[]; only?: string[] }, root: string): Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>> {
+      let langId: string | null;
+      try { langId = detectLanguageFromExtension(filePath); } catch { return []; }
+      if (!langId) return [];
+      const timeoutMs = 10_000;
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs);
+        if (!server) return [];
+        return await withBudget(server.codeActions(filePath, range, context), timeoutMs);
+      } catch { return []; }
     },
     async goToDefinitionOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeSingle> {
       const line0 = toZeroBased(line);
