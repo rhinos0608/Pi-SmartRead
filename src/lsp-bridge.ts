@@ -27,7 +27,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { resolveLanguageServer } from "./language-intelligence-runtime.js";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 
 // ── Language intelligence wiring ───────────────────────────────────────
 // Cache of resolved executable/args per `${root}:${languageId}` so that
@@ -236,6 +237,8 @@ export interface LSPBridge {
   workspaceSymbolOutcome(query: string, root: string, opts?: LspOutcomeOptions): Promise<LspWorkspaceSymbolsOutcome>;
   hoverOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspHoverOutcome>;
   getFreshDiagnosticsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDiagnosticsOutcome>;
+  rename(filePath: string, line: number, character: number, newName: string, root: string): Promise<LspWorkspaceEdit | null>;
+  prepareRename(filePath: string, line: number, character: number, root: string): Promise<{ range: LSPRange; placeholder?: string } | null>;
   // Call hierarchy — raw item-based incoming/outgoing, outcome position-based (internally resolves via prepareCallHierarchy)
   prepareCallHierarchyOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspCallHierarchyPrepareOutcome>;
   incomingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspIncomingCallsOutcome>;
@@ -647,6 +650,97 @@ export class LSPConnection {
     return this.openDocuments.size;
   }
 
+  async rename(filePath: string, line0: number, character0: number, newName: string): Promise<LspWorkspaceEdit | null> {
+    const uri = pathToFileURL(resolve(filePath)).href;
+    let result: unknown;
+    try {
+      result = await this.request("textDocument/rename", { textDocument: { uri }, position: { line: line0, character: character0 }, newName });
+    } catch {
+      return null;
+    }
+    if (!result || typeof result !== "object") return null;
+    const raw = result as Record<string, unknown>;
+    const fileEdits: Array<{ filePath: string; edits: Array<{ range: LSPRange; newText: string }> }> = [];
+    const toPath = (u: string): string | null => {
+      try {
+        if (u.startsWith("file://")) return resolve(fileURLToPath(u));
+        return null;
+      } catch { return null; }
+    };
+    if (Array.isArray(raw.documentChanges)) {
+      for (const dc of raw.documentChanges as unknown[]) {
+        if (!dc || typeof dc !== "object") return null;
+        const entry = dc as Record<string, unknown>;
+        // Fail cleanly on resource operations (CreateFile/RenameFile/DeleteFile) — rename v1 only supports TextDocumentEdit; returning partial edits would be unsafe
+        if (typeof entry.kind === "string") return null;
+        const td = entry.textDocument as Record<string, unknown> | undefined;
+        const edits = entry.edits as unknown;
+        if (!td || typeof td.uri !== "string" || !Array.isArray(edits)) return null;
+        const fp = toPath(td.uri as string);
+        if (!fp) return null;
+        const normEdits: Array<{ range: LSPRange; newText: string }> = [];
+        for (const e of edits as unknown[]) {
+          if (!e || typeof e !== "object") continue;
+          const er = e as Record<string, unknown>;
+          const range = er.range as LSPRange | undefined;
+          const newText = er.newText as string | undefined;
+          if (!range || typeof newText !== "string") continue;
+          normEdits.push({ range, newText });
+        }
+        if (normEdits.length) fileEdits.push({ filePath: fp, edits: normEdits });
+      }
+    } else if (raw.changes && typeof raw.changes === "object") {
+      const changes = raw.changes as Record<string, unknown>;
+      for (const [uriKey, editsRaw] of Object.entries(changes)) {
+        const fp = toPath(uriKey);
+        if (!fp) return null;
+        if (!Array.isArray(editsRaw)) return null;
+        const normEdits: Array<{ range: LSPRange; newText: string }> = [];
+        for (const e of editsRaw as unknown[]) {
+          if (!e || typeof e !== "object") continue;
+          const er = e as Record<string, unknown>;
+          const range = er.range as LSPRange | undefined;
+          const newText = er.newText as string | undefined;
+          if (!range || typeof newText !== "string") continue;
+          normEdits.push({ range, newText });
+        }
+        if (normEdits.length) fileEdits.push({ filePath: fp, edits: normEdits });
+      }
+    } else {
+      return null;
+    }
+    if (fileEdits.length === 0) return null;
+    // Convert to protocol LspWorkspaceEdit shape (fileEdits with LspTextEdit)
+    return { fileEdits: fileEdits.map((fe) => ({ filePath: fe.filePath, edits: fe.edits.map((ed) => ({ filePath: fe.filePath, range: ed.range, newText: ed.newText })) })) } as unknown as LspWorkspaceEdit;
+  }
+
+  async prepareRename(filePath: string, line0: number, character0: number): Promise<{ range: LSPRange; placeholder?: string } | null> {
+    const uri = pathToFileURL(resolve(filePath)).href;
+    let result: unknown;
+    try {
+      result = await this.request("textDocument/prepareRename", { textDocument: { uri }, position: { line: line0, character: character0 } });
+    } catch {
+      return null;
+    }
+    if (!result || typeof result !== "object") return null;
+    // Server may return Range directly or { range, placeholder, defaultBehavior } etc
+    const r = result as Record<string, unknown>;
+    if (r.start && r.end) {
+      // Is a Range itself
+      const start = r.start as Record<string, unknown>;
+      const end = r.end as Record<string, unknown>;
+      if (typeof start.line === "number" && typeof start.character === "number" && typeof end.line === "number" && typeof end.character === "number") {
+        return { range: r as unknown as LSPRange };
+      }
+    }
+    if (r.range && typeof r.range === "object") {
+      const range = r.range as LSPRange;
+      const placeholder = typeof r.placeholder === "string" ? (r.placeholder as string) : undefined;
+      if (range.start && range.end) return { range, placeholder };
+    }
+    return null;
+  }
+
   /**
    * Query workspace/symbol on this server.
    */
@@ -920,6 +1014,18 @@ export class LSPManager {
     const server = await this.getServer(langId);
     if (!server) return;
     await server.didChange(filePath, text);
+  }
+
+  async rename(languageId: string, filePath: string, line0: number, character0: number, newName: string): Promise<LspWorkspaceEdit | null> {
+    const server = await this.getServer(languageId, { purpose: "request" });
+    if (!server) return null;
+    return server.rename(filePath, line0, character0, newName);
+  }
+
+  async prepareRename(languageId: string, filePath: string, line0: number, character0: number): Promise<{ range: LSPRange; placeholder?: string } | null> {
+    const server = await this.getServer(languageId, { purpose: "request" });
+    if (!server) return null;
+    return server.prepareRename(filePath, line0, character0);
   }
 
   /** Route closeFile to the right server */
@@ -1209,6 +1315,36 @@ async function createBridge(): Promise<LSPBridge | null> {
       } catch { return []; }
     },
 
+    async rename(filePath: string, line: number, character: number, newName: string, root: string): Promise<LspWorkspaceEdit | null> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      if (line0 < 0 || char0 < 0) return null;
+      let langId: string | null;
+      try { langId = detectLanguageFromExtension(filePath); } catch { return null; }
+      if (!langId) return null;
+      const timeoutMs = 10_000;
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs);
+        if (!server) return null;
+        return await withBudget(server.rename(filePath, line0, char0, newName), timeoutMs);
+      } catch { return null; }
+    },
+    async prepareRename(filePath: string, line: number, character: number, root: string): Promise<{ range: LSPRange; placeholder?: string } | null> {
+      const line0 = toZeroBased(line);
+      const char0 = toZeroBased(character);
+      if (line0 < 0 || char0 < 0) return null;
+      let langId: string | null;
+      try { langId = detectLanguageFromExtension(filePath); } catch { return null; }
+      if (!langId) return null;
+      const timeoutMs = 10_000;
+      try {
+        const mgr = cachedManager(root);
+        const server = await withBudget(mgr.getServer(langId, { purpose: "request" }), timeoutMs);
+        if (!server) return null;
+        return await withBudget(server.prepareRename(filePath, line0, char0), timeoutMs);
+      } catch { return null; }
+    },
     async goToDefinitionOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeSingle> {
       const line0 = toZeroBased(line);
       const char0 = toZeroBased(character);

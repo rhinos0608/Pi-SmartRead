@@ -11,6 +11,8 @@ import {
 } from "@rhinos0608/pi-workspace-protocol";
 import { createRpcServer, type BusLike, type RequestEvent } from "@rhinos0608/pi-workspace-protocol";
 import { getLSPBridge } from "./lsp-bridge.js";
+import { validateWorkspaceEdit } from "./workspace-edit-validator.js";
+import type { RenamePreviewRequest, RenamePreviewResponse, LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 
 export interface LanguageIntelligenceProviderBus extends BusLike {}
 
@@ -159,6 +161,40 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 return validatedOrDegraded({ status: "degraded", reason: "unconfirmed", diagnostics: [], truncated: false });
             }
 
+            if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview) {
+                const v = validateRenamePreviewRequest(payload);
+                if (!v.ok) throw new Error(v.error);
+                const req = v.value;
+                const bridge = await getLSPBridge();
+                if (!bridge || typeof (bridge as unknown as { rename?: unknown }).rename !== "function") {
+                    const resp: RenamePreviewResponse = { ok: false, error: "no-server" };
+                    return resp;
+                }
+                const workspaceRoot = req.filePath.includes("/") ? req.filePath.slice(0, req.filePath.lastIndexOf("/")) || "/" : "/";
+                let rawEdit: LspWorkspaceEdit | null = null;
+                try {
+                    rawEdit = await withBudget(
+                        (bridge as unknown as { rename: (f: string, l: number, c: number, n: string, r: string) => Promise<LspWorkspaceEdit | null> }).rename(req.filePath, req.line, req.character, req.newName, workspaceRoot),
+                        10_000,
+                    );
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    const resp: RenamePreviewResponse = { ok: false, error: msg.includes("timed out") ? "timeout" : "rename failed" };
+                    return resp;
+                }
+                if (!rawEdit) {
+                    const resp: RenamePreviewResponse = { ok: false, error: "no edits" };
+                    return resp;
+                }
+                const validated = validateWorkspaceEdit(rawEdit);
+                if (!validated.ok) {
+                    const resp: RenamePreviewResponse = { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
+                    return resp;
+                }
+                const resp: RenamePreviewResponse = { ok: true, workspaceEdit: validated.value as unknown as LspWorkspaceEdit };
+                return resp;
+            }
+
             throw new Error(`unknown rpc method: ${String(rpc)}`);
         },
     });
@@ -174,4 +210,24 @@ function validatedOrDegraded(resp: CheckPostEditDiagnosticsResponse): CheckPostE
     const v = validateCheckPostEditDiagnosticsResponse(resp);
     if (v.ok) return resp;
     return { status: "degraded", reason: "unconfirmed", diagnostics: [], truncated: false };
+}
+
+function validateRenamePreviewRequest(v: unknown): { ok: true; value: RenamePreviewRequest } | { ok: false; error: string } {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "RenamePreviewRequest must be object" };
+    const o = v as Record<string, unknown>;
+    const { filePath, line, character, newName } = o;
+    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "RenamePreviewRequest.filePath must be non-empty string" };
+    if (filePath.includes("\0")) return { ok: false, error: "RenamePreviewRequest.filePath must not contain NUL" };
+    if (typeof line !== "number" || !Number.isInteger(line) || line < 1) return { ok: false, error: "RenamePreviewRequest.line must be integer >=1" };
+    if (typeof character !== "number" || !Number.isInteger(character) || character < 1) return { ok: false, error: "RenamePreviewRequest.character must be integer >=1" };
+    if (typeof newName !== "string" || newName.length === 0) return { ok: false, error: "RenamePreviewRequest.newName must be non-empty string" };
+    if (newName.length > 256) return { ok: false, error: "RenamePreviewRequest.newName must be <=256 chars" };
+    return { ok: true, value: v as RenamePreviewRequest };
+}
+
+function withBudget<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+        promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+    });
 }
