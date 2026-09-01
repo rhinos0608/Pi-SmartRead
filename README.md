@@ -31,8 +31,135 @@ Pi-SmartRead also provides passive safety and enrichment that runs across all to
 | **Bash context guard** | Caps oversized bash output to head+tail preview, writes full output to temp file |
 | **Startup tool guidance + repo map injection** | Injects SmartRead tool-selection guidance and a compact repo map on the first turn — no wasted round trips |
 | **Read enrichment** | Appends import relationships, git recency, branch notes, and graphify knowledge to every file read |
-| **LSP bridge** | Tracks opened files on the language server for faster subsequent LSP queries; closes mutated files for fresh re-reads |
+| **LSP bridge** | Manages LSP server lifecycle; capability negotiation (renameProvider, codeActionProvider, documentFormattingProvider, workspaceEdit.documentChanges); `prepareDocument()` serializes concurrent requests per (connection, path); supports rename, code actions, formatting, organize imports; all URIs via `pathToFileURL` |
 | **Microagents** | Scans `.pi-smartread/microagents/` for markdown-based agent instructions with trigger-based or always-loaded rules |
+| **WorkspaceEdit validation** | Validates untrusted LSP output: file URIs only, canonical realpaths, UTF-16 ranges, no overlapping edits, bounded counts, resource-operation rejection |
+| **Managed LSP install** | npm-only, exact pinned versions, atomic swaps, cross-process locking, `--ignore-scripts`, integrity checks |
+| **Capability negotiation** | Advertises supported LSP features, checks server capabilities before requests |
+
+---
+
+## Language Intelligence Runtime (Phases 1-5)
+
+Pi-SmartRead now owns LSP server processes and exposes language intelligence to Pi-SmartEdit via a narrow, validated RPC. The runtime covers server resolution, trust, managed installs, WorkspaceEdit validation, and positional planning.
+
+### Overview
+
+- Pi-SmartRead spawns and supervises LSP servers over stdio (JSON-RPC).
+- Pi-SmartEdit never spawns LSP servers directly — it calls Pi-SmartRead over `pi.workspace.language_intelligence.rpc`.
+- All LSP-produced WorkspaceEdits are validated before leaving Pi-SmartRead.
+
+### 5-tier resolver
+
+Resolution order for a file's language server (first hit wins):
+
+1. **override** — explicit `overrides[languageId]` in `~/.pi/agent/language-intelligence.json` (`command` + `args`). Must exist on disk.
+2. **project-local** — `node_modules/.bin/<candidate>` under the detected project root, **only if the root is trusted** (see Trust store).
+3. **system** — bare candidate on `PATH` (`typescript-language-server`, `pyright-langserver`, `clangd`, etc.). Checked via filesystem `PATH` scan, no spawn.
+4. **managed** — Pi-managed install under `~/.pi/agent/language-intelligence/packages/` (lockfile `runtime.lock.json` + `bin/` symlink). Checked synchronously; no network.
+5. **degraded** — no server available. Returns `reasonCode` (`unsupported-language`, `no-server-descriptor`, `language-disabled`, `project-local-untrusted`, `executable-missing`, `invalid-override`) and `fallback: "ast" | "text"`.
+
+Root detection walks up from the file's directory looking for language-specific markers (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, etc.); falls back to `cwd` canonicalized via `realpathSync`.
+
+### Server catalog
+
+`src/language-server-catalog.ts` declares **17 descriptors** (`LANGUAGE_SERVER_CATALOG`). Each descriptor has `id`, `displayName`, `languageIds`, `extensions`, `filenames`, `rootMarkers`, `commandCandidates`, `priority`, and optional `initializationOptions`/`settings`/`expectedCapabilities`.
+
+`CommandCandidate` fields: `command`, `args`, `platforms?` (e.g. `["win32"]`), `requiredEnv?`, `managedInstall?` (`{ type: "npm", packageName, version, bin }` — exact pinned version). Candidates are filtered by platform/env at resolve time.
+
+Auto-installable candidates (have `managedInstall`):
+`typescript-language-server@6.0.0`, `pyright@1.1.413` (`pyright-langserver`), `bash-language-server@5.6.0`, `vscode-langservers-extracted@4.10.0` (json/html/css), `yaml-language-server@1.24.0`.
+
+### Trust store
+
+- Path: `~/.pi/agent/language-intelligence/trust.json` — shape `{ trustedRoots: string[] }` (canonical realpaths).
+- Project-local binaries (`node_modules/.bin/*`) only execute if the detected project root is trusted. Untrusted roots fall through to system/managed tiers and surface `project-local-untrusted` in degraded mode.
+- Manage via `/lsp trust [path]` or by editing `trust.json`. Trust checks use `realpathSync` with try/catch fallback.
+
+### Install modes
+
+- `off` (default) — never auto-install. Managed binaries already on disk still resolve via tier 4.
+- `auto` — on first use (`purpose: "request"` only, never warmup), if resolution is degraded and a managed candidate exists, Pi-SmartRead auto-installs it then re-resolves. Disabled languages never auto-install. Retry-storm guard: per `(languageId, root)` failed installs are not retried within the session; concurrent requests coalesce via an in-flight map.
+
+Configure via `/lsp install auto` (writes `installMode: "auto"` to `~/.pi/agent/language-intelligence.json`) or by editing that file. `loadConfig()` validates the shape and ignores unknown fields.
+
+### Managed installs
+
+- **npm-only**, exact pinned versions (e.g. `typescript-language-server@6.0.0`), `--ignore-scripts --no-audit --fund=false`.
+- Storage: `~/.pi/agent/language-intelligence/{packages/<packageName>, bin/<bin>, locks/<package>.lock, runtime.lock.json, logs/}`.
+- **Atomic swaps** with backup/restore: temp dir `packages/.tmp-<pkg>-<ts>-<rand>` → `rename` to `packages/<pkg>`; on failure restores `packages/<pkg>.bak`.
+- **Cross-process locking**: per-package `locks/<pkg>.lock` (exclusive-create `wx` + stale reclamation) and global `locks/runtime.lock.json.lock` for lockfile mutation (5s retry, exponential backoff, stale threshold `installTimeout + 60s`).
+- **Integrity checks**: verifies `packages/<pkg>/node_modules/<pkg>/package.json` version matches catalog; verifies expected bin exists at `node_modules/.bin/<bin>`; on mismatch removes install and restores backup.
+- **Lifecycle**: `installServer(managedInstall)` → `uninstallServer(packageName)` → `updateServer(managedInstall)` (reinstall pinned version). Symlink-or-copy into `bin/<bin>`.
+- Managed resolution is synchronous (lockfile read + `existsSync`) — no spawn or network at resolve time.
+
+### WorkspaceEdit validation
+
+Untrusted LSP output is validated by `validateWorkspaceEdit()` (`src/workspace-edit-validator.ts`) before it leaves Pi-SmartRead:
+
+- Rejects `documentChanges` resource operations (`create`/`rename`/`delete` via `kind`).
+- Requires `fileEdits: Array<{ filePath, edits }>` (non-empty, max 50 files / 5000 edits / 10 MB total `newText`).
+- `filePath` must be an absolute path (not `file://` URI, not relative, no NUL); canonicalized via `realpathSync` (must exist); duplicate canonical paths rejected.
+- Each edit: `range: { start: {line, character}, end: {line, character} }` non-negative integers, `start <= end` (UTF-16 code-unit offsets), `newText: string`.
+- No overlapping edits within a single file (sorted by start, adjacent `end > next.start` is overlap).
+- Returns `{ ok: true, value: ValidatedWorkspaceEdit }` or `{ ok: false, errors: ValidationError[] }`.
+
+### Positional planner
+
+Converts a `ValidatedWorkspaceEdit` (exact UTF-16 range edits) to staged file content without text-search semantics:
+
+- Reads current file content, splits by detected line ending (`\r\n` vs `\n` — preserved).
+- For each file, sorts edits by start position, applies them by slicing UTF-16 offsets per line (no regex/search).
+- Merges duplicate `filePath` entries (edits grouped by canonical path) before application.
+- Produces staged content per file for the patch pipeline — no `oldText`/`newText` search, no fuzzy matching.
+
+---
+
+## Operator Command `/lsp`
+
+Registered via `registerLanguageIntelligenceCommand(pi)` as `/lsp`. All subcommands run in the current `ctx.cwd` project root.
+
+| Subcommand | Usage | What it does |
+|---|---|---|
+| `status` | `/lsp status` | Show detected languages, per-language resolution (descriptor, tier, executable or `reasonCode`), warmup state, and `installMode`. Default when no subcommand given. |
+| `doctor` | `/lsp doctor [lang]` | Diagnose a language's LSP setup: descriptors, tier, `reasonCode`/`fallback`, trust state, and hint (`run /lsp install <id> to install`) if a managed candidate exists. Without `lang`, diagnoses up to 20 detected languages. |
+| `trust` | `/lsp trust [path]` | Trust a project root for local binaries. Writes canonical realpath to `trust.json`, invalidates the resolved-server cache and evicts the `LSPManager` for that root. Defaults to current `cwd`. |
+| `restart` | `/lsp restart [server]` | Restart the `LSPManager` for the current root (whole manager; `server` arg is informational). |
+| `install` | `/lsp install <server>\|auto` | Install a language server (`server` = descriptor id or language id, e.g. `typescript` or `python`) via its managed npm spec, or enable auto-install for all detected languages (`auto` → `setInstallMode("auto")` then installs each missing managed candidate). |
+| `update` | `/lsp update <server>\|--all` | Update an installed server (reinstall pinned version) or all installed managed servers (`--all` iterates catalog entries where `isServerInstalled(packageName, version)` is true). |
+| `uninstall` | `/lsp uninstall <server>` | Remove an installed server's package dir, `bin/` symlink, and lockfile entries. |
+
+Examples:
+
+```
+/lsp status
+/lsp doctor python
+/lsp trust /Users/me/my-project
+/lsp restart
+/lsp install typescript
+/lsp install auto
+/lsp update --all
+/lsp uninstall yaml-language-server
+```
+
+---
+
+## RPC Provider
+
+Pi-SmartRead exposes language intelligence over the event-bus RPC channel `pi.workspace.language_intelligence.rpc` (`RPC_CHANNELS.languageIntelligence`). Handler: `createLanguageIntelligenceProvider(bus)` in `src/language-intelligence-provider.ts`.
+
+All methods that return edits validate via `validateWorkspaceEdit()` and enforce a 10s budget (`withBudget`).
+
+| Method | Request | Response |
+|---|---|---|
+| `language_intelligence_capabilities` | `{}` | `{ provider: "pi-smartread", capabilities: ["post-edit-diagnostics"] }` |
+| `check_post_edit_diagnostics` | `{ canonicalPath, canonicalWorkspaceRoot, expectedContentSha256, waitMs?, maxDiagnostics }` — validates `realpathSync` identity and SHA-256 before/after the LSP poll | `{ status: "confirmed" \| "empty" \| "unavailable" \| "degraded", diagnostics: LanguageDiagnostic[], truncated, reason? }` |
+| `rename_preview` | `{ filePath, line, character, newName }` (1-indexed line/character; `newName` ≤256 chars) | `{ ok: true, workspaceEdit: ValidatedWorkspaceEdit }` or `{ ok: false, error }` |
+| `organize_imports` | `{ filePath }` | `{ ok: true, workspaceEdit }` or `{ ok: false, error }` |
+| `formatting` | `{ filePath, tabSize?: 1..16, insertSpaces?: boolean }` | `{ ok: true, workspaceEdit }` or `{ ok: false, error }` |
+| `code_action` | `{ filePath, line, character, endLine?, endCharacter?, diagnostics?, only?: string[] }` (1-indexed) | `{ ok: true, actions: Array<{ title, kind?, workspaceEdit?, isPreferred? }> }` or `{ ok: false, error }` |
+
+`check_post_edit_diagnostics` flow: `realpathSync` check → SHA-256 pre-hash → `getFreshDiagnosticsOutcome()` via the LSP bridge → SHA-256 post-hash → map `unavailable`/`empty`/`confirmed`/`degraded` (with truncated/capped diagnostics). Failures degrade gracefully.
 
 ---
 
@@ -266,6 +393,21 @@ Bash, C, C#, C++, Clojure, Common Lisp, CSS, D, Dart, Elisp, Elixir, Elm, Fortra
 **Call graph support** (for code search enrichment): TypeScript, JavaScript, TSX, Python, Go, Rust.
 
 Languages without dedicated tree-sitter parsers still work for file reading and BM25 text ranking.
+
+**Managed-install candidates** (auto-installable via `/lsp install`):
+
+| Language | Server | Package | Auto-installable |
+|---|---|---|---|
+| TypeScript/JavaScript | `typescript-language-server` | `typescript-language-server@6.0.0` | Yes |
+| Python | `pyright-langserver` | `pyright@1.1.413` | Yes (primary; also `pyright`, `pylsp`, `pyls`, `jedi-language-server` as fallbacks) |
+| Bash | `bash-language-server` | `bash-language-server@5.6.0` | Yes |
+| JSON | `vscode-json-language-server` | `vscode-langservers-extracted@4.10.0` | Yes |
+| YAML | `yaml-language-server` | `yaml-language-server@1.24.0` | Yes |
+| C# | `omnisharp` | `omnisharp` (system) | Yes |
+| PHP | `intelephense` | `intelephense` (system) | Yes |
+| C/C++ | `clangd` | `clangd` (system) | System binary |
+
+Other catalog servers (rust-analyzer, gopls, jdtls, csharp-ls, phpactor, lua-language-server, solargraph, vscode-html/css) resolve via system PATH or project-local binaries.
 
 ---
 
