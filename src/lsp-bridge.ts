@@ -497,6 +497,25 @@ export class LSPConnection {
   /** The language IDs this server handles */
   languageIds: string[] = [];
 
+  private serverCapabilities: Record<string, unknown> | null = null;
+
+  private documentRefreshQueue = new Map<string, Promise<void>>();
+
+  async prepareDocument(filePath: string): Promise<void> {
+    const resolved = resolve(filePath);
+    const prior = this.documentRefreshQueue.get(resolved) ?? Promise.resolve();
+    const next = prior.then(async () => {
+      if (this.isOpen(resolved)) {
+        await this.didClose(resolved);
+      }
+      await this.openFile(resolved);
+    });
+    this.documentRefreshQueue.set(resolved, next.catch(() => {}));
+    return next;
+  }
+
+  getServerCapabilities(): Record<string, unknown> | null { return this.serverCapabilities; }
+
   async start(command: string, args: string[], rootUri: string): Promise<void> {
     this.proc = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     this.proc.stdout?.on("data", (chunk: Buffer) => this._onData(chunk));
@@ -505,7 +524,7 @@ export class LSPConnection {
 
     const initResult = await this.request("initialize", {
       processId: process.pid,
-      rootUri: `file://${rootUri}`,
+      rootUri: pathToFileURL(resolve(rootUri)).href,
       capabilities: {
         textDocument: {
           definition: { dynamicRegistration: false },
@@ -514,13 +533,23 @@ export class LSPConnection {
           implementation: { dynamicRegistration: false },
           hover: { dynamicRegistration: false },
           callHierarchy: { dynamicRegistration: false },
+          rename: { dynamicRegistration: false, prepareSupport: true, honorsChangeAnnotations: false },
+          codeAction: { dynamicRegistration: false, codeActionLiteralSupport: { codeActionKind: { valueSet: ["quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source.organizeImports", "source.fixAll"] } }, isPreferredSupport: true },
+          formatting: { dynamicRegistration: false },
         },
         workspace: {
           symbol: { dynamicRegistration: false },
+          workspaceEdit: { documentChanges: true, resourceOperations: [] },
         },
       },
     });
     if (!initResult) throw new Error("LSP initialize failed");
+    try {
+      const caps = (initResult as Record<string, unknown>)?.capabilities;
+      this.serverCapabilities = caps && typeof caps === "object" ? (caps as Record<string, unknown>) : {} as Record<string, unknown>;
+    } catch {
+      this.serverCapabilities = {} as Record<string, unknown>;
+    }
     await this.notify("initialized", {});
   }
 
@@ -550,7 +579,7 @@ export class LSPConnection {
   async openFile(filePath: string): Promise<void> {
     const resolved = resolve(filePath);
     if (this.openDocuments.has(resolved)) return;
-    const uri = `file://${resolved}`;
+    const uri = pathToFileURL(resolved).href;
     const text = existsSync(resolved) ? readFileSync(resolved, "utf-8") : "";
     const version = (this.openDocuments.get(resolved) ?? 0) + 1;
     this.openDocuments.set(resolved, version);
@@ -566,7 +595,7 @@ export class LSPConnection {
    */
   async didChange(filePath: string, text: string): Promise<void> {
     const resolved = resolve(filePath);
-    const uri = `file://${resolved}`;
+    const uri = pathToFileURL(resolved).href;
     // Drop any diagnostics published for the previous document state so a
     // post-edit poll cannot observe stale results from before this update.
     this.diagnostics.delete(resolved);
@@ -593,7 +622,7 @@ export class LSPConnection {
   async didClose(filePath: string): Promise<void> {
     const resolved = resolve(filePath);
     if (!this.openDocuments.has(resolved)) return;
-    const uri = `file://${resolved}`;
+    const uri = pathToFileURL(resolved).href;
     this.openDocuments.delete(resolved);
     await this.notify("textDocument/didClose", { textDocument: { uri } });
   }
@@ -605,7 +634,7 @@ export class LSPConnection {
   async didSave(filePath: string): Promise<void> {
     const resolved = resolve(filePath);
     if (!this.openDocuments.has(resolved)) return;
-    const uri = `file://${resolved}`;
+    const uri = pathToFileURL(resolved).href;
     await this.notify("textDocument/didSave", { textDocument: { uri } });
   }
 
@@ -654,6 +683,8 @@ export class LSPConnection {
   }
 
   async rename(filePath: string, line0: number, character0: number, newName: string): Promise<LspWorkspaceEdit | null> {
+    if (!this.serverCapabilities?.renameProvider) return null;
+    await this.prepareDocument(filePath);
     const uri = pathToFileURL(resolve(filePath)).href;
     let result: unknown;
     try {
@@ -661,63 +692,15 @@ export class LSPConnection {
     } catch {
       return null;
     }
-    if (!result || typeof result !== "object") return null;
-    const raw = result as Record<string, unknown>;
-    const fileEdits: Array<{ filePath: string; edits: Array<{ range: LSPRange; newText: string }> }> = [];
-    const toPath = (u: string): string | null => {
-      try {
-        if (u.startsWith("file://")) return resolve(fileURLToPath(u));
-        return null;
-      } catch { return null; }
-    };
-    if (Array.isArray(raw.documentChanges)) {
-      for (const dc of raw.documentChanges as unknown[]) {
-        if (!dc || typeof dc !== "object") return null;
-        const entry = dc as Record<string, unknown>;
-        // Fail cleanly on resource operations (CreateFile/RenameFile/DeleteFile) — rename v1 only supports TextDocumentEdit; returning partial edits would be unsafe
-        if (typeof entry.kind === "string") return null;
-        const td = entry.textDocument as Record<string, unknown> | undefined;
-        const edits = entry.edits as unknown;
-        if (!td || typeof td.uri !== "string" || !Array.isArray(edits)) return null;
-        const fp = toPath(td.uri as string);
-        if (!fp) return null;
-        const normEdits: Array<{ range: LSPRange; newText: string }> = [];
-        for (const e of edits as unknown[]) {
-          if (!e || typeof e !== "object") continue;
-          const er = e as Record<string, unknown>;
-          const range = er.range as LSPRange | undefined;
-          const newText = er.newText as string | undefined;
-          if (!range || typeof newText !== "string") continue;
-          normEdits.push({ range, newText });
-        }
-        if (normEdits.length) fileEdits.push({ filePath: fp, edits: normEdits });
-      }
-    } else if (raw.changes && typeof raw.changes === "object") {
-      const changes = raw.changes as Record<string, unknown>;
-      for (const [uriKey, editsRaw] of Object.entries(changes)) {
-        const fp = toPath(uriKey);
-        if (!fp) return null;
-        if (!Array.isArray(editsRaw)) return null;
-        const normEdits: Array<{ range: LSPRange; newText: string }> = [];
-        for (const e of editsRaw as unknown[]) {
-          if (!e || typeof e !== "object") continue;
-          const er = e as Record<string, unknown>;
-          const range = er.range as LSPRange | undefined;
-          const newText = er.newText as string | undefined;
-          if (!range || typeof newText !== "string") continue;
-          normEdits.push({ range, newText });
-        }
-        if (normEdits.length) fileEdits.push({ filePath: fp, edits: normEdits });
-      }
-    } else {
-      return null;
-    }
-    if (fileEdits.length === 0) return null;
-    // Convert to protocol LspWorkspaceEdit shape (fileEdits with LspTextEdit)
-    return { fileEdits: fileEdits.map((fe) => ({ filePath: fe.filePath, edits: fe.edits.map((ed) => ({ filePath: fe.filePath, range: ed.range, newText: ed.newText })) })) } as unknown as LspWorkspaceEdit;
+    // Delegate to the shared fail-closed parser (convertWorkspaceEdit) instead of
+    // duplicating LSP WorkspaceEdit parsing here — a prior duplicate parser silently
+    // fell through to `changes` when `documentChanges` was present but malformed,
+    // bypassing the fail-closed contract enforced by convertWorkspaceEdit.
+    return convertWorkspaceEdit(result);
   }
 
   async prepareRename(filePath: string, line0: number, character0: number): Promise<{ range: LSPRange; placeholder?: string } | null> {
+    if (!this.serverCapabilities?.renameProvider) return null;
     const uri = pathToFileURL(resolve(filePath)).href;
     let result: unknown;
     try {
@@ -745,6 +728,8 @@ export class LSPConnection {
   }
 
   async organizeImports(filePath: string): Promise<LspWorkspaceEdit | null> {
+    if (!this.serverCapabilities?.codeActionProvider) return null;
+    await this.prepareDocument(filePath);
     const uri = pathToFileURL(resolve(filePath)).href;
     let result: unknown;
     try {
@@ -770,6 +755,8 @@ export class LSPConnection {
   }
 
   async formatting(filePath: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null> {
+    if (!this.serverCapabilities?.documentFormattingProvider) return null;
+    await this.prepareDocument(filePath);
     const uri = pathToFileURL(resolve(filePath)).href;
     let result: unknown;
     try {
@@ -785,11 +772,14 @@ export class LSPConnection {
     const fp = resolve(filePath);
     const edits: Array<{ range: LSPRange; newText: string }> = [];
     for (const e of editsRaw) {
-      if (!e || typeof e !== "object") continue;
-      const range = (e as Record<string, unknown>).range as LSPRange | undefined;
+      if (!e || typeof e !== "object") return null;
+      const range = (e as Record<string, unknown>).range as Record<string, unknown> | undefined;
       const newText = (e as Record<string, unknown>).newText as string | undefined;
-      if (!range || typeof newText !== "string") continue;
-      edits.push({ range, newText });
+      if (!range || typeof newText !== "string") return null;
+      const s = (range as Record<string, unknown>).start as Record<string, unknown> | undefined;
+      const en = (range as Record<string, unknown>).end as Record<string, unknown> | undefined;
+      if (!s || !en || !Number.isInteger(s.line as unknown as number) || (s.line as unknown as number) < 0 || !Number.isInteger(s.character as unknown as number) || (s.character as unknown as number) < 0 || !Number.isInteger(en.line as unknown as number) || (en.line as unknown as number) < 0 || !Number.isInteger(en.character as unknown as number) || (en.character as unknown as number) < 0 || (en.line as unknown as number) < (s.line as unknown as number) || ((en.line as unknown as number) === (s.line as unknown as number) && (en.character as unknown as number) < (s.character as unknown as number))) return null;
+      edits.push({ range: range as unknown as LSPRange, newText });
     }
     if (edits.length === 0) return null;
     return { fileEdits: [{ filePath: fp, edits: edits.map((ed) => ({ filePath: fp, range: ed.range, newText: ed.newText })) }] } as unknown as LspWorkspaceEdit;
@@ -800,6 +790,8 @@ export class LSPConnection {
     range: LSPRange,
     context: { diagnostics?: unknown[]; only?: string[] },
   ): Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>> {
+    if (!this.serverCapabilities?.codeActionProvider) return [];
+    await this.prepareDocument(filePath);
     const uri = pathToFileURL(resolve(filePath)).href;
     let result: unknown;
     try {
@@ -839,7 +831,7 @@ export class LSPConnection {
    */
   async hover(filePath: string, line: number, character: number): Promise<LSPHoverResult | null> {
     const resolved = resolve(filePath);
-    const uri = `file://${resolved}`;
+    const uri = pathToFileURL(resolved).href;
     const result = await this.request("textDocument/hover", {
       textDocument: { uri },
       position: { line, character },
@@ -1224,6 +1216,10 @@ const MAX_MANAGER_CACHE_SIZE = 5;
 const managerAccessOrder: string[] = [];
 
 /** Shuts down and removes all managers from the cache */
+export async function prepareDocument(conn: LSPConnection, filePath: string): Promise<void> {
+  return conn.prepareDocument(filePath);
+}
+
 export async function shutdownAllManagers(): Promise<void> {
   for (const mgr of managerCache.values()) {
     await mgr.shutdown();
@@ -1248,40 +1244,52 @@ function convertWorkspaceEdit(raw: unknown): LspWorkspaceEdit | null {
     }
   };
   const fileEdits: Array<{ filePath: string; edits: Array<{ range: LSPRange; newText: string }> }> = [];
-  if (Array.isArray((obj as Record<string, unknown>).documentChanges)) {
-    for (const dc of (obj as Record<string, unknown>).documentChanges as unknown[]) {
+  if ("documentChanges" in obj && obj.documentChanges !== undefined) {
+    if (!Array.isArray(obj.documentChanges)) return null;
+    for (const dc of obj.documentChanges as unknown[]) {
+      if (!dc || typeof dc !== "object") return null;
       const entry = dc as Record<string, unknown>;
       // Reject resource operations (CreateFile/RenameFile/DeleteFile) — return null for whole edit
       if (typeof entry.kind === "string") return null;
       const td = entry.textDocument as Record<string, unknown> | undefined;
       const editsRaw = entry.edits as unknown[] | undefined;
-      if (!td || !Array.isArray(editsRaw)) return null;
+      if (!td || typeof td.uri !== "string" || !Array.isArray(editsRaw) || editsRaw.length === 0) return null;
       const fp = toPath(td.uri as string);
-      if (!fp) continue;
+      if (!fp) return null;
       const normEdits: Array<{ range: LSPRange; newText: string }> = [];
       for (const er of editsRaw) {
+        if (!er || typeof er !== "object") return null;
         const e = er as Record<string, unknown>;
-        const range = e.range as LSPRange | undefined;
+        const range = e.range as Record<string, unknown> | undefined;
         const newText = e.newText as string | undefined;
-        if (!range || typeof newText !== "string") continue;
-        normEdits.push({ range, newText });
+        if (!range || typeof newText !== "string") return null;
+        const s = (range as Record<string, unknown>).start as Record<string, unknown> | undefined;
+        const en = (range as Record<string, unknown>).end as Record<string, unknown> | undefined;
+        if (!s || !en || !Number.isInteger(s.line as unknown as number) || (s.line as unknown as number) < 0 || !Number.isInteger(s.character as unknown as number) || (s.character as unknown as number) < 0 || !Number.isInteger(en.line as unknown as number) || (en.line as unknown as number) < 0 || !Number.isInteger(en.character as unknown as number) || (en.character as unknown as number) < 0 || (en.line as unknown as number) < (s.line as unknown as number) || ((en.line as unknown as number) === (s.line as unknown as number) && (en.character as unknown as number) < (s.character as unknown as number))) return null;
+        normEdits.push({ range: range as unknown as LSPRange, newText });
       }
+      if (normEdits.length === 0) return null;
       fileEdits.push({ filePath: fp, edits: normEdits });
     }
   }
   if (obj.changes && typeof obj.changes === "object") {
     for (const [uriKey, editsRaw] of Object.entries(obj.changes as Record<string, unknown>)) {
       const fp = toPath(uriKey);
-      if (!fp) continue;
-      if (!Array.isArray(editsRaw)) continue;
+      if (!fp) return null;
+      if (!Array.isArray(editsRaw) || (editsRaw as unknown[]).length === 0) return null;
       const normEdits: Array<{ range: LSPRange; newText: string }> = [];
       for (const er of editsRaw as unknown[]) {
+        if (!er || typeof er !== "object") return null;
         const e = er as Record<string, unknown>;
-        const range = e.range as LSPRange | undefined;
+        const range = e.range as Record<string, unknown> | undefined;
         const newText = e.newText as string | undefined;
-        if (!range || typeof newText !== "string") continue;
-        normEdits.push({ range, newText });
+        if (!range || typeof newText !== "string") return null;
+        const s = (range as Record<string, unknown>).start as Record<string, unknown> | undefined;
+        const en = (range as Record<string, unknown>).end as Record<string, unknown> | undefined;
+        if (!s || !en || !Number.isInteger(s.line as unknown as number) || (s.line as unknown as number) < 0 || !Number.isInteger(s.character as unknown as number) || (s.character as unknown as number) < 0 || !Number.isInteger(en.line as unknown as number) || (en.line as unknown as number) < 0 || !Number.isInteger(en.character as unknown as number) || (en.character as unknown as number) < 0 || (en.line as unknown as number) < (s.line as unknown as number) || ((en.line as unknown as number) === (s.line as unknown as number) && (en.character as unknown as number) < (s.character as unknown as number))) return null;
+        normEdits.push({ range: range as unknown as LSPRange, newText });
       }
+      if (normEdits.length === 0) return null;
       fileEdits.push({ filePath: fp, edits: normEdits });
     }
   }

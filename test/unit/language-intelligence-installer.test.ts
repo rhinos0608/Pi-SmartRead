@@ -45,6 +45,12 @@ function fakeSpawnSuccessFactory() {
       mkdirSync(join(prefix, "node_modules", ".bin"), { recursive: true });
       writeFileSync(p, "#!/bin/sh\necho mock", "utf-8");
     }
+    // Create node_modules/<packageName>/package.json with matching version so the
+    // post-install integrity check (verifies installed version == requested version) passes.
+    const pkgVersion = pkgArg.split("@")[1] ?? "0.0.0";
+    const pkgDir = join(prefix, "node_modules", packageName);
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: packageName, version: pkgVersion }), "utf-8");
     const ee: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void } = Object.assign(new EventEmitter() as EventEmitter, {
       stdout: new EventEmitter(),
       stderr: new EventEmitter(),
@@ -282,7 +288,7 @@ describe("language-intelligence-installer", () => {
       return null;
     }
     expect(findCandidate("typescript-language-server", "typescript-language-server")).toEqual({ type: "npm", packageName: "typescript-language-server", version: "6.0.0", bin: "typescript-language-server" });
-    expect(findCandidate("pyright", "pyright-langserver")).toEqual({ type: "npm", packageName: "pyright", version: "1.1.413", bin: "pyright-langserver" });
+    expect(findCandidate("pyright-langserver", "pyright-langserver")).toEqual({ type: "npm", packageName: "pyright", version: "1.1.413", bin: "pyright-langserver" });
     expect(findCandidate("bash-language-server", "bash-language-server")).toEqual({ type: "npm", packageName: "bash-language-server", version: "5.6.0", bin: "bash-language-server" });
     expect(findCandidate("vscode-json-language-server", "vscode-json-language-server")).toEqual({ type: "npm", packageName: "vscode-langservers-extracted", version: "4.10.0", bin: "vscode-json-language-server" });
     expect(findCandidate("vscode-html-language-server", "vscode-html-language-server")).toEqual({ type: "npm", packageName: "vscode-langservers-extracted", version: "4.10.0", bin: "vscode-html-language-server" });
@@ -411,6 +417,10 @@ describe("language-intelligence-installer", () => {
         mkdirSync(join(prefix, "node_modules", ".bin"), { recursive: true });
         writeFileSync(p, "#!/bin/sh\necho mock", "utf-8");
       }
+      const pkgVersion = pkgArg.split("@")[1] ?? "0.0.0";
+      const pkgDir = join(prefix, "node_modules", packageName || "yaml-language-server");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: packageName || "yaml-language-server", version: pkgVersion }), "utf-8");
       firstEE = Object.assign(new EventEmitter() as EventEmitter, {
         stdout: new EventEmitter(),
         stderr: new EventEmitter(),

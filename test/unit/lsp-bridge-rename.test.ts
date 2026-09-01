@@ -29,7 +29,7 @@ function makeFakeProc(): FakeProc {
         try {
           const msg = JSON.parse(content);
           if (msg.method === "initialize" && msg.id !== undefined) {
-            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: {} } }));
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { renameProvider: true } } }));
           }
         } catch {}
       }

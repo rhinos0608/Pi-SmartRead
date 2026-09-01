@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
-import { join, dirname, resolve, extname, delimiter } from "node:path";
+import { join, dirname, resolve, extname, delimiter, basename } from "node:path";
 import { LANGUAGE_SERVER_CATALOG, type ServerDescriptor, getDescriptorsForLanguage } from "./language-server-catalog.js";
 import { loadConfig, isRootTrusted } from "./language-intelligence-config.js";
 import { isServerInstalled, getInstalledBinPath } from "./language-intelligence-installer.js";
@@ -93,7 +93,7 @@ export function detectLanguageId(filePath: string): string | null {
   const ext = extname(filePath).toLowerCase();
   if (!ext) {
     // also handle bare filenames via catalog filenames
-    const base = filePath.split("/").pop() ?? filePath;
+    const base = basename(filePath);
     for (const desc of LANGUAGE_SERVER_CATALOG) {
       if (desc.filenames?.includes(base)) return desc.languageIds[0] ?? null;
     }
@@ -122,6 +122,15 @@ function detectRoot(filePath: string, cwd: string, markers: string[]): string {
   }
   // no marker found → cwd canonicalized
   try { return realpathSync(resolve(cwd)); } catch { return resolve(cwd); }
+}
+
+export function detectProjectRoot(filePath: string, cwd: string): string {
+  const languageId = detectLanguageId(filePath);
+  if (!languageId) {
+    try { return realpathSync(resolve(cwd)); } catch { return resolve(cwd); }
+  }
+  const markers = allMarkersForLanguage(languageId);
+  return detectRoot(filePath, cwd, markers);
 }
 
 function allMarkersForLanguage(languageId: string): string[] {
@@ -263,17 +272,21 @@ function tryProjectLocal(
       if (cand.platforms && !cand.platforms.includes(process.platform)) continue;
       if (cand.requiredEnv && cand.requiredEnv.some((k: string) => !process.env[k])) continue;
       const localBin = join(root, "node_modules", ".bin", cand.command);
-      // existence check — only when trusted (via injectable seam for test verification)
-      if (fileExists(localBin)) {
-        return {
-          status: "available",
-          languageId: desc.languageIds[0]!,
-          root,
-          descriptorId: desc.id,
-          executable: localBin,
-          args: cand.args,
-          tier: "project-local",
-        };
+      const isWin = process.platform === "win32";
+      const exts = isWin ? ["", ".cmd", ".exe", ".bat", ".com"] : [""];
+      for (const ext of exts) {
+        const candidate = localBin + ext;
+        if (fileExists(candidate)) {
+          return {
+            status: "available",
+            languageId: desc.languageIds[0]!,
+            root,
+            descriptorId: desc.id,
+            executable: candidate,
+            args: cand.args,
+            tier: "project-local",
+          };
+        }
       }
     }
   }

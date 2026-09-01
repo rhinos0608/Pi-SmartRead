@@ -46,7 +46,8 @@ export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
     extensions: [".py", ".pyi", ".pyx"],
     rootMarkers: ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"],
     commandCandidates: [
-      { command: "pyright", args: ["--stdio"], managedInstall: { type: "npm", packageName: "pyright", version: "1.1.413", bin: "pyright-langserver" } },
+      { command: "pyright-langserver", args: ["--stdio"], managedInstall: { type: "npm", packageName: "pyright", version: "1.1.413", bin: "pyright-langserver" } },
+      { command: "pyright", args: ["--stdio"] },
       { command: "pylsp", args: ["--stdio"] },
       { command: "pyls", args: ["--stdio"] },
       { command: "jedi-language-server", args: ["--stdio"] },

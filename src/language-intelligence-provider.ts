@@ -1,6 +1,5 @@
 import { realpathSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, resolve } from "node:path";
 import {
     RPC_CHANNELS,
     LANGUAGE_INTELLIGENCE_RPC_METHODS,
@@ -12,6 +11,7 @@ import {
 } from "@rhinos0608/pi-workspace-protocol";
 import { createRpcServer, type BusLike, type RequestEvent } from "@rhinos0608/pi-workspace-protocol";
 import { getLSPBridge } from "./lsp-bridge.js";
+import { resolveLanguageServer, detectProjectRoot } from "./language-intelligence-runtime.js";
 import { validateWorkspaceEdit } from "./workspace-edit-validator.js";
 import type { RenamePreviewRequest, RenamePreviewResponse, LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 
@@ -171,7 +171,8 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                     const resp: RenamePreviewResponse = { ok: false, error: "no-server" };
                     return resp;
                 }
-                const workspaceRoot = dirname(resolve(req.filePath));
+                const resolution = resolveLanguageServer(req.filePath, process.cwd());
+                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
                 let rawEdit: LspWorkspaceEdit | null = null;
                 try {
                     rawEdit = await withBudget(
@@ -204,7 +205,8 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 if (!bridge || typeof (bridge as unknown as { organizeImports?: unknown }).organizeImports !== "function") {
                     return { ok: false, error: "no-server" };
                 }
-                const workspaceRoot = dirname(resolve(req.filePath));
+                const resolution = resolveLanguageServer(req.filePath, process.cwd());
+                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
                 let rawEdit: LspWorkspaceEdit | null = null;
                 try {
                     rawEdit = await withBudget(
@@ -229,7 +231,8 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 if (!bridge || typeof (bridge as unknown as { formatting?: unknown }).formatting !== "function") {
                     return { ok: false, error: "no-server" };
                 }
-                const workspaceRoot = dirname(resolve(req.filePath));
+                const resolution = resolveLanguageServer(req.filePath, process.cwd());
+                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
                 let rawEdit: LspWorkspaceEdit | null = null;
                 try {
                     rawEdit = await withBudget(
@@ -254,7 +257,8 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 if (!bridge || typeof (bridge as unknown as { codeActions?: unknown }).codeActions !== "function") {
                     return { ok: false, error: "no-server" };
                 }
-                const workspaceRoot = dirname(resolve(req.filePath));
+                const resolution = resolveLanguageServer(req.filePath, process.cwd());
+                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
                 const line0 = Math.max(0, req.line - 1);
                 const char0 = Math.max(0, req.character - 1);
                 const endLine0 = req.endLine !== undefined ? Math.max(0, req.endLine - 1) : line0;

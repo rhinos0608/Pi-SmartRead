@@ -13,8 +13,18 @@ import {
   copyFileSync,
   statSync,
   writeSync,
+  realpathSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve as pathResolve, sep as pathSep } from "node:path";
+
+function isPathContained(candidate: string, root: string): boolean {
+  const normalizedRoot = pathResolve(root);
+  let realRoot: string;
+  try { realRoot = realpathSync(normalizedRoot); } catch { realRoot = normalizedRoot; }
+  let normalizedCandidate: string;
+  try { normalizedCandidate = realpathSync(candidate); } catch { normalizedCandidate = pathResolve(candidate); }
+  return normalizedCandidate === realRoot || normalizedCandidate.startsWith(realRoot + pathSep);
+}
 import { homedir } from "node:os";
 import { spawn as nodeSpawn } from "node:child_process";
 
@@ -37,6 +47,63 @@ function lockfilePath(home = homedir()): string {
 }
 function lockPathFor(packageName: string, home = homedir()): string {
   return join(locksDir(home), `${packageName}.lock`);
+}
+
+async function withLockfileLock<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = join(locksDir(home), "runtime.lock.json.lock");
+  try { mkdirSync(dirname(lockPath), { recursive: true }); } catch { /* ignore */ }
+  const staleThresholdMs = DEFAULT_INSTALL_TIMEOUT_MS + STALE_LOCK_MARGIN_MS;
+  const timeoutMs = 5000;
+  const start = Date.now();
+  let delay = 20;
+  let fd: number | null = null;
+  let token: string | null = null;
+  while (true) {
+    try {
+      fd = openSync(lockPath, "wx");
+      token = `${process.pid}:${Date.now()}:${staleThresholdMs}`;
+      try { writeSync(fd, token); } catch { /* ignore */ }
+      break;
+    } catch (e: unknown) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code !== "EEXIST") {
+        throw new Error(`failed to acquire lockfile lock: ${String(e)}`);
+      }
+      try {
+        let effectiveThreshold = staleThresholdMs;
+        try {
+          const content = readFileSync(lockPath, "utf-8");
+          const stored = Number(content.split(":")[2]);
+          if (Number.isFinite(stored) && stored > 0) effectiveThreshold = stored;
+        } catch { /* ignore */ }
+        const st = statSync(lockPath);
+        const age = Date.now() - st.mtimeMs;
+        if (age > effectiveThreshold) {
+          try { unlinkSync(lockPath); } catch { /* ignore */ }
+          continue;
+        }
+        try {
+          const content = readFileSync(lockPath, "utf-8");
+          const ts = Number(content.split(":")[1]);
+          if (Number.isFinite(ts) && Date.now() - ts > effectiveThreshold) {
+            try { unlinkSync(lockPath); } catch { /* ignore */ }
+            continue;
+          }
+        } catch { /* ignore */ }
+      } catch { /* ignore */ }
+      if (Date.now() - start >= timeoutMs) {
+        throw new Error("failed to acquire lockfile lock: timeout");
+      }
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 1.5, 200);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (fd !== null && token !== null) releaseLock(fd, lockPath, token);
+    else if (fd !== null) releaseLock(fd, lockPath);
+  }
 }
 
 // Lockfile schema
@@ -218,9 +285,12 @@ export type ManagedInstall = { packageName: string; version: string; bin: string
 
 export function isServerInstalled(packageName: string, version: string, home = homedir()): boolean {
   const lf = readLockfile(home);
+  const managedRoot = getInstallerStorageRoot(home);
   for (const entry of Object.values(lf.servers)) {
     if (entry.packageName === packageName && entry.version === version) {
-      if (existsSync(entry.resolvedBinPath)) return true;
+      const p = entry.resolvedBinPath;
+      if (!isPathContained(p, managedRoot)) return false;
+      if (existsSync(p)) return true;
     }
   }
   return false;
@@ -228,11 +298,17 @@ export function isServerInstalled(packageName: string, version: string, home = h
 
 export function getInstalledBinPath(packageName: string, bin: string, home = homedir()): string | null {
   const lf = readLockfile(home);
+  const managedRoot = getInstallerStorageRoot(home);
+  const isContained = (p: string): boolean => isPathContained(p, managedRoot);
   // key is bin; also search by values for robustness
   const byKey = lf.servers[bin];
-  if (byKey && byKey.packageName === packageName && existsSync(byKey.resolvedBinPath)) return byKey.resolvedBinPath;
+  if (byKey && byKey.packageName === packageName) {
+    if (!isContained(byKey.resolvedBinPath)) return null;
+    if (existsSync(byKey.resolvedBinPath)) return byKey.resolvedBinPath;
+  }
   for (const entry of Object.values(lf.servers)) {
     if (entry.packageName === packageName && (entry.resolvedBinPath.endsWith(`/${bin}`) || entry.resolvedBinPath.endsWith(`\\${bin}`))) {
+      if (!isContained(entry.resolvedBinPath)) continue;
       if (existsSync(entry.resolvedBinPath)) return entry.resolvedBinPath;
     }
   }
@@ -240,6 +316,7 @@ export function getInstalledBinPath(packageName: string, bin: string, home = hom
   // Fallback: check if any entry's bin matches requested bin and package matches
   for (const [k, entry] of Object.entries(lf.servers)) {
     if (k === bin && entry.packageName === packageName) {
+      if (!isContained(entry.resolvedBinPath)) return null;
       if (existsSync(entry.resolvedBinPath)) return entry.resolvedBinPath;
     }
   }
@@ -258,6 +335,7 @@ function runSpawn(
       env: process.env,
     } as never);
 
+    const MAX_OUTPUT = 100 * 1024;
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -275,8 +353,17 @@ function runSpawn(
 
     const onData = (chunk: Buffer | string, isErr: boolean) => {
       const text = chunk.toString();
-      if (isErr) stderr += text;
-      else stdout += text;
+      if (isErr) {
+        if (stderr.length < MAX_OUTPUT) {
+          stderr += text;
+          if (stderr.length >= MAX_OUTPUT) stderr = stderr.slice(0, MAX_OUTPUT) + "\n[stderr truncated]";
+        }
+      } else {
+        if (stdout.length < MAX_OUTPUT) {
+          stdout += text;
+          if (stdout.length >= MAX_OUTPUT) stdout = stdout.slice(0, MAX_OUTPUT) + "\n[stdout truncated]";
+        }
+      }
       if (opts.onLog) {
         const lines = text.split("\n");
         for (const l of lines) if (l.trim()) opts.onLog(l);
@@ -370,6 +457,33 @@ export async function installServer(
       }
       renameSync(tempDir, pkgRoot);
       tempDir = null;
+      // P2-9: lightweight integrity check — verify installed package version matches catalog
+      {
+        let mismatch: string | null = null;
+        let readErr: unknown = null;
+        try {
+          const installedPkgPath = join(pkgRoot, "node_modules", packageName, "package.json");
+          const raw = readFileSync(installedPkgPath, "utf-8");
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          const installedVersion = typeof parsed.version === "string" ? parsed.version : "";
+          if (installedVersion !== version) mismatch = `installed version mismatch: expected ${version} got ${installedVersion || "unknown"}`;
+        } catch (e) {
+          readErr = e;
+        }
+        if (mismatch || readErr) {
+          try { rmSync(pkgRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+          let restoreFailed = false;
+          let restoreErr: unknown = null;
+          if (usedBackup) {
+            try { renameSync(backupPath, pkgRoot); } catch (re) { restoreFailed = true; restoreErr = re; }
+          }
+          if (restoreFailed) {
+            return { ok: false, error: `${mismatch ?? `integrity check failed: ${String(readErr).slice(0, 500)}`} — AND backup restore also failed, manual recovery needed at ${backupPath}: ${String(restoreErr)}` };
+          }
+          if (mismatch) return { ok: false, error: mismatch };
+          return { ok: false, error: `integrity check failed: ${String(readErr).slice(0, 500)}` };
+        }
+      }
     } catch (e) {
       let restoreFailed = false;
       let restoreErr: unknown = null;
@@ -444,21 +558,24 @@ export async function installServer(
     void linked;
 
     // Update lockfile atomically — key by bin to allow vscode triple sharing packageName
-    const lf = readLockfile(home);
-    lf.servers[bin] = {
-      packageName,
-      version,
-      resolvedBinPath,
-      installedAt: new Date().toISOString(),
-      platform: process.platform,
-      arch: process.arch,
-    };
+    // Guarded by global lockfile lock to prevent last-writer-wins across different packages.
     try {
-      if (_forceLockfileFailNext) {
-        _forceLockfileFailNext = false;
-        throw new Error("mock lockfile write failure");
-      }
-      writeLockfileAtomic(lf, home);
+      await withLockfileLock(home, async () => {
+        const lf = readLockfile(home);
+        lf.servers[bin] = {
+          packageName,
+          version,
+          resolvedBinPath,
+          installedAt: new Date().toISOString(),
+          platform: process.platform,
+          arch: process.arch,
+        };
+        if (_forceLockfileFailNext) {
+          _forceLockfileFailNext = false;
+          throw new Error("mock lockfile write failure");
+        }
+        writeLockfileAtomic(lf, home);
+      });
     } catch (e) {
       const restored = restoreFromBackup();
       if (!restored.ok) {
@@ -495,26 +612,45 @@ export async function uninstallServer(
       rmSync(pkgRoot, { recursive: true, force: true });
     }
     // Remove all lockfile entries referencing this packageName
-    const lf = readLockfile(home);
-    let changed = false;
-    for (const [k, v] of Object.entries(lf.servers)) {
-      if (v.packageName === packageName) {
-        // also remove bin symlink if exists
-        const binDest = join(binDir(home), k);
-        try { if (existsSync(binDest)) unlinkSync(binDest); } catch { try { rmSync(binDest, { force: true }); } catch {} }
-        // also try by bin name from entry
-        const binFromPath = v.resolvedBinPath.split("/").pop() ?? "";
-        if (binFromPath && binFromPath !== k) {
-          const alt = join(binDir(home), binFromPath);
-          try { if (existsSync(alt)) unlinkSync(alt); } catch { /* ignore */ }
-        }
-        delete lf.servers[k];
-        changed = true;
+    // Guarded by global lockfile lock so concurrent installs of other packages don't get clobbered.
+    // Collect bins to clean, then mutate lockfile under global lock.
+    const binsToClean: string[] = [];
+    {
+      const lfPeek = readLockfile(home);
+      for (const [k, v] of Object.entries(lfPeek.servers)) {
+        if (v.packageName === packageName) binsToClean.push(k);
       }
     }
-    if (changed) {
-      writeLockfileAtomic(lf, home);
+    for (const k of binsToClean) {
+      const binDest = join(binDir(home), k);
+      try { if (existsSync(binDest)) unlinkSync(binDest); } catch { try { rmSync(binDest, { force: true }); } catch {} }
     }
+    // Also clean alt bin names derived from resolvedBinPath
+    {
+      const lfPeek2 = readLockfile(home);
+      for (const v of Object.values(lfPeek2.servers)) {
+        if (v.packageName === packageName) {
+          const binFromPath = v.resolvedBinPath.split("/").pop() ?? "";
+          if (binFromPath && !binsToClean.includes(binFromPath)) {
+            const alt = join(binDir(home), binFromPath);
+            try { if (existsSync(alt)) unlinkSync(alt); } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+    await withLockfileLock(home, async () => {
+      const lf = readLockfile(home);
+      let changed = false;
+      for (const [k, v] of Object.entries(lf.servers)) {
+        if (v.packageName === packageName) {
+          delete lf.servers[k];
+          changed = true;
+        }
+      }
+      if (changed) {
+        writeLockfileAtomic(lf, home);
+      }
+    });
     // Cleanup any leftover temp dirs for this package
     try {
       const files = readdirSync(packagesDir(home));
