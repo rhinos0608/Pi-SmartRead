@@ -64,7 +64,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@orama/orama": "^3.1.18",
-    "@rhinos0608/pi-workspace-protocol": "file:../Pi-Workspace-Protocol-phase2",
+    "@rhinos0608/pi-workspace-protocol": "file:../Pi-Workspace-Protocol",
     "@sinclair/typebox": "^0.34.13",
     "ignore": "^7.0.5",
     "sqlite-vec": "^0.1.9",
