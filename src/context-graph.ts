@@ -1,5 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { findSrcFiles } from "./file-discovery.js";
 import { getTagsBatch, initParser } from "./tags.js";
@@ -14,6 +13,10 @@ import { getIncrementalIndex } from "./incremental-index.js";
 import { writeCoverage } from "./index-coverage.js";
 import { chooseConcurrency } from "./adaptive-concurrency.js";
 import { writeSnapshot, computeSourceHash } from "./index-snapshot.js";
+import { EdgeStore } from "./edge-store.js";
+
+// Re-exported for compatibility (moved to edge-store.ts).
+export { EdgeStore, type MutationEvent } from "./edge-store.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -86,6 +89,44 @@ export function resolveImportSpecifier(cwd: string, importerPath: string, specif
   }
 
   return undefined;
+}
+
+// ── Small shared helpers (pure, no behavior change) ─────────────────
+
+/** Dedup key for symbol-neighbour results. */
+function pushTagNeighbour(
+  results: GraphNeighbour[],
+  seen: Set<string>,
+  fname: string,
+  from: string,
+  type: EdgeType,
+  confidence: number,
+): void {
+  const pairKey = `${fname}::${type}`;
+  if (seen.has(pairKey)) return;
+  seen.add(pairKey);
+  results.push({ path: fname, provenance: { from, to: fname, type, confidence } });
+}
+
+/** Collect call-graph neighbours for one function entry (calls or called_by). */
+function collectCallEdges(
+  func: { calls: string[]; calledBy: string[] },
+  field: "calls" | "calledBy",
+  relPath: string,
+  root: string,
+): Array<{ path: string; type: EdgeType }> {
+  const out: Array<{ path: string; type: EdgeType }> = [];
+  const edgeType: EdgeType = field === "calls" ? "calls" : "called_by";
+  for (const entry of func[field]) {
+    const parts = entry.split(":");
+    if (parts.length !== 2) continue;
+    const file = parts[0];
+    if (!file || file === relPath) continue;
+    const fullPath = resolve(root, file);
+    if (!isReadableWorkspaceFile(root, fullPath)) continue;
+    out.push({ path: fullPath, type: edgeType });
+  }
+  return out;
 }
 
 // ── Graph Service ─────────────────────────────────────────────────
@@ -356,33 +397,19 @@ export class ContextGraph {
     // 1. Direct Imports
     const importNeighbours = this.getImportNeighbours(path);
     for (const n of importNeighbours) {
-      if (!seen.has(resolve(n))) {
-        seen.add(resolve(n));
-        const provenance: Provenance = { from: path, to: n, type: "imports", confidence: 1.0 };
-        neighbours.push({ path: n, provenance });
-        this.recordProvenance(provenance);
-      }
+      this.addUniqueNeighbour(neighbours, seen, n, { from: path, to: n, type: "imports", confidence: 1.0 });
     }
 
     // 2. Reverse imports from built adjacency (no workspace rescan)
     for (const n of this.getImportDependents(path)) {
-      if (!seen.has(resolve(n))) {
-        seen.add(resolve(n));
-        const provenance: Provenance = { from: path, to: n, type: "imported_by", confidence: 1.0 };
-        neighbours.push({ path: n, provenance });
-        this.recordProvenance(provenance);
-      }
+      this.addUniqueNeighbour(neighbours, seen, n, { from: path, to: n, type: "imported_by", confidence: 1.0 });
     }
 
     // 3. Symbol-based neighbours (Phase 1: definitions for symbols used in this file)
     if (options.includeSymbols) {
       const symbolNeighbours = await this.getSymbolNeighbours(path, options);
       for (const n of symbolNeighbours) {
-        if (!seen.has(resolve(n.path))) {
-          seen.add(resolve(n.path));
-          neighbours.push(n);
-          this.recordProvenance(n.provenance);
-        }
+        this.addUniqueNeighbour(neighbours, seen, n.path, n.provenance);
       }
     }
 
@@ -390,11 +417,7 @@ export class ContextGraph {
     if (options.includeCalls && this.callGraph) {
       const callNeighbours = this.getCallNeighbours(path);
       for (const n of callNeighbours) {
-        if (!seen.has(resolve(n.path))) {
-          seen.add(resolve(n.path));
-          neighbours.push(n);
-          this.recordProvenance(n.provenance);
-        }
+        this.addUniqueNeighbour(neighbours, seen, n.path, n.provenance);
       }
     }
 
@@ -419,13 +442,7 @@ export class ContextGraph {
       if (tags) {
         for (const tag of tags) {
           const type: EdgeType = tag.kind === "def" ? "defines" : "references";
-          const pairKey = `${tag.fname}::${type}`;
-          if (seen.has(pairKey)) continue;
-          seen.add(pairKey);
-          results.push({
-            path: tag.fname,
-            provenance: { from: queryOrIdentifier, to: tag.fname, type, confidence: 0.9 },
-          });
+          pushTagNeighbour(results, seen, tag.fname, queryOrIdentifier, type, 0.9);
         }
       }
       return results;
@@ -443,24 +460,12 @@ export class ContextGraph {
 
       for (const def of resolution.definitions) {
         const fullPath = resolve(this.root, def.file);
-        const pairKey = `${fullPath}::defines`;
-        if (seen.has(pairKey)) continue;
-        seen.add(pairKey);
-        results.push({
-          path: fullPath,
-          provenance: { from: queryOrIdentifier, to: fullPath, type: "defines", confidence: 0.9 },
-        });
+        pushTagNeighbour(results, seen, fullPath, queryOrIdentifier, "defines", 0.9);
       }
 
       for (const ref of resolution.references) {
         const fullPath = resolve(this.root, ref.file);
-        const pairKey = `${fullPath}::references`;
-        if (seen.has(pairKey)) continue;
-        seen.add(pairKey);
-        results.push({
-          path: fullPath,
-          provenance: { from: queryOrIdentifier, to: fullPath, type: "references", confidence: 0.8 },
-        });
+        pushTagNeighbour(results, seen, fullPath, queryOrIdentifier, "references", 0.8);
       }
     } catch {
       // Fall back to raw tag-based lookup
@@ -469,14 +474,9 @@ export class ContextGraph {
       const tags = await getTagsBatch(fileObjects, this.tagsCache, options.forceRefresh ?? false);
 
       for (const tag of tags) {
-        if (tag.name === queryOrIdentifier) {
-          const type: EdgeType = tag.kind === "def" ? "defines" : "references";
-          const pairKey = `${tag.fname}::${type}`;
-          if (seen.has(pairKey)) continue;
-          seen.add(pairKey);
-          const provenance: Provenance = { from: queryOrIdentifier, to: tag.fname, type, confidence: 0.8 };
-          results.push({ path: tag.fname, provenance });
-        }
+        if (tag.name !== queryOrIdentifier) continue;
+        const type: EdgeType = tag.kind === "def" ? "defines" : "references";
+        pushTagNeighbour(results, seen, tag.fname, queryOrIdentifier, type, 0.8);
       }
     }
 
@@ -488,6 +488,20 @@ export class ContextGraph {
    */
   explainPathAddition(path: string): Provenance | undefined {
     return this.provenances.get(resolve(path));
+  }
+
+  /** Append a neighbour once per resolved path and record its provenance. */
+  private addUniqueNeighbour(
+    neighbours: GraphNeighbour[],
+    seen: Set<string>,
+    path: string,
+    provenance: Provenance,
+  ): void {
+    const key = resolve(path);
+    if (seen.has(key)) return;
+    seen.add(key);
+    neighbours.push({ path, provenance });
+    this.recordProvenance(provenance);
   }
 
   private recordProvenance(p: Provenance): void {
@@ -535,39 +549,14 @@ export class ContextGraph {
     const functionsInFile = this.callGraph.functions.filter(f => f.file === relPath);
 
     for (const func of functionsInFile) {
-      // Functions this file calls
-      for (const calleeStr of func.calls) {
-        // calleeStr is typically file:func or func
-        const parts = calleeStr.split(":");
-        if (parts.length === 2) {
-          const calleeFile = parts[0];
-          if (calleeFile && calleeFile !== relPath) {
-            const calleePath = resolve(this.root, calleeFile);
-            if (isReadableWorkspaceFile(this.root, calleePath)) {
-              neighbours.push({
-                path: calleePath,
-                provenance: { from: path, to: calleePath, type: "calls", confidence: 0.8 },
-              });
-            }
-          }
-        }
-      }
-
-      // Functions that call this file
-      for (const callerStr of func.calledBy) {
-        const parts = callerStr.split(":");
-        if (parts.length === 2) {
-          const callerFile = parts[0];
-          if (callerFile && callerFile !== relPath) {
-            const callerPath = resolve(this.root, callerFile);
-            if (isReadableWorkspaceFile(this.root, callerPath)) {
-              neighbours.push({
-                path: callerPath,
-                provenance: { from: path, to: callerPath, type: "called_by", confidence: 0.8 },
-              });
-            }
-          }
-        }
+      for (const edge of [
+        ...collectCallEdges(func, "calls", relPath, this.root),
+        ...collectCallEdges(func, "calledBy", relPath, this.root),
+      ]) {
+        neighbours.push({
+          path: edge.path,
+          provenance: { from: path, to: edge.path, type: edge.type, confidence: 0.8 },
+        });
       }
     }
 
@@ -754,268 +743,4 @@ export function findDirectImportNeighbours(cwd: string, paths: string[], maxCoun
   }
 
   return neighbours;
-}
-
-function canonicalMutationPath(root: string, value: string): string | null {
-  const marker = value.indexOf(":");
-  const filePart = marker > 0 ? value.slice(0, marker) : value;
-  const suffix = marker > 0 ? value.slice(marker) : "";
-  try {
-    const realRoot = realpathSync(resolve(root));
-    const realFile = realpathSync(resolve(root, filePart));
-    const rel = relative(realRoot, realFile);
-    if (rel.startsWith("..") || isAbsolute(rel)) return null;
-    return realFile + suffix;
-  } catch { return null; }
-}
-
-// ── EdgeStore: Event-sourced graph mutation log ────────────────────
-
-/**
- * A single mutation event recorded by the EdgeStore.
- * Each event is an append-only log entry: { type, data, timestamp }.
- */
-export interface MutationEvent {
-  id?: string;
-  /** Edge type: "breakage" | "co_change" */
-  type: "breakage" | "co_change";
-  data: {
-    /** The file or symbol that was modified (e.g. "src/auth.ts:login"). */
-    from: string;
-    /** The file or symbol that broke or co-changed (e.g. "src/types.ts:User"). */
-    to: string;
-    /** Human-readable description (e.g. "type check failed in User interface"). */
-    context?: string;
-    /** Confidence score (0-1). Default 1.0 for observed breakage. */
-    confidence?: number;
-    /** Source of observation. Omitted means legacy/untrusted. */
-    source?: "diagnostics" | "git_history" | "manual" | "same_transaction";
-  };
-  /** Unix timestamp in ms. */
-  timestamp: number;
-}
-
-/**
- * Event-sourced store for graph mutations.
- *
- * Appends mutation events (breakage, co-change) to a JSONL log file.
- * On replay, produces Provenance edges that can feed into the ContextGraph's
- * neighbor expansion.
- *
- * File location: <root>/.pi-smartread/graph-mutations.jsonl
- *
- * This is the integration point for Smart-Edit's post-edit evidence pipeline.
- * Smart-Edit writes MutationEvents here; Pi-SmartRead replays them on graph
- * construction. Determinism within a retrieval call is preserved because
- * replay happens at graph build time, not during query.
- */
-export class EdgeStore {
-  private static readonly EDGE_LOG_RELPATH = ".pi-smartread/graph-mutations.jsonl";
-  /** Max size of the mutation log file (1 MB) before tail-read is truncated. */
-  private static readonly EDGE_LOG_MAX_BYTES = 1024 * 1024;
-  /** Max context string length per event. */
-  private static readonly EDGE_CONTEXT_MAX_CHARS = 500;
-  /** Max lines to read from the tail of the log. */
-  private static readonly EDGE_LOG_MAX_LINES = 5000;
-
-  /**
-   * Append a breakage event to the mutation log.
-   *
-   * @param root - Project root directory (used for log file location).
-   * @param from - File/symbol that was modified (e.g. "src/auth.ts:login").
-   * @param to - File/symbol that broke (e.g. "src/types.ts:User").
-   * @param context - Optional human-readable description.
-   * @param confidence - Confidence score (0-1). Default 1.0 for observed breakage.
-   */
-  static recordBreakage(
-    root: string,
-    from: string,
-    to: string,
-    context?: string,
-    confidence?: number,
-  ): boolean {
-    const event: MutationEvent = {
-      type: "breakage",
-      data: {
-        from,
-        to,
-        context: context ? context.slice(0, EdgeStore.EDGE_CONTEXT_MAX_CHARS) : undefined,
-        confidence,
-        source: "diagnostics",
-      },
-      timestamp: Date.now(),
-    };
-    return EdgeStore.append(root, event);
-  }
-
-  /**
-   * Append a co-change event to the mutation log.
-   *
-   * @param root - Project root directory.
-   * @param from - File that was edited.
-   * @param to - File that co-changed in the same commit history.
-   * @param context - Optional human-readable description (e.g. commit hash).
-   * @param confidence - Confidence score (0-1). Default 0.7 for git history.
-   */
-  static recordCoChange(
-    root: string,
-    from: string,
-    to: string,
-    context?: string,
-    confidence?: number,
-  ): boolean {
-    const event: MutationEvent = {
-      type: "co_change",
-      data: {
-        from,
-        to,
-        context: context ? context.slice(0, EdgeStore.EDGE_CONTEXT_MAX_CHARS) : undefined,
-        confidence: confidence ?? 0.7,
-        source: "git_history",
-      },
-      timestamp: Date.now(),
-    };
-    return EdgeStore.append(root, event);
-  }
-
-  /**
-   * Read all mutation events from the log, optionally filtered by recency.
-   *
-   * @param root - Project root directory.
-   * @param maxAgeMs - Only return events newer than this (ms from now). Default: 30 days.
-   * @returns Sorted array of mutation events (newest first).
-   */
-  static readEdges(root: string, maxAgeMs = 30 * 24 * 60 * 60 * 1000): MutationEvent[] {
-    const logPath = EdgeStore.getLogPath(root);
-    if (!existsSync(logPath)) return [];
-
-    const now = Date.now();
-    const events: MutationEvent[] = [];
-
-    try {
-      // Tail-read: read last EDGE_LOG_MAX_BYTES from end of file
-      const text = EdgeStore.tailRead(logPath, EdgeStore.EDGE_LOG_MAX_BYTES);
-      if (text === null) return [];
-
-      let lineCount = 0;
-      for (const line of text.split("\n")) {
-        if (lineCount >= EdgeStore.EDGE_LOG_MAX_LINES) break;
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const event = EdgeStore.validateEvent(JSON.parse(trimmed), root);
-          if (event && now - event.timestamp <= maxAgeMs) {
-            events.push(event);
-            lineCount++;
-          }
-        } catch {
-          // Skip malformed lines silently
-        }
-      }
-    } catch {
-      return [];
-    }
-
-    // Sort newest first
-    events.sort((a, b) => b.timestamp - a.timestamp);
-    return events;
-  }
-
-  /**
-   * Convert MutationEvents to Provenance edges for ContextGraph neighbor expansion.
-   * Deduplicates by (from, to, type) keeping the highest confidence.
-   */
-  static toProvenances(events: MutationEvent[], root: string): Provenance[] {
-    const best = new Map<string, Provenance>();
-
-    for (const ev of events) {
-      // Resolve relative paths against root
-      const fromPath = canonicalMutationPath(root, ev.data.from);
-      const toPath = canonicalMutationPath(root, ev.data.to);
-      if (!fromPath || !toPath) continue;
-
-      const key = ev.id ?? `${fromPath}||${toPath}||${ev.type}`;
-
-      const edgeType: EdgeType = ev.type === "breakage" ? "breakage" : "co_change";
-      const existing = best.get(key);
-      const confidence = ev.data.confidence ?? (ev.type === "breakage" ? 1.0 : 0.7);
-
-      if (!existing || existing.confidence < confidence) {
-        best.set(key, {
-          from: fromPath,
-          to: toPath,
-          type: edgeType,
-          confidence,
-          source: ev.data.source,
-          impactEligible: ev.data.source === "diagnostics",
-        });
-      }
-    }
-
-    return [...best.values()];
-  }
-
-  private static getLogPath(root: string): string {
-    return `${resolve(root)}/${EdgeStore.EDGE_LOG_RELPATH}`;
-  }
-
-  /**
-   * Tail-read: read the last `maxBytes` bytes from a file.
-   * Returns null if the file cannot be read.
-   */
-  private static tailRead(filePath: string, maxBytes: number): string | null {
-    try {
-      const fd = openSync(filePath, "r");
-      const stat = statSync(filePath);
-      const readSize = Math.min(stat.size, maxBytes);
-      const startPos = Math.max(0, stat.size - readSize);
-      const buffer = Buffer.alloc(readSize);
-      readSync(fd, buffer, 0, readSize, startPos);
-      closeSync(fd);
-      return buffer.toString("utf-8");
-    } catch {
-      return null;
-    }
-  }
-
-  private static validateEvent(value: unknown, root: string): MutationEvent | null {
-    if (!value || typeof value !== "object") return null;
-    const v = value as Record<string, unknown>;
-    if (v.type !== "breakage" && v.type !== "co_change") return null;
-    if (!Number.isFinite(v.timestamp) || (v.timestamp as number) < 0 || (v.timestamp as number) > Date.now() + 86_400_000) return null;
-    if (!v.data || typeof v.data !== "object") return null;
-    const d = v.data as Record<string, unknown>;
-    if (typeof d.from !== "string" || typeof d.to !== "string" || d.from.length === 0 || d.to.length === 0 || d.from.length > 1000 || d.to.length > 1000) return null;
-    if (d.context !== undefined && (typeof d.context !== "string" || d.context.length > EdgeStore.EDGE_CONTEXT_MAX_CHARS)) return null;
-    if (d.confidence !== undefined && (!Number.isFinite(d.confidence) || (d.confidence as number) < 0 || (d.confidence as number) > 1)) return null;
-    const sources = ["diagnostics", "git_history", "manual", "same_transaction"];
-    if (d.source !== undefined && (typeof d.source !== "string" || !sources.includes(d.source))) return null;
-    const from = canonicalMutationPath(root, d.from);
-    const to = canonicalMutationPath(root, d.to);
-    if (!from || !to) return null;
-    const id = typeof v.id === "string" && v.id.length <= 200 ? v.id : createHash("sha256").update(JSON.stringify([v.type, from, to, d.context ?? "", d.confidence ?? null, d.source ?? "legacy", v.timestamp])).digest("hex");
-    return { id, type: v.type, data: { from, to, ...(typeof d.context === "string" ? { context: d.context } : {}), ...(typeof d.confidence === "number" ? { confidence: d.confidence } : {}), ...(typeof d.source === "string" ? { source: d.source as MutationEvent["data"]["source"] } : {}) }, timestamp: v.timestamp as number };
-  }
-
-  private static append(root: string, event: MutationEvent): boolean {
-    const valid = EdgeStore.validateEvent(event, root);
-    if (!valid) return false;
-    const logPath = EdgeStore.getLogPath(root);
-    const dir = dirname(logPath);
-
-    try {
-      mkdirSync(dir, { recursive: true });
-    } catch {
-      // Directory may already exist
-    }
-
-    const line = JSON.stringify(valid) + "\n";
-    try {
-      appendFileSync(logPath, line, "utf-8");
-      return true;
-    } catch {
-      // Report persistence failure to the caller (graph_mutate returns an error).
-      return false;
-    }
-  }
 }
