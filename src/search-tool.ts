@@ -31,6 +31,28 @@ import { expandToMonorepoRoots } from "./monorepo-detector.js";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { recordSparse, resolveSessionKey } from "./file-read-cache.js";
 import { executeDeepSearch } from "./deep-search.js";
+import {
+  evaluateBooleanExpression,
+  parseBooleanQuery,
+} from "./boolean-query.js";
+// Facade re-exports: boolean-query lives in its own module.
+// Re-exported here so existing `search-tool.js` import paths keep working.
+export {
+  evaluateBooleanExpression,
+  parseBooleanQuery,
+  type BooleanExpression,
+} from "./boolean-query.js";
+import {
+  matchAstNodesInFile,
+  parseAstPattern,
+} from "./search-ast-pattern.js";
+// Facade re-exports: search-ast-pattern lives in its own module.
+// Re-exported here so existing `search-tool.js` import paths keep working.
+export {
+  parseAstPattern,
+  type ParsedAstPattern,
+} from "./search-ast-pattern.js";
+
 
 type SearchMatchMode = "literal" | "regex" | "boolean" | "ast_pattern";
 
@@ -132,19 +154,10 @@ async function extractCodeDefinitions(
   const grammar = loadLanguage(lang);
   if (!grammar) return [];
 
-  let code: string;
-  try {
-    code = await fs.readFile(filePath, "utf-8");
-  } catch {
-    return [];
-  }
+  const code = await readTextFileQuiet(filePath);
+  if (code === null) return [];
 
-  let parser = parserPool.get(lang);
-  if (!parser) {
-    parser = new Parser();
-    parser.setLanguage(grammar);
-    parserPool.set(lang, parser);
-  }
+  const parser = getSharedParser(lang, grammar);
   const chunkSize = 1024;
   const tree = parser.parse((offset) => code.slice(offset, offset + chunkSize));
   if (!tree?.rootNode) return [];
@@ -324,6 +337,85 @@ function clampMaxResults(value: number | undefined): number {
   return Math.max(1, Math.min(10000, Math.trunc(value)));
 }
 
+/** Repo-relative path with posix separators for display and evidence keys. */
+function toRelPath(cwd: string, filePath: string): string {
+  return relative(cwd, filePath).replace(/\\/g, "/");
+}
+
+/** Pooled tree-sitter parser per language; avoids rebuilding parsers per file. */
+function getSharedParser(lang: string, grammar: NonNullable<ReturnType<typeof loadLanguage>>): Parser {
+  let parser = parserPool.get(lang);
+  if (!parser) {
+    parser = new Parser();
+    parser.setLanguage(grammar);
+    parserPool.set(lang, parser);
+  }
+  return parser;
+}
+
+/** Quiet file read: null on failure so callers can skip without branching. */
+async function readTextFileQuiet(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/** True when file exceeds scan budget or is unreadable (callers skip either way). */
+async function shouldSkipOversizedFile(filePath: string, maxBytes: number): Promise<boolean> {
+  try {
+    const stat = await fs.stat(filePath);
+    return stat.size > maxBytes;
+  } catch {
+    return true;
+  }
+}
+
+/** Case-aware literal substring matcher shared by literal and fallback paths. */
+function literalMatcher(query: string, caseSensitive: boolean): (line: string) => boolean {
+  if (caseSensitive) return (line) => line.includes(query);
+  const lowered = query.toLowerCase();
+  return (line) => line.toLowerCase().includes(lowered);
+}
+
+/** Cached definition lookup; extracts on miss. */
+async function getOrExtractDefinitions(
+  cache: Map<string, CodeDefinition[]>,
+  filePath: string,
+  relFile: string,
+): Promise<CodeDefinition[]> {
+  const cached = cache.get(filePath);
+  if (cached) return cached;
+  const defs = await extractCodeDefinitions(filePath, relFile);
+  cache.set(filePath, defs);
+  return defs;
+}
+
+/** Definition hits first, then path + line order. */
+function sortGrepMatches(matches: GrepSearchMatch[]): void {
+  matches.sort((a, b) => {
+    if (a.group !== b.group) return a.group === "definition" ? -1 : 1;
+    return a.relFile.localeCompare(b.relFile) || a.line - b.line;
+  });
+}
+
+/** Group matches by file for sparse session cache. */
+function recordGrepMatches(
+  sessionKey: string,
+  matches: Array<{ file: string; line: number; snippet: string }>,
+): void {
+  const byFile = new Map<string, Array<{ line: number; text: string }>>();
+  for (const match of matches) {
+    const entries = byFile.get(match.file) ?? [];
+    entries.push({ line: match.line, text: match.snippet });
+    byFile.set(match.file, entries);
+  }
+  for (const [absPath, entries] of byFile) {
+    recordSparse(sessionKey, absPath, entries);
+  }
+}
+
 function collapseSearchRoots(roots: string[]): string[] {
   const unique = [...new Set(roots.map((root) => resolve(root)))].sort((a, b) => a.length - b.length);
   const kept: string[] = [];
@@ -383,196 +475,7 @@ async function discoverAcrossRoots(
   return { files, summary };
 }
 
-// ── Boolean query parser & evaluator ──────────────────────────────────
-
-interface BooleanExpression {
-  kind: "term" | "phrase" | "not" | "and" | "or";
-  value?: string;
-  left?: BooleanExpression;
-  right?: BooleanExpression;
-  expr?: BooleanExpression;
-}
-
-type BooleanToken =
-  | { type: "word" | "phrase" | "eof"; value: string }
-  | { type: "op"; value: "AND" | "OR" | "NOT" }
-  | { type: "paren"; value: "(" | ")" };
-
-function tokenize(query: string): BooleanToken[] {
-  const tokens: BooleanToken[] = [];
-  let i = 0;
-  while (i < query.length) {
-    if (/\s/.test(query[i]!)) {
-      i++;
-      continue;
-    }
-    if (query[i] === "(" || query[i] === ")") {
-      tokens.push({ type: "paren", value: query[i] as "(" | ")" });
-      i++;
-      continue;
-    }
-    if (query[i] === '"') {
-      let j = i + 1;
-      while (j < query.length && query[j] !== '"') j++;
-      tokens.push({ type: "phrase", value: query.slice(i + 1, j) });
-      i = j + 1;
-      continue;
-    }
-    let j = i;
-    while (
-      j < query.length &&
-      !/\s/.test(query[j]!) &&
-      query[j] !== "(" &&
-      query[j] !== ")" &&
-      query[j] !== '"'
-    ) {
-      j++;
-    }
-    const word = query.slice(i, j);
-    const upper = word.toUpperCase();
-    if (upper === "AND" || upper === "OR" || upper === "NOT") {
-      tokens.push({ type: "op", value: upper as "AND" | "OR" | "NOT" });
-    } else {
-      tokens.push({ type: "word", value: word });
-    }
-    i = j;
-  }
-  tokens.push({ type: "eof", value: "" });
-  return tokens;
-}
-
-/**
- * Parse a boolean query string into an expression AST.
- *
- * Grammar (precedence: NOT > AND > OR):
- *   expression := or_expr
- *   or_expr := and_expr ("OR" and_expr)*
- *   and_expr := not_expr ("AND"? not_expr)*
- *   not_expr := "NOT" not_expr | primary
- *   primary := "(" expression ")" | phrase | term
- *   phrase := '"' [^"]* '"'
- *   term := [^\s()"]+
- */
-export function parseBooleanQuery(query: string): BooleanExpression {
-  const trimmed = query.trim();
-  if (!trimmed) return { kind: "term", value: "" };
-
-  const tokens = tokenize(trimmed);
-  let pos = 0;
-
-  const peek = (): BooleanToken => tokens[pos] ?? { type: "eof", value: "" };
-  const consume = (): BooleanToken => tokens[pos++] ?? { type: "eof", value: "" };
-
-  const parseOr = (): BooleanExpression => {
-    let left = parseAnd();
-    while (peek().type === "op" && (peek() as { value: string }).value === "OR") {
-      consume();
-      const right = parseAnd();
-      left = { kind: "or", left, right };
-    }
-    return left;
-  };
-
-  const parseAnd = (): BooleanExpression => {
-    // Leading OR/AND: treat as just the right operand
-    if (peek()?.value?.toUpperCase() === "OR" || peek()?.value?.toUpperCase() === "AND") {
-      consume(); // skip the operator
-    }
-    let left = parseNot();
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const token = peek();
-      if (token.type === "eof") break;
-      if (token.type === "op" && (token as { value: string }).value === "OR") break;
-      if (token.type === "paren" && (token as { value: string }).value === ")") break;
-
-      // Consume explicit AND if present
-      if (token.type === "op" && (token as { value: string }).value === "AND") {
-        consume();
-      }
-
-      const next = peek();
-      if (
-        (next.type === "op" && (next as { value: string }).value === "NOT") ||
-        next.type === "word" ||
-        next.type === "phrase" ||
-        (next.type === "paren" && (next as { value: string }).value === "(")
-      ) {
-        const right = parseNot();
-        left = { kind: "and", left, right };
-      } else {
-        break;
-      }
-    }
-    return left;
-  };
-
-  const parseNot = (): BooleanExpression => {
-    if (peek().type === "op" && (peek() as { value: string }).value === "NOT") {
-      consume();
-      return { kind: "not", expr: parseNot() };
-    }
-    return parsePrimary();
-  };
-
-  const parsePrimary = (): BooleanExpression => {
-    if (peek().type === "paren" && (peek() as { value: string }).value === "(") {
-      consume();
-      const expr = parseOr();
-      // Consume closing paren if present (unmatched paren is tolerated)
-      if (peek().type === "paren" && (peek() as { value: string }).value === ")") {
-        consume();
-      }
-      return expr;
-    }
-    if (peek().type === "phrase") {
-      const t = consume() as { value: string };
-      return { kind: "phrase", value: t.value };
-    }
-    if (peek().type === "word") {
-      const t = consume() as { value: string };
-      return { kind: "term", value: t.value };
-    }
-    // Should not reach here with well-formed input; consume and return empty
-    consume();
-    return { kind: "term", value: "" };
-  };
-
-  return parseOr();
-}
-
-/** Evaluate a parsed boolean expression against a line of text. */
-export function evaluateBooleanExpression(
-  expr: BooleanExpression,
-  line: string,
-  caseSensitive: boolean,
-): boolean {
-  switch (expr.kind) {
-    case "term":
-    case "phrase": {
-      // Empty term matches nothing (handles empty/whitespace-only queries)
-      if (!expr.value) return false;
-      const haystack = caseSensitive ? line : line.toLowerCase();
-      const needle = caseSensitive ? expr.value! : expr.value!.toLowerCase();
-      return haystack.includes(needle);
-    }
-    case "not": {
-      // Bare NOT with no operand matches nothing
-      if (!expr.expr || (expr.expr.kind === "term" && !expr.expr.value)) return false;
-      return !evaluateBooleanExpression(expr.expr!, line, caseSensitive);
-    }
-    case "and":
-      return (
-        evaluateBooleanExpression(expr.left!, line, caseSensitive) &&
-        evaluateBooleanExpression(expr.right!, line, caseSensitive)
-      );
-    case "or":
-      return (
-        evaluateBooleanExpression(expr.left!, line, caseSensitive) ||
-        evaluateBooleanExpression(expr.right!, line, caseSensitive)
-      );
-  }
-}
+// Boolean query parser & evaluator lives in ./boolean-query.ts (re-exported above).
 
 function buildLineMatcher(
   query: string,
@@ -592,21 +495,11 @@ function buildLineMatcher(
       return (line) => evaluateBooleanExpression(expr, line, caseSensitive);
     } catch {
       // Invalid boolean query — fall back to literal matching
-      if (caseSensitive) {
-        return (line) => line.includes(query);
-      }
-      const lowered = query.toLowerCase();
-      return (line) => line.toLowerCase().includes(lowered);
+      return literalMatcher(query, caseSensitive);
     }
   }
 
-  if (matchMode === "literal") {
-    if (caseSensitive) {
-      return (line) => line.includes(query);
-    }
-    const lowered = query.toLowerCase();
-    return (line) => line.toLowerCase().includes(lowered);
-  }
+  if (matchMode === "literal") return literalMatcher(query, caseSensitive);
 
   const flags = caseSensitive ? "" : "i";
   let regex: RegExp;
@@ -614,11 +507,7 @@ function buildLineMatcher(
     regex = new RegExp(query, flags);
   } catch {
     // Invalid regex — fall back to literal matching
-    if (caseSensitive) {
-      return (line) => line.includes(query);
-    }
-    const lowered = query.toLowerCase();
-    return (line) => line.toLowerCase().includes(lowered);
+    return literalMatcher(query, caseSensitive);
   }
   return (line) => regex.test(line);
 }
@@ -701,542 +590,7 @@ function formatGrepResults(
   return lines.join("\n");
 }
 
-// ── AST Pattern Search ───────────────────────────────────────────
-
-/**
- * Parsed representation of an AST pattern query.
- * Converts user-friendly patterns like "fn * -> Result" into structured filters.
- */
-interface ParsedAstPattern {
-  /** Tree-sitter node types to search for */
-  nodeTypes: string[];
-  /** Whether the node must be async (null = don\'t care) */
-  isAsync: boolean | null;
-  /** Glob pattern for node name (null = any, "*" = any, "foo*" = prefix) */
-  namePattern: string | null;
-  /** Glob pattern for return type annotation (null = skip check) */
-  returnTypePattern: string | null;
-  /** Glob pattern for extends/superclass (null = skip check) */
-  extendsPattern: string | null;
-  /** Glob pattern for Rust impl for-type (null = skip check) */
-  forTypePattern: string | null;
-  /** Field type patterns for body content check (null = skip) */
-  bodyFieldPatterns: string[] | null;
-  /** Regex fallback for languages without tree-sitter */
-  fallbackRegex: RegExp | null;
-}
-
-/** Maps user-friendly pattern keywords to tree-sitter node types */
-const AST_KEYWORD_NODE_TYPES: Record<string, string[]> = {
-  fn: [
-    "function_declaration",
-    "function_item",
-    "function_definition",
-    "method_definition",
-    "method_declaration",
-    "function_expression",
-    "arrow_function",
-  ],
-  class: [
-    "class_declaration",
-    "class_definition",
-    "class_specifier",
-    "class_expression",
-  ],
-  struct: [
-    "struct_item",
-    "struct_specifier",
-  ],
-  impl: [
-    "impl_item",
-  ],
-  trait: [
-    "trait_item",
-  ],
-  enum: [
-    "enum_item",
-    "enum_specifier",
-  ],
-  interface: [
-    "interface_declaration",
-  ],
-};
-
-const AST_KEYWORDS = new Set(Object.keys(AST_KEYWORD_NODE_TYPES));
-const AST_QUALIFIERS = new Set(["async", "static", "pub", "public", "private", "protected", "export"]);
-const AST_RELATIONS = new Set(["extends", "for", "implements", "with", "->"]);
-
-/**
- * Tokenize an AST pattern into tokens, normalizing parens and braces.
- *   "fn(*) -> Result"        \u2192 ["fn", "*", "->", "Result"]
- *   "class * extends Base"   \u2192 ["class", "*", "extends", "Base"]
- *   "async fn process_*"     \u2192 ["async", "fn", "process_*"]
- *   "impl * for *"           \u2192 ["impl", "*", "for", "*"]
- *   "struct * { *: String }" \u2192 ["struct", "*", "{", "*:", "String", "}"]
- */
-function tokenizeAstPattern(raw: string): string[] {
-  const normalized = raw
-    .replace(/\(\s*\*\s*\)/g, " * ")
-    .replace(/\(/g, " ( ")
-    .replace(/\)/g, " ) ")
-    .replace(/\{/g, " { ")
-    .replace(/\}/g, " } ");
-  return normalized.trim().split(/\s+/).filter(Boolean);
-}
-
-/** Escape regex special characters */
-function escapeRegex(s: string): string {
-  return s.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Convert a glob pattern (with `*` as wildcard for identifiers) to a regex pattern string.
- * Handles "*", "prefix*", "*suffix", and literal patterns.
- */
-function globToRegexPattern(glob: string): string {
-  if (glob === "*" || glob === "") return "[a-zA-Z_][a-zA-Z0-9_]*";
-  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  return escaped.replace(/\*/g, "[a-zA-Z_][a-zA-Z0-9_]*");
-}
-
-/** Check if `text` matches a glob pattern (supports "*" wildcard). */
-function globMatch(text: string, pattern: string): boolean {
-  if (pattern === "*" || pattern === null) return true;
-  if (pattern === text) return true;
-  const regexStr = `^${globToRegexPattern(pattern)}$`;
-  try {
-    return new RegExp(regexStr).test(text);
-  } catch {
-    return text.includes(pattern);
-  }
-}
-
-/**
- * Build a fallback regex from a tokenized AST pattern for languages
- * without tree-sitter support. Converts the pattern to a line-matching regex.
- */
-function buildPatternFallbackRegex(tokens: string[]): RegExp {
-  const parts: string[] = [];
-  let i = 0;
-  while (i < tokens.length) {
-    const token = tokens[i]!;
-
-    // Body block: match { ... } with flexible content
-    if (token === "{") {
-      i++;
-      const bodyTokens: string[] = [];
-      while (i < tokens.length && tokens[i] !== "}") {
-        bodyTokens.push(tokens[i]!);
-        i++;
-      }
-      if (i < tokens.length) i++; // skip "}"
-
-      if (bodyTokens.length === 0) {
-        parts.push(`\\s*\\{[^}]*\\}`);
-      } else {
-        // Extract literal type names (non-wildcard) for body matching
-        const literals = bodyTokens.filter(
-          (t) => t !== "*" && t !== "*:" && !t.includes("*"),
-        );
-        if (literals.length > 0) {
-          const typeCheck = literals.map((t) => `\\b${escapeRegex(t)}\\b`).join("[^}]*");
-          parts.push(`\\s*\\{[^}]*${typeCheck}[^}]*\\}`);
-        } else {
-          parts.push(`\\s*\\{[^}]*\\}`);
-        }
-      }
-      continue;
-    }
-
-    // Keywords and qualifiers
-    if (
-      AST_KEYWORDS.has(token) ||
-      AST_QUALIFIERS.has(token) ||
-      token === "extends" ||
-      token === "implements" ||
-      token === "for" ||
-      token === "with"
-    ) {
-      parts.push(`\\b${token}\\b`);
-    } else if (token === "*") {
-      parts.push(`[a-zA-Z_][a-zA-Z0-9_]*`);
-    } else if (token === "*:") {
-      parts.push(`[a-zA-Z_][a-zA-Z0-9_]*\\s*:`);
-    } else if (token === "->") {
-      parts.push(`->`);
-    } else if (token === "(") {
-      parts.push(`\\(`);
-    } else if (token === ")") {
-      parts.push(`\\)`);
-    } else if (token.endsWith("*") && !token.startsWith("*") && token.length > 1) {
-      // prefix* \u2192 prefix followed by identifier
-      const prefix = escapeRegex(token.slice(0, -1));
-      parts.push(`${prefix}[a-zA-Z_][a-zA-Z0-9_]*`);
-    } else if (token.startsWith("*") && token.length > 1) {
-      // *suffix \u2192 identifier followed by suffix
-      const suffix = escapeRegex(token.slice(1));
-      parts.push(`[a-zA-Z_][a-zA-Z0-9_]*${suffix}`);
-    } else {
-      parts.push(`\\b${escapeRegex(token)}\\b`);
-    }
-    i++;
-  }
-
-  return new RegExp(parts.join("\\s+"));
-}
-
-/**
- * Parse a user-friendly AST pattern string into a structured query.
- *
- * Supported patterns:
- *   fn(*) -> Result         \u2014 functions returning Result
- *   class * extends Base    \u2014 classes extending Base
- *   async fn process_*      \u2014 async functions starting with "process_"
- *   impl * for *            \u2014 trait implementations
- *   struct * { *: String }  \u2014 structs with String fields
- */
-function parseAstPattern(raw: string): ParsedAstPattern | null {
-  const tokens = tokenizeAstPattern(raw);
-  if (tokens.length === 0) return null;
-
-  // Find the structural keyword (fn, class, struct, impl, trait, enum, interface)
-  let keyword: string | null = null;
-  let keywordIdx = -1;
-  for (let i = 0; i < tokens.length; i++) {
-    if (AST_KEYWORDS.has(tokens[i]!)) {
-      keyword = tokens[i]!;
-      keywordIdx = i;
-      break;
-    }
-  }
-  if (!keyword) return null;
-
-  const qualifiers = new Set<string>();
-  let namePattern: string | null = null;
-  let returnTypePattern: string | null = null;
-  let extendsPattern: string | null = null;
-  let forTypePattern: string | null = null;
-  let bodyFieldPatterns: string[] | null = null;
-
-  // Collect qualifiers before keyword
-  for (let i = 0; i < keywordIdx; i++) {
-    if (AST_QUALIFIERS.has(tokens[i]!)) {
-      qualifiers.add(tokens[i]!);
-    }
-  }
-
-  // Keep full token list for regex fallback building
-  const allTokens = [...tokens];
-
-  // Parse tokens after keyword
-  let i = keywordIdx + 1;
-  while (i < tokens.length) {
-    const token = tokens[i]!;
-
-    // Qualifiers can appear after keyword too
-    if (AST_QUALIFIERS.has(token)) {
-      qualifiers.add(token);
-      i++;
-      continue;
-    }
-
-    // Return type: -> Type
-    if (token === "->") {
-      i++;
-      if (i < tokens.length) {
-        returnTypePattern = tokens[i]!;
-        i++;
-      }
-      continue;
-    }
-
-    // Extends: extends Base
-    if (token === "extends") {
-      i++;
-      if (i < tokens.length) {
-        extendsPattern = tokens[i]!;
-        i++;
-      }
-      continue;
-    }
-
-    // For-type (Rust impl): for Type
-    if (token === "for") {
-      i++;
-      if (i < tokens.length) {
-        forTypePattern = tokens[i]!;
-        i++;
-      }
-      continue;
-    }
-
-    // implements / with \u2014 just skip the type name
-    if (token === "implements" || token === "with") {
-      i++;
-      if (
-        i < tokens.length &&
-        tokens[i] !== "{" &&
-        tokens[i] !== "->" &&
-        !AST_RELATIONS.has(tokens[i]!)
-      ) {
-        i++; // skip the type name
-      }
-      continue;
-    }
-
-    // Body block: { field patterns }
-    if (token === "{") {
-      i++;
-      const fieldTokens: string[] = [];
-      while (i < tokens.length && tokens[i] !== "}") {
-        const ft = tokens[i]!;
-        // Strip trailing ":" from field name patterns like "*:"
-        fieldTokens.push(ft.endsWith(":") ? ft.slice(0, -1) : ft);
-        i++;
-      }
-      if (i < tokens.length) i++; // skip "}"
-
-      if (fieldTokens.length > 0) {
-        // Extract literal type names (non-wildcard tokens) for body field matching
-        const types = fieldTokens.filter(
-          (t) => t !== "*" && !AST_KEYWORDS.has(t) && !AST_QUALIFIERS.has(t) && !t.startsWith("*"),
-        );
-        bodyFieldPatterns = types.length > 0 ? types : ["*"];
-      } else {
-        bodyFieldPatterns = ["*"];
-      }
-      continue;
-    }
-
-    // Skip standalone parens \u2014 they\'re decorative in pattern syntax
-    if (token === "(" || token === ")") {
-      i++;
-      continue;
-    }
-
-    // Everything else is a name pattern or wildcard
-    if (namePattern === null) {
-      if (token === "*:" || token === "*") {
-        namePattern = "*";
-      } else if (token.includes("*")) {
-        namePattern = token.replace(/:$/, "");
-      } else if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token)) {
-        namePattern = token;
-      }
-    }
-    i++;
-  }
-
-  const nodeTypes = AST_KEYWORD_NODE_TYPES[keyword] ?? [];
-  const isAsync = qualifiers.has("async") ? true : null;
-  const fallbackRegex = buildPatternFallbackRegex(allTokens);
-
-  return {
-    nodeTypes,
-    isAsync,
-    namePattern,
-    returnTypePattern,
-    extendsPattern,
-    forTypePattern,
-    bodyFieldPatterns,
-    fallbackRegex,
-  };
-}
-
-/**
- * Extract the "name" from a tree-sitter AST node.
- * Tries the "name" field first, then "trait" field (Rust impl),
- * then falls back to the first identifier-like child.
- */
-function getNodeName(node: Parser.SyntaxNode): string | null {
-  const nameNode = node.childForFieldName("name");
-  if (nameNode) return nameNode.text;
-
-  // For Rust impl_item, use "trait" field
-  const traitNode = node.childForFieldName("trait");
-  if (traitNode) return traitNode.text;
-
-  // Fallback to first identifier child
-  for (const child of node.namedChildren) {
-    if (
-      child.type === "identifier" ||
-      child.type === "type_identifier" ||
-      child.type === "property_identifier"
-    ) {
-      return child.text;
-    }
-  }
-  return null;
-}
-
-/**
- * Find the body child of a tree-sitter AST node.
- * Looks for children with body-like type names.
- */
-function findBodyChild(node: Parser.SyntaxNode): Parser.SyntaxNode | null {
-  for (const child of node.namedChildren) {
-    const t = child.type;
-    if (
-      t.endsWith("_body") ||
-      t === "body" ||
-      t === "block" ||
-      t === "statement_block" ||
-      t === "declaration_list" ||
-      t === "field_declaration_list" ||
-      t === "class_body"
-    ) {
-      return child;
-    }
-  }
-  return null;
-}
-
-/**
- * Check whether a tree-sitter AST node matches the parsed AST pattern query.
- * Applies all non-null filters from the query against the node.
- */
-function checkAstNodeMatches(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
-  // 1. Node type filter
-  if (!query.nodeTypes.includes(node.type)) return false;
-
-  // 2. Name filter
-  if (query.namePattern !== null && query.namePattern !== "*") {
-    const name = getNodeName(node);
-    if (!name || !globMatch(name, query.namePattern)) return false;
-  }
-
-  // 3. Async filter
-  if (query.isAsync === true) {
-    const firstLine = node.text.split("\n")[0] ?? "";
-    if (!/\basync\b/.test(firstLine)) return false;
-  }
-
-  // 4. Return type filter
-  if (query.returnTypePattern !== null && query.returnTypePattern !== "*") {
-    const rtNode = node.childForFieldName("return_type");
-    if (rtNode) {
-      // Strip leading ": " (TS/Java) or "-> " (Rust/Swift) from return_type text
-      const rtText = rtNode.text.replace(/^[:\->]\s*/, "");
-      if (!globMatch(rtText, query.returnTypePattern)) return false;
-    } else {
-      // Fallback: search for "-> Type" or ": Type" in text
-      const arrowMatch = node.text.match(/(?:->|:)\s*([A-Za-z_][A-Za-z0-9_<>[\]]*)/);
-      if (!arrowMatch || !globMatch(arrowMatch[1]!, query.returnTypePattern)) return false;
-    }
-  }
-
-  // 5. Extends / superclass filter
-  if (query.extendsPattern !== null && query.extendsPattern !== "*") {
-    let found = false;
-    for (const child of node.children) {
-      if (child.type === "class_heritage" || child.type === "superclass") {
-        if (child.text.includes(query.extendsPattern)) {
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
-      if (
-        !node.text.includes(`extends ${query.extendsPattern}`) &&
-        !node.text.includes(`extends${query.extendsPattern}`)
-      ) {
-        return false;
-      }
-    }
-  }
-
-  // 6. For-type filter (Rust impl_item: impl Trait for Type)
-  if (query.forTypePattern !== null && query.forTypePattern !== "*") {
-    if (node.type === "impl_item") {
-      const typeNode = node.childForFieldName("type");
-      if (!typeNode || !globMatch(typeNode.text, query.forTypePattern)) return false;
-    } else {
-      const forMatch = node.text.match(/\bfor\s+(\S+?)\s*\{/);
-      if (!forMatch || !globMatch(forMatch[1]!, query.forTypePattern)) return false;
-    }
-  }
-
-  // 7. Body field filter
-  if (query.bodyFieldPatterns !== null) {
-    if (query.bodyFieldPatterns.length === 1 && query.bodyFieldPatterns[0] === "*") {
-      // { * } means any body \u2014 always matches
-    } else {
-      const bodyNode = findBodyChild(node);
-      if (!bodyNode) return false;
-
-      const bodyText = bodyNode.text;
-      const matchesOne = query.bodyFieldPatterns.some((pattern) => {
-        const re = new RegExp(`:\\s*${globToRegexPattern(pattern)}\\b`);
-        return re.test(bodyText);
-      });
-      if (!matchesOne) return false;
-    }
-  }
-
-  return true;
-}
-
-/**
- * Search a single file for AST nodes matching the parsed pattern.
- * Uses native tree-sitter (synchronous) \u2014 only supports grammars loaded
- * by `loadLanguage()` (TypeScript, JavaScript, TSX).
- * Other languages fall through to regex matching.
- */
-async function matchAstNodesInFile(
-  filePath: string,
-  lang: string,
-  query: ParsedAstPattern,
-): Promise<{ node: Parser.SyntaxNode; name: string }[]> {
-  const grammar = loadLanguage(lang as any);
-  if (!grammar) return [];
-
-  let content: string;
-  try {
-    content = await fs.readFile(filePath, "utf-8");
-  } catch {
-    return [];
-  }
-
-  let parser = parserPool.get(lang);
-  if (!parser) {
-    parser = new Parser();
-    parser.setLanguage(grammar);
-    parserPool.set(lang, parser);
-  }
-
-  const chunkSize = 1024;
-  const tree = parser.parse((offset) => content.slice(offset, offset + chunkSize));
-  if (!tree?.rootNode) return [];
-
-  const results: { node: Parser.SyntaxNode; name: string }[] = [];
-  const cursor = tree.rootNode.walk();
-
-  while (true) {
-    const node = cursor.currentNode;
-    if (node && query.nodeTypes.includes(node.type)) {
-      if (checkAstNodeMatches(node, query)) {
-        const name = getNodeName(node) ?? node.type;
-        results.push({ node, name });
-      }
-    }
-
-    if (cursor.gotoFirstChild()) continue;
-    if (cursor.gotoNextSibling()) continue;
-
-    let reachedRoot = false;
-    while (true) {
-      if (!cursor.gotoParent()) {
-        reachedRoot = true;
-        break;
-      }
-      if (cursor.gotoNextSibling()) break;
-    }
-    if (reachedRoot) break;
-  }
-
-  return results;
-}
+// AST pattern parsing & matching lives in ./search-ast-pattern.ts (re-exported above).
 
 // ── Handlers ──────────────────────────────────────────────────────
 
@@ -1291,27 +645,14 @@ export async function handleGrep(
     if (matches.length >= maxResults) break;
 
     // Skip oversized files to avoid unbounded memory reads
-    try {
-      const stat = await fs.stat(filePath);
-      if (stat.size > MAX_FILE_BYTES) continue;
-    } catch {
-      continue;
-    }
+    if (await shouldSkipOversizedFile(filePath, MAX_FILE_BYTES)) continue;
 
-    let content: string;
-    try {
-      content = await fs.readFile(filePath, "utf-8");
-    } catch {
-      continue;
-    }
+    const content = await readTextFileQuiet(filePath);
+    if (content === null) continue;
 
-    const relFile = relative(cwd, filePath).replace(/\\/g, "/");
+    const relFile = toRelPath(cwd, filePath);
     const lines = content.split(/\r?\n/g);
-    let definitions = definitionCache.get(filePath);
-    if (!definitions) {
-      definitions = await extractCodeDefinitions(filePath, relFile);
-      definitionCache.set(filePath, definitions);
-    }
+    const definitions = await getOrExtractDefinitions(definitionCache, filePath, relFile);
 
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index] ?? "";
@@ -1336,21 +677,8 @@ export async function handleGrep(
     }
   }
 
-  matches.sort((a, b) => {
-    if (a.group !== b.group) return a.group === "definition" ? -1 : 1;
-    return a.relFile.localeCompare(b.relFile) || a.line - b.line;
-  });
-
-  const sessionKey = resolveSessionKey(toolCallId);
-  const byFile = new Map<string, Array<{ line: number; text: string }>>();
-  for (const match of matches) {
-    const entries = byFile.get(match.file) ?? [];
-    entries.push({ line: match.line, text: match.snippet });
-    byFile.set(match.file, entries);
-  }
-  for (const [absPath, entries] of byFile) {
-    recordSparse(sessionKey, absPath, entries);
-  }
+  sortGrepMatches(matches);
+  recordGrepMatches(resolveSessionKey(toolCallId), matches);
 
   return {
     content: [
@@ -1420,12 +748,8 @@ export async function handleCode(
     if (signal?.aborted) throw new Error("Operation aborted");
     if (totalChars > maxChars) break;
 
-    const relFile = relative(cwd, filePath).replace(/\\/g, "/");
-    let defs = definitionCache.get(filePath);
-    if (!defs) {
-      defs = await extractCodeDefinitions(filePath, relFile);
-      definitionCache.set(filePath, defs);
-    }
+    const relFile = toRelPath(cwd, filePath);
+    const defs = await getOrExtractDefinitions(definitionCache, filePath, relFile);
     for (const definition of defs) {
       totalChars += definition.body.length;
       allDefs.push(definition);
@@ -1618,16 +942,10 @@ export async function handleCode(
     }
   }
 
-  const sessionKey = resolveSessionKey(toolCallId);
-  const byFile = new Map<string, Array<{ line: number; text: string }>>();
-  for (const definition of top) {
-    const entries = byFile.get(definition.file) ?? [];
-    entries.push({ line: definition.startLine, text: definition.body });
-    byFile.set(definition.file, entries);
-  }
-  for (const [absPath, entries] of byFile) {
-    recordSparse(sessionKey, absPath, entries);
-  }
+  recordGrepMatches(
+    resolveSessionKey(toolCallId),
+    top.map((definition) => ({ file: definition.file, line: definition.startLine, snippet: definition.body })),
+  );
 
   return {
     content: [{ type: "text" as const, text: lines.join("\n") }],
@@ -1705,19 +1023,10 @@ export async function handleAstPattern(
     if (matches.length >= maxResults) break;
 
     // Skip oversized files
-    try {
-      const stat = await fs.stat(filePath);
-      if (stat.size > MAX_FILE_BYTES) continue;
-    } catch {
-      continue;
-    }
+    if (await shouldSkipOversizedFile(filePath, MAX_FILE_BYTES)) continue;
 
-    const relFile = relative(cwd, filePath).replace(/\\/g, "/");
-    let definitions = definitionCache.get(filePath);
-    if (!definitions) {
-      definitions = await extractCodeDefinitions(filePath, relFile);
-      definitionCache.set(filePath, definitions);
-    }
+    const relFile = toRelPath(cwd, filePath);
+    const definitions = await getOrExtractDefinitions(definitionCache, filePath, relFile);
 
     const lang = filenameToLang(filePath);
     let astHits: { node: Parser.SyntaxNode; name: string }[] = [];
@@ -1750,12 +1059,8 @@ export async function handleAstPattern(
 
     // Run regex fallback for additional coverage (non-AST languages or partial matches)
     if (matches.length < maxResults) {
-      let content: string;
-      try {
-        content = await fs.readFile(filePath, "utf-8");
-      } catch {
-        continue;
-      }
+      const content = await readTextFileQuiet(filePath);
+      if (content === null) continue;
 
       const lines = content.split(/\r?\n/g);
       for (let index = 0; index < lines.length; index++) {
@@ -1788,22 +1093,8 @@ export async function handleAstPattern(
     }
   }
 
-  matches.sort((a, b) => {
-    if (a.group !== b.group) return a.group === "definition" ? -1 : 1;
-    return a.relFile.localeCompare(b.relFile) || a.line - b.line;
-  });
-
-  // Record in session cache
-  const sessionKey = resolveSessionKey(toolCallId);
-  const byFile = new Map<string, Array<{ line: number; text: string }>>();
-  for (const match of matches) {
-    const entries = byFile.get(match.file) ?? [];
-    entries.push({ line: match.line, text: match.snippet });
-    byFile.set(match.file, entries);
-  }
-  for (const [absPath, entries] of byFile) {
-    recordSparse(sessionKey, absPath, entries);
-  }
+  sortGrepMatches(matches);
+  recordGrepMatches(resolveSessionKey(toolCallId), matches);
 
   // Format output
   const lines: string[] = [
