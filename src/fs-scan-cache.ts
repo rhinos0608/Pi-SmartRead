@@ -272,10 +272,8 @@ export class FsScanCache<T extends unknown[]> {
 		// cache keys use native resolve(), which yields backslashes on Windows).
 		const normTarget = resolvedTarget.replace(/\\/g, "/");
 		const normRoot = cacheRoot.replace(/\\/g, "/");
-		return (
-			normTarget === normRoot ||
-			normTarget.startsWith(normRoot + "/")
-		)
+		const prefix = normRoot.endsWith("/") ? normRoot : `${normRoot}/`;
+		return normTarget === normRoot || normTarget.startsWith(prefix)
 		})
 	}
 
