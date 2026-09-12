@@ -24,6 +24,11 @@
  * does not import from smart-edit.
  */
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+function toFileUri(filePath: string): string {
+  return pathToFileURL(resolve(filePath)).href;
+}
 import type { LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 import { cachedManager, managerCache } from "./lsp-manager.js";
 import type { LSPConnection } from "./lsp-connection.js";
@@ -163,7 +168,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         if (!server) return [];
         await server.openFile(filePath);
         const result = await server.request("textDocument/references", {
-          textDocument: { uri: `file://${resolve(filePath)}` },
+          textDocument: { uri: toFileUri(filePath) },
           position: { line, character },
           context: { includeDeclaration: true },
         }) as LSPLocation[] | null;
@@ -182,7 +187,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         if (!server) return [];
         await server.openFile(filePath);
         const result = await server.request("textDocument/documentSymbol", {
-          textDocument: { uri: `file://${resolve(filePath)}` },
+          textDocument: { uri: toFileUri(filePath) },
         }) as LSPDocumentSymbol[] | null;
         return result ?? [];
       } catch { return []; }
@@ -199,7 +204,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         if (!server) return [];
         await server.openFile(filePath);
         const result = await server.request("textDocument/implementation", {
-          textDocument: { uri: `file://${resolve(filePath)}` },
+          textDocument: { uri: toFileUri(filePath) },
           position: { line, character },
         }) as LSPLocation | LSPLocation[] | null;
         if (!result) return [];
@@ -218,7 +223,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         if (!server) return [];
         await server.openFile(filePath);
         const result = await server.request("textDocument/prepareCallHierarchy", {
-          textDocument: { uri: `file://${resolve(filePath)}` },
+          textDocument: { uri: toFileUri(filePath) },
           position: { line, character },
         }) as LSPCallHierarchyItem[] | null;
         return result ?? [];
@@ -396,7 +401,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         (locs) => locs.length === 0,
         (server) => (async () => {
           await server.openFile(filePath);
-          const result = await server.request("textDocument/references", { textDocument: { uri: `file://${resolve(filePath)}` }, position: { line: line0, character: char0 }, context: { includeDeclaration: true } }) as LSPLocation[] | null;
+          const result = await server.request("textDocument/references", { textDocument: { uri: toFileUri(filePath) }, position: { line: line0, character: char0 }, context: { includeDeclaration: true } }) as LSPLocation[] | null;
           return result ?? [];
         })(),
       );
@@ -412,7 +417,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         (symbols) => symbols.length === 0,
         (server) => (async () => {
           await server.openFile(filePath);
-          const result = await server.request("textDocument/documentSymbol", { textDocument: { uri: `file://${resolve(filePath)}` } }) as LSPDocumentSymbol[] | null;
+          const result = await server.request("textDocument/documentSymbol", { textDocument: { uri: toFileUri(filePath) } }) as LSPDocumentSymbol[] | null;
           return result ?? [];
         })(),
       );
@@ -430,7 +435,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         (locs) => locs.length === 0,
         (server) => (async () => {
           await server.openFile(filePath);
-          const result = await server.request("textDocument/implementation", { textDocument: { uri: `file://${resolve(filePath)}` }, position: { line: line0, character: char0 } }) as LSPLocation | LSPLocation[] | null;
+          const result = await server.request("textDocument/implementation", { textDocument: { uri: toFileUri(filePath) }, position: { line: line0, character: char0 } }) as LSPLocation | LSPLocation[] | null;
           if (!result) return [];
           return Array.isArray(result) ? result : [result];
         })(),
@@ -481,7 +486,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         (server) => (async () => {
           await server.openFile(filePath);
           const result = await server.request("textDocument/prepareCallHierarchy", {
-            textDocument: { uri: `file://${resolve(filePath)}` },
+            textDocument: { uri: toFileUri(filePath) },
             position: { line: line0, character: char0 },
           }) as LSPCallHierarchyItem[] | null;
           return result ?? [];
@@ -505,7 +510,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         const calls = await withBudget((async () => {
           await server.openFile(filePath);
           const items = await server.request("textDocument/prepareCallHierarchy", {
-            textDocument: { uri: `file://${resolve(filePath)}` },
+            textDocument: { uri: toFileUri(filePath) },
             position: { line: line0, character: char0 },
           }) as LSPCallHierarchyItem[] | null;
           if (!items || items.length === 0) return null;
@@ -532,7 +537,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         const calls = await withBudget((async () => {
           await server.openFile(filePath);
           const items = await server.request("textDocument/prepareCallHierarchy", {
-            textDocument: { uri: `file://${resolve(filePath)}` },
+            textDocument: { uri: toFileUri(filePath) },
             position: { line: line0, character: char0 },
           }) as LSPCallHierarchyItem[] | null;
           if (!items || items.length === 0) return null;
@@ -582,7 +587,7 @@ async function createBridge(): Promise<LSPBridge | null> {
         // pull fallback: try textDocument/diagnostic if no publish receipt and no diagnostics yet
         if (diagnostics.length === 0 && !hasPublishReceipt) {
           try {
-            const uri = `file://${resolved}`;
+            const uri = toFileUri(resolved);
             const pull = await withBudget((server as any).request("textDocument/diagnostic", { textDocument: { uri }, previousResultId: "" }), Math.min(400, timeoutMs), opts?.signal) as any;
             if (pull !== null) {
               pullSucceeded = true;
@@ -617,7 +622,7 @@ async function serverGoToDefinition(
 ): Promise<LSPLocation | null> {
   await server.openFile(filePath);
   const result = await server.request("textDocument/definition", {
-    textDocument: { uri: `file://${resolve(filePath)}` },
+    textDocument: { uri: toFileUri(filePath) },
     position: { line, character },
   }) as LSPLocation | LSPLocation[] | null;
   if (!result) return null;

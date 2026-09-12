@@ -2,6 +2,9 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const toUri = (p: string): string => pathToFileURL(resolve(p)).href;
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeProc extends EventEmitter {
@@ -63,8 +66,8 @@ describe("LSPConnection rename", () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "a.ts");
     const targetPath = join(root, "b.ts");
-    const targetUri = `file://${resolve(targetPath)}`;
-    const fileUri = `file://${resolve(filePath)}`;
+    const targetUri = toUri(targetPath);
+    const fileUri = toUri(filePath);
     // Intercept rename request and respond with documentChanges
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
@@ -104,7 +107,7 @@ describe("LSPConnection rename", () => {
   it("rename converts changes format", async () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "a.ts");
-    const fileUri = `file://${resolve(filePath)}`;
+    const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
       (origWrite as unknown as (d: string) => boolean)(data);

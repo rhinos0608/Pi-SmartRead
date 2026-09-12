@@ -2,6 +2,9 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const toUri = (p: string): string => pathToFileURL(resolve(p)).href;
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeProc extends EventEmitter {
@@ -62,7 +65,7 @@ describe("LSPConnection semantic actions", () => {
   it("organizeImports sends correct codeAction request with source.organizeImports only", async () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "a.ts");
-    const fileUri = `file://${resolve(filePath)}`;
+    const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     let captured: unknown = null;
     (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
@@ -91,8 +94,8 @@ describe("LSPConnection semantic actions", () => {
   it("organizeImports extracts first action with edit", async () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "b.ts");
-    const fileUri = `file://${resolve(filePath)}`;
-    const otherUri = `file://${resolve(join(root, "c.ts"))}`;
+    const fileUri = toUri(filePath);
+    const otherUri = toUri(join(root, "c.ts"));
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
       (origWrite as unknown as (d: string) => boolean)(data);
@@ -143,7 +146,7 @@ describe("LSPConnection semantic actions", () => {
   it("formatting sends correct formatting request", async () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "f.ts");
-    const fileUri = `file://${resolve(filePath)}`;
+    const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     let captured: unknown = null;
     (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
@@ -235,7 +238,7 @@ describe("LSPConnection semantic actions", () => {
   it("codeActions sends correct codeAction request", async () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "h.ts");
-    const fileUri = `file://${resolve(filePath)}`;
+    const fileUri = toUri(filePath);
     const range = { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } };
     const context = { diagnostics: [{ message: "err" }], only: ["quickfix"] };
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
@@ -266,7 +269,7 @@ describe("LSPConnection semantic actions", () => {
   it("codeActions maps response to CodeActionItem array", async () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "i.ts");
-    const fileUri = `file://${resolve(filePath)}`;
+    const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
       (origWrite as unknown as (d: string) => boolean)(data);

@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -153,7 +154,7 @@ describe("LSPConnection diagnostics plumbing", () => {
     const msgs = writtenMessages(proc);
     const didSave = msgs.find((m) => m.method === "textDocument/didSave");
     expect(didSave).toBeTruthy();
-    expect(didSave.params).toEqual({ textDocument: { uri: `file://${resolve(filePath)}` } });
+    expect(didSave.params).toEqual({ textDocument: { uri: pathToFileURL(resolve(filePath)).href } });
   });
 
   it("didSave is a no-op for a file never opened on this connection", async () => {
@@ -247,7 +248,7 @@ describe("LSPConnection diagnostics plumbing", () => {
     const body = JSON.stringify({
       jsonrpc: "2.0",
       method: "textDocument/publishDiagnostics",
-      params: { uri: `file://${resolve(filePath)}`, diagnostics: [{ message, severity: 1 }] },
+      params: { uri: pathToFileURL(resolve(filePath)).href, diagnostics: [{ message, severity: 1 }] },
     });
     const framed = Buffer.from(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`, "utf-8");
 
@@ -270,7 +271,7 @@ describe("LSPConnection diagnostics plumbing", () => {
     sendToStdout(proc, {
       jsonrpc: "2.0",
       method: "textDocument/publishDiagnostics",
-      params: { uri: `file://${resolve(filePath)}`, diagnostics: [{ message: "stale", severity: 1 }] },
+      params: { uri: pathToFileURL(resolve(filePath)).href, diagnostics: [{ message: "stale", severity: 1 }] },
     });
     expect(conn.getDiagnostics(filePath)).toHaveLength(1);
 
@@ -299,7 +300,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
         try {
           const msg = JSON.parse(body);
           if (msg.method === "textDocument/definition") {
-            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: [{ uri: `file://${resolve(join(root, "a.ts"))}`, range: { start: msg.params.position, end: msg.params.position } }] }));
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: [{ uri: pathToFileURL(resolve(join(root, "a.ts"))).href, range: { start: msg.params.position, end: msg.params.position } }] }));
           }
         } catch {}
         return true;
@@ -341,7 +342,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
           const msg = JSON.parse(body);
           if (msg.method === "textDocument/definition") {
             if (mode === "empty") queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: null }));
-            else if (mode === "confirmed") queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: [{ uri: `file://${resolve(join(root, "a.ts"))}`, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }] }));
+            else if (mode === "confirmed") queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: [{ uri: pathToFileURL(resolve(join(root, "a.ts"))).href, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }] }));
             else if (mode === "hang") { /* never respond -> timeout */ }
           }
           if (msg.method === "textDocument/diagnostic") {
@@ -402,7 +403,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     installFakeServerBin();
     await bridge!.openFile(filePath, root);
     // Seed stale diagnostics via publishDiagnostics for the current file
-    sendToStdout(activeProc!, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: `file://${resolve(filePath)}`, diagnostics: [{ message: "stale", severity: 1 }] } });
+    sendToStdout(activeProc!, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: pathToFileURL(resolve(filePath)).href, diagnostics: [{ message: "stale", severity: 1 }] } });
     // stale seeded via publishDiagnostics above; fresh outcome must clear it
     // Now call fresh outcome with short wait and no fresh publish -> must clear stale and return degraded (unconfirmed), not empty
     const r = await (bridge as any).getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 120 });
