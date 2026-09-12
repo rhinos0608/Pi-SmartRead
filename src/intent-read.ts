@@ -11,7 +11,7 @@
  * finished resolving.
  */
 import { existsSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import type {
   ExtensionContext,
@@ -21,11 +21,15 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { createReadTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@mariozechner/pi-coding-agent";
 import { validateEmbeddingConfig } from "./config.js";
-import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings, fetchEmbeddingsSharded, SHARD_SIZE } from "./embedding.js";
-import { embeddingProfileId } from "./embedding-profile.js";
+import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings } from "./embedding.js";
 import { PersistentEmbeddingCache } from "./persistent-embedding-cache.js";
 import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
-import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
+import {
+  INTENT_READ_CACHE_SIZE,
+  normalizeCandidatePath,
+  rankCandidates,
+  type EmbeddingStatus,
+} from "./intent-ranking.js";
 import {
   findDirectImportNeighbours,
 } from "./context-graph.js";
@@ -42,19 +46,13 @@ import {
   LruCache,
 } from "./utils.js";
 import { probeQuery, type ProbeResult } from "./query-probe.js";
-import { rerank, type RerankerInput } from "./rerank.js";
-import { enrichRerankSignals } from "./rerank-signal-bridge.js";
-import { chunkTextAst, type ChunkResult } from "./chunking.js";
-import { applyHyde, type HydeResult } from "./hyde.js";
+import { type HydeResult } from "./hyde.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import {
   classifyConfidence,
-  classifyRelevanceByScore,
-  classifySimilarity,
   type ConfidenceClass,
   type RelevanceClass,
 } from "./classifiers.js";
-import { listAdrs } from "./adr-store.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -77,36 +75,71 @@ const IntentReadSchema = Type.Object({
 type IntentReadInput = Static<typeof IntentReadSchema>;
 
 type InclusionStatus = "full" | "partial" | "omitted" | "not_top_k" | "below_threshold" | "error";
-type EmbeddingStatus = "ok" | "failed_fallback_bm25";
 
-const INTENT_READ_CACHE_SIZE = 64;
-const MIN_RELEVANCE_SCORE = 0.05;
 const MAX_INTENT_READ_FILES = 500;
-const ADR_BOOST = 0.3;
 
 
-function createEmbeddingCacheKey(config: EmbedRequest, query: string, inputs: string[]): string {
-  return JSON.stringify({
-    cwdSafeBaseUrl: config.baseUrl.replace(/\/+$/, ""),
-    model: config.model,
-    profile: embeddingProfileId(config.model),
-    query,
-    inputs: [...inputs],
-    inputTypes: config.inputTypes,
-    inputTitles: config.inputTitles,
+/** True when cwd looks like a project root (gates graph-heavy expansion). */
+function hasProjectMarkerDir(cwd: string): boolean {
+  return (
+    existsSync(join(cwd, ".git")) ||
+    existsSync(join(cwd, "package.json")) ||
+    existsSync(join(cwd, "tsconfig.json")) ||
+    existsSync(join(cwd, "pyproject.toml")) ||
+    existsSync(join(cwd, "Cargo.toml")) ||
+    existsSync(join(cwd, "go.mod"))
+  );
+}
+
+/** Deduplicate explicit file requests by path, preserving first occurrence. */
+function dedupeFiles<T extends { path: string }>(files: T[]): T[] {
+  const seenPaths = new Set<string>();
+  return files.filter((f) => {
+    if (seenPaths.has(f.path)) return false;
+    seenPaths.add(f.path);
+    return true;
   });
 }
 
-function isRelevantCandidate(keywordScore: number, semanticScore: number | undefined, embeddingStatus: EmbeddingStatus): boolean {
-  // Keep exact lexical matches even when embeddings disagree. Code search must not
-  // drop identifier/API-name hits solely because semantic similarity is low.
-  if (keywordScore > 0) return true;
-  if (embeddingStatus !== "ok" || semanticScore === undefined) return false;
-  return semanticScore >= MIN_RELEVANCE_SCORE;
+/** Strip internal numeric scores; public output uses discrete classifiers. */
+function toPublicFileDetail(detail: Partial<WorkingIntentReadFileDetail>): IntentReadFileDetail {
+  const {
+    semanticScore: _semanticScore,
+    keywordScore: _keywordScore,
+    rrfScore: _rrfScore,
+    chunkScore: _chunkScore,
+    probeConfidenceScore: _probeConfidenceScore,
+    ...publicDetail
+  } = detail;
+  return publicDetail as IntentReadFileDetail;
 }
 
-function normalizeCandidatePath(cwd: string, path: string): string {
-  return isAbsolute(path) ? path : resolve(cwd, path);
+/** Pick the packing plan covering the most files; tie-break prefers #1 ranked file. */
+function choosePackingPlan(packCandidates: FileCandidate[]) {
+  const requestOrder = packCandidates.map((_, i) => i);
+  const smallestFirstOrder = [...requestOrder].sort((a, b) => {
+    const d = packCandidates[a]!.fullMetrics.bytes - packCandidates[b]!.fullMetrics.bytes;
+    return d !== 0 ? d : a - b;
+  });
+  // Relevance-first hybrid: guarantee #1 ranked file is included first,
+  // then fill remaining space with smallest-first for maximum coverage.
+  // Prevents smallest-first from displacing the highest-confidence result.
+  const relevanceFirstOrder = packCandidates.length > 0
+    ? [0, ...smallestFirstOrder.filter((i) => i !== 0)]
+    : [];
+  const candidates = [
+    { plan: buildPlan("request-order", requestOrder, packCandidates), name: "request-order" },
+    { plan: buildPlan("smallest-first", smallestFirstOrder, packCandidates), name: "smallest-first" },
+    { plan: buildPlan("relevance-first", relevanceFirstOrder, packCandidates), name: "relevance-first" },
+  ];
+  const best = candidates.sort((a, b) => {
+    const d = b.plan.fullSuccessCount - a.plan.fullSuccessCount;
+    if (d !== 0) return d;
+    const aHasTop = a.plan.fullIncluded.has(0) ? 1 : 0;
+    const bHasTop = b.plan.fullIncluded.has(0) ? 1 : 0;
+    return bHasTop - aHasTop;
+  })[0]!;
+  return { plan: best.plan, switchedForCoverage: best.name !== "request-order" };
 }
 
 interface IntentReadFileDetail {
@@ -280,12 +313,7 @@ export function createIntentReadTool(
         resolvedFiles = reordered.map((p) => ({ path: p }));
       } else {
         // Deduplicate by path to prevent silent overwrites in detail map
-        const seenPaths = new Set<string>();
-        resolvedFiles = params.files!.filter(f => {
-          if (seenPaths.has(f.path)) return false;
-          seenPaths.add(f.path);
-          return true;
-        });
+        resolvedFiles = dedupeFiles(params.files!);
       }
 
       const candidateCountBeforeGraph = resolvedFiles.length;
@@ -294,13 +322,7 @@ export function createIntentReadTool(
       // (mutation edges, probe) to avoid wasted work on test stubs.
       // MUST run before graph construction so we can skip the expensive
       // buildContextGraph when no project root is present (e.g. cwd="/" in tests).
-      const hasProjectMarker =
-        existsSync(join(ctx.cwd, ".git")) ||
-        existsSync(join(ctx.cwd, "package.json")) ||
-        existsSync(join(ctx.cwd, "tsconfig.json")) ||
-        existsSync(join(ctx.cwd, "pyproject.toml")) ||
-        existsSync(join(ctx.cwd, "Cargo.toml")) ||
-        existsSync(join(ctx.cwd, "go.mod"));
+      const hasProjectMarker = hasProjectMarkerDir(ctx.cwd);
 
       // Shared ContextGraph from the canonical mcp-registry singleton (revision-gated,
       // concurrent-build-coalescing). Only build when the graph will actually be
@@ -616,293 +638,31 @@ export function createIntentReadTool(
       // WP-8: ADR boost tracking (populated inside the if-block)
       let adrBoosts: number[] = [];
 
-      if (successfulFiles.length > 0) {
-        // Chunk each successful file's body
-        const chunkSizeChars = embeddingConfig?.chunkSizeChars ?? 4096;
-        const chunkOverlapChars = embeddingConfig?.chunkOverlapChars ?? 512;
-        const maxChunksPerFile = embeddingConfig?.maxChunksPerFile ?? 12;
-
-        // Map file index -> its chunks (using AST-aware chunking when available)
-        const fileChunks: ChunkResult[][] = [];
-        for (const f of successfulFiles) {
-          const result = await chunkTextAst(f.body!, {
-            chunkSizeChars,
-            chunkOverlapChars,
-            maxChunksPerFile,
-            filePath: f.path,
-            compressForEmbedding: true,
-            useSymbolBoundaries: true,
-          });
-          fileChunks.push(result.chunks);
-          if (result.diagnostics.usedAst) {
-            astChunkingUsed = true;
-            astChunkingStats = {
-              usedAst: true,
-              wasmAvailable: result.diagnostics.wasmAvailable,
-              parseTimeMs: Math.max(astChunkingStats.parseTimeMs, result.diagnostics.parseTimeMs),
-              symbolCount: Math.max(astChunkingStats.symbolCount, result.diagnostics.symbolCount),
-            };
-          }
-        }
-
-        // Collect all chunk texts plus document titles for model-specific retrieval prompts.
-        const allChunkTexts = fileChunks.flatMap((chunks) => chunks.map((c) => c.embeddingText ?? c.text));
-        const allChunkTitles = fileChunks.flatMap((chunks, fileIndex) =>
-          chunks.map(() => successfulFiles[fileIndex]!.path)
-        );
-
-        const bodies = successfulFiles.map((f) => f.body!);
-        const paths = successfulFiles.map((f) => f.path);
-
-        // Always compute BM25 scores on whole-file bodies
-        const keywordScoresArr = bm25Scores(query, bodies);
-        const keywordRanks = computeRanks(keywordScoresArr, paths);
-
-        const semanticScores: number[] = [];
-        let semanticRanks: number[] = [];
-
-        // HyDE (Hypothetical Document Embeddings): optionally replace the
-        // raw query with a generated hypothetical code document for embedding.
-        // This improves semantic matching for abstract/natural-language queries.
-        hydeResult = applyHyde({
-          enabled: embeddingConfig?.hydeEnabled === true,
-          query,
-        });
-        const embeddingQuery = hydeResult.applied ? hydeResult.document : query;
-
-        // Attempt embedding if config is available — fall back to BM25-only on failure
-        if (!embeddingConfig) {
-          embeddingStatus = "failed_fallback_bm25";
-          embeddingError = "embedding config not available";
-        } else {
-          try {
-            const { baseUrl, model, apiKey } = embeddingConfig;
-            const embeddingRequest: EmbedRequest = {
-              baseUrl,
-              model,
-              apiKey,
-              inputs: [embeddingQuery, ...allChunkTexts],
-              inputTypes: ["query", ...allChunkTexts.map(() => "document" as const)],
-              inputTitles: [undefined, ...allChunkTitles],
-            };
-            const embeddingCacheKey = createEmbeddingCacheKey(embeddingRequest, query, allChunkTexts);
-
-            // Check persistent cache first, then memory LRU
-            const persistentCache = persistentCaches.get(ctx.cwd) ?? new PersistentEmbeddingCache(ctx.cwd);
-            persistentCaches.set(ctx.cwd, persistentCache);
-
-            const persistentKey = PersistentEmbeddingCache.computeKey(embeddingRequest, query, allChunkTexts);
-            let embeddingResult: EmbedResult | null = null;
-
-            // Check memory LRU
-            const cachedMemResult = embeddingLruCache.get(embeddingCacheKey);
-            if (cachedMemResult) {
-              embeddingCacheHit = true;
-              embeddingResult = cachedMemResult;
-            }
-
-            // Check persistent disk cache
-            if (!embeddingResult) {
-              const persistentResult = persistentCache.get(persistentKey);
-              if (persistentResult) {
-                embeddingCacheHit = true;
-                embeddingResult = persistentResult;
-                // Promote to memory
-                embeddingLruCache.set(embeddingCacheKey, persistentResult);
-              }
-            }
-
-            // Call API if no cache hit — use sharded path for large batches
-            if (!embeddingResult) {
-              if (embeddingRequest.inputs.length > SHARD_SIZE) {
-                embeddingResult = await fetchEmbeddingsSharded(embeddingRequest);
-              } else {
-                embeddingResult = await fetchEmbeddingsImpl(embeddingRequest);
-              }
-            }
-
-            const { vectors } = embeddingResult;
-            if (!cachedMemResult) {
-              embeddingLruCache.set(embeddingCacheKey, { vectors });
-              persistentCache.set(persistentKey, { vectors });
-            }
-
-          if (vectors.length >= allChunkTexts.length + 1) {
-            const queryVec = vectors[0]!;
-            const chunkVecs = vectors.slice(1, allChunkTexts.length + 1);
-
-            // Map chunk vectors back to parent files, taking max similarity
-            let chunkIdx = 0;
-            for (let fi = 0; fi < fileChunks.length; fi++) {
-              const numChunks = fileChunks[fi]!.length;
-              totalChunks += numChunks;
-              if (numChunks > 0) {
-                filesChunked++;
-                const myChunkVecs = chunkVecs.slice(chunkIdx, chunkIdx + numChunks);
-                const { maxScore, bestChunkIndex } = maxChunkSimilarity(queryVec, myChunkVecs!);
-                semanticScores.push(maxScore);
-                const path = successfulFiles[fi]!.path;
-                const fileDetail = fileDetails.get(path)!;
-                fileDetail.chunkIndex = bestChunkIndex;
-                fileDetail.chunkScore = maxScore;
-                fileDetail.chunkRelevance = classifySimilarity(maxScore);
-                const bestChunk = fileChunks[fi]![bestChunkIndex]!;
-                bestChunkByFile.push({
-                  path,
-                  chunkIndex: bestChunkIndex,
-                  relevance: classifySimilarity(maxScore),
-                  startChar: bestChunk.startChar,
-                  endChar: bestChunk.endChar,
-                  preview: (bestChunk.embeddingText ?? bestChunk.text).substring(0, 120),
-                });
-              } else {
-                semanticScores.push(-Infinity);
-              }
-              chunkIdx += numChunks;
-            }
-
-            semanticRanks = computeRanks(semanticScores, paths);
-            embeddingStatus = "ok";
-          } else {
-            embeddingStatus = "failed_fallback_bm25";
-            embeddingError = `Expected ${allChunkTexts.length + 1} vectors, got ${vectors.length}`;
-          }
-        } catch (err) {
-          embeddingStatus = "failed_fallback_bm25";
-          embeddingError = err instanceof Error ? err.message : String(err);
-        }
-        }  // end embedding attempt when config is available
-
-        let rrfScores: number[];
-        let rrfRanks: number[];
-
-        if (embeddingStatus === "ok" && semanticRanks.length > 0) {
-          rrfScores = computeRrfScores(semanticRanks, keywordRanks);
-          rrfRanks = computeRanks(rrfScores, paths);
-        } else {
-          // BM25-only fallback
-          rrfScores = keywordRanks.map((kr) => 1 / (60 + kr));
-          rrfRanks = computeRanks(rrfScores, paths);
-        }
-
-        // WP-8: ADR boost — additive signal from cross-session ADRs
-        adrBoosts = new Array<number>(successfulFiles.length).fill(0) as number[];
-        try {
-          const adrs = listAdrs(ctx.cwd, { status: "accepted" });
-          if (adrs.length > 0) {
-            for (let i = 0; i < successfulFiles.length; i++) {
-              const fp = paths[i]!;
-              const basename = fp.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
-              for (const adr of adrs) {
-                if (adr.tags.some((t) => fp.includes(t) || basename === t)) {
-                  adrBoosts[i] = ADR_BOOST;
-                  rrfScores[i]! += ADR_BOOST;
-                  break;
-                }
-              }
-            }
-            rrfRanks = computeRanks(rrfScores, paths);
-          }
-        } catch {
-          /* fail-safe: corrupt/missing ADR store leaves ranking unchanged */
-        }
-
-        const maxKeywordScore = Math.max(...keywordScoresArr, 0);
-        const maxRrfScore = Math.max(...rrfScores, 0);
-        for (let i = 0; i < successfulFiles.length; i++) {
-          const base = fileDetails.get(paths[i]!)!;
-          base.keywordRank = keywordRanks[i]!;
-          base.keywordScore = keywordScoresArr[i];
-          base.keywordRelevance = classifyRelevanceByScore(base.keywordScore, maxKeywordScore);
-          base.rrfScore = rrfScores[i];
-          base.fusedRank = rrfRanks[i]!;
-          base.fusedRelevance = classifyRelevanceByScore(base.rrfScore, maxRrfScore);
-          if (adrBoosts[i]! > 0) base.adrBoost = adrBoosts[i];
-          if (embeddingStatus === "ok") {
-            base.semanticRank = semanticRanks[i]!;
-            base.semanticScore = semanticScores[i]!;
-            base.semanticRelevance = classifySimilarity(base.semanticScore);
-            base.rankedBy = "hybrid";
-          } else {
-            base.rankedBy = "bm25" as "bm25";
-          }
-        }
-
-        // Apply structural signals to file details for reranking and observability
-        for (const path of paths) {
-          const detail = fileDetails.get(path)!;
-          const normalized = normalizeCandidatePath(ctx.cwd, path);
-          if (probeAddedSet.has(normalized)) {
-            detail.probeConfidenceScore = 1.0;
-            detail.probeConfidence = classifyConfidence(detail.probeConfidenceScore);
-            detail.graphDistance = 0;
-          } else if (graphDistanceMap.has(normalized)) {
-            detail.graphDistance = graphDistanceMap.get(normalized);
-          }
-        }
-
-        const relevantPaths = new Set<string>();
-        for (let i = 0; i < successfulFiles.length; i++) {
-          if (isRelevantCandidate(keywordScoresArr[i]!, semanticScores[i]!, embeddingStatus)) {
-            relevantPaths.add(paths[i]!);
-          }
-        }
-        filteredBelowThresholdPaths = paths.filter((path) => !relevantPaths.has(path));
-
-        const ranksByPath = new Map(paths.map((path, i) => [path, rrfRanks[i]]));
-
-        // Sort by RRF rank
-        rankedSuccessOrder = [...paths]
-          .filter((path) => relevantPaths.has(path))
-          .sort((a, b) => (ranksByPath.get(a) ?? Infinity) - (ranksByPath.get(b) ?? Infinity));
-
-        // Phase 5: optional structural reranker (off by default, gated behind config)
-        if (embeddingConfig?.rerankEnabled === true && rankedSuccessOrder.length > 0) {
-          const { isRecentlyModified } = await import("./git-history.js");
-          
-          // Build body-by-path map for the signal bridge (no extra disk reads)
-          const bodyByPath = new Map<string, string>();
-          for (const f of successfulFiles) {
-            if (f.body) bodyByPath.set(f.path, f.body);
-          }
-          
-          const rerankInputs: RerankerInput[] = await Promise.all(
-            rankedSuccessOrder.map(async (path) => {
-              const detail = fileDetails.get(path)!;
-              let temporalScore = 0;
-              try {
-                if (await isRecentlyModified(ctx.cwd, path)) temporalScore = 1.0;
-              } catch { /* ignore git errors */ }
-              
-              return {
-                path,
-                rrfScore: detail.rrfScore ?? 0,
-                keywordScore: detail.keywordScore ?? 0,
-                semanticScore: detail.semanticScore,
-                graphDistance: detail.graphDistance,
-                probeConfidence: detail.probeConfidenceScore,
-                temporalScore,
-              };
-            })
-          );
-          
-          // WP-7: enrich with halsteadComplexity, astProfile, minHashProximity from file bodies
-          const enrichedInputs = await enrichRerankSignals(rerankInputs, bodyByPath);
-          const rerankResults = rerank(enrichedInputs);
-          const changedCount = rerankResults.filter((r) => r.changed).length;
-          if (changedCount > 0) {
-            const reordered = [...rerankResults].sort((a, b) => a.newRank - b.newRank);
-            rankedSuccessOrder = reordered.map((r) => r.path);
-          }
-          rerankingResult = {
-            status: "ok",
-            changedOrder: changedCount > 0,
-            candidateCount: rerankResults.length,
-            strategy: "structural",
-          };
-        }
-      }
-
+      const rankResult = await rankCandidates({
+        query,
+        files: successfulFiles,
+        embeddingConfig,
+        cwd: ctx.cwd,
+        embeddingLruCache,
+        persistentCaches,
+        fetchEmbeddingsImpl,
+        probeAddedSet,
+        graphDistanceMap,
+        fileDetails,
+      });
+      embeddingStatus = rankResult.embeddingStatus;
+      embeddingError = rankResult.embeddingError;
+      embeddingCacheHit = rankResult.embeddingCacheHit;
+      rankedSuccessOrder = rankResult.rankedSuccessOrder;
+      filteredBelowThresholdPaths = rankResult.filteredBelowThresholdPaths;
+      totalChunks = rankResult.totalChunks;
+      filesChunked = rankResult.filesChunked;
+      bestChunkByFile.push(...rankResult.bestChunkByFile);
+      astChunkingUsed = rankResult.astChunkingUsed;
+      astChunkingStats = rankResult.astChunkingStats;
+      hydeResult = rankResult.hydeResult;
+      adrBoosts = rankResult.adrBoosts;
+      rerankingResult = rankResult.rerankingResult;
       const effectiveTopK = Math.min(topK, rankedSuccessOrder.length);
       const topKPaths = new Set(rankedSuccessOrder.slice(0, effectiveTopK));
 
@@ -943,40 +703,7 @@ export function createIntentReadTool(
         };
       });
 
-      const requestOrder = packCandidates.map((_, i) => i);
-      const smallestFirstOrder = [...requestOrder].sort((a, b) => {
-        const d = packCandidates[a]!.fullMetrics.bytes - packCandidates[b]!.fullMetrics.bytes;
-        return d !== 0 ? d : a - b;
-      });
-
-      // Relevance-first hybrid: guarantee #1 ranked file is included first,
-      // then fill remaining space with smallest-first for maximum coverage.
-      // Prevents smallest-first from displacing the highest-confidence result.
-      const relevanceFirstOrder = packCandidates.length > 0
-        ? [0, ...smallestFirstOrder.filter((i) => i !== 0)]
-        : [];
-
-      const requestPlan = buildPlan("request-order", requestOrder, packCandidates);
-      const smallestPlan = buildPlan("smallest-first", smallestFirstOrder, packCandidates);
-      const relevancePlan = buildPlan("relevance-first", relevanceFirstOrder, packCandidates);
-
-      // Pick the plan that includes the most successful files.
-      // Tie-break: prefer plans that include the #1 ranked file (index 0).
-      const candidates_plans = [
-        { plan: requestPlan, name: "request-order" },
-        { plan: smallestPlan, name: "smallest-first" },
-        { plan: relevancePlan, name: "relevance-first" },
-      ];
-      const best = candidates_plans.sort((a, b) => {
-        const d = b.plan.fullSuccessCount - a.plan.fullSuccessCount;
-        if (d !== 0) return d;
-        // Tie-break: prefer including the top-ranked file
-        const aHasTop = a.plan.fullIncluded.has(0) ? 1 : 0;
-        const bHasTop = b.plan.fullIncluded.has(0) ? 1 : 0;
-        return bHasTop - aHasTop;
-      })[0]!;
-      const switchedForCoverage = best.name !== "request-order";
-      const plan = best.plan;
+      const { plan, switchedForCoverage } = choosePackingPlan(packCandidates);
 
       // Build output sections in RRF rank order
       const sections: string[] = [];
@@ -1002,18 +729,6 @@ export function createIntentReadTool(
       const outputText = sections.join("\n\n");
 
       // 7. Build details.files: successful files in RRF order, then errored files in input order.
-      // Strip internal numeric scores; public output uses discrete classifiers.
-      const toPublicFileDetail = (detail: Partial<WorkingIntentReadFileDetail>): IntentReadFileDetail => {
-        const {
-          semanticScore: _semanticScore,
-          keywordScore: _keywordScore,
-          rrfScore: _rrfScore,
-          chunkScore: _chunkScore,
-          probeConfidenceScore: _probeConfidenceScore,
-          ...publicDetail
-        } = detail;
-        return publicDetail as IntentReadFileDetail;
-      };
       const allFileDetails: IntentReadFileDetail[] = [
         ...rankedSuccessOrder.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
         ...filteredBelowThresholdPaths.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
