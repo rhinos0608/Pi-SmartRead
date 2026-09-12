@@ -4,308 +4,53 @@
  * WP-4: Wires new inspect params (callDepth, callDirection, impact, deadCode, diff,
  * clusters, layers, boundaries, routes, hotspots, graphSchema) to wave-1 compute modules.
  * Renders output sections per spec output shapes, respecting token budget.
+ *
+ * Seam2: directory pipeline lives in ./inspect-directory.js, shared
+ * canonical/range/token/callgraph helpers in ./inspect-runtime.js.
  */
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { realpathSync, statSync } from "node:fs";
 import { relative as pathRelative, resolve as pathResolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
     PROTOCOL_SCHEMA_VERSION,
     hashSessionFilePath,
     inspectionIdFor,
-    resourceIdFor,
     canonicalizeWorkspaceRoot,
     type WorkspaceEvidenceEnvelope,
     type InspectedResource,
     type InspectMode,
 } from "@rhinos0608/pi-workspace-protocol";
-import { clampMapTokens, createRepoTool } from "./repomap-tool.js";
 import { extractStructuralFacts } from "./structural-facts.js";
 import { computeFileSignals } from "./signals.js";
-import type { InspectV4Input, InspectV4Mode, InspectV4Result, CallDirection, DiffTarget } from "./inspect-types.js";
+import type { InspectV4Input, InspectV4Mode, InspectV4Result } from "./inspect-types.js";
 import type { StructuralFacts } from "./structural-facts-types.js";
-import type { ContextGraph } from "./context-graph.js";
 import { expandBlastRadius, classifyFileRisk, detectDeadCode } from "./impact-analysis.js";
-import { detectCommunities } from "./community-detection.js";
-import { extractRoutes, scanRoutes } from "./route-extraction.js";
-import { deriveLayers } from "./layer-analysis.js";
-import { detectServiceBoundaries } from "./monorepo-detector.js";
-import { findGitRoot } from "./git-history.js";
-import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { inspectNavigation as directInspectNavigation, inspectDiagnostics as directInspectDiagnostics, type LspInspectionProvider } from "./lsp-inspection.js";
+import { extractRoutes } from "./route-extraction.js";
+import type { CallGraphResult } from "./callgraph.js";
+import { inspectNavigation as directInspectNavigation, inspectDiagnostics as directInspectDiagnostics } from "./lsp-inspection.js";
+import { uriToFsPath, renderNavigationSection, renderDiagnosticsSection, renderCallGraphSection } from "./inspect-sections.js";
+import { renderDiffSection } from "./inspect-diff.js";
+import { executeDirectoryInspect } from "./inspect-directory.js";
+import {
+    SECTION_NL,
+    joinSectionLines,
+    tryCanonical,
+    estimateTokens,
+    resolveLspProvider,
+    canonicalizeNavigationItems,
+    addSearchMatchResource,
+    addResource,
+    setResourceRanges,
+    mergeRanges,
+    toDiagnosticsOverallStatus,
+    ensureCallGraph,
+    findSectionName,
+    riskOrder,
+} from "./inspect-runtime.js";
 
-function resolveLspProvider(input: InspectV4Input): LspInspectionProvider | null {
-  return (input.lspInspectionProvider as LspInspectionProvider | undefined) ?? null;
-}
-
-const execFileAsync = promisify(execFile);
-
-// ── Token budget helpers ─────────────────────────────────────────
-
-function estimateTokens(text: string): number {
-    // Rough estimate: ~4 chars per token
-    return Math.ceil(Buffer.byteLength(text, "utf8") / 4);
-}
-
-const DIRECTORY_TRUNCATION_FOOTER =
-    "[truncated: ranked map or requested analysis omitted — rerun with higher mapTokens]";
-
-function assembleDirectoryOutput(coreText: string, sections: string[]): string {
-    if (sections.length === 0) return coreText;
-    return coreText + "\n\n" + sections.join("\n\n");
-}
-
-// ── WP-SR3 helpers — always canonicalize via tryCanonical(realpathSync(...)) ──
-function uriToFsPath(uri: string): string {
-    if (uri.startsWith("file://")) {
-        try { return fileURLToPath(uri); } catch { return uri.slice(7); }
-    }
-    return uri;
-}
-function canonicalizeNavigationItems(items: unknown[], _cwd: string): unknown[] {
-    return (items as any[]).map((it) => {
-        if (it && typeof it === "object") {
-            // callHierarchy incoming/outgoing: { from/to: { uri, range } }
-            if ((it as any).from?.uri && typeof (it as any).from.uri === "string") {
-                const fsPath = uriToFsPath((it as any).from.uri);
-                const canon = tryCanonical(fsPath);
-                const newUri = "file://" + canon;
-                const base = { ...(it as any), from: { ...(it as any).from, uri: newUri } };
-                // also canonicalize target uri of from-range host if present as top-level? keep as is
-                return base;
-            }
-            if ((it as any).to?.uri && typeof (it as any).to.uri === "string") {
-                const fsPath = uriToFsPath((it as any).to.uri);
-                const canon = tryCanonical(fsPath);
-                const newUri = "file://" + canon;
-                return { ...(it as any), to: { ...(it as any).to, uri: newUri } };
-            }
-            const loc = (it as any).location ?? it;
-            if (loc && typeof loc.uri === "string") {
-                const fsPath = uriToFsPath(loc.uri);
-                const canon = tryCanonical(fsPath);
-                const newUri = "file://" + canon;
-                if ((it as any).location) return { ...(it as any), location: { ...(it as any).location, uri: newUri } };
-                return { ...(it as any), uri: newUri };
-            }
-            if ((it as any).uri && typeof (it as any).uri === "string") {
-                const fsPath = uriToFsPath((it as any).uri);
-                const canon = tryCanonical(fsPath);
-                return { ...(it as any), uri: "file://" + canon };
-            }
-        }
-        return it;
-    });
-}
-function addSearchMatchResource(map: Map<string, InspectedResource>, filePath: string, _cwd: string, _loc: unknown) {
-    try {
-        const canon = tryCanonical(filePath);
-        let startLine: number | undefined;
-        let endLine: number | undefined;
-        try {
-            const rawRange =
-                (_loc as any)?.range ??
-                (_loc as any)?.location?.range ??
-                (_loc as any)?.selectionRange ??
-                (_loc as any)?.location?.selectionRange;
-            if (rawRange?.start?.line !== undefined) {
-                startLine = (rawRange.start.line as number) + 1;
-                if (rawRange?.end?.line !== undefined) endLine = (rawRange.end.line as number) + 1;
-                else endLine = startLine;
-            } else if ((_loc as any)?.line !== undefined) {
-                startLine = (_loc as any).line as number;
-                endLine = ((_loc as any).endLine as number | undefined) ?? startLine;
-                // legacy line is already 1-based; if endLine provided but seems 0-based, keep as is
-            }
-        } catch {}
-        if (startLine === undefined || endLine === undefined) return;
-        const newRange = { startLine, endLine };
-        const existing = map.get(canon);
-        if (existing) {
-            const merged = mergeRanges([...existing.allowedRanges, newRange]);
-            map.set(canon, { ...existing, allowedRanges: merged });
-            return;
-        }
-        map.set(canon, {
-            resourceId: resourceIdFor({ canonicalPath: canon, kind: "range", range: newRange }),
-            canonicalPath: canon,
-            kind: "range",
-            coverage: "search-match",
-            allowedRanges: [newRange],
-            fresh: false,
-        });
-    } catch {}
-}
-function toDiagnosticsOverallStatus(files: Array<{ status: string; diagnostics: unknown[] }>): string {
-    // Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values (e.g. "needs-triage") without closing switch/default paths.
-    const hasFindings = files.some((f) => (f.diagnostics as unknown[]).length > 0);
-    if (hasFindings) return "findings";
-    const allUnavailable = files.every((f) => f.status === "unavailable");
-    if (allUnavailable) return "unavailable";
-    const allEmpty = files.every((f) => f.status === "empty");
-    if (allEmpty) return "unconfirmed";
-    return "partial";
-}
-function renderNavigationSection(details: { operation: string; status: string; items: unknown[]; truncated: boolean }, _cwd: string): string {
-    const lines: string[] = [];
-    lines.push("## LSP Navigation");
-    lines.push("");
-    lines.push(`Operation: ${details.operation} — status: ${details.status} — source: lsp${details.truncated ? " — truncated" : ""}`);
-    lines.push("");
-    if (details.status === "empty") lines.push("_empty \u2260 clean/complete — never treat as proof of absence._");
-    if (details.status === "unavailable") lines.push("_LSP unavailable for this file/query._");
-    if (details.status === "degraded") lines.push("_LSP degraded (timeout/error)._"
-    );
-    if (details.items.length === 0) {
-        lines.push("No results.");
-    } else {
-        lines.push(`Results (${details.items.length}${details.truncated ? ", truncated" : ""}):`);
-        for (const it of details.items as any[]) {
-            if (it?.from?.uri) {
-                const p = uriToFsPath(it.from.uri);
-                const range = it.from.range ?? it.fromRanges?.[0];
-                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
-                const fromRanges = it.fromRanges ? ` (${it.fromRanges.length} range(s))` : "";
-                lines.push(`- incoming from ${it.from.name} (kind ${it.from.kind}) — ${p}${pos}${fromRanges}`);
-            } else if (it?.to?.uri) {
-                const p = uriToFsPath(it.to.uri);
-                const range = it.to.range ?? it.fromRanges?.[0];
-                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
-                const fromRanges = it.fromRanges ? ` (${it.fromRanges.length} range(s))` : "";
-                lines.push(`- outgoing to ${it.to.name} (kind ${it.to.kind}) — ${p}${pos}${fromRanges}`);
-            } else if (it?.name) {
-                const loc = it.location?.uri ? uriToFsPath(it.location.uri) : it.uri ? uriToFsPath(it.uri) : "";
-                const range = it.location?.range ?? it.range;
-                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
-                lines.push(`- ${it.name} (kind ${it.kind})${loc ? ` — ${loc}${pos}` : ""}`);
-            } else if (it?.contents !== undefined) {
-                const text = typeof it.contents === "string" ? it.contents : Array.isArray(it.contents) ? (it.contents as any[]).map((c: any) => typeof c === "string" ? c : c.value ?? "").join("\n") : (it.contents as any).value ?? "";
-                const preview = String(text).slice(0, 200).replace(/\n/g, " ");
-                lines.push(`- hover: ${preview}`);
-            } else if (it?.uri) {
-                const p = uriToFsPath(it.uri);
-                const range = it.range;
-                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
-                lines.push(`- ${p}${pos}`);
-            } else if (it?.location?.uri) {
-                const p = uriToFsPath(it.location.uri);
-                const range = it.location.range;
-                const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
-                lines.push(`- ${p}${pos}`);
-            } else {
-                lines.push(`- ${JSON.stringify(it).slice(0, 200)}`);
-            }
-        }
-    }
-    return lines.join("\n");
-}
-function renderDiagnosticsSection(details: { status: string; files: Array<{ path: string; diagnostics: unknown[]; truncated?: boolean }>; truncated: boolean }, _cwd: string): string {
-    const lines: string[] = [];
-    lines.push("## LSP Diagnostics");
-    lines.push("");
-    lines.push(`Status: ${details.status} — source: lsp${details.truncated ? " — truncated" : ""}`);
-    lines.push("");
-    if (details.status === "unconfirmed") lines.push("_unconfirmed \u2260 clean/complete — not proof of absence._");
-    if (details.status === "unavailable") lines.push("_LSP unavailable._");
-    if (details.status === "partial") lines.push("_Partial results (some files unavailable/degraded)._"
-    );
-    if (details.files.length === 0) {
-        lines.push("No files.");
-    } else {
-        for (const f of details.files) {
-            const diags = f.diagnostics as any[];
-            lines.push(`- ${f.path}: ${diags.length} diagnostic(s)${f.truncated ? " (truncated)" : ""}`);
-            for (const d of diags) {
-                const msg = (d as any).message ?? JSON.stringify(d).slice(0, 200);
-                const sev = (d as any).severity !== undefined ? ` [severity ${(d as any).severity}]` : "";
-                const range = (d as any).range;
-                const pos = range ? ` @ ${range.start.line + 1}:${range.start.character + 1}` : "";
-                lines.push(`  - ${msg}${sev}${pos}`);
-            }
-        }
-    }
-    return lines.join("\n");
-}
-async function buildDirectoryDiagnostics(opts: { cwd: string; dirPath: string; waitMs: number; maxPerFile: number; maxFiles: number; signal?: AbortSignal; lspInspectionProvider?: LspInspectionProvider }): Promise<{ details: any; sectionText: string }> {
-    const { cwd, dirPath, waitMs, maxPerFile, maxFiles, signal, lspInspectionProvider } = opts as any;
-    const allFiles = await findSrcFiles(dirPath);
-    allFiles.sort();
-    const truncatedByFiles = allFiles.length > maxFiles;
-    const selected = allFiles.slice(0, maxFiles);
-    const files: Array<{ path: string; diagnostics: unknown[]; truncated?: boolean }> = [];
-    let anyTruncated = truncatedByFiles;
-    const perFileStatuses: Array<{ status: string; diagnostics: unknown[] }> = [];
-    for (const fp of selected) {
-        try {
-            const fileAbs = fp.startsWith("/") ? fp : pathResolve(fp);
-            const diagFn = lspInspectionProvider ? lspInspectionProvider.inspectDiagnostics : directInspectDiagnostics;
-            const outcome = await diagFn({ path: fileAbs, root: cwd, waitMs, maxPerFile, signal } as any);
-            const canon = tryCanonical(fileAbs);
-            files.push({ path: canon, diagnostics: outcome.diagnostics, truncated: outcome.truncated });
-            perFileStatuses.push({ status: outcome.status, diagnostics: outcome.diagnostics });
-            if (outcome.truncated) anyTruncated = true;
-        } catch {
-            const canon = (() => { try { return tryCanonical(fp); } catch { return fp; } })();
-            files.push({ path: canon, diagnostics: [], truncated: false });
-            perFileStatuses.push({ status: "degraded", diagnostics: [] });
-        }
-    }
-    const status = toDiagnosticsOverallStatus(perFileStatuses.length ? perFileStatuses : [{ status: "unavailable", diagnostics: [] }]);
-    const details = { schemaVersion: 1 as const, status, source: "lsp" as const, files, truncated: anyTruncated };
-    const sectionText = renderDiagnosticsSection(details, cwd);
-    return { details, sectionText };
-}
-
-function fitDirectoryOutput(coreText: string, extraSections: string[], budget: number): { text: string; truncated: boolean; admittedCount: number } {
-    const footerSep = "\n\n" + DIRECTORY_TRUNCATION_FOOTER;
-    const totalSections = extraSections.length;
-    // Binary-search max k sections fitting with reserved footer
-    let lo = 0;
-    let hi = totalSections;
-    let bestK = -1;
-    while (lo <= hi) {
-        const mid = Math.floor((lo + hi) / 2);
-        const candidate = assembleDirectoryOutput(coreText, extraSections.slice(0, mid)) + (mid < totalSections ? footerSep : "");
-        if (estimateTokens(candidate) <= budget) {
-            bestK = mid;
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    if (bestK >= 0) {
-        const truncated = bestK < totalSections;
-        const text = assembleDirectoryOutput(coreText, extraSections.slice(0, bestK)) + (truncated ? footerSep : "");
-        return { text, truncated, admittedCount: bestK };
-    }
-    // Core alone exceeds budget — binary-search line prefix
-    const coreLines = coreText.split("\n");
-    let lLo = 0;
-    let lHi = coreLines.length;
-    let bestL = 0;
-    while (lLo <= lHi) {
-        const mid = Math.floor((lLo + lHi) / 2);
-        const candidate = coreLines.slice(0, mid).join("\n") + footerSep;
-        if (estimateTokens(candidate) <= budget) {
-            bestL = mid;
-            lLo = mid + 1;
-        } else {
-            lHi = mid - 1;
-        }
-    }
-    const text = coreLines.slice(0, bestL).join("\n") + footerSep;
-    // Ensure hard cap even if footer alone exceeds budget (clamped min 256 prevents this)
-    if (estimateTokens(text) > budget) {
-        // Last resort: truncate footer itself line-aligned (should not happen with valid budget)
-        const footerLines = DIRECTORY_TRUNCATION_FOOTER.split("\n");
-        return { text: footerLines.join("\n"), truncated: true, admittedCount: 0 };
-    }
-    return { text, truncated: true, admittedCount: 0 };
-}
-
-// ── Validation (spec §4) ─────────────────────────────────────────
+// Re-exported for existing importers (tests) — canonical home is ./inspect-diff.js.
+export { runGitDiff, renderDiffSection } from "./inspect-diff.js";
+// Directory pipeline canonical home is ./inspect-directory.js; re-exported for existing importers.
+export { executeDirectoryInspect } from "./inspect-directory.js";
 
 function requireSessionFilePath(input: InspectV4Input): string {
     if (typeof input.sessionFilePath !== "string" || input.sessionFilePath.length === 0) {
@@ -322,22 +67,6 @@ export function resolveInspectV4Mode(input: InspectV4Input): InspectV4Mode {
     throw new Error(`inspect path is neither file nor directory: ${input.path}`);
 }
 
-// ── Lazy call-graph builder ──────────────────────────────────────
-
-async function ensureCallGraph(
-    input: InspectV4Input,
-    existing: CallGraphResult | null,
-): Promise<CallGraphResult | null> {
-    if (existing) return existing;
-    try {
-        const cwd = realpathSync(input.cwd);
-        const files = await findSrcFiles(cwd);
-        return await buildCallGraph(files);
-    } catch {
-        return null;
-    }
-}
-
 // ── Main dispatch ────────────────────────────────────────────────
 
 export async function executeInspectV4(input: InspectV4Input): Promise<InspectV4Result> {
@@ -347,349 +76,179 @@ export async function executeInspectV4(input: InspectV4Input): Promise<InspectV4
     return executeFileInspect(input);
 }
 
-// ── Directory inspect ────────────────────────────────────────────
-
-export async function executeDirectoryInspect(input: InspectV4Input): Promise<InspectV4Result> {
-    const sessionFilePath = input.sessionFilePath;
-    const cwd = realpathSync(input.cwd);
-    const canonicalRoot = canonicalizeWorkspaceRoot(cwd);
-    const sessionId = hashSessionFilePath(sessionFilePath);
-
-    const mapRoot = pathResolve(cwd, input.path);
-    const repoTool = createRepoTool();
-    const fakeCtx = { cwd, sessionManager: undefined } as any;
-    const clampedBudget = clampMapTokens(input.mapTokens);
-    const params: Record<string, unknown> = {
-        directory: mapRoot,
-        mapTokens: clampedBudget,
-        compact: input.compact ?? true,
-    };
-    if (input.focus && input.focus.length > 0) {
-        params.focus = input.focus;
-    }
-    // Lazy-start contract: repomap LSP fallback only when navigation/diagnostics requested
-    (params as any).allowLspFallback = !!(input.navigation || input.diagnostics);
-    const result = await repoTool.execute(
-        "inspect-v4-map",
-        params as any,
-        input.signal,
-        undefined,
-        fakeCtx,
-    );
-    const contentText = (result.content?.[0] as { type: "text"; text: string } | undefined)?.text ?? "";
-
-    // Hard budget enforcement (foveated: ranked core + complete optional sections)
-    const budget = clampedBudget;
-
-    // ── Compute sections for directory mode ─────────────────────
-    const extraSections: string[] = [];
-    let callGraph: CallGraphResult | null = null;
-
-    // Lazy build call graph if needed by hotspots/deadCode/diff
-    if (input.hotspots || input.deadCode || input.diff) {
-        callGraph = await ensureCallGraph(input, null);
-    }
-
-    // clusters
-    if (input.clusters) {
-        try {
-            const importEdges = buildImportEdges(input.contextGraph);
-            const clusters = detectCommunities(importEdges);
-            const lines: string[] = [
-                `## Community Clusters (modularity: ${clusters.modularity.toFixed(2)}, ${clusters.clusters.size} clusters)`,
-                "",
-            ];
-            for (const [cid, members] of clusters.clusters) {
-                const label = guessClusterLabel(members);
-                lines.push(`Cluster ${cid} (${members.length} files)  — "${label}"`);
-                const sample = members.slice(0, 8).map(m => pathRelative(cwd, m)).join(", ");
-                const more = members.length > 8 ? `, ...(+${members.length - 8})` : "";
-                lines.push(`  ${sample}${more}`);
-                lines.push("");
-            }
-            extraSections.push(lines.join("\n"));
-        } catch {
-            extraSections.push("## Community Clusters\n\n(computation failed)");
-        }
-    }
-
-    // layers
-    if (input.layers) {
-        try {
-            const importEdges = buildImportEdges(input.contextGraph);
-            const files = await findSrcFiles(pathResolve(cwd, input.path));
-            const layerMap = deriveLayers(importEdges, files);
-            const lines: string[] = ["## Architectural Layers (derived from imports)", ""];
-            for (const [layer, members] of layerMap.layers) {
-                lines.push(`${layer} (${members.length} files):`);
-                const sample = members.slice(0, 5).map(m => pathRelative(cwd, m)).join(", ");
-                const more = members.length > 5 ? `, ...(+${members.length - 5})` : "";
-                lines.push(`  ${sample}${more}`);
-                lines.push("");
-            }
-            if (layerMap.unclassified.length > 0) {
-                lines.push(`unclassified (${layerMap.unclassified.length} files):`);
-                lines.push(`  (files without clear layer assignment)`);
-                lines.push("");
-            }
-            extraSections.push(lines.join("\n"));
-        } catch {
-            extraSections.push("## Architectural Layers\n\n(computation failed)");
-        }
-    }
-
-    // boundaries
-    if (input.boundaries) {
-        try {
-            const boundary = detectServiceBoundaries(cwd);
-            const lines: string[] = ["## Service Boundaries", ""];
-            if (boundary.services.length === 0) {
-                lines.push("(no service boundaries detected)");
-            } else {
-                for (const svc of boundary.services) {
-                    lines.push(`${svc.name} (package: ${svc.rootPath})`);
-                    if (svc.dependencies.length > 0) {
-                        lines.push(`  → depends on: ${svc.dependencies.join(", ")}`);
-                    }
-                    lines.push("");
-                }
-            }
-            extraSections.push(lines.join("\n"));
-        } catch {
-            extraSections.push("## Service Boundaries\n\n(detection failed)");
-        }
-    }
-
-    // deadCode (directory scope)
-    if (input.deadCode && callGraph) {
-        try {
-            const deadCode = detectDeadCode(pathRelative(cwd, pathResolve(cwd, input.path)), callGraph);
-            if (deadCode.totalDeadFunctions > 0) {
-                const lines: string[] = [`## Dead Code (${deadCode.totalDeadFunctions} zero-caller functions)`, ""];
-                for (const file of deadCode.files) {
-                    lines.push(`  ${pathRelative(cwd, file.path)}:`);
-                    for (const fn of file.functions.slice(0, 10)) {
-                        lines.push(`    ${fn.name}()  L${fn.line}`);
-                    }
-                    if (file.functions.length > 10) {
-                        lines.push(`    (${file.functions.length - 10} more in this file)`);
-                    }
-                    // Directory mode: refs stay in rendered text; no resource authorization
-                }
-                extraSections.push(lines.join("\n"));
-            } else {
-                extraSections.push("## Dead Code\n\n(no zero-caller functions found)");
-            }
-        } catch {
-            extraSections.push("## Dead Code\n\n(detection failed)");
-        }
-    }
-
-    // routes (directory scan)
-    if (input.routes) {
-        try {
-            const routes = scanRoutes(pathResolve(cwd, input.path));
-            if (routes.length > 0) {
-                const lines: string[] = [`## HTTP Routes (${routes.length} routes)`, ""];
-                const byFile = new Map<string, typeof routes>();
-                for (const r of routes) {
-                    const key = r.file;
-                    if (!byFile.has(key)) byFile.set(key, []);
-                    byFile.get(key)!.push(r);
-                }
-                for (const [file, fileRoutes] of byFile) {
-                    lines.push(`${file}:`);
-                    for (const r of fileRoutes) {
-                        const handler = r.handler ?? "(handler)";
-                        lines.push(`  ${r.method.padEnd(7)} ${r.path.padEnd(30)} → ${handler}  L${r.line}`);
-                    }
-                    lines.push("");
-                }
-                // Directory mode: route refs stay in rendered text; no resource authorization
-                extraSections.push(lines.join("\n"));
-            } else {
-                extraSections.push("## HTTP Routes\n\n(no routes found)");
-            }
-        } catch {
-            extraSections.push("## HTTP Routes\n\n(extraction failed)");
-        }
-    }
-
-    // hotspots (directory scope)
-    if (input.hotspots && callGraph) {
-        try {
-            const sorted = [...callGraph.functions]
-                .sort((a, b) => b.calledBy.length - a.calledBy.length)
-                .slice(0, 15);
-            if (sorted.length > 0) {
-                const lines: string[] = [`## Hotspots (top ${sorted.length} by fan-in)`, ""];
-                for (let i = 0; i < sorted.length; i++) {
-                    const fn = sorted[i]!;
-                    const num = String(i + 1).padStart(2, " ");
-                    lines.push(`  ${num}. ${fn.name.padEnd(35)} ${fn.file}:${fn.line}  — ${fn.calledBy.length} callers`);
-                }
-                extraSections.push(lines.join("\n"));
-            } else {
-                extraSections.push("## Hotspots\n\n(no function data available)");
-            }
-        } catch {
-            extraSections.push("## Hotspots\n\n(computation failed)");
-        }
-    }
-
-    // graphSchema (directory scope)
-    if (input.graphSchema) {
-        try {
-            const lines: string[] = ["## Graph Schema", ""];
-            if (input.contextGraph) {
-                try {
-                    const provenanceEdges = input.contextGraph.getProvenanceEdges?.() ?? [];
-                    const capacityStats = input.contextGraph.getCapacityStats?.();
-                    const sampleEdges = provenanceEdges.slice(0, 8).map(e => `${e.from} → ${e.to}`);
-                    // Use dedicated file index for file-node count, not derived from provenance edge endpoints
-                    const fileNodeCount = capacityStats?.fileIndex?.entries ?? new Set([...provenanceEdges.flatMap(e => [e.from, e.to])]).size;
-                    const edgeCount = provenanceEdges.length;
-                    const symbolEntries = capacityStats?.symbolIndex?.entries ?? 0;
-                    lines.push(`Context graph: file-nodes=${fileNodeCount}, edges=${edgeCount}, symbol-entries=${symbolEntries}`);
-                    if (sampleEdges.length > 0) {
-                        lines.push("Sample edges:");
-                        for (const se of sampleEdges) {
-                            lines.push(`  ${se}`);
-                        }
-                    }
-                } catch {
-                    lines.push("Context graph: available (introspection failed)");
-                }
-            } else {
-                lines.push('contextGraph: "not built"');
-            }
-            lines.push("");
-            extraSections.push(lines.join("\n"));
-        } catch {
-            extraSections.push("## Graph Schema\n\n(introspection failed)");
-        }
-    }
-
-    // diff (directory scope)
-    if (input.diff) {
-        try {
-            const section = await renderDiffSection(input.diff, cwd, callGraph);
-            extraSections.push(section.text);
-        } catch {
-            extraSections.push("## Diff Impact\n\n(computation failed)");
-        }
-    }
-
-    // ── WP-SR3 navigation (directory: workspaceSymbols only) ──
-    let __navDetails: any = undefined;
-    if (input.navigation) {
-        try {
-            const op = input.navigation.operation;
-            const maxResults = Math.min(Math.max(input.navigation.maxResults ?? 20, 1), 100);
-            const navFn = resolveLspProvider(input)?.inspectNavigation ?? directInspectNavigation;
-            const outcome = await navFn({
-                operation: op as any,
-                query: input.navigation.query,                line: input.navigation.line,
-                character: input.navigation.character,
-                maxResults,
-                path: pathResolve(cwd, input.path),
-                root: cwd,
-                signal: input.signal as any,
-            });
-            const status = outcome.status === "confirmed" ? "ok" : outcome.status;
-            // Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values without closing switch/default paths.
-            const items = canonicalizeNavigationItems(outcome.items, cwd);
-            __navDetails = { schemaVersion: 1 as const, operation: op, status, source: "lsp" as const, items, truncated: outcome.truncated };
-            extraSections.push(renderNavigationSection(__navDetails, cwd));
-        } catch {
-            extraSections.push("## LSP Navigation\n\n(computation failed)");
-        }
-    }
-
-    // ── WP-SR3 diagnostics (directory) ──
-    let __diagDetails: any = undefined;
-    if (input.diagnostics) {
-        try {
-            const waitMs = input.diagnostics.waitMs ?? 1500;
-            const maxPerFile = input.diagnostics.maxPerFile ?? 12;
-            const maxFiles = input.diagnostics.maxFiles ?? 20;
-            const r = await buildDirectoryDiagnostics({ cwd, dirPath: pathResolve(cwd, input.path), waitMs, maxPerFile, maxFiles, signal: input.signal as any, lspInspectionProvider: resolveLspProvider(input) ?? undefined } as any);
-            __diagDetails = r.details;
-            extraSections.push(r.sectionText);
-        } catch {
-            extraSections.push("## LSP Diagnostics\n\n(computation failed)");
-        }
-    }
-
-    // ── Hard budget fitting (preserves ranked order, complete sections only) ──
-    const { text: fittedText, truncated, admittedCount } = fitDirectoryOutput(contentText, extraSections, budget);
-    void admittedCount;
-    // Keep LSP text/details in sync when budget trimming drops their sections.
-    // MCP clients only see rendered text, so a dropped section with retained
-    // details would silently lose information.
-    const renderDroppedNav = __navDetails !== undefined && !fittedText.includes("## LSP Navigation");
-    const renderDroppedDiag = __diagDetails !== undefined && !fittedText.includes("## LSP Diagnostics");
-    let finalText = fittedText;
-    let navDetails: typeof __navDetails = __navDetails;
-    let diagDetails: typeof __diagDetails = __diagDetails;
-    const omissionNotes: string[] = [];
-    if (renderDroppedNav) {
-        omissionNotes.push("Note: LSP Navigation section omitted due to token-budget fitting (mapTokens too low to include it).");
-        navDetails = undefined;
-    }
-    if (renderDroppedDiag) {
-        omissionNotes.push("Note: LSP Diagnostics section omitted due to token-budget fitting (mapTokens too low to include it).");
-        diagDetails = undefined;
-    }
-    if (omissionNotes.length > 0) {
-        const footerIdx = finalText.indexOf(DIRECTORY_TRUNCATION_FOOTER);
-        const noteBlock = omissionNotes.join("\n") + "\n";
-        const candidate = footerIdx >= 0
-            ? finalText.slice(0, footerIdx) + noteBlock + finalText.slice(footerIdx)
-            : finalText + "\n" + noteBlock;
-        if (estimateTokens(candidate) <= budget) {
-            finalText = candidate;
-        }
-        // else: note block omitted to preserve hard budget; fittedText already carries truncation footer when truncated
-    }
-
-    const inspectionId = inspectionIdFor({
-        sessionId,
-        workspaceRoot: canonicalRoot,
-        resources: [],
-    });
-    const envelope: WorkspaceEvidenceEnvelope = {
-        schemaVersion: PROTOCOL_SCHEMA_VERSION,
-        inspectionId,
-        sessionId,
-        workspaceRoot: cwd,
-        canonicalWorkspaceRoot: canonicalRoot,
-        createdAt: new Date().toISOString(),
-        resources: [],
-        mode: "map",
-    };
-
-    const upstream: Record<string, unknown> = { ...(result.details as Record<string, unknown> ?? {}) };
-    if (navDetails) upstream.navigation = navDetails;
-    if (diagDetails) upstream.diagnostics = diagDetails;
-    // Remove stale LSP keys when their sections were budget-dropped
-    if (renderDroppedNav) delete (upstream as any).navigation;
-    if (renderDroppedDiag) delete (upstream as any).diagnostics;
-    return {
-        mode: "directory",
-        contentText: finalText,
-        workspaceEvidence: envelope,
-        lineCount: finalText === "" ? 0 : finalText.split("\n").length,
-        byteLength: Buffer.byteLength(finalText, "utf8"),
-        truncated: truncated || omissionNotes.length > 0,
-        upstreamDetails: upstream,
-        navigation: navDetails,
-        diagnostics: diagDetails,
-    } as any;
-}
-
 // ── File inspect ─────────────────────────────────────────────────
 
+type SectionResources = Map<string, InspectedResource>;
+function buildFileDeadCodeSection(cwd: string, absolutePath: string, callGraph: CallGraphResult): { text: string; resources: SectionResources } {
+    try {
+        // Relative path required: callGraph.functions[].file stores relative paths.
+        const fileRelPath = pathRelative(cwd, absolutePath);
+        const deadCode = detectDeadCode(fileRelPath, callGraph);
+        const sr = new Map<string, InspectedResource>();
+        addResource(sr, absolutePath, cwd);
+        if (deadCode.totalDeadFunctions === 0) {
+            return { text: "## Dead Code" + SECTION_NL + SECTION_NL + "(no zero-caller functions found in this file)", resources: sr };
+        }
+        const lines: string[] = [`## Dead Code (${deadCode.totalDeadFunctions} zero-caller functions)`, ""];
+        for (const file of deadCode.files) {
+            lines.push(`  ${file.path}:`);
+            for (const fn of file.functions) {
+                lines.push(`    ${fn.name}()  L${fn.line}`);
+            }
+            lines.push("");
+        }
+        return { text: joinSectionLines(lines), resources: sr };
+    } catch {
+        return { text: "## Dead Code" + SECTION_NL + SECTION_NL + "(detection failed)", resources: new Map() };
+    }
+}
+function buildFileRoutesSection(absolutePath: string, cwd: string): { text: string; resources: SectionResources } {
+    try {
+        const routes = extractRoutes(absolutePath);
+        if (routes.length === 0) {
+            return { text: "## HTTP Routes" + SECTION_NL + SECTION_NL + "(no routes found in this file)", resources: new Map() };
+        }
+        const lines: string[] = [`## HTTP Routes (${routes.length} routes)`, ""];
+        for (const r of routes) {
+            const handler = r.handler ?? "(handler)";
+            lines.push(`  ${r.method.padEnd(7)} ${r.path.padEnd(30)} → ${handler}  L${r.line}`);
+        }
+        const sr = new Map<string, InspectedResource>();
+        addResource(sr, absolutePath, cwd);
+        return { text: joinSectionLines(lines), resources: sr };
+    } catch {
+        return { text: "## HTTP Routes" + SECTION_NL + SECTION_NL + "(extraction failed)", resources: new Map() };
+    }
+}
+function buildFileHotspotsSection(cwd: string, absolutePath: string, callGraph: CallGraphResult): { text: string; resources: SectionResources } {
+    try {
+        const fileRelPath = pathRelative(cwd, absolutePath);
+        const fileFns = callGraph.functions
+            .filter(f => f.file === fileRelPath)
+            .sort((a, b) => b.calledBy.length - a.calledBy.length)
+            .slice(0, 15);
+        const sr = new Map<string, InspectedResource>();
+        addResource(sr, absolutePath, cwd);
+        if (fileFns.length === 0) {
+            return { text: "## Hotspots" + SECTION_NL + SECTION_NL + "(no function data for this file)", resources: sr };
+        }
+        const lines: string[] = [`## Hotspots (${fileFns.length} functions by fan-in)`, ""];
+        for (let i = 0; i < fileFns.length; i++) {
+            const fn = fileFns[i]!;
+            const num = String(i + 1).padStart(2, " ");
+            lines.push(`  ${num}. ${fn.name.padEnd(35)} L${fn.line}  — ${fn.calledBy.length} callers`);
+        }
+        return { text: joinSectionLines(lines), resources: sr };
+    } catch {
+        return { text: "## Hotspots" + SECTION_NL + SECTION_NL + "(computation failed)", resources: new Map() };
+    }
+}
+async function buildFileNavigationSection(input: InspectV4Input, cwd: string, absolutePath: string): Promise<{ details: any; text: string; resources: SectionResources }> {
+    try {
+        const op = input.navigation!.operation;
+        const maxResults = Math.min(Math.max(input.navigation!.maxResults ?? 20, 1), 100);
+        const navFn = resolveLspProvider(input)?.inspectNavigation ?? directInspectNavigation;
+        const outcome = await navFn({
+            operation: op as any,
+            line: input.navigation!.line,
+            character: input.navigation!.character,
+            query: input.navigation!.query,
+            maxResults,
+            path: absolutePath,
+            root: cwd,
+            signal: input.signal as any,
+        });
+        const status = outcome.status === "confirmed" ? "ok" : outcome.status;
+        // Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values without closing switch/default paths.
+        const items = canonicalizeNavigationItems(outcome.items, cwd);
+        const details = { schemaVersion: 1 as const, operation: op, status, source: "lsp" as const, items, truncated: outcome.truncated };
+        const srNav = new Map<string, InspectedResource>();
+        // file-mode results stay coverage:"search-match" — add per-location resources (including call hierarchy from/to)
+        for (const it of items as any[]) {
+            let p: string | undefined;
+            let loc: unknown = it;
+            if ((it as any)?.from?.uri) { p = uriToFsPath((it as any).from.uri); loc = (it as any).from; }
+            else if ((it as any)?.to?.uri) { p = uriToFsPath((it as any).to.uri); loc = (it as any).to; }
+            else p = (it as any)?.location?.uri ? uriToFsPath((it as any).location.uri) : (it as any)?.uri ? uriToFsPath((it as any).uri) : undefined;
+            if (p) addSearchMatchResource(srNav, p, cwd, loc);
+            else addSearchMatchResource(srNav, absolutePath, cwd, it);
+        }
+        if (op === "hover" && input.navigation!.line !== undefined) {
+            addSearchMatchResource(srNav, absolutePath, cwd, { line: input.navigation!.line });
+        }
+        // empty non-hover navigations produce no coverage (no fake line-1)
+        // when items empty and not hover, srNav stays empty
+        return { details, text: renderNavigationSection(details, cwd), resources: srNav };
+    } catch {
+        return { details: undefined, text: "## LSP Navigation" + SECTION_NL + SECTION_NL + "(computation failed)", resources: new Map() };
+    }
+}
+async function buildFileDiagnosticsSection(input: InspectV4Input, cwd: string, absolutePath: string): Promise<{ details: any; text: string; resources: SectionResources }> {
+    try {
+        const waitMs = input.diagnostics!.waitMs ?? 1500;
+        const maxPerFile = input.diagnostics!.maxPerFile ?? 12;
+        const diagFn = resolveLspProvider(input)?.inspectDiagnostics ?? directInspectDiagnostics;
+        const outcome = await diagFn({ path: absolutePath, root: cwd, waitMs, maxPerFile, signal: input.signal as any });
+        const status = toDiagnosticsOverallStatus([{ status: outcome.status, diagnostics: outcome.diagnostics }]);
+        const canonPath = tryCanonical(absolutePath);
+        const files = [{ path: canonPath, diagnostics: outcome.diagnostics, truncated: outcome.truncated }];
+        const details = { schemaVersion: 1 as const, status, source: "lsp" as const, files, truncated: !!outcome.truncated };
+        const srD = new Map<string, InspectedResource>();
+        if (outcome.diagnostics.length === 0) {
+            // empty diagnostics -> no coverage, do not fabricate line-1
+        } else {
+            for (const d of outcome.diagnostics as any[]) addSearchMatchResource(srD, absolutePath, cwd, d);
+        }
+        return { details, text: renderDiagnosticsSection(details, cwd), resources: srD };
+    } catch {
+        return { details: undefined, text: "## LSP Diagnostics" + SECTION_NL + SECTION_NL + "(computation failed)", resources: new Map() };
+    }
+}
+function buildFileGraphSchemaSection(input: InspectV4Input, cwd: string, absolutePath: string, facts: { dependencies: Array<{ specifier: string; resolvedPath?: string }>; externalDependents?: Array<{ file: string }> }): { text: string; resources: SectionResources } {
+    try {
+        const lines: string[] = ["## Graph Schema", ""];
+        if (input.contextGraph) {
+            try {
+                const provenanceEdges = input.contextGraph.getProvenanceEdges?.() ?? [];
+                const capacityStats = input.contextGraph.getCapacityStats?.();
+                // Use dedicated file index for file-node count, not derived from provenance edge endpoints
+                const fileNodeCount = capacityStats?.fileIndex.entries ?? new Set([...provenanceEdges.flatMap(e => [e.from, e.to])]).size;
+                const edgeCount = provenanceEdges.length;
+                const symbolEntries = capacityStats?.symbolIndex.entries ?? 0;
+                const sampleEdges = provenanceEdges.slice(0, 8).map(e => `${e.from} → ${e.to}`);
+                lines.push(`Context graph: file-nodes=${fileNodeCount}, edges=${edgeCount}, symbol-entries=${symbolEntries}`);
+                if (sampleEdges.length > 0) {
+                    lines.push("Sample edges:");
+                    for (const se of sampleEdges) {
+                        lines.push(`  ${se}`);
+                    }
+                }
+            } catch {
+                lines.push("Context graph: available (introspection failed)");
+            }
+        } else {
+            // Fallback: use import/dependency data
+            const depCount = facts.dependencies.length;
+            const extCount = facts.externalDependents?.length ?? 0;
+            lines.push("Context graph: not available — using direct import/dependent edges");
+            lines.push(`Direct dependencies (imported modules): ${depCount}`);
+            lines.push(`External dependents (importing files): ${extCount}`);
+            if (depCount > 0) {
+                const sample = facts.dependencies.slice(0, 5).map(d => `${d.specifier} → ${d.resolvedPath ? pathRelative(cwd, d.resolvedPath) : "(external)"}`);
+                lines.push("Sample dependency edges:");
+                for (const s of sample) lines.push(`  ${s}`);
+            }
+            if (extCount > 0) {
+                const sample = (facts.externalDependents ?? []).slice(0, 5).map(d => `${pathRelative(cwd, absolutePath)} → ${pathRelative(cwd, d.file)}`);
+                lines.push("Sample dependent edges:");
+                for (const s of sample) lines.push(`  ${s}`);
+            }
+        }
+        return { text: joinSectionLines(lines), resources: new Map() };
+    } catch {
+        return { text: "## Graph Schema" + SECTION_NL + SECTION_NL + "(introspection failed)", resources: new Map() };
+    }
+}
 export async function executeFileInspect(input: InspectV4Input): Promise<InspectV4Result> {
     const sessionFilePath = input.sessionFilePath;
     const cwd = realpathSync(input.cwd);
@@ -955,207 +514,48 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
 
     // deadCode (file scope)
     if (input.deadCode && callGraph) {
-        try {
-            const fileRelPath = pathRelative(cwd, absolutePath);
-            const deadCode = detectDeadCode(fileRelPath, callGraph);
-            if (deadCode.totalDeadFunctions > 0) {
-                const lines: string[] = [`## Dead Code (${deadCode.totalDeadFunctions} zero-caller functions)`, ""];
-                for (const file of deadCode.files) {
-                    lines.push(`  ${file.path}:`);
-                    for (const fn of file.functions) {
-                        lines.push(`    ${fn.name}()  L${fn.line}`);
-                    }
-                    lines.push("");
-                }
-                const sr2 = new Map<string, InspectedResource>();
-                addResource(sr2, absolutePath, cwd);
-                sectionResources.push(sr2);
-                extraSections.push(lines.join("\n"));
-            } else {
-                const sr3 = new Map<string, InspectedResource>();
-                addResource(sr3, absolutePath, cwd);
-                sectionResources.push(sr3);
-                extraSections.push("## Dead Code\n\n(no zero-caller functions found in this file)");
-            }
-        } catch {
-            extraSections.push("## Dead Code\n\n(detection failed)");
-            sectionResources.push(new Map());
-        }
+        const dead = buildFileDeadCodeSection(cwd, absolutePath, callGraph);
+        extraSections.push(dead.text);
+        sectionResources.push(dead.resources);
     }
 
     // routes (file mode — single file)
     if (input.routes) {
-        try {
-            const routes = extractRoutes(absolutePath);
-            if (routes.length > 0) {
-                const lines: string[] = [`## HTTP Routes (${routes.length} routes)`, ""];
-                for (const r of routes) {
-                    const handler = r.handler ?? "(handler)";
-                    lines.push(`  ${r.method.padEnd(7)} ${r.path.padEnd(30)} → ${handler}  L${r.line}`);
-                }
-                const sr4 = new Map<string, InspectedResource>();
-                addResource(sr4, absolutePath, cwd);
-                sectionResources.push(sr4);
-                extraSections.push(lines.join("\n"));
-            } else {
-                sectionResources.push(new Map());
-                extraSections.push("## HTTP Routes\n\n(no routes found in this file)");
-            }
-        } catch {
-            extraSections.push("## HTTP Routes\n\n(extraction failed)");
-            sectionResources.push(new Map());
-        }
+        const fr = buildFileRoutesSection(absolutePath, cwd);
+        extraSections.push(fr.text);
+        sectionResources.push(fr.resources);
     }
 
     // hotspots (file scope — functions in this file ranked by fan-in)
     if (input.hotspots && callGraph) {
-        try {
-            const fileRelPath = pathRelative(cwd, absolutePath);
-            const fileFns = callGraph.functions
-                .filter(f => f.file === fileRelPath)
-                .sort((a, b) => b.calledBy.length - a.calledBy.length)
-                .slice(0, 15);
-            if (fileFns.length > 0) {
-                const lines: string[] = [`## Hotspots (${fileFns.length} functions by fan-in)`, ""];
-                for (let i = 0; i < fileFns.length; i++) {
-                    const fn = fileFns[i]!;
-                    const num = String(i + 1).padStart(2, " ");
-                    lines.push(`  ${num}. ${fn.name.padEnd(35)} L${fn.line}  — ${fn.calledBy.length} callers`);
-                }
-                const sr5 = new Map<string, InspectedResource>();
-                addResource(sr5, absolutePath, cwd);
-                sectionResources.push(sr5);
-                extraSections.push(lines.join("\n"));
-            } else {
-                const sr6 = new Map<string, InspectedResource>();
-                addResource(sr6, absolutePath, cwd);
-                sectionResources.push(sr6);
-                extraSections.push("## Hotspots\n\n(no function data for this file)");
-            }
-        } catch {
-            extraSections.push("## Hotspots\n\n(computation failed)");
-            sectionResources.push(new Map());
-        }
+        const hs = buildFileHotspotsSection(cwd, absolutePath, callGraph);
+        extraSections.push(hs.text);
+        sectionResources.push(hs.resources);
     }
 
     // ── WP-SR3 navigation (file) ──
     let __navDetails: any = undefined;
     if (input.navigation) {
-        try {
-            const op = input.navigation.operation;
-            const maxResults = Math.min(Math.max(input.navigation.maxResults ?? 20, 1), 100);
-            const navFn2 = resolveLspProvider(input)?.inspectNavigation ?? directInspectNavigation;
-            const outcome = await navFn2({
-                operation: op as any,
-                line: input.navigation.line,
-                character: input.navigation.character,
-                query: input.navigation.query,
-                maxResults,
-                path: absolutePath,
-                root: cwd,
-                signal: input.signal as any,
-            });
-            const status = outcome.status === "confirmed" ? "ok" : outcome.status;
-            // Extension seam: future mutating autofix/format and external security-scanner triage plugs here — add new status values without closing switch/default paths.
-            const items = canonicalizeNavigationItems(outcome.items, cwd);
-            __navDetails = { schemaVersion: 1 as const, operation: op, status, source: "lsp" as const, items, truncated: outcome.truncated };
-            extraSections.push(renderNavigationSection(__navDetails, cwd));
-            const srNav = new Map<string, InspectedResource>();
-            // file-mode results stay coverage:"search-match" — add per-location resources (including call hierarchy from/to)
-            for (const it of items as any[]) {
-                let p: string | undefined;
-                let loc: unknown = it;
-                if ((it as any)?.from?.uri) { p = uriToFsPath((it as any).from.uri); loc = (it as any).from; }
-                else if ((it as any)?.to?.uri) { p = uriToFsPath((it as any).to.uri); loc = (it as any).to; }
-                else p = (it as any)?.location?.uri ? uriToFsPath((it as any).location.uri) : (it as any)?.uri ? uriToFsPath((it as any).uri) : undefined;
-                if (p) addSearchMatchResource(srNav, p, cwd, loc);
-                else addSearchMatchResource(srNav, absolutePath, cwd, it);
-            }
-            if (op === "hover" && input.navigation.line !== undefined) {
-                addSearchMatchResource(srNav, absolutePath, cwd, { line: input.navigation.line });
-            }
-            // empty non-hover navigations produce no coverage (no fake line-1)
-            // when items empty and not hover, srNav stays empty
-            sectionResources.push(srNav);
-        } catch {
-            extraSections.push("## LSP Navigation\n\n(computation failed)");
-            sectionResources.push(new Map());
-        }
+        const nav = await buildFileNavigationSection(input, cwd, absolutePath);
+        __navDetails = nav.details;
+        extraSections.push(nav.text);
+        sectionResources.push(nav.resources);
     }
 
     // ── WP-SR3 diagnostics (file) ──
     let __diagDetails: any = undefined;
     if (input.diagnostics) {
-        try {
-            const waitMs = input.diagnostics.waitMs ?? 1500;
-            const maxPerFile = input.diagnostics.maxPerFile ?? 12;
-            const diagFnFile = resolveLspProvider(input)?.inspectDiagnostics ?? directInspectDiagnostics;
-            const outcome = await diagFnFile({ path: absolutePath, root: cwd, waitMs, maxPerFile, signal: input.signal as any });
-            const status = toDiagnosticsOverallStatus([{ status: outcome.status, diagnostics: outcome.diagnostics }]);
-            const canonPath = tryCanonical(absolutePath);
-            const files = [{ path: canonPath, diagnostics: outcome.diagnostics, truncated: outcome.truncated }];
-            __diagDetails = { schemaVersion: 1 as const, status, source: "lsp" as const, files, truncated: !!outcome.truncated };
-            extraSections.push(renderDiagnosticsSection(__diagDetails, cwd));
-            const srD = new Map<string, InspectedResource>();
-            if (outcome.diagnostics.length === 0) {
-                // empty diagnostics -> no coverage, do not fabricate line-1
-            } else {
-                for (const d of outcome.diagnostics as any[]) addSearchMatchResource(srD, absolutePath, cwd, d);
-            }
-            sectionResources.push(srD);
-        } catch {
-            extraSections.push("## LSP Diagnostics\n\n(computation failed)");
-            sectionResources.push(new Map());
-        }
+        const diag = await buildFileDiagnosticsSection(input, cwd, absolutePath);
+        __diagDetails = diag.details;
+        extraSections.push(diag.text);
+        sectionResources.push(diag.resources);
     }
 
     // graphSchema (file scope)
     if (input.graphSchema) {
-        try {
-            const lines: string[] = ["## Graph Schema", ""];
-            if (input.contextGraph) {
-                try {
-                    const provenanceEdges = input.contextGraph.getProvenanceEdges?.() ?? [];
-                    const capacityStats = input.contextGraph.getCapacityStats?.();
-                    // Use dedicated file index for file-node count, not derived from provenance edge endpoints
-                    const fileNodeCount = capacityStats?.fileIndex.entries ?? new Set([...provenanceEdges.flatMap(e => [e.from, e.to])]).size;
-                    const edgeCount = provenanceEdges.length;
-                    const symbolEntries = capacityStats?.symbolIndex.entries ?? 0;
-                    const sampleEdges = provenanceEdges.slice(0, 8).map(e => `${e.from} → ${e.to}`);
-                    lines.push(`Context graph: file-nodes=${fileNodeCount}, edges=${edgeCount}, symbol-entries=${symbolEntries}`);
-                    if (sampleEdges.length > 0) {
-                        lines.push("Sample edges:");
-                        for (const se of sampleEdges) {
-                            lines.push(`  ${se}`);
-                        }
-                    }
-                } catch {
-                    lines.push("Context graph: available (introspection failed)");
-                }
-            } else {
-                // Fallback: use import/dependency data
-                const depCount = facts.dependencies.length;
-                const extCount = facts.externalDependents?.length ?? 0;
-                lines.push("Context graph: not available — using direct import/dependent edges");
-                lines.push(`Direct dependencies (imported modules): ${depCount}`);
-                lines.push(`External dependents (importing files): ${extCount}`);
-                if (depCount > 0) {
-                    const sample = facts.dependencies.slice(0, 5).map(d => `${d.specifier} → ${d.resolvedPath ? pathRelative(cwd, d.resolvedPath) : "(external)"}`);
-                    lines.push("Sample dependency edges:");
-                    for (const s of sample) lines.push(`  ${s}`);
-                }
-                if (extCount > 0) {
-                    const sample = (facts.externalDependents ?? []).slice(0, 5).map(d => `${pathRelative(cwd, absolutePath)} → ${pathRelative(cwd, d.file)}`);
-                    lines.push("Sample dependent edges:");
-                    for (const s of sample) lines.push(`  ${s}`);
-                }
-            }
-            sectionResources.push(new Map());
-            extraSections.push(lines.join("\n"));
-        } catch {
-            extraSections.push("## Graph Schema\n\n(introspection failed)");
-            sectionResources.push(new Map());
-        }
+        const gs = buildFileGraphSchemaSection(input, cwd, absolutePath, facts);
+        sectionResources.push(gs.resources);
+        extraSections.push(gs.text);
     }
 
     // ── Render extra sections with token budget ────────────────
@@ -1246,383 +646,4 @@ export async function executeFileInspect(input: InspectV4Input): Promise<Inspect
         navigation: __navDetails,
         diagnostics: __diagDetails,
     } as any;
-}
-
-// ── Section renderers ────────────────────────────────────────────
-
-function renderCallGraphSection(
-    callGraph: CallGraphResult | null,
-    targetFile: string,
-    facts: StructuralFacts,
-    depth: number,
-    direction: CallDirection,
-    cwd: string,
-): { text: string; emittedFiles: string[] } {
-    const lines: string[] = [
-        `## Call Graph (depth=${depth}, direction=${direction})`,
-        "",
-    ];
-    const emittedFiles = new Set<string>();
-
-    if (!callGraph) {
-        lines.push("(call graph not available — build with includeCalls: true)");
-        return { text: lines.join("\n"), emittedFiles: [] };
-    }
-
-    // Find functions defined in this file
-    const fileFns = callGraph.functions.filter(f => f.file === targetFile);
-
-    if (fileFns.length === 0) {
-        // Fall back to children from structural facts
-        for (const child of facts.children) {
-            lines.push(`  ${child.name}()  L${child.line}`);
-            lines.push("");
-        }
-        if (facts.children.length === 0) {
-            lines.push("(no function definitions found in file)");
-        }
-        return { text: lines.join("\n"), emittedFiles: [] };
-    }
-
-    // Outbound (callees)
-    if (direction === "callees" || direction === "both") {
-        lines.push("outbound:");
-        for (const fn of fileFns.slice(0, 5)) {
-            lines.push(`  ${fn.name}()  L${fn.line}`);
-            renderCallees(callGraph, fn, lines, depth, 1, cwd, undefined, emittedFiles);
-        }
-        lines.push("");
-    }
-
-    // Inbound (callers)
-    if (direction === "callers" || direction === "both") {
-        lines.push("inbound:");
-        for (const fn of fileFns.slice(0, 5)) {
-            if (fn.calledBy.length > 0) {
-                lines.push(`  ${fn.name}()  L${fn.line}  ← calls this`);
-                renderCallers(callGraph, fn, lines, depth, 1, cwd, undefined, emittedFiles);
-            }
-        }
-        lines.push("");
-    }
-
-    return { text: lines.join("\n"), emittedFiles: [...emittedFiles] };
-}
-
-function renderCallees(
-    cg: CallGraphResult,
-    fn: { calls: string[] },
-    lines: string[],
-    maxDepth: number,
-    currentDepth: number,
-    cwd: string,
-    visited?: Set<string>,
-    emittedFiles?: Set<string>,
-): void {
-    if (currentDepth > maxDepth) return;
-    const visitedSet = visited ?? new Set<string>();
-    const indent = "    ".repeat(currentDepth);
-    for (const calleeStr of fn.calls.slice(0, 10)) {
-        const parts = calleeStr.split(":");
-        const name = parts.length === 2 ? parts[1]! : calleeStr;
-        if (visitedSet.has(name)) continue;
-        visitedSet.add(name);
-        const file = parts.length === 2 ? parts[0] : undefined;
-        if (file) emittedFiles?.add(file);
-        const fileSuffix = file ? `  ${file}` : "";
-        lines.push(`${indent}→ ${name}()${fileSuffix}`);
-        // Recurse into callees of the called function
-        const calleeFn = cg.functions.find(f => f.name === name);
-        if (calleeFn) {
-            renderCallees(cg, calleeFn, lines, maxDepth, currentDepth + 1, cwd, visitedSet, emittedFiles);
-        }
-    }
-}
-
-function renderCallers(
-    cg: CallGraphResult,
-    fn: { calledBy: string[] },
-    lines: string[],
-    maxDepth: number,
-    currentDepth: number,
-    _cwd: string,
-    visited?: Set<string>,
-    emittedFiles?: Set<string>,
-): void {
-    if (currentDepth >= maxDepth) return;
-    const visitedSet = visited ?? new Set<string>();
-    const indent = "    ".repeat(currentDepth);
-    for (const callerStr of fn.calledBy.slice(0, 10)) {
-        const parts = callerStr.split(":");
-        const name = parts.length === 2 ? parts[1]! : callerStr;
-        if (visitedSet.has(name)) continue;
-        visitedSet.add(name);
-        const file = parts.length === 2 ? parts[0] : undefined;
-        if (file) emittedFiles?.add(file);
-        const fileSuffix = file ? `  ${file}` : "";
-        lines.push(`${indent}← ${name}()${fileSuffix}`);
-        const callerFn = cg.functions.find(f => f.name === name);
-        if (callerFn) {
-            renderCallers(cg, callerFn, lines, maxDepth, currentDepth + 1, _cwd, visitedSet, emittedFiles);
-        }
-    }
-}
-
-// ── Helpers ──────────────────────────────────────────────────────
-
-function setResourceRanges(
-    resourcesByPath: Map<string, InspectedResource>,
-    canonical: string,
-    line: number,
-): void {
-    const canon = tryCanonical(canonical);
-    const existing = resourcesByPath.get(canon);
-    if (existing) {
-        const merged = mergeRanges([...existing.allowedRanges, { startLine: line, endLine: line }]);
-        resourcesByPath.set(canon, { ...existing, allowedRanges: merged });
-    } else {
-        resourcesByPath.set(canon, {
-            resourceId: resourceIdFor({ canonicalPath: canon, kind: "range", range: { startLine: line, endLine: line } }),
-            canonicalPath: canon,
-            kind: "range",
-            coverage: "search-match",
-            allowedRanges: [{ startLine: line, endLine: line }],
-            fresh: false,
-        });
-    }
-}
-
-function tryCanonical(filePath: string): string {
-    try { return realpathSync(filePath); } catch { return filePath; }
-}
-
-function addResource(
-    resourcesByPath: Map<string, InspectedResource>,
-    filePath: string,
-    cwd: string,
-): void {
-    const canonical = tryCanonical(pathResolve(cwd, filePath));
-    if (!resourcesByPath.has(canonical)) {
-        resourcesByPath.set(canonical, {
-            resourceId: resourceIdFor({ canonicalPath: canonical, kind: "range" }),
-            canonicalPath: canonical,
-            kind: "range",
-            coverage: "search-match",
-            allowedRanges: [{ startLine: 1, endLine: 1 }],
-            fresh: false,
-        });
-    }
-}
-
-function mergeRanges(ranges: Array<{ startLine: number; endLine: number }>): Array<{ startLine: number; endLine: number }> {
-    if (ranges.length <= 1) return ranges;
-    const sorted = [...ranges].sort((a, b) => a.startLine - b.startLine);
-    const out: Array<{ startLine: number; endLine: number }> = [];
-    for (const r of sorted) {
-        const last = out[out.length - 1];
-        if (last && r.startLine <= last.endLine + 1) {
-            last.endLine = Math.max(last.endLine, r.endLine);
-        } else {
-            out.push({ ...r });
-        }
-    }
-    return out;
-}
-
-function riskOrder(risk: string): number {
-    switch (risk) {
-        case "critical": return 0;
-        case "high": return 1;
-        case "medium": return 2;
-        case "low": return 3;
-        default: return 4;
-    }
-}
-
-/**
- * Build import edges from ContextGraph for community detection / layer analysis.
- * Falls back to empty array when contextGraph is not available.
- */
-function buildImportEdges(contextGraph: ContextGraph | undefined): Array<{ from: string; to: string }> {
-    if (!contextGraph) return [];
-    // Use ContextGraph's getProvenanceEdges() to extract import/call edges
-    // recorded during file-index population.
-    const provenances = contextGraph.getProvenanceEdges();
-    if (provenances.length > 0) return provenances;
-    // If no provenances recorded yet, try getFileNeighbours on each known file.
-    // For now, return empty — community detection / layer analysis degrade gracefully.
-    return [];
-}
-
-/**
- * Guess a human-readable label for a cluster based on common path patterns.
- */
-function guessClusterLabel(members: string[]): string {
-    // Count path segment tokens
-    const tokens = new Map<string, number>();
-    for (const m of members) {
-        const parts = m.split("/");
-        for (const p of parts) {
-            const clean = p.replace(/\.[^.]+$/, "").toLowerCase();
-            if (clean.length > 2 && clean !== "src" && clean !== "lib" && clean !== "index") {
-                tokens.set(clean, (tokens.get(clean) ?? 0) + 1);
-            }
-        }
-    }
-    // Most common token wins
-    let best = "";
-    let bestCount = 0;
-    for (const [token, count] of tokens) {
-        if (count > bestCount) {
-            bestCount = count;
-            best = token;
-        }
-    }
-    return best || "unknown";
-}
-
-/**
- * Map section index back to a human-readable section name for budget truncation messages.
- */
-function findSectionName(sections: string[], index: number): string {
-    const text = sections[index] ?? "";
-    const match = text.match(/^##\s+(.+?)(?:\s*\(|$)/m);
-    if (match?.[1]) return match[1].trim();
-    return `Section ${index + 1}`;
-}
-
-/**
- * Run git diff and return structured changes for the diff param.
- * Returns null when git is absent, not a repo, or diff fails.
- */
-export async function runGitDiff(
-    diffTarget: DiffTarget,
-    cwd: string
-): Promise<{ file: string; status?: string; oldFile?: string; addedCount: number; addedLines: number[]; deletedLines: number; changedLineRanges: Array<{ startLine: number; endLine: number }> }[] | null> {
-    const gitRoot = await findGitRoot(cwd);
-    if (!gitRoot) return null;
-
-    const args: string[] = ["diff"];
-    if (diffTarget === "staged") args.push("--cached");
-    else if (diffTarget === "HEAD") args.push("HEAD~1");
-    args.push("--numstat");
-
-    let stdout: string;
-    try {
-        const result = await execFileAsync("git", args, {
-            cwd: gitRoot,
-            encoding: "utf-8",
-            maxBuffer: 5 * 1024 * 1024,
-        }) as { stdout: string };
-        stdout = result.stdout;
-    } catch {
-        return null;
-    }
-
-    if (!stdout.trim()) return [];
-
-    const files: Array<{
-        file: string;
-        addedCount: number;
-        addedLines: number[];
-        deletedLines: number;
-        changedLineRanges: Array<{ startLine: number; endLine: number }>;
-    }> = [];
-
-    for (const line of stdout.trim().split("\n")) {
-        const parts = line.split("\t");
-        if (parts.length < 3) continue;
-        const added = parseInt(parts[0]!, 10);
-        const _deleted = parseInt(parts[1]!, 10);
-        const file = parts.slice(2).join("\t").trim();
-        if (!file || isNaN(added)) continue;
-        files.push({ file, addedCount: added, addedLines: [], deletedLines: _deleted, changedLineRanges: [] });
-    }
-
-    if (files.length === 0) return files;
-
-    // Get unified diff with hunk headers for line number mapping
-    const unifiedArgs: string[] = ["diff"];
-    if (diffTarget === "staged") unifiedArgs.push("--cached");
-    else if (diffTarget === "HEAD") unifiedArgs.push("HEAD~1");
-    unifiedArgs.push("--unified=0");
-
-    try {
-        const unifiedResult = await execFileAsync("git", unifiedArgs, {
-            cwd: gitRoot,
-            encoding: "utf-8",
-            maxBuffer: 10 * 1024 * 1024,
-        }) as { stdout: string };
-        const unifiedStdout = unifiedResult.stdout;
-
-        // Parse hunk headers to get changed line ranges per file
-        const hunkRegex = /@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/;
-        let currentFile = "";
-        for (const uline of unifiedStdout.split("\n")) {
-            const fileMatch = uline.match(/^\+\+\+\s+b\/(.+)$/);
-            if (fileMatch) {
-                currentFile = fileMatch[1]!;
-                continue;
-            }
-            if (!currentFile) continue;
-            const hunkMatch = hunkRegex.exec(uline);
-            if (hunkMatch) {
-                const startLine = parseInt(hunkMatch[1]!, 10);
-                const hunkLen = hunkMatch[2] ? parseInt(hunkMatch[2]!, 10) : 1;
-                const endLine = startLine + hunkLen - 1;
-                const entry = files.find(f => f.file === currentFile);
-                if (entry && hunkLen > 0) {
-                    entry.addedLines.push(startLine, endLine);
-                    entry.changedLineRanges.push({ startLine, endLine });
-                }
-            }
-        }
-    } catch {
-        // Unified diff parsing is best-effort; numstat data is still usable
-    }
-
-    return files;
-}
-
-/**
- * Render the diff impact section text.
- */
-export async function renderDiffSection(
-    diffTarget: DiffTarget,
-    cwd: string,
-    callGraph?: CallGraphResult | null,
-): Promise<{ text: string; emittedFiles: string[] }> {
-    const changes = await runGitDiff(diffTarget, cwd);
-
-    if (changes === null) {
-        return { text: "## Diff Impact\n\nError: inspect diff requires a git repository", emittedFiles: [] };
-    }
-
-    if (changes.length === 0) {
-        return { text: `## Diff Impact: ${diffTarget} changes\n\n(no changes found)`, emittedFiles: [] };
-    }
-
-    // Find symbols in changed line ranges using basic function-definition regex
-    const lines: string[] = [
-        `## Diff Impact: ${diffTarget} changes`,
-        "",
-        `Changed Files (${changes.length}):`,
-    ];
-
-    for (const change of changes) {
-        const absPath = pathResolve(cwd, change.file);
-        const symbols = (callGraph?.functions ?? []).filter((fn) => {
-            const fnPath = pathResolve(cwd, fn.file);
-            return fnPath === absPath && change.changedLineRanges.some((r) => fn.line <= r.endLine && (fn.endLine ?? fn.line) >= r.startLine);
-        });
-        const symbolNote = symbols.length > 0
-            ? `${symbols.length} symbol${symbols.length !== 1 ? "s" : ""} modified: ${symbols.map((fn) => fn.qualifiedName ?? fn.name).join(", ")}`
-            : "symbols unavailable (AST coverage incomplete)";
-        lines.push(`  ${change.file}  — ${symbolNote}`);
-    }
-
-    // Risk requires complete impact evidence; diff churn alone is not evidence.
-    lines.push("", "Impact assessment: unavailable (diff does not include complete callgraph coverage)");
-
-    return { text: lines.join("\n"), emittedFiles: changes.map(c => pathResolve(cwd, c.file)) };
 }
