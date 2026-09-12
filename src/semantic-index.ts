@@ -7,13 +7,14 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { ResolvedEmbeddingConfig } from "./config.js";
 import { validateEmbeddingConfig } from "./config.js";
 import { chunkTextAst } from "./chunking.js";
 import { fetchEmbeddings, type EmbedRequest, type EmbedResult } from "./embedding.js";
 import { embeddingProfileId } from "./embedding-profile.js";
 import { discoverFiles, type FileDiscoveryResult } from "./file-discovery.js";
+import { canonicalRelative } from "./workspace-boundary.js";
 import { bm25Scores, computeRanks } from "./scoring.js";
 import {
   SqliteVecStore,
@@ -285,8 +286,11 @@ export class SemanticIndex {
         continue;
       }
       if (!stat.isFile() || stat.size > this.maxFileBytes) continue;
-      const rel = normalizeRelative(relative(this.root, absolutePath));
-      if (!rel || rel.startsWith("../")) continue;
+      // Single-flavor relative: registry root is native-flavor canonical while
+      // discovered paths may be long-flavor; raw relative() escapes with ".."
+      // on Windows 8.3 short/long mismatches and drops every file.
+      const rel = normalizeRelative(canonicalRelative(this.root, absolutePath));
+      if (!rel || rel.startsWith("../") || isAbsolute(rel)) continue;
       const previous = this.metadata.files[rel];
       const hash = previous && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size
         ? previous.hash
@@ -593,7 +597,9 @@ export class SemanticIndex {
 }
 
 export function pathPrefixForDirectory(projectRoot: string, directory: string): string | undefined {
-  const rel = normalizeRelative(relative(resolve(projectRoot), resolve(directory)));
+  // Canonicalize both sides first: same 8.3 short/long hazard as above;
+  // a spurious ".." escape throws and callers degrade to lexical fallback.
+  const rel = normalizeRelative(canonicalRelative(resolve(projectRoot), resolve(directory)));
   if (!rel) return undefined;
   if (rel.startsWith("../") || isAbsolute(rel)) throw new Error("Directory is outside semantic index root");
   return rel;

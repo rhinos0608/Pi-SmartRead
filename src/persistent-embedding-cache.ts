@@ -16,7 +16,7 @@
  *   - JSON serialization of float arrays
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
 import { join, parse, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { EmbedRequest, EmbedResult } from "./embedding.js";
@@ -46,10 +46,22 @@ export class PersistentEmbeddingCache {
     // disk entries written by one fake-embedder test leak into another with
     // identical query and inputs (order-dependent hits; drive roots are
     // writable on Windows while permission-denied on Linux masked it).
-    // Keep memory LRU only for such roots.
+    // Keep memory LRU only for such roots. Parse the resolved path: on
+    // Windows resolve("/") yields the drive root (e.g. "D:\\") while
+    // parse("/").root does not, so comparing against the raw input misses.
+    let resolved: string;
     try {
-      const { root: parsedRoot } = parse(root);
-      if (resolve(root) === parsedRoot) return;
+      resolved = resolve(root);
+      const { root: parsedRoot } = parse(resolved);
+      if (resolved === parsedRoot) return;
+    } catch {
+      return;
+    }
+    // Stub roots (e.g. "/" or "/workspace/repo" in tests) must not gain a
+    // cache directory: on Windows mkdir -p would succeed under the drive
+    // root and leak entries across tests, and pollute the filesystem.
+    try {
+      if (!statSync(resolved).isDirectory()) return;
     } catch {
       return;
     }

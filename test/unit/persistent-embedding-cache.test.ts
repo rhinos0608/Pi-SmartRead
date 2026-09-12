@@ -129,6 +129,20 @@ describe("PersistentEmbeddingCache", () => {
     expect(cache.diskEntries).toBe(0);
   });
 
+  it("stays memory-only at the filesystem root (shared across tests/processes)", () => {
+    const cache = new PersistentEmbeddingCache("/");
+    expect(cache.hasPersistence).toBe(false);
+    expect(cache.diskEntries).toBe(0);
+  });
+
+  it("stays memory-only for nonexistent stub roots without creating directories", () => {
+    const missing = join(tmpDir, "does-not-exist", "repo");
+    const cache = new PersistentEmbeddingCache(missing);
+    expect(cache.hasPersistence).toBe(false);
+    expect(cache.diskEntries).toBe(0);
+    expect(existsSync(missing)).toBe(false);
+  });
+
   it("handles many sequential reads/writes without corruption", () => {
     const cache = new PersistentEmbeddingCache(tmpDir, 100);
 
