@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { join } from "node:path";
 import { createIntentReadTool } from "../../src/intent-read.js";
 import { SCENARIOS, createRetrievalFixture, cleanupFixture, RetrievalFixture } from "../helpers/retrieval-fixtures.js";
 import type { EmbedRequest, EmbedResult } from "../../src/embedding.js";
@@ -71,7 +72,7 @@ describe("Advanced Retrieval Baseline (Phase 0)", () => {
 
     expect(text).toContain("app.ts");
     // Current intent-read engine SHOULD already support direct relative import augmentation
-    expect(details.graphAugmentation.addedPaths).toContain(fixture.root + "/config.ts");
+    expect(details.graphAugmentation.addedPaths).toContain(join(fixture.root, "config.ts"));
   });
 
   it("Scenario 4: Symbol cross-file match (Baseline - MISSING)", async () => {
@@ -93,6 +94,6 @@ describe("Advanced Retrieval Baseline (Phase 0)", () => {
     
     // In this specific scenario, UserService imports Repository from ./repo.
     // So it should be found IF current logic catches relative imports well.
-    expect(details.graphAugmentation.addedPaths).toContain(fixture.root + "/repo.ts");
+    expect(details.graphAugmentation.addedPaths).toContain(join(fixture.root, "repo.ts"));
   });
 });

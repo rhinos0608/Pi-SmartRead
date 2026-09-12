@@ -11,7 +11,7 @@
  */
 
 import { existsSync, promises as fs } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import Parser, { Query } from "tree-sitter";
 import { getTagsBatch, initParser, loadLanguage } from "./tags.js";
 import { TagsCache } from "./cache.js";
@@ -155,7 +155,7 @@ function scoreDefinitionRelevance(
   // Same parent tree (shared ancestor)
   const defDir = dirname(defFile);
   const ctxDir = dirname(contextFile);
-  if (defDir.startsWith(ctxDir + "/") || ctxDir.startsWith(defDir + "/")) return 30;
+  if (defDir.startsWith(ctxDir + sep) || ctxDir.startsWith(defDir + sep)) return 30;
 
   return 10;
 }

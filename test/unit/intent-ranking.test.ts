@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolve } from "node:path";
 import { LruCache } from "../../src/utils.js";
 import type { EmbedResult } from "../../src/embedding.js";
 import type { PersistentEmbeddingCache } from "../../src/persistent-embedding-cache.js";
@@ -77,7 +78,7 @@ describe("intent-ranking: embedding cache key", () => {
 
 describe("intent-ranking: normalizeCandidatePath", () => {
   it("resolves relative paths against cwd and leaves absolute paths alone", () => {
-    expect(normalizeCandidatePath("/repo", "src/a.ts")).toBe("/repo/src/a.ts");
+    expect(normalizeCandidatePath("/repo", "src/a.ts")).toBe(resolve("/repo", "src/a.ts"));
     expect(normalizeCandidatePath("/repo", "/elsewhere/b.ts")).toBe("/elsewhere/b.ts");
   });
 });

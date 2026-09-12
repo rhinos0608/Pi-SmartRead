@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, isAbsolute } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { retrieveQuery } from "../../src/query-retrieval.js";
 import { canonicalPath } from "../../src/workspace-boundary.js";
@@ -137,7 +137,10 @@ describe("shared query retrieval", () => {
     const result = await retrieveQuery({ query: "semanticNeedle", cwd: allowed });
     expect(result.strategy).toBe("hybrid");
     const allowedCanon = canonicalPath(allowed) ?? realpathSync(allowed);
-    expect(result.hits.every((hit) => hit.absolutePath.startsWith(`${allowedCanon}/`))).toBe(true);
+    expect(result.hits.every((hit) => {
+      const rel = relative(allowedCanon, hit.absolutePath);
+      return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+    })).toBe(true);
   });
 
   it("owns one nearest-project registry entry and disposes live handles", async () => {

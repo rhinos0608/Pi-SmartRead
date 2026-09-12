@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { detectMonorepo, expandToMonorepoRoots, detectServiceBoundaries } from "../../src/monorepo-detector.js";
 
@@ -32,9 +32,9 @@ describe("monorepo detector", () => {
     writeProjectFile(root, "packages/b/package.json", JSON.stringify({ name: "b" }));
 
     const mono = detectMonorepo(root);
-    expect(mono?.packages.map((path) => path.replace(`${root}/`, "")).sort()).toEqual([
-      "packages/a",
-      "packages/b",
+    expect(mono?.packages.map((path) => relative(root, path)).sort()).toEqual([
+      join("packages", "a"),
+      join("packages", "b"),
     ]);
   });
 
@@ -53,15 +53,15 @@ describe("monorepo detector", () => {
     writeProjectFile(root, "packages/core/src/index.ts", "export const core = true;\n");
 
     const mono = detectMonorepo(root);
-    expect(mono?.packages.map((path) => path.replace(`${root}/`, "")).sort()).toEqual([
-      "packages/core",
+    expect(mono?.packages.map((path) => relative(root, path)).sort()).toEqual([
+      join("packages", "core"),
       "plugin-auth",
       "plugin-ui",
     ]);
 
     const expanded = expandToMonorepoRoots(join(root, "packages/core"));
-    expect(expanded.map((path) => path.replace(`${root}/`, "")).sort()).toEqual([
-      "packages/core",
+    expect(expanded.map((path) => relative(root, path)).sort()).toEqual([
+      join("packages", "core"),
       "plugin-auth",
       "plugin-ui",
     ]);

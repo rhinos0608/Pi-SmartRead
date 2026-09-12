@@ -104,7 +104,7 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
       let shown = 0;
       for (const [file, reasons] of nearby) {
         if (shown++ >= 8) break;
-        contextLines.push(`• Nearby: ${path.relative(projectRoot, file)} — ${reasons.join("; ")}`);
+        contextLines.push(`• Nearby: ${path.relative(projectRoot, file).replace(/\\/g, "/")} — ${reasons.join("; ")}`);
       }
     }
   } catch {

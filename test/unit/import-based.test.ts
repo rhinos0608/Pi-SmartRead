@@ -296,7 +296,7 @@ describe("RepoMap — import-based fallback", () => {
     // core.ts should have in-degree 1 (imported by main.ts via @ alias)
     expect(result.stats!.totalFiles).toBe(2); // src/core.ts, main.ts
     const coreEntry = result.rankedTags.find(
-      (rt) => rt.tag.relFname === "src/core.ts",
+      (rt) => rt.tag.relFname === join("src", "core.ts") || rt.tag.relFname === "src/core.ts",
     );
     expect(coreEntry).toBeDefined();
     expect(coreEntry!.rank).toBeGreaterThan(0);

@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   clearEnricherCache,
@@ -96,10 +96,10 @@ describe("GraphifyEnricher community detection", () => {
     const files = enricher.getCommunityFiles(aComm!);
     expect(files.length).toBe(3);
     // Should include a.ts, b.ts, c.ts
-    const relFiles = files.map(f => f.replace(TEST_CWD + "/", ""));
-    expect(relFiles).toContain("src/a.ts");
-    expect(relFiles).toContain("src/b.ts");
-    expect(relFiles).toContain("src/c.ts");
+    const relFiles = files.map(f => relative(TEST_CWD, f));
+    expect(relFiles).toContain(join("src", "a.ts"));
+    expect(relFiles).toContain(join("src", "b.ts"));
+    expect(relFiles).toContain(join("src", "c.ts"));
   });
 
   it("communityCount reflects detected communities when graph.json has none", () => {

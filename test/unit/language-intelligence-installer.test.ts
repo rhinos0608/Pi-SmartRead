@@ -303,7 +303,7 @@ describe("language-intelligence-installer", () => {
 
   it("getInstallerStorageRoot returns expected path", () => {
     expect(getInstallerStorageRoot(home)).toBe(join(home, ".pi", "agent", "language-intelligence"));
-    expect(getInstallerStorageRoot("/custom/home")).toBe("/custom/home/.pi/agent/language-intelligence");
+    expect(getInstallerStorageRoot("/custom/home")).toBe(join("/custom/home", ".pi", "agent", "language-intelligence"));
   });
 
   it("failed finalization (renameSync throw) preserves prior install via backup restore", async () => {

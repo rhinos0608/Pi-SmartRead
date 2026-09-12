@@ -444,7 +444,7 @@ export function detectTests(
     return {
       name: "tests",
       label: "Yes",
-      value: `Yes (${relative(cwd, linkage.testFile)})`,
+      value: `Yes (${relative(cwd, linkage.testFile).replace(/\\/g, "/")})`,
       detail: linkage.testFile,
       confidence: "medium",
       source: "test file discovery",

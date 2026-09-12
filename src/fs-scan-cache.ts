@@ -268,11 +268,14 @@ export class FsScanCache<T extends unknown[]> {
 			const sepIndex = key.indexOf("|")
 			if (sepIndex === -1) return false
 			const cacheRoot = key.slice(0, sepIndex)
-			// Invalidate if target is at or under the cached root
-			return (
-				resolvedTarget === cacheRoot ||
-				resolvedTarget.startsWith(cacheRoot + "/")
-			)
+			// Invalidate if target is at or under the cached root (sep-aware:
+		// cache keys use native resolve(), which yields backslashes on Windows).
+		const normTarget = resolvedTarget.replace(/\\/g, "/");
+		const normRoot = cacheRoot.replace(/\\/g, "/");
+		return (
+			normTarget === normRoot ||
+			normTarget.startsWith(normRoot + "/")
+		)
 		})
 	}
 

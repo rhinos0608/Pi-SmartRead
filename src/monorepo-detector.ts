@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 interface MonorepoWorkspace {
   /** Workspace root directory (absolute) */
@@ -202,7 +202,7 @@ function resolveWorkspacePackageRoot(rootDir: string, candidate: string): string
 
 function isSubpath(parent: string, child: string): boolean {
   const rel = relative(resolve(parent), resolve(child));
-  return rel === "" || (!rel.startsWith("..") && rel !== "");
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 // ── Service Boundary Detection ─────────────────────────────────
