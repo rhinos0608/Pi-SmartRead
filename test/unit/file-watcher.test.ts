@@ -75,6 +75,13 @@ describe("file-watcher", () => {
     vi.useFakeTimers();
     mockWatch.mockReset();
     mockClose.mockReset();
+    // Reset the chokidar require mock: sibling tests set mockReturnValue
+    // (chokidar present) and restoreAllMocks does not clear it, so restore
+    // the default "module not found" behavior for test isolation.
+    mockModuleRequire.mockReset();
+    mockModuleRequire.mockImplementation(() => {
+      throw new Error("Cannot find module 'chokidar'");
+    });
     // Capture originals for safe restore
     savedNodeEnv = process.env.NODE_ENV;
     savedVitest = process.env.VITEST;

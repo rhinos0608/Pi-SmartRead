@@ -28,7 +28,7 @@ describe("read tool workspace evidence", () => {
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   it("full read attaches a valid full-file envelope and publishes it", async () => {
-    const publish = vi.fn();
+    const publish = vi.fn((_envelope: unknown, _sessionFilePath: string, _workspaceRoot: string) => {});
     const tool = createReadTool({ publishInspection: publish });
     const res: any = await tool.execute("t1", { path: "x.ts" }, undefined, undefined, makeCtx(dir, session));
     const env = res.details.workspaceEvidence;
@@ -157,7 +157,7 @@ describe("extended read modes", () => {
   });
 
   it("returns and publishes real-chain batch evidence for paths", async () => {
-    const publish = vi.fn();
+    const publish = vi.fn((_envelope: unknown, _sessionFilePath: string, _workspaceRoot: string) => {});
     const tool = createReadTool({ publishInspection: publish });
     const result: any = await tool.execute(
       "batch",

@@ -504,7 +504,7 @@ describe("read_files: batch workspace evidence", () => {
 	}
 
 	it("attaches a merged schema-3 envelope and publishes it when reads emit per-file evidence", async () => {
-		const publish: ReturnType<typeof vi.fn> = vi.fn();
+		const publish = vi.fn((_envelope: unknown, _sessionFilePath: string, _workspaceRoot: string) => {});
 		const envA = makeEnvelopeFor("/alpha", "1".repeat(64), "a".repeat(64));
 		const envB = makeEnvelopeFor("/b", "2".repeat(64), "b".repeat(64));
 		const readTool = {
@@ -566,7 +566,7 @@ describe("read_files: batch workspace evidence", () => {
 	});
 
 	it("does not attach a batch envelope when no per-file evidence is emitted", async () => {
-		const publish = vi.fn();
+		const publish = vi.fn((_envelope: unknown, _sessionFilePath: string, _workspaceRoot: string) => {});
 		const readTool = {
 			execute: async () => ({
 				content: [{ type: "text", text: "x" }],
@@ -590,7 +590,7 @@ describe("read_files: batch workspace evidence", () => {
 	});
 
 	it("does not attach a batch envelope when no session file is available", async () => {
-		const publish = vi.fn();
+		const publish = vi.fn((_envelope: unknown, _sessionFilePath: string, _workspaceRoot: string) => {});
 		const env = makeEnvelopeFor("/alpha", "1".repeat(64), "a".repeat(64));
 		const readTool = {
 			execute: async () => ({
