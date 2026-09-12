@@ -72,18 +72,16 @@ function isPythonFile(path: string): boolean {
 
 // ── Complexity (AST) ───────────────────────────────────────────────────
 
+const GRAMMAR_MODULE_BY_LANG: Record<string, string> = {
+  typescript: "tree-sitter-typescript",
+  tsx: "tree-sitter-typescript",
+  javascript: "tree-sitter-javascript",
+  python: "tree-sitter-python",
+};
 function loadGrammar(lang: SupportedLanguage): unknown {
-  switch (lang) {
-    case "typescript":
-    case "tsx":
-      return require("tree-sitter-typescript");
-    case "javascript":
-      return require("tree-sitter-javascript");
-    case "python":
-      return require("tree-sitter-python");
-    default:
-      return null;
-  }
+  const moduleName = GRAMMAR_MODULE_BY_LANG[lang];
+  if (!moduleName) return null;
+  return require(moduleName);
 }
 
 function countBranchesRecursive(
@@ -188,15 +186,9 @@ export async function computeComplexity(
 
       const total = perFn.reduce((a, b) => a + b, 0);
       const maxFn = Math.max(...perFn, 0);
-
-      let label: string;
-      if (maxFn >= 20) label = "High";
-      else if (maxFn >= 10) label = "Medium";
-      else label = "Low";
-
       return {
         name: "complexity",
-        label,
+        label: complexityLabelAst(maxFn),
         value: `${total}`,
         detail: `max ${maxFn} in a single function`,
         confidence: "high",
@@ -209,14 +201,9 @@ export async function computeComplexity(
 
   // Regex fallback
   const { total, maxInFunction } = complexityRegex(src);
-  let label: string;
-  if (total >= 30) label = "High";
-  else if (total >= 10) label = "Medium";
-  else label = "Low";
-
   return {
     name: "complexity",
-    label,
+    label: complexityLabelRegex(total),
     value: `${total}`,
     detail: `max ${maxInFunction} in a single function (regex)`,
     confidence: "low",
@@ -224,14 +211,17 @@ export async function computeComplexity(
   };
 }
 
-export function detectPublicApi(
-  absolutePath: string,
-  source?: string,
-): SignalResult {
-  const src = readSource(absolutePath, source);
-  const isPy = isPythonFile(absolutePath);
-
-  if (isPy) {
+function complexityLabelAst(maxFn: number): string {
+  if (maxFn >= 20) return "High";
+  if (maxFn >= 10) return "Medium";
+  return "Low";
+}
+function complexityLabelRegex(total: number): string {
+  if (total >= 30) return "High";
+  if (total >= 10) return "Medium";
+  return "Low";
+}
+function detectPythonPublicApi(src: string): SignalResult {
     // Check for __all__
     const allMatch = src.match(/__all__\s*=\s*\[([^\]]*)\]/);
     if (allMatch) {
@@ -282,7 +272,7 @@ export function detectPublicApi(
       source: "python underscore convention",
     };
   }
-
+function detectTsPublicApi(src: string): SignalResult {
   // TS/JS: count export keyword at statement level
   const exportMatches = src.match(/export\s+(?:default\s+)?(?:function|class|const|let|var|interface|type|enum|abstract|async)/g);
   const exportCount = exportMatches ? exportMatches.length : 0;
@@ -311,7 +301,13 @@ export function detectPublicApi(
     source: "ts/js export keyword",
   };
 }
-
+export function detectPublicApi(absolutePath: string, source?: string): SignalResult {
+  const src = readSource(absolutePath, source);
+  return isPythonFile(absolutePath) ? detectPythonPublicApi(src) : detectTsPublicApi(src);
+}
+function unknownReuse(detail: string): SignalResult {
+  return { name: "reuse", label: "Unknown", value: "Unknown", detail, confidence: "none", source: "import scan" };
+}
 function reuseFromImportScan(dependents: DependentInfo[]): SignalResult {
   const count = new Set(dependents.map((dependent) => resolve(dependent.file))).size;
   if (count > 0) {
@@ -349,27 +345,11 @@ export async function computeReuseBreadth(
     try {
       // Quick directory check — findSrcFiles returns [] for non-existent dirs
       // but we need to distinguish "no workspace" from "no dependents"
-      if (!existsSync(scanCwd)) {
-        return {
-          name: "reuse",
-          label: "Unknown",
-          value: "Unknown",
-          detail: "Graph unavailable — could not scan workspace",
-          confidence: "none",
-          source: "import scan",
-        };
-      }
+      if (!existsSync(scanCwd)) return unknownReuse("Graph unavailable — could not scan workspace");
       const dependents = await findImportDependents(absolutePath, scanCwd, filenameToLang(absolutePath) as any);
       return reuseFromImportScan(dependents);
     } catch {
-      return {
-        name: "reuse",
-        label: "Unknown",
-        value: "Unknown",
-        detail: "Graph unavailable — could not scan workspace",
-        confidence: "none",
-        source: "import scan",
-      };
+      return unknownReuse("Graph unavailable — could not scan workspace");
     }
   }
 

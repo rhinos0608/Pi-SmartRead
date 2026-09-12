@@ -865,6 +865,180 @@ describe("grep tool — glob-aware retrieval", () => {
         expect((result.details as any).totalHits).toBeGreaterThanOrEqual(20);
         expect(text).not.toContain(".md");
     });
+
+    it("matches *.ts files inside a path subdirectory", async () => {
+        mkdirSync(join(workdir, "jobs"), { recursive: true });
+        writeFileSync(
+            join(workdir, "jobs", "reasoningIsolation.test.ts"),
+            'const ROOT = join(import.meta.dirname, "..", "..");\n',
+            "utf8",
+        );
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-glob-path",
+            { pattern: "meta.dirname", path: "jobs", glob: "*.ts", literal: true, limit: 20 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        const text = (result.content[0] as { text: string }).text;
+        expect((result.details as any).shownHits).toBeGreaterThanOrEqual(1);
+        expect(text).toContain("reasoningIsolation.test.ts");
+    });
+
+    it("treats escaped dots as regex so import\\.meta\\.dirname matches import.meta.dirname", async () => {
+        mkdirSync(join(workdir, "jobs"), { recursive: true });
+        writeFileSync(
+            join(workdir, "jobs", "reasoningIsolation.test.ts"),
+            'const ROOT = join(import.meta.dirname, "..", "..");\n',
+            "utf8",
+        );
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-escaped-dot",
+            { pattern: "import\\.meta\\.dirname", path: "jobs", limit: 20 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        expect((result.details as any).engines).toContain("regex");
+        expect((result.details as any).shownHits).toBeGreaterThanOrEqual(1);
+        expect((result.content[0] as { text: string }).text).toContain("reasoningIsolation.test.ts");
+    });
+
+    it("ranks BM25 hits under path + *.ts glob when there is no exact phrase", async () => {
+        mkdirSync(join(workdir, "jobs"), { recursive: true });
+        writeFileSync(
+            join(workdir, "jobs", "reasoningIsolation.test.ts"),
+            'const ROOT = join(import.meta.dirname, "..", "..");\n',
+            "utf8",
+        );
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-glob-bm25",
+            { pattern: "ROOT dirname", path: "jobs", glob: "*.ts", limit: 20 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        expect((result.details as any).shownHits).toBeGreaterThanOrEqual(1);
+        expect((result.content[0] as { text: string }).text).toContain("reasoningIsolation.test.ts");
+    });
+});
+
+const PATH_ANCHOR = "PATH_ANCHOR_NEEDLE";
+
+describe("grep tool — path-anchored globs", () => {
+    beforeEach(() => {
+        mkdirSync(join(workdir, "jobs", "sub"), { recursive: true });
+        writeFileSync(join(workdir, "jobs", "top.ts"), `export const x = "${PATH_ANCHOR}";\n`, "utf8");
+        writeFileSync(join(workdir, "jobs", "sub", "nested.ts"), `export const x = "${PATH_ANCHOR}";\n`, "utf8");
+        writeFileSync(join(workdir, "outside.ts"), `export const x = "${PATH_ANCHOR}";\n`, "utf8");
+        writeFileSync(join(workdir, "src", "deep.ts"), `export const x = "${PATH_ANCHOR}";\n`, "utf8");
+    });
+
+    async function run(params: Record<string, unknown>) {
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-anchor",
+            { pattern: PATH_ANCHOR, literal: true, limit: 20, ...params },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        return {
+            text: (result.content[0] as { text: string }).text,
+            details: result.details as any,
+        };
+    }
+
+    it("path=jobs glob=*.ts matches only immediate children", async () => {
+        const { text } = await run({ path: "jobs", glob: "*.ts" });
+        expect(text).toContain("jobs/top.ts");
+        expect(text).not.toContain("nested.ts");
+        expect(text).not.toContain("outside.ts");
+        expect(text).not.toContain("deep.ts");
+    });
+
+    it("path=jobs glob=**/*.ts recurses under jobs only", async () => {
+        const { text } = await run({ path: "jobs", glob: "**/*.ts" });
+        expect(text).toContain("jobs/top.ts");
+        expect(text).toContain("jobs/sub/nested.ts");
+        expect(text).not.toContain("outside.ts");
+        expect(text).not.toContain("src/deep.ts");
+    });
+
+    it("path=jobs/sub glob=*.ts does not re-anchor to session cwd", async () => {
+        const { text } = await run({ path: "jobs/sub", glob: "*.ts" });
+        expect(text).toContain("jobs/sub/nested.ts");
+        expect(text).not.toContain("jobs/top.ts");
+        expect(text).not.toContain("outside.ts");
+    });
+
+    it("path=jobs/sub glob=**/*.ts stays under sub", async () => {
+        const { text } = await run({ path: "jobs/sub", glob: "**/*.ts" });
+        expect(text).toContain("jobs/sub/nested.ts");
+        expect(text).not.toContain("jobs/top.ts");
+        expect(text).not.toContain("outside.ts");
+    });
+
+    it("absolute path matches relative path semantics", async () => {
+        const { text } = await run({ path: join(workdir, "jobs"), glob: "*.ts" });
+        expect(text).toContain("jobs/top.ts");
+        expect(text).not.toContain("nested.ts");
+        expect(text).not.toContain("outside.ts");
+    });
+
+    it("path=. glob=*.ts is session-root immediate children", async () => {
+        const { text } = await run({ path: ".", glob: "*.ts" });
+        expect(text).toContain("outside.ts");
+        expect(text).not.toContain("jobs/top.ts");
+        expect(text).not.toContain("src/deep.ts");
+    });
+
+    it("does not leak cwd files that match the glob outside searchDir", async () => {
+        const { text, details } = await run({ path: "jobs", glob: "*.ts" });
+        expect(details.shownHits).toBeGreaterThanOrEqual(1);
+        expect(text).toContain("jobs/top.ts");
+        expect(text).not.toContain("outside.ts");
+    });
+
+    it("path=jobs/sub/.. normalizes to jobs", async () => {
+        const { text } = await run({ path: "jobs/sub/..", glob: "*.ts" });
+        expect(text).toContain("jobs/top.ts");
+        expect(text).not.toContain("nested.ts");
+        expect(text).not.toContain("outside.ts");
+    });
+});
+
+describe("grep tool — regex detection", () => {
+    beforeEach(() => {
+        writeFileSync(join(workdir, "src", "classify.ts"), "foo.bar\nfoo\\z\n", "utf8");
+    });
+
+    async function enginesFor(pattern: string): Promise<string[]> {
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-re",
+            { pattern, path: "src/classify.ts", limit: 20 },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        return (result.details as any).engines as string[];
+    }
+
+    it("routes foo\\.bar as regex", async () => {
+        expect(await enginesFor("foo\\.bar")).toContain("regex");
+    });
+
+    it("keeps foo.bar as literal (bare dot is not regex syntax)", async () => {
+        expect(await enginesFor("foo.bar")).not.toContain("regex");
+    });
+
+    it("keeps foo\\z as literal (backslash + non-class letter)", async () => {
+        expect(await enginesFor("foo\\z")).not.toContain("regex");
+    });
 });
 
 // ── Explicit degradation reasons ─────────────────────────────────

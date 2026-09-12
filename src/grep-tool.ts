@@ -47,7 +47,7 @@ const GrepOptionProperties = {
     path: Type.Optional(Type.String({ description: "Directory or file to search in (default: cwd)." })),
     glob: Type.Optional(Type.String({ description: "File filter, e.g. '*.ts' or 'src/**/*.py'." })),
     ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)." })),
-    literal: Type.Optional(Type.Boolean({ description: "Exact substring match — skip regex detection and BM25/semantic (default: false)." })),
+    literal: Type.Optional(Type.Boolean({ description: "Force exact substring. Disables regex auto-detect, BM25, and semantic (default: false)." })),
     limit: Type.Optional(Type.Number({ description: "Max results (default: 20, max: 100).", default: 20, minimum: 1, maximum: 100 })),
     contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 10).", default: 2, minimum: 0, maximum: 10 })),
     graphFilter: Type.Optional(Type.String({ description: 'Filter results by graph relationship. Format: "EDGE_TYPE->target" e.g. "CALLS->auth.login" or "IMPORTED_BY->src/core".' })),
@@ -58,14 +58,16 @@ const TopLevelSkipProperty = {
     skip: Type.Optional(Type.Number({ description: "Matches to skip (pagination) for structural search — routes into structural.skip.", minimum: 0 })),
 };
 
+const PATTERN_DESCRIPTION = "Literal substring by default. Auto-regex only if the pattern contains |, ^, $, .*, .+, [class], (group), {n}, \\d/\\w/\\s/\\b, or \\. Bare '.' is literal: foo.bar matches foo.bar, not fooXbar. import\\.meta\\.dirname is regex. Set literal:true to force substring.";
+
 const GrepQuerySchema = Type.Object({
-    pattern: Type.String({ description: "Text, symbol name, or concept to search for.", minLength: 1 }),
+    pattern: Type.String({ description: PATTERN_DESCRIPTION, minLength: 1 }),
     ...GrepOptionProperties,
     ...TopLevelSkipProperty,
 });
 
 const GrepSchema = Type.Object({
-    pattern: Type.Optional(Type.String({ description: "Single text, symbol name, or concept to search for. Provide pattern or queries, not both.", minLength: 1 })),
+    pattern: Type.Optional(Type.String({ description: `${PATTERN_DESCRIPTION} Provide pattern or queries, not both.`, minLength: 1 })),
     queries: Type.Optional(Type.Array(GrepQuerySchema, {
         description: "Multiple searches to run in one call. Top-level options are shared defaults; per-query options override them.",
         minItems: 1,
@@ -78,7 +80,7 @@ const GrepSchema = Type.Object({
 type GrepInput = Static<typeof GrepSchema>;
 type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available.`;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available.`;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -524,7 +526,9 @@ async function executeGrepQuery(
 
         if (params.glob) {
             const { minimatch } = await import("minimatch");
-            current = current.filter((hit) => minimatch(hit.relFile, params.glob!));
+            current = current.filter((hit) =>
+                minimatch(relativeToSearchDir(searchDir, hit.file), params.glob!),
+            );
         }
 
         if (hasGraphFilter) {
@@ -579,7 +583,11 @@ function resolveSearchScope(cwd: string, inputPath: string | undefined): { searc
     return { searchDir: target };
 }
 
-const REGEX_SYNTAX = /(^|[^\\])(?:\||\^|\$|\.\*|\.\+|\[[^\]]+\]|\([^)]*\)|\{\d+(?:,\d*)?\}|\\[bBdDsSwW])/;
+function relativeToSearchDir(searchDir: string, file: string): string {
+    return relative(searchDir, file).replace(/\\/g, "/");
+}
+
+const REGEX_SYNTAX = /(^|[^\\])(?:\||\^|\$|\.\*|\.\+|\[[^\]]+\]|\([^)]*\)|\{\d+(?:,\d*)?\}|\\[bBdDsSwW]|\\\.)/;
 
 function detectRegexPattern(pattern: string): string | null {
     if (!REGEX_SYNTAX.test(pattern)) return null;
@@ -1008,7 +1016,6 @@ function isWithinWorkspace(root: string, dir: string): boolean {
 async function buildCorpus(
     searchDir: string,
     scopedFile: string | undefined,
-    cwd: string,
     fileGlob: string | undefined,
 ): Promise<CorpusEntry> {
     corpusBuildCount++;
@@ -1019,7 +1026,7 @@ async function buildCorpus(
     const discoveryCap = fileGlob ? 10_000 : MAX_BM25_CANDIDATES;
     let files = scopedFile ? [scopedFile] : await findCodeFiles(searchDir, discoveryCap);
     if (fileGlob) {
-        files = files.filter((f) => minimatch(relative(cwd, f).replace(/\\/g, "/"), fileGlob));
+        files = files.filter((f) => minimatch(relativeToSearchDir(searchDir, f), fileGlob));
     }
     files = files.slice(0, MAX_BM25_CANDIDATES);
 
@@ -1060,7 +1067,7 @@ async function getSearchCorpus(
         getWorkspaceRevision !== undefined &&
         isWithinWorkspace(root, searchDir);
     if (!cacheable) {
-        return { entry: await buildCorpus(searchDir, scopedFile, cwd, fileGlob), cached: false };
+        return { entry: await buildCorpus(searchDir, scopedFile, fileGlob), cached: false };
     }
     const glob = fileGlob ?? "";
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -1073,7 +1080,7 @@ async function getSearchCorpus(
             // Builder must not inherit any caller abort signal: a coalesced
             // build serves all concurrent callers, so cancellation is handled
             // by the caller before/after the await, never inside the build.
-            pending = buildCorpus(searchDir, scopedFile, cwd, fileGlob).then((entry) => {
+            pending = buildCorpus(searchDir, scopedFile, fileGlob).then((entry) => {
                 if (getWorkspaceRevision() !== revision) return null; // stale — don't publish
                 corpusCache.set(key, entry);
                 return entry;
@@ -1092,7 +1099,7 @@ async function getSearchCorpus(
         }
     }
     // Safety net: loop exited without a fresh build (revision churn).
-    return { entry: await buildCorpus(searchDir, scopedFile, cwd, fileGlob), cached: false };
+    return { entry: await buildCorpus(searchDir, scopedFile, fileGlob), cached: false };
 }
 
 async function runFallbackBm25(

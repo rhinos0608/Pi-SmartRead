@@ -41,7 +41,8 @@ describe("language-intelligence warmup", () => {
     const src = readFileSync("src/language-intelligence-runtime.ts", "utf-8");
     expect(src).toContain("isRootTrusted");
     // lsp-bridge must call resolveLanguageServer which internally checks trust gate — ensure no direct existsSync on node_modules/.bin without trust check
-    const bridgeSrc = readFileSync("src/lsp-bridge.ts", "utf-8");
+    // (Phase B split: bridge family spans lsp-bridge + lsp-types + lsp-manager + lsp-connection)
+    const bridgeSrc = ["src/lsp-bridge.ts", "src/lsp-types.ts", "src/lsp-manager.ts", "src/lsp-connection.ts"].map((f) => readFileSync(f, "utf-8")).join("\n");
     expect(bridgeSrc).toContain("resolveLanguageServer");
     expect(bridgeSrc).not.toMatch(/node_modules.*\\.bin.*existsSync/);
   });
