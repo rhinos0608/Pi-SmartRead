@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -68,7 +68,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 const { spawn } = await import("node:child_process");
-const { LSPConnection, getLSPBridge, resetLSPBridge, shutdownAllManagers } = await import("../../src/lsp-bridge.js");
+const { LSPConnection, getLSPBridge, resetLSPBridge, shutdownAllManagers, invalidateResolvedServerCacheForRoot } = await import("../../src/lsp-bridge.js");
 
 async function makeConnection(root: string): Promise<{ conn: InstanceType<typeof LSPConnection>; proc: FakeProc }> {
   const conn = new LSPConnection();
@@ -79,14 +79,37 @@ async function makeConnection(root: string): Promise<{ conn: InstanceType<typeof
   return { conn, proc };
 }
 
+const ORIGINAL_PATH = process.env.PATH ?? "";
+let fakeBinDir: string | null = null;
+/**
+ * Hermetic seam: bridge-level tests go through LSPManager, whose constructor
+ * only builds spawnable configs when a real binary resolves in PATH (a seeded
+ * resolver-cache entry alone is wiped by detection before it is read). CI has
+ * no language-server binary, so provide a fake `typescript-language-server`
+ * executable on PATH. Spawn itself stays mocked — the fake is only stat-checked
+ * by the resolver, never executed. No production semantics change.
+ */
+function installFakeServerBin(): void {
+  if (!fakeBinDir) {
+    fakeBinDir = mkdtempSync(join(tmpdir(), "lsp-fakebin-"));
+    const binPath = join(fakeBinDir, "typescript-language-server");
+    writeFileSync(binPath, "#!/bin/sh\nexit 0\n");
+    try { chmodSync(binPath, 0o755); } catch { /* stat-checked only, never executed */ }
+  }
+  process.env.PATH = `${fakeBinDir}${delimiter}${ORIGINAL_PATH}`;
+}
+
 describe("LSPConnection diagnostics plumbing", () => {
   let root: string;
 
   beforeEach(() => {
+    installFakeServerBin();
     root = mkdtempSync(join(tmpdir(), "lsp-bridge-diag-"));
   });
 
   afterEach(async () => {
+    process.env.PATH = ORIGINAL_PATH;
+    invalidateResolvedServerCacheForRoot(root);
     rmSync(root, { recursive: true, force: true });
     vi.clearAllMocks();
     await shutdownAllManagers();
@@ -209,6 +232,7 @@ describe("LSPConnection diagnostics plumbing", () => {
     // Opening a file in a fresh root creates a manager with a live connection.
     const filePath = join(root, "a.ts");
     writeFileSync(filePath, "export const a = 1;");
+    installFakeServerBin();
     await bridge!.openFile(filePath, root);
 
     expect(bridge!.isAvailable()).toBe(true);
@@ -257,8 +281,8 @@ describe("LSPConnection diagnostics plumbing", () => {
 
 describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
   let root: string;
-  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "lsp-bridge-outcome-")); });
-  afterEach(async () => { rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
+  beforeEach(() => { installFakeServerBin(); root = mkdtempSync(join(tmpdir(), "lsp-bridge-outcome-")); });
+  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
 
   it("goToDefinitionOutcome: 1-based public pos translated to 0-based internally", async () => {
     // fake server echoes position so we can assert wire format
@@ -285,6 +309,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     const bridge = await getLSPBridge();
     const filePath = join(root, "a.ts");
     writeFileSync(filePath, "export const a = 1;");
+    installFakeServerBin();
     const r: any = await (bridge as any).goToDefinitionOutcome(filePath, 5, 10, root, { timeoutMs: 2000 });
     // capture outbound LSP position on any spawned proc
     const calls = (spawn as unknown as ReturnType<typeof vi.fn>).mock.results;
@@ -330,6 +355,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     const bridge = await getLSPBridge();
     const filePath = join(root, "a.ts");
     writeFileSync(filePath, "export const a = 1;");
+    installFakeServerBin();
     mode = "empty";
     const empty = await (bridge as any).goToDefinitionOutcome(filePath, 1, 1, root, { timeoutMs: 800 });
     expect(empty.status).toBe("empty");
@@ -373,6 +399,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     const bridge = await getLSPBridge();
     const filePath = join(root, "a.ts");
     writeFileSync(filePath, "export const a = 1;");
+    installFakeServerBin();
     await bridge!.openFile(filePath, root);
     // Seed stale diagnostics via publishDiagnostics for the current file
     sendToStdout(activeProc!, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: `file://${resolve(filePath)}`, diagnostics: [{ message: "stale", severity: 1 }] } });
@@ -407,6 +434,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     let bridge: any = await getLSPBridge();
     let filePath = join(root, "unconfirmed.ts");
     writeFileSync(filePath, "export const a = 1;");
+    installFakeServerBin();
     const unconfirmed = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 600, waitMs: 80 });
     expect(unconfirmed.status).toBe("degraded");
     expect(unconfirmed.diagnostics).toEqual([]);
@@ -437,6 +465,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     bridge = await getLSPBridge();
     filePath = join(root, "confirmed.ts");
     writeFileSync(filePath, "export const b = 1;");
+    installFakeServerBin();
     const confirmed = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 400 });
     expect(confirmed.status).toBe("empty");
     expect(confirmed.diagnostics).toEqual([]);
@@ -468,6 +497,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     let bridge: any = await getLSPBridge();
     let filePath = join(root, "closed-null.ts");
     writeFileSync(filePath, "export const a = 1;");
+    installFakeServerBin();
     const degraded = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
     expect(degraded.status).toBe("degraded");
     expect(degraded.diagnostics).toEqual([]);
@@ -484,6 +514,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     bridge = await getLSPBridge();
     filePath = join(root, "closed-success-empty.ts");
     writeFileSync(filePath, "export const b = 1;");
+    installFakeServerBin();
     const empty = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
     expect(empty.status).toBe("empty");
     expect(empty.diagnostics).toEqual([]);
