@@ -76,7 +76,8 @@ export function runGitCouplingChannel(
     .slice(0, maxCandidates);
 
   const candidates: ChannelCandidate[] = sorted.map(([absPath, rawScore]) => {
-    const relPath = relative(resolvedRoot, absPath);
+    // Normalize to forward slashes: `relative` returns backslashes on Windows.
+    const relPath = relative(resolvedRoot, absPath).replace(/\\/g, "/");
     return {
       file: relPath,
       name: relPath,

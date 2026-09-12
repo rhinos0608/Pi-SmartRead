@@ -301,8 +301,9 @@ describe("utils: buildPartialSection", () => {
 
 describe("utils: resolveWorkspacePath (opt-in boundary)", () => {
   it("resolves paths without restriction when no env is set", () => {
-    const result = resolveWorkspacePath("/tmp", "file.ts");
-    expect(result).toBe(require("node:path").resolve("/tmp", "file.ts"));
+    const tmp = require("node:os").tmpdir();
+    const result = resolveWorkspacePath(tmp, "file.ts");
+    expect(result).toBe(require("node:path").resolve(tmp, "file.ts"));
   });
 
   it("throws for empty path", () => {
@@ -312,17 +313,18 @@ describe("utils: resolveWorkspacePath (opt-in boundary)", () => {
 
 describe("utils: resolveDirectoryParam (opt-in boundary)", () => {
   it("resolves directory without restriction when no env is set", () => {
-    const result = resolveDirectoryParam("/tmp", undefined);
+    const tmp = require("node:os").tmpdir();
+    const result = resolveDirectoryParam(tmp, undefined);
     // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS)
-    const expected = require("node:fs").realpathSync("/tmp");
+    const expected = require("node:fs").realpathSync(tmp);
     expect(result).toBe(expected);
   });
 
   it("resolves explicit directory", () => {
-    const dir = require("node:path").resolve("/tmp", "sub");
+    const dir = require("node:path").resolve(require("node:os").tmpdir(), "sub");
     require("node:fs").mkdirSync(dir, { recursive: true });
     try {
-      const result = resolveDirectoryParam("/tmp", "sub");
+      const result = resolveDirectoryParam(require("node:os").tmpdir(), "sub");
       // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS)
       const expected = require("node:fs").realpathSync(dir);
       expect(result).toBe(expected);

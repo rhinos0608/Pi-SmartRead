@@ -8,7 +8,14 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { EdgeType, Provenance } from "./context-graph.js";
 
 function canonicalMutationPath(root: string, value: string): string | null {
-  const marker = value.indexOf(":");
+  // Split off a `:symbol` suffix, skipping a Windows drive-letter colon
+  // (`C:\proj\...`) so absolute Windows paths resolve instead of `C`.
+  let marker = -1;
+  for (let i = value.indexOf(":"); i !== -1; i = value.indexOf(":", i + 1)) {
+    if (i === 1 && /^[a-zA-Z]:[\\/]/.test(value)) continue;
+    marker = i;
+    break;
+  }
   const filePart = marker > 0 ? value.slice(0, marker) : value;
   const suffix = marker > 0 ? value.slice(marker) : "";
   try {

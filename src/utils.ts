@@ -302,8 +302,28 @@ export function validatePath(path: string): void {
 	}
 }
 
-const FILE_LINE_RANGE_RE = /^(.*?)(?::(.+))$/;
 const URL_LIKE_RE = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//;
+const DRIVE_LETTER_RE = /^[a-zA-Z]:[\\/]/;
+function isRangeSpecValid(spec: string): boolean {
+	const s = spec.trim();
+	if (!s) return false;
+	let m = /^(\d+)-(\d+)$/.exec(s);
+	if (m) return Number(m[1]) >= 1 && Number(m[2]) >= Number(m[1]);
+	m = /^(\d+)-$/.exec(s);
+	if (m) return Number(m[1]) >= 1;
+	m = /^(\d+)\+(\d+)$/.exec(s);
+	if (m) return Number(m[1]) >= 1 && Number(m[2]) >= 1;
+	m = /^(\d+)$/.exec(s);
+	if (m) return Number(m[1]) >= 1;
+	return false;
+}
+
+function isSelectorChunkValid(chunk: string): boolean {
+	const trimmed = chunk.trim();
+	if (!trimmed) return false;
+	if (trimmed.toLowerCase() === "raw") return true;
+	return trimmed.split(",").every(isRangeSpecValid);
+}
 
 export function isUrlLikePath(rawPath: string): boolean {
 	return URL_LIKE_RE.test(rawPath);
@@ -316,11 +336,18 @@ export function splitPathAndSelector(rawPath: string): { path: string; selector?
 	if (isUrlLikePath(rawPath)) {
 		return { path: rawPath };
 	}
-	const match = FILE_LINE_RANGE_RE.exec(rawPath);
-	if (!match) {
-		return { path: rawPath };
+	// Scan colons left-to-right (skipping a Windows drive-letter colon) and split
+	// at the first colon whose entire suffix is a valid line selector. A bare
+	// drive path like `C:\foo` has no valid selector suffix, so it stays whole.
+	for (let i = rawPath.indexOf(":"); i !== -1; i = rawPath.indexOf(":", i + 1)) {
+		if (i === 1 && DRIVE_LETTER_RE.test(rawPath)) continue;
+		const suffix = rawPath.slice(i + 1);
+		if (!suffix) continue;
+		if (suffix.split(":").every(isSelectorChunkValid)) {
+			return { path: rawPath.slice(0, i), selector: suffix };
+		}
 	}
-	return { path: match[1]!, selector: match[2] };
+	return { path: rawPath };
 }
 
 export function selectorToOffsetLimit(selector?: string): { offset?: number; limit?: number; raw?: boolean } {

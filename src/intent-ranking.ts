@@ -359,7 +359,7 @@ export async function rankCandidates<TFileDetail extends RankingFileDetail>(
       if (adrs.length > 0) {
         for (let i = 0; i < files.length; i++) {
           const fp = paths[i]!;
-          const basename = fp.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
+          const basename = fp.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, "") ?? "";
           for (const adr of adrs) {
             if (adr.tags.some((t) => fp.includes(t) || basename === t)) {
               adrBoosts[i] = ADR_BOOST;

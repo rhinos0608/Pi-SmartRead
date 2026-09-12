@@ -250,8 +250,8 @@ describe("Retrieval Benchmarks (Recall@k / MRR)", () => {
       const rankedPaths: string[] = (details.files as any[])
         .filter((f: any) => f.ok && f.included)
         .map((f: any) => {
-          // Normalize to basename for comparison
-          const parts = f.path.split("/");
+          // Normalize to basename for comparison (both POSIX and Windows separators)
+          const parts = f.path.split(/[/\\]/);
           return parts[parts.length - 1]!;
         });
 
@@ -308,7 +308,7 @@ describe("Retrieval Benchmarks (Recall@k / MRR)", () => {
         const details = result.details as any;
         const rankedPaths: string[] = (details.files as any[])
           .filter((f: any) => f.ok && f.included)
-          .map((f: any) => f.path.split("/").pop()!);
+          .map((f: any) => f.path.split(/[/\\]/).pop()!);
 
         const relevantSet = new Set(scenario.relevantFiles);
         const k = Math.min(scenario.topK ?? 3, rankedPaths.length);
