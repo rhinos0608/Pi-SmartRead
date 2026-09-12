@@ -1,5 +1,6 @@
-import { realpathSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
+import { canonicalPath, canonicalRelative } from "./workspace-boundary.js";
 import { handleCode, handleGrep } from "./search-tool.js";
 import { pathPrefixForDirectory } from "./semantic-index.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
@@ -41,7 +42,8 @@ export interface RetrieveQueryOptions {
 
 function canonicalFile(path: string): string | null {
   try {
-    const canonical = realpathSync(path);
+    const canonical = canonicalPath(path);
+    if (!canonical) return null;
     return statSync(canonical).isFile() ? canonical : null;
   } catch {
     return null;
@@ -60,13 +62,16 @@ function resolveExplicitDirectory(cwd: string, requested: string | undefined): s
   if (!stat.isDirectory()) {
     throw new Error(`Path is not a directory: ${raw}`);
   }
-  return realpathSync(absolute);
+  return canonicalPath(absolute) ?? absolute;
 }
 
 export async function retrieveQuery(options: RetrieveQueryOptions): Promise<QueryRetrievalResult> {
   const query = options.query.trim();
   if (!query) throw new Error("query must not be empty or whitespace-only");
-  const cwd = realpathSync(options.cwd);
+  // Single-flavor canonicalization: the index registry keys on canonicalPath
+  // (native-first), so lookup roots must use the same flavor or short/long
+  // mismatches make relative() escape and force fallback.
+  const cwd = canonicalPath(options.cwd) ?? resolve(options.cwd);
   const topK = Math.max(1, Math.min(100, Math.trunc(options.topK ?? 20)));
 
   // Resolve search directory — no allowed-root gating; external directories allowed.
@@ -85,7 +90,7 @@ export async function retrieveQuery(options: RetrieveQueryOptions): Promise<Quer
           const absolutePath = canonicalFile(resolve(semanticIndex.root, result.filePath));
           if (!absolutePath) return [];
           // Filter to searchDirectory scope
-          const relToSearchDir = relative(searchDirectory, absolutePath);
+          const relToSearchDir = canonicalRelative(searchDirectory, absolutePath);
           if (relToSearchDir.startsWith("..") || isAbsolute(relToSearchDir)) return [];
           return [{
             absolutePath,
@@ -135,7 +140,7 @@ async function runFallback(
     if (!absolutePath || seen.has(absolutePath)) continue;
     // Filter fallback hits to those actually under the requested searchDirectory
     // (the underlying tools can return matches from registered/ancestor roots).
-    const relToSearchDir = relative(searchDirectory, absolutePath);
+    const relToSearchDir = canonicalRelative(searchDirectory, absolutePath);
     if (relToSearchDir.startsWith("..") || isAbsolute(relToSearchDir)) continue;
     seen.add(absolutePath);
     const lineStart = typeof match.line === "number" ? Math.max(1, Math.trunc(match.line)) : 1;

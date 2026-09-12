@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { retrieveQuery } from "../../src/query-retrieval.js";
+import { canonicalPath } from "../../src/workspace-boundary.js";
 import {
   disposeSemanticIndexes,
   effectiveSemanticRoot,
@@ -104,7 +105,7 @@ describe("shared query retrieval", () => {
     process.env.PI_SMARTREAD_ALLOWED_ROOT = allowed;
 
     const semanticRoot = effectiveSemanticRoot(allowed, root);
-    expect(semanticRoot).toBe(realpathSync(allowed));
+    expect(semanticRoot).toBe(canonicalPath(allowed) ?? realpathSync(allowed));
     const discoveredRoots: string[] = [];
     const index = getOrCreateSemanticIndex(semanticRoot!, {
       config,
@@ -117,7 +118,7 @@ describe("shared query retrieval", () => {
     await index.initialize();
     await index.updateIndex();
 
-    expect(discoveredRoots).toEqual([realpathSync(allowed)]);
+    expect(discoveredRoots).toEqual([canonicalPath(allowed) ?? realpathSync(allowed)]);
     expect(index.getStats().indexedFileCount).toBe(1);
     expect(getSemanticIndex(nested)).toBe(index);
     expect(getSemanticIndex(join(root, "other"))).toBeNull();
@@ -135,7 +136,8 @@ describe("shared query retrieval", () => {
     // Allowed-root env no longer gates explicit queries; broader index is reused.
     const result = await retrieveQuery({ query: "semanticNeedle", cwd: allowed });
     expect(result.strategy).toBe("hybrid");
-    expect(result.hits.every((hit) => hit.absolutePath.startsWith(`${realpathSync(allowed)}/`))).toBe(true);
+    const allowedCanon = canonicalPath(allowed) ?? realpathSync(allowed);
+    expect(result.hits.every((hit) => hit.absolutePath.startsWith(`${allowedCanon}/`))).toBe(true);
   });
 
   it("owns one nearest-project registry entry and disposes live handles", async () => {

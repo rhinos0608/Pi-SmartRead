@@ -10,6 +10,22 @@ export interface WorkspaceBoundaryOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Relative path with single-flavor canonicalization plus forward slashes.
+ *
+ * Raw `relative()` breaks on Windows when the two sides come from different
+ * realpath flavors (8.3 short `RUNNER~1` vs long `runneradmin`): textually
+ * different components make it escape with `..` even for identical dirs.
+ * Canonicalizing both sides through one flavor first keeps containment
+ * checks, git pathspecs, and user-facing IDs stable. Falls back to raw
+ * `relative()` when either side cannot be canonicalized.
+ */
+export function canonicalRelative(from: string, to: string): string {
+  const canonicalFrom = canonicalPath(from) ?? from;
+  const canonicalTo = canonicalPath(to) ?? to;
+  return relative(canonicalFrom, canonicalTo).replace(/\\/g, "/");
+}
+
 export function canonicalPath(path: string): string | null {
   try {
     return realpathSync.native(path);

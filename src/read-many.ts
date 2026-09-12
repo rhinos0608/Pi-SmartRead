@@ -392,7 +392,7 @@ export function createReadManyTool(
 					}) + (rawMode || !contextFooter ? "" : contextFooter);
 					candidates.push({
 						index: i,
-						path: resolvedPath,
+						path: targetPath,
 						ok: true,
 						fullText,
 						fullMetrics: measureText(fullText),
@@ -402,7 +402,7 @@ export function createReadManyTool(
 					if (perFileEvidence) perFileEvidenceByIndex.set(i, perFileEvidence);
 
 					fileDetails.push({
-						path: resolvedPath,
+						path: targetPath,
 						ok: true,
 						imageCount,
 						truncation: details?.truncation,
@@ -419,14 +419,14 @@ export function createReadManyTool(
 					const fullText = formatContentBlock(request.path, `[Error: ${message}]`, i + 1);
 					candidates.push({
 						index: i,
-						path: resolvedPath,
+						path: targetPath,
 						ok: false,
 						fullText,
 						fullMetrics: measureText(fullText),
 					});
 
 					fileDetails.push({
-						path: resolvedPath,
+						path: targetPath,
 						ok: false,
 						error: message,
 					});

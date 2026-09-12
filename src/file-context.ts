@@ -23,6 +23,7 @@ import {
    getFileCommitContext,
 } from "./git-context.js";
 import { loadGitContextConfig, type ResolvedGitContextConfig } from "./config.js";
+import { canonicalRelative } from "./workspace-boundary.js";
 import { scanBranchNotes } from "./git-notes.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { EdgeStore } from "./context-graph.js";
@@ -123,7 +124,9 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
         ? opts.gitRoot
         : (gitConfig.enabled ? await findGitRoot(analysisRoot) : null);
       if (gitRoot && gitConfig.enabled) {
-        const relToGitRoot = path.relative(gitRoot, fullPath);
+        // Single-flavor relative: git rev-parse and realpath disagree on
+        // Windows 8.3 short/long forms, which makes raw relative() escape.
+        const relToGitRoot = canonicalRelative(gitRoot, fullPath);
         const commits = await getFileCommitContext(gitRoot, relToGitRoot, gitConfig.readEnrichmentCommits);
         if (commits.length > 0) {
           contextLines.push("• Recent commits:");

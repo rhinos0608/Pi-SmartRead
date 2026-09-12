@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { promisify } from "node:util";
+import { canonicalRelative } from "./workspace-boundary.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,7 +41,7 @@ export async function getCoCommittedFiles(
   if (!gitRoot) return [];
 
   const fullPath = isAbsolute(targetPath) ? targetPath : resolve(cwd, targetPath);
-  const relTarget = relative(gitRoot, fullPath);
+  const relTarget = canonicalRelative(gitRoot, fullPath);
 
   if (!existsSync(fullPath)) return [];
 
@@ -130,7 +131,8 @@ export async function isRecentlyModified(cwd: string, targetPath: string, since 
   }
 
   const fullPath = isAbsolute(targetPath) ? targetPath : resolve(cwd, targetPath);
-  const relTarget = relative(gitRoot, fullPath);
+  // Forward slashes: git log --name-only emits posix-style names.
+  const relTarget = canonicalRelative(gitRoot, fullPath);
 
   return cacheEntry.files.has(relTarget);
 }
@@ -148,7 +150,7 @@ export async function fileLastModifiedRelative(
   const gitRoot = await findGitRoot(cwd);
   if (gitRoot) {
     try {
-      const relPath = relative(gitRoot, absolutePath);
+      const relPath = canonicalRelative(gitRoot, absolutePath);
       const { stdout } = await execFileAsync(
         "git",
         ["log", "-1", "--format=%ar", "--", relPath],
