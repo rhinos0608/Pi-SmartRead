@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { buildToolRegistry } from "../../src/mcp-registry.js";
@@ -55,7 +55,9 @@ const __filenameStdio = fileURLToPath(import.meta.url);
 const __dirnameStdio = dirname(__filenameStdio);
 const MCP_SERVER_PATH = join(__dirnameStdio, "../../src/mcp-server.ts");
 const requireStdio = createRequire(import.meta.url);
-const TSX_LOADER_PATH = requireStdio.resolve("tsx");
+// --import requires a file:// URL on Windows (bare D:\ paths throw
+// ERR_UNSUPPORTED_ESM_URL_SCHEME). Convert the resolved loader to a URL.
+const TSX_LOADER_PATH = pathToFileURL(requireStdio.resolve("tsx")).href;
 function mcpInit(): Record<string, unknown> {
   return { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "test", version: "1.0.0" } } };
 }

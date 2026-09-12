@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -34,9 +34,12 @@ process.stdout.write(JSON.stringify({ dirty, warnings }) + "\n");
 
 function runChild(cwd: string, root: string): Promise<{ dirty: string[]; warnings: string[] }> {
   return new Promise((resolve, reject) => {
+    // --import requires a file:// URL on Windows (bare D:\ paths throw
+    // ERR_UNSUPPORTED_ESM_URL_SCHEME).
+    const loaderUrl = pathToFileURL(join(ROOT, "node_modules/tsx/dist/loader.mjs")).href;
     const child = spawn(
       "node",
-      ["--import", join(ROOT, "node_modules/tsx/dist/loader.mjs"), "--input-type=module", "--eval", CHILD_SCRIPT],
+      ["--import", loaderUrl, "--input-type=module", "--eval", CHILD_SCRIPT],
       {
         cwd,
         env: { ...process.env, VITEST: "", NODE_ENV: "development", WATCH_ROOT: root },

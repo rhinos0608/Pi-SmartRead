@@ -225,7 +225,7 @@ describe("file-watcher", () => {
       const stop = startWatching("/test/root", onDirty, { mode: "recursive" });
 
       expect(mockWatch).toHaveBeenCalledWith(
-        "/test/root",
+        path.resolve("/test/root"),
         { recursive: true },
         expect.any(Function),
       );
@@ -341,7 +341,7 @@ describe("file-watcher", () => {
         expect.stringContaining("falling back to non-recursive"),
       );
       expect(mockWatch).toHaveBeenCalledTimes(2);
-      expect(mockWatch).toHaveBeenLastCalledWith("/test/root", expect.any(Function));
+      expect(mockWatch).toHaveBeenLastCalledWith(path.resolve("/test/root"), expect.any(Function));
       stop();
       consoleWarnSpy.mockRestore();
     });
@@ -476,7 +476,7 @@ describe("file-watcher", () => {
       const paths = onDirty.mock.calls[0]![0] as string[];
       expect(paths.length).toBe(1);
       // Last watched dir is deepest (a/b/c), so relative path includes the nested subdirs
-      expect(paths[0]).toMatch(/a\/b\/c\/changed\.ts$/);
+      expect(paths[0]).toMatch(/a[/\\]b[/\\]c[/\\]changed\.ts$/);
       stop();
     });
 

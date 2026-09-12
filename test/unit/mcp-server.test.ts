@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,7 +19,9 @@ const MCP_SERVER_PATH = join(__dirname, "../../src/mcp-server.ts");
 // the child's cwd (a temp dir for graph_mutate has no node_modules to resolve
 // a bare `tsx` specifier against). ESM-safe require via createRequire.
 const require = createRequire(import.meta.url);
-const TSX_LOADER_PATH = require.resolve("tsx");
+// --import requires a file:// URL on Windows (bare D:\ paths throw
+// ERR_UNSUPPORTED_ESM_URL_SCHEME). Convert the resolved loader to a URL.
+const TSX_LOADER_PATH = pathToFileURL(require.resolve("tsx")).href;
 
 function mcpInitialize(): Record<string, unknown> {
   return {
