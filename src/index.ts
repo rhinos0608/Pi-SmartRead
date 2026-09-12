@@ -112,7 +112,13 @@ export function lspUriToPath(uri: string): string {
     try {
       return fileURLToPath(uri);
     } catch {
-      return uri;
+      // Cross-platform fallback: POSIX file URLs (file:///Users/...) throw
+      // ERR_INVALID_FILE_URL_PATH on Windows. Return the decoded pathname.
+      try {
+        return decodeURIComponent(new URL(uri).pathname);
+      } catch {
+        return uri;
+      }
     }
   }
   // Raw filesystem path (POSIX or Windows drive-letter like D:\...).

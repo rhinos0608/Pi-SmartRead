@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { fileURLToPath } from "node:url";
 import { lspUriToPath } from "../../src/index.js";
 
 describe("lspUriToPath", () => {
   it("converts file:// URIs to filesystem paths", () => {
-    expect(lspUriToPath("file:///Users/me/src/a.ts")).toBe(fileURLToPath("file:///Users/me/src/a.ts"));
+    // Cross-platform: POSIX file URL must decode to a POSIX path on every OS
+    // (fileURLToPath throws ERR_INVALID_FILE_URL_PATH for this URL on Windows).
+    expect(lspUriToPath("file:///Users/me/src/a.ts")).toBe("/Users/me/src/a.ts");
   });
 
   it("returns raw Windows drive-letter paths as-is (never passed to fileURLToPath)", () => {
