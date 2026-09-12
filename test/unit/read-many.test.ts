@@ -28,6 +28,12 @@ type StubReadResult = {
 	details?: any;
 };
 
+// Strip a Windows drive prefix and normalize separators for assertions:
+// "D:/workspace/outside.ts" -> "/workspace/outside.ts".
+function stripDrive(p: string): string {
+	return p.replace(/\\/g, "/").replace(/^[A-Za-z]:/, "");
+}
+
 function createToolWithMap(
 	map: Record<string, StubReadResult | Error>,
 	inspect?: (input: { path: string; offset?: number; limit?: number }) => void,
@@ -35,10 +41,13 @@ function createToolWithMap(
 	const readTool = {
 		execute: async (_toolCallId: string, input: { path: string; offset?: number; limit?: number }) => {
 			inspect?.(input);
-			// Windows resolves "/alpha" to "\alpha" (drive-relative); normalize so
-			// fixtures match on all platforms.
+			// Windows resolves "/alpha" to a drive-absolute path; normalize +
+			// suffix-match so fixtures match on all platforms.
 			const normalized = input.path.replace(/\\/g, "/");
-			const value = map[input.path] ?? map[normalized];
+			const value =
+					map[input.path] ??
+					map[normalized] ??
+					Object.entries(map).find(([key]) => normalized.endsWith(key))?.[1];
 			if (!value) {
 				throw new Error(`No stub for path: ${input.path}`);
 			}
@@ -92,7 +101,9 @@ describe("read_files: helper logic", () => {
 			{ cwd: "/" } as any,
 		);
 
-		expect(seen).toEqual([{ path: "/window.ts", offset: 2, limit: 2 }]);
+		expect(seen.map((s) => ({ ...s, path: stripDrive(s.path) }))).toEqual([
+			{ path: "/window.ts", offset: 2, limit: 2 },
+		]);
 		const text = (result.content[0] as any).text as string;
 		expect(text).toContain("@/window.ts:2-3");
 		expect(text).toMatch(/\n2[a-z]{2}\|line 2/);
@@ -116,7 +127,11 @@ describe("read_files: helper logic", () => {
 			{ cwd: "/workspace/repo" } as any,
 		);
 
-		expect(seen[0]).toEqual({ path: "/workspace/outside.ts", offset: undefined, limit: undefined });
+		expect(seen[0] && { ...seen[0], path: stripDrive(seen[0]!.path) }).toEqual({
+			path: "/workspace/outside.ts",
+			offset: undefined,
+			limit: undefined,
+		});
 		expect((result.content[0] as any).text).toContain("outside");
 	});
 
@@ -211,7 +226,7 @@ describe("read_files: query (intent) mode", () => {
 		const text = (result.content[0] as any).text as string;
 		const details = result.details as any;
 		expect(details.query).toBe("authentication");
-		expect(text).toContain("@/a");
+		expect(text).toContain("@/alpha");
 		expect(text).not.toContain("@/b");
 		expect(Array.isArray(details.files)).toBe(true);
 	});
@@ -265,7 +280,7 @@ describe("read_files: execute behavior", () => {
 		expect(details.packing.fullIncludedSuccessCount).toBe(2);
 		expect(details.packing.partialIncludedPath).toBe("/alpha");
 
-		const posA = text.indexOf("@/a");
+		const posA = text.indexOf("@/alpha");
 		const posB = text.indexOf("@/b");
 		const posC = text.indexOf("@/c");
 		expect(posA).toBeGreaterThanOrEqual(0);
@@ -455,7 +470,7 @@ describe("read_files: execute behavior", () => {
 		);
 
 		const text = (result.content[0] as any).text as string;
-		const posA = text.indexOf("@/a");
+		const posA = text.indexOf("@/alpha");
 		const posB = text.indexOf("@/src/b.ts");
 		const posC = text.indexOf("@/src/c.ts");
 		expect(posA).toBeGreaterThanOrEqual(0);
