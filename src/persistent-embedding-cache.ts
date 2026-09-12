@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, parse, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { EmbedRequest, EmbedResult } from "./embedding.js";
 import { embeddingProfileId } from "./embedding-profile.js";
@@ -42,6 +42,17 @@ export class PersistentEmbeddingCache {
     this.maxEntries = maxEntries;
     this.cacheDir = join(root, CACHE_DIRNAME);
     this.usePersistence = false;
+    // Filesystem roots are shared across unrelated tests and processes, so
+    // disk entries written by one fake-embedder test leak into another with
+    // identical query and inputs (order-dependent hits; drive roots are
+    // writable on Windows while permission-denied on Linux masked it).
+    // Keep memory LRU only for such roots.
+    try {
+      const { root: parsedRoot } = parse(root);
+      if (resolve(root) === parsedRoot) return;
+    } catch {
+      return;
+    }
 
     try {
       if (!existsSync(this.cacheDir)) {
