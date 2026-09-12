@@ -252,11 +252,13 @@ describe("LSP catalog expansion", () => {
   });
 
   it("resolution goes through runtime (lsp-bridge imports resolveLanguageServer)", async () => {
-    const src = readFileSync("src/lsp-bridge.ts", "utf-8");
+    const src = readFileSync("src/lsp-types.ts", "utf-8");
     expect(src).toContain("resolveLanguageServer");
     expect(src).toContain("language-intelligence-runtime");
-    // Must not still use execFileSync for which/where
-    expect(src).not.toMatch(/execFileSync.*which/);
+    // Must not still use execFileSync for which/where (bridge family)
+    for (const f of ["src/lsp-bridge.ts", "src/lsp-types.ts", "src/lsp-manager.ts", "src/lsp-connection.ts"]) {
+      expect(readFileSync(f, "utf-8")).not.toMatch(/execFileSync.*which/);
+    }
   });
 
   it("does not duplicate existing servers (omnisharp/csharp-ls preserved exactly)", () => {
@@ -312,7 +314,7 @@ describe("LSP catalog expansion", () => {
   });
 
   it("P1-2: resolver/legacy merge dedupes by languageId, not command string", () => {
-    const src = readFileSync("src/lsp-bridge.ts", "utf-8");
+    const src = readFileSync("src/lsp-manager.ts", "utf-8");
     // Must dedupe legacy by languageId coverage
     expect(src).toContain("coveredLanguages");
     expect(src).toContain("languageIds.some");
