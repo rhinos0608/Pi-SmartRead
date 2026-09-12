@@ -8,7 +8,7 @@ import type {
   SnapshotId,
 } from "../../src/repository-intelligence-types.js";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 describe("RepositoryIntelligenceService", () => {
@@ -17,8 +17,7 @@ describe("RepositoryIntelligenceService", () => {
 
   const makeFile = (name: string, content: string) => {
     const fname = join(tmpDir, name);
-    const dir = fname.substring(0, fname.lastIndexOf("/"));
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dirname(fname), { recursive: true });
     writeFileSync(fname, content, "utf-8");
     return fname;
   };

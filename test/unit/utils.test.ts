@@ -315,9 +315,10 @@ describe("utils: resolveDirectoryParam (opt-in boundary)", () => {
   it("resolves directory without restriction when no env is set", () => {
     const tmp = require("node:os").tmpdir();
     const result = resolveDirectoryParam(tmp, undefined);
-    // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS)
+    // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS).
+    // Normalize both sides: realpath flavors differ on Windows (8.3 short vs long).
     const expected = require("node:fs").realpathSync(tmp);
-    expect(result).toBe(expected);
+    expect(require("node:fs").realpathSync(result)).toBe(expected);
   });
 
   it("resolves explicit directory", () => {
@@ -325,9 +326,10 @@ describe("utils: resolveDirectoryParam (opt-in boundary)", () => {
     require("node:fs").mkdirSync(dir, { recursive: true });
     try {
       const result = resolveDirectoryParam(require("node:os").tmpdir(), "sub");
-      // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS)
+      // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS).
+      // Normalize both sides: realpath flavors differ on Windows (8.3 short vs long).
       const expected = require("node:fs").realpathSync(dir);
-      expect(result).toBe(expected);
+      expect(require("node:fs").realpathSync(result)).toBe(expected);
     } finally {
       require("node:fs").rmSync(dir, { recursive: true, force: true });
     }

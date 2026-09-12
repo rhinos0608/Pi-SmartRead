@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, utimesSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   computeComplexity,
@@ -33,10 +33,6 @@ function setupGitRepo(dir: string, fileRel: string, content: string): string {
   return fp;
 }
 
-function dirname(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i >= 0 ? p.slice(0, i) : ".";
-}
 
 /** Stub ContextGraph using real import-edge direction: importer → imported target. */
 async function makeMockGraph(importingFiles: string[]): Promise<ContextGraph> {
