@@ -33,7 +33,13 @@ import {
    splitPathAndSelector,
 } from "./utils.js";
 import { buildFileContextLines } from "./file-context.js";
-import { computePathEvidence, computeStructuralOutlineEvidence } from "./path-evidence.js";
+import {
+  attestPathRead,
+  attestStructuralOutline,
+  publishEvidence,
+  resolveAttestedRange,
+  sessionFileFromCtx,
+} from "./read-evidence.js";
 import { resolveAstOutlineConfig, outlineSupportsPath, buildAstOutline, renderAstOutline } from "./ast-outline.js";
 import { getGraphifyEnricher } from "./graphify-enricher.js";
 import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./tool-guidance.js";
@@ -348,35 +354,11 @@ interface HookResponse {
    details: Record<string, unknown>;
 }
 
-// ── Evidence comparison helper ────────────────────────────────────
-
-/**
- * The builtin read appends a continuation note ONLY for user-limited,
- * non-truncated reads that stop before EOF (see pi-coding-agent
- * dist/core/tools/read.js). Rather than stripping note-shaped suffixes
- * (which could eat genuine file content), reconstruct the exact expected
- * note from the evidence-read state and accept only exact matches.
- * Any other shape → mismatch → the caller skips evidence (fail safe).
- */
-export function shownMatchesAttested(args: {
-   builtinText: string;
-   truncationContent: string | undefined;
-   sliceText: string;
-   totalLines: number;
-   evidenceOffset: number | undefined;
-   evidenceLimit: number | undefined;
-}): boolean {
-   const { builtinText, truncationContent, sliceText, totalLines, evidenceOffset, evidenceLimit } = args;
-   if (typeof truncationContent === "string") return truncationContent === sliceText;
-   if (builtinText === sliceText) return true;
-   if (evidenceLimit === undefined) return false;
-   const startLine = evidenceOffset ?? 1;
-   const endLine = Math.min(totalLines, startLine + evidenceLimit - 1);
-   const remaining = totalLines - endLine;
-   if (remaining <= 0) return false;
-   const note = `\n\n[${remaining} more lines in file. Use offset=${endLine + 1} to continue.]`;
-   return builtinText === sliceText + note;
-}
+// ── Read evidence attestation (Seam 3) lives in ./read-evidence.js ───
+// Lifecycle, dispatch, enrichment, anchors, and microagents stay here.
+// Re-exported so existing `import { shownMatchesAttested } from "./hook.js"`
+// call sites keep working.
+export { shownMatchesAttested } from "./read-evidence.js";
 
 // ── Contextual read enrichment ────────────────────────────────────
 
@@ -420,23 +402,24 @@ async function tryStructuralOutlineRead(
 
       const sessionFilePath = sessionFileFromCtx(ctx);
       if (sessionFilePath && rendered.declarationLines.length > 0) {
-         try {
-            const evidence = computeStructuralOutlineEvidence({
-               path: targetPath,
-               cwd: ctx.cwd,
+         // attestStructuralOutline fails closed (null) but never throws:
+         // the outline read still succeeds with or without evidence.
+         const attested = attestStructuralOutline({
+            path: targetPath,
+            cwd: ctx.cwd,
+            sessionFilePath,
+            fullContent: content,
+            declarationLines: rendered.declarationLines,
+         });
+         if (attested) {
+            response.details.workspaceEvidence = attested.workspaceEvidence;
+            publishEvidence(
+               opts?.publishInspection,
+               attested.workspaceEvidence,
                sessionFilePath,
-               fullContent: content,
-               declarationLines: rendered.declarationLines,
-            });
-            response.details.workspaceEvidence = evidence.workspaceEvidence;
-            try {
-               opts?.publishInspection?.(
-                  evidence.workspaceEvidence,
-                  sessionFilePath,
-                  evidence.workspaceEvidence.canonicalWorkspaceRoot,
-               );
-            } catch { /* publish is best-effort */ }
-         } catch { /* evidence is best-effort */ }
+               attested.workspaceEvidence.canonicalWorkspaceRoot,
+            );
+         }
       }
 
       return response;
@@ -544,50 +527,39 @@ async function interceptContextualRead(
       | { type: "text"; text: string }
       | undefined)?.text;
    if (sessionFilePath && !isImageResult && typeof builtinText === "string") {
-      try {
-         const truncation = (result.details as Record<string, unknown> | undefined)?.truncation as
-            | { truncated?: boolean; outputLines?: number; firstLineExceedsLimit?: boolean; content?: string }
-            | undefined;
-         if (truncation?.firstLineExceedsLimit) throw new Error("zero lines shown");
-         let evidenceOffset = typeof normalizedParams.offset === "number" ? normalizedParams.offset : undefined;
-         let evidenceLimit = typeof normalizedParams.limit === "number" ? normalizedParams.limit : undefined;
-         if (truncation?.truncated && typeof truncation.outputLines === "number") {
-            // Truncated output must not claim full-file coverage: clamp the
-            // evidence range to the lines the model actually saw.
-            evidenceOffset = displayStartLine;
-            evidenceLimit = truncation.outputLines;
-         }
-         const evidence = computePathEvidence({
-            path: fullPath,
-            ...(evidenceOffset !== undefined ? { offset: evidenceOffset } : {}),
-            ...(evidenceLimit !== undefined ? { limit: evidenceLimit } : {}),
+      // Attestation (Seam 3) fails closed (null) but never throws:
+      // the read still succeeds with or without evidence.
+      const truncation = (result.details as Record<string, unknown> | undefined)?.truncation as
+         | { truncated?: boolean; outputLines?: number; firstLineExceedsLimit?: boolean; content?: string }
+         | undefined;
+      const range = resolveAttestedRange({
+         normalizedOffset: typeof normalizedParams.offset === "number" ? normalizedParams.offset : undefined,
+         normalizedLimit: typeof normalizedParams.limit === "number" ? normalizedParams.limit : undefined,
+         displayStartLine,
+         truncation,
+      });
+      if (!("zeroLines" in range)) {
+         const attested = attestPathRead({
+            fullPath,
             cwd: ctx.cwd,
             sessionFilePath,
-         });
-         // Revalidate: only attest content the model actually saw. The
-         // builtin read and computePathEvidence hit the disk at different
-         // instants — if the file changed in between, skip evidence.
-         const matches = shownMatchesAttested({
             builtinText,
-            truncationContent: truncation?.truncated && typeof truncation.content === "string"
-               ? truncation.content
-               : undefined,
-            sliceText: evidence.sliceText,
-            totalLines: evidence.totalLines,
-            evidenceOffset,
-            evidenceLimit,
+            truncation,
+            evidenceOffset: range.evidenceOffset,
+            evidenceLimit: range.evidenceLimit,
+            displayStartLine,
          });
-         if (!matches) throw new Error("shown/attested content mismatch");
-         if (!result.details || typeof result.details !== "object") result.details = {};
-         (result.details as Record<string, unknown>).workspaceEvidence = evidence.workspaceEvidence;
-         try {
-            opts?.publishInspection?.(
-               evidence.workspaceEvidence,
+         if (attested) {
+            if (!result.details || typeof result.details !== "object") result.details = {};
+            (result.details as Record<string, unknown>).workspaceEvidence = attested.workspaceEvidence;
+            publishEvidence(
+               opts?.publishInspection,
+               attested.workspaceEvidence,
                sessionFilePath,
-               evidence.workspaceEvidence.canonicalWorkspaceRoot,
+               attested.canonicalWorkspaceRoot,
             );
-         } catch { /* publish is best-effort */ }
-      } catch { /* evidence is best-effort */ }
+         }
+      }
    }
 
    // Enrichment footer: imports, git history, git notes, graph, LSP
@@ -851,22 +823,6 @@ function createEvidenceReadFactory(
       undefined,
     ),
   })) as unknown as typeof import("@mariozechner/pi-coding-agent").createReadTool;
-}
-
-/**
- * Local helper: extract the canonical session file path from context.
- * Duplicated rather than imported from inspect-tool.ts to avoid the
- * import cycle (search-tool.ts ⟶ hook.ts ⟶ … ⟶ inspect-tool.ts ⟶ inspect.ts).
- */
-function sessionFileFromCtx(ctx: ExtensionContext): string | null {
-   try {
-      const sm = (ctx as { sessionManager?: { getSessionFile?: () => string | undefined } }).sessionManager;
-      if (!sm || typeof sm.getSessionFile !== "function") return null;
-      const p = sm.getSessionFile();
-      return typeof p === "string" && p.length > 0 ? p : null;
-   } catch {
-      return null;
-   }
 }
 
 /**
