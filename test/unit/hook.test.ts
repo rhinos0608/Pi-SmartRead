@@ -220,7 +220,7 @@ describe("registerSessionHooks", () => {
     // Should not throw — no-op path
   });
 
-  it("before_agent_start returns system prompt with repo map on first turn", async () => {
+  it("before_agent_start returns system prompt with SmartRead guidance on first turn", async () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
@@ -248,7 +248,6 @@ describe("registerSessionHooks", () => {
       expect(typed).toBeDefined();
       expect(typeof typed!.systemPrompt).toBe("string");
       const promptText = typed!.systemPrompt;
-      expect(promptText).toContain("Repository Map");
       expect(promptText).toContain("SmartRead Tool Guide");
       expect(promptText).toContain("BM25+embedding RRF");
       expect(promptText).toContain("inspect { path }:");
