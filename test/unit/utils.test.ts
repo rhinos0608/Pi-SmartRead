@@ -316,9 +316,12 @@ describe("utils: resolveDirectoryParam (opt-in boundary)", () => {
     const tmp = require("node:os").tmpdir();
     const result = resolveDirectoryParam(tmp, undefined);
     // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS).
-    // Normalize both sides: realpath flavors differ on Windows (8.3 short vs long).
-    const expected = require("node:fs").realpathSync(tmp);
-    expect(require("node:fs").realpathSync(result)).toBe(expected);
+    // Use the native realpath flavor on both sides: on Windows the Win32 API
+    // returns 8.3 short names (RUNNER~1) while the JS fallback returns long
+    // names — mixing flavors flakes the comparison.
+    const fs = require("node:fs");
+    const realpath = fs.realpathSync.native ?? fs.realpathSync;
+    expect(realpath(result)).toBe(realpath(tmp));
   });
 
   it("resolves explicit directory", () => {
@@ -327,9 +330,10 @@ describe("utils: resolveDirectoryParam (opt-in boundary)", () => {
     try {
       const result = resolveDirectoryParam(require("node:os").tmpdir(), "sub");
       // canonicalPath resolves symlinks (e.g. /tmp -> /private/tmp on macOS).
-      // Normalize both sides: realpath flavors differ on Windows (8.3 short vs long).
-      const expected = require("node:fs").realpathSync(dir);
-      expect(require("node:fs").realpathSync(result)).toBe(expected);
+      // Same native-flavor normalization as above for Windows 8.3 stability.
+      const fs = require("node:fs");
+      const realpath = fs.realpathSync.native ?? fs.realpathSync;
+      expect(realpath(result)).toBe(realpath(dir));
     } finally {
       require("node:fs").rmSync(dir, { recursive: true, force: true });
     }

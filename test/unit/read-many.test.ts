@@ -35,7 +35,10 @@ function createToolWithMap(
 	const readTool = {
 		execute: async (_toolCallId: string, input: { path: string; offset?: number; limit?: number }) => {
 			inspect?.(input);
-			const value = map[input.path];
+			// Windows resolves "/alpha" to "\alpha" (drive-relative); normalize so
+			// fixtures match on all platforms.
+			const normalized = input.path.replace(/\\/g, "/");
+			const value = map[input.path] ?? map[normalized];
 			if (!value) {
 				throw new Error(`No stub for path: ${input.path}`);
 			}
@@ -165,7 +168,7 @@ describe("read_files: helper logic", () => {
 	it("uses strict request-order full packing (stops on first non-fitting full block)", () => {
 		const huge = "H".repeat(DEFAULT_MAX_BYTES + 128);
 		const candidates = [
-			makeCandidate("/a", "small-a", true, 0),
+			makeCandidate("/alpha", "small-a", true, 0),
 			makeCandidate("/b", huge, true, 1),
 			makeCandidate("/c", "small-c", true, 2),
 		];
@@ -193,13 +196,13 @@ describe("read_files: helper logic", () => {
 describe("read_files: query (intent) mode", () => {
 	it("ranks and packs files by relevance when query is set", async () => {
 		const tool = createToolWithMap({
-			"/a": { content: [{ type: "text", text: "authentication logic here" }] },
+			"/alpha": { content: [{ type: "text", text: "authentication logic here" }] },
 			"/b": { content: [{ type: "text", text: "database schema" }] },
 		});
 
 		const result = await tool.execute(
 			"call-q1",
-			{ query: "authentication", files: [{ path: "/a" }, { path: "/b" }], topK: 1 },
+			{ query: "authentication", files: [{ path: "/alpha" }, { path: "/b" }], topK: 1 },
 			undefined,
 			undefined,
 			{ cwd: "/" } as any,
@@ -222,12 +225,12 @@ describe("read_files: query (intent) mode", () => {
 
 	it("throws when directory is provided without query", async () => {
 		const tool = createToolWithMap({
-			"/a": { content: [{ type: "text", text: "x" }] },
+			"/alpha": { content: [{ type: "text", text: "x" }] },
 		});
 		await expect(
 			tool.execute(
 				"call-q3",
-				{ files: [{ path: "/a" }], directory: "." } as any,
+				{ files: [{ path: "/alpha" }], directory: "." } as any,
 				undefined,
 				undefined,
 				{ cwd: "/" } as any,
@@ -240,7 +243,7 @@ describe("read_files: execute behavior", () => {
 	it("switches to smallest-first only when successful full coverage improves, while rendering in original order", async () => {
 		const big = Array.from({ length: 3200 }, (_, i) => `line-${i}-${"x".repeat(20)}`).join("\n");
 		const tool = createToolWithMap({
-			"/a": { content: [{ type: "text", text: big }] },
+			"/alpha": { content: [{ type: "text", text: big }] },
 			"/b": { content: [{ type: "text", text: "small-b" }] },
 			"/c": { content: [{ type: "text", text: "small-c" }] },
 		});
@@ -248,7 +251,7 @@ describe("read_files: execute behavior", () => {
 		const result = await tool.execute(
 			"call-1",
 			{
-				files: [{ path: "/a" }, { path: "/b" }, { path: "/c" }],
+				files: [{ path: "/alpha" }, { path: "/b" }, { path: "/c" }],
 			},
 			undefined,
 			undefined,
@@ -260,7 +263,7 @@ describe("read_files: execute behavior", () => {
 		expect(details.packing.strategy).toBe("smallest-first");
 		expect(details.packing.switchedForCoverage).toBe(true);
 		expect(details.packing.fullIncludedSuccessCount).toBe(2);
-		expect(details.packing.partialIncludedPath).toBe("/a");
+		expect(details.packing.partialIncludedPath).toBe("/alpha");
 
 		const posA = text.indexOf("@/a");
 		const posB = text.indexOf("@/b");
@@ -273,7 +276,7 @@ describe("read_files: execute behavior", () => {
 	it("does not switch strategy when only error-block coverage improves", async () => {
 		const big = Array.from({ length: 3200 }, (_, i) => `line-${i}-${"x".repeat(20)}`).join("\n");
 		const tool = createToolWithMap({
-			"/a": { content: [{ type: "text", text: big }] },
+			"/alpha": { content: [{ type: "text", text: big }] },
 			"/e1": new Error("missing e1"),
 			"/e2": new Error("missing e2"),
 		});
@@ -281,7 +284,7 @@ describe("read_files: execute behavior", () => {
 		const result = await tool.execute(
 			"call-2",
 			{
-				files: [{ path: "/a" }, { path: "/e1" }, { path: "/e2" }],
+				files: [{ path: "/alpha" }, { path: "/e1" }, { path: "/e2" }],
 			},
 			undefined,
 			undefined,
@@ -292,7 +295,7 @@ describe("read_files: execute behavior", () => {
 		expect(details.packing.strategy).toBe("request-order");
 		expect(details.packing.switchedForCoverage).toBe(false);
 		expect(details.packing.fullIncludedSuccessCount).toBe(0);
-		expect(details.packing.partialIncludedPath).toBe("/a");
+		expect(details.packing.partialIncludedPath).toBe("/alpha");
 	});
 
 	it("uses heredoc error framing and honors stopOnError", async () => {
@@ -352,14 +355,14 @@ describe("read_files: execute behavior", () => {
 
 	it("keeps combinedTruncation undefined when packed output already fits", async () => {
 		const tool = createToolWithMap({
-			"/a": { content: [{ type: "text", text: "a" }] },
+			"/alpha": { content: [{ type: "text", text: "a" }] },
 			"/b": { content: [{ type: "text", text: "b" }] },
 		});
 
 		const result = await tool.execute(
 			"call-5",
 			{
-				files: [{ path: "/a" }, { path: "/b" }],
+				files: [{ path: "/alpha" }, { path: "/b" }],
 			},
 			undefined,
 			undefined,
@@ -438,14 +441,14 @@ describe("read_files: execute behavior", () => {
 	it("renders files in original order regardless of packing strategy", async () => {
 		const body = Array.from({ length: 3000 }, (_, i) => `line-${i}-${"x".repeat(15)}`).join("\n");
 		const tool = createToolWithMap({
-			"/a": { content: [{ type: "text", text: body }] },
+			"/alpha": { content: [{ type: "text", text: body }] },
 			"/src/b.ts": { content: [{ type: "text", text: "b" }] },
 			"/src/c.ts": { content: [{ type: "text", text: "c" }] },
 		});
 
 		const result = await tool.execute(
 			"call-7",
-			{ files: [{ path: "/a" }, { path: "/src/b.ts" }, { path: "/src/c.ts" }] },
+			{ files: [{ path: "/alpha" }, { path: "/src/b.ts" }, { path: "/src/c.ts" }] },
 			undefined,
 			undefined,
 			{ cwd: "/" } as any,
@@ -487,20 +490,21 @@ describe("read_files: batch workspace evidence", () => {
 
 	it("attaches a merged schema-3 envelope and publishes it when reads emit per-file evidence", async () => {
 		const publish: ReturnType<typeof vi.fn> = vi.fn();
-		const envA = makeEnvelopeFor("/a", "1".repeat(64), "a".repeat(64));
+		const envA = makeEnvelopeFor("/alpha", "1".repeat(64), "a".repeat(64));
 		const envB = makeEnvelopeFor("/b", "2".repeat(64), "b".repeat(64));
 		const readTool = {
 			execute: async (
 				_toolCallId: string,
 				input: { path: string; offset?: number; limit?: number },
 			) => {
-				if (input.path === "/a") {
+				const normalized = input.path.replace(/\\/g, "/");
+				if (normalized === "/alpha" || normalized.endsWith("/alpha")) {
 					return {
 						content: [{ type: "text", text: "aaa" }],
 						details: { workspaceEvidence: envA },
 					};
 				}
-				if (input.path === "/b") {
+				if (normalized === "/b" || normalized.endsWith("/b")) {
 					return {
 						content: [{ type: "text", text: "bbb" }],
 						details: { workspaceEvidence: envB },
@@ -518,7 +522,7 @@ describe("read_files: batch workspace evidence", () => {
 
 		const result = await tool.execute(
 			"call-ev-1",
-			{ files: [{ path: "/a" }, { path: "/b" }] },
+			{ files: [{ path: "/alpha" }, { path: "/b" }] },
 			undefined,
 			undefined,
 			ctx,
@@ -530,7 +534,7 @@ describe("read_files: batch workspace evidence", () => {
 		// Two per-file resources merged into one envelope.
 		expect(batch.resources).toHaveLength(2);
 		const ids = batch.resources.map((r: any) => r.canonicalPath).sort();
-		expect(ids).toEqual(["/a", "/b"]);
+		expect(ids).toEqual(["/alpha", "/b"]);
 		// Merged inspectionId is recomputed across the combined resource set
 		// — it must be a 64-char hex string and must NOT equal any of the
 		// per-file inspectionIds verbatim (the protocol hashes the resource
@@ -561,7 +565,7 @@ describe("read_files: batch workspace evidence", () => {
 		} as any;
 		const result = await tool.execute(
 			"call-ev-2",
-			{ files: [{ path: "/a" }] },
+			{ files: [{ path: "/alpha" }] },
 			undefined,
 			undefined,
 			ctx,
@@ -572,7 +576,7 @@ describe("read_files: batch workspace evidence", () => {
 
 	it("does not attach a batch envelope when no session file is available", async () => {
 		const publish = vi.fn();
-		const env = makeEnvelopeFor("/a", "1".repeat(64), "a".repeat(64));
+		const env = makeEnvelopeFor("/alpha", "1".repeat(64), "a".repeat(64));
 		const readTool = {
 			execute: async () => ({
 				content: [{ type: "text", text: "x" }],
@@ -584,7 +588,7 @@ describe("read_files: batch workspace evidence", () => {
 		const ctx = { cwd: "/" } as any;
 		const result = await tool.execute(
 			"call-ev-3",
-			{ files: [{ path: "/a" }] },
+			{ files: [{ path: "/alpha" }] },
 			undefined,
 			undefined,
 			ctx,
@@ -594,7 +598,7 @@ describe("read_files: batch workspace evidence", () => {
 	});
 
 	it("publish failure never blocks the batch read", async () => {
-		const env = makeEnvelopeFor("/a", "1".repeat(64), "a".repeat(64));
+		const env = makeEnvelopeFor("/alpha", "1".repeat(64), "a".repeat(64));
 		const readTool = {
 			execute: async () => ({
 				content: [{ type: "text", text: "ok" }],
@@ -610,7 +614,7 @@ describe("read_files: batch workspace evidence", () => {
 		} as any;
 		const result = await tool.execute(
 			"call-ev-4",
-			{ files: [{ path: "/a" }] },
+			{ files: [{ path: "/alpha" }] },
 			undefined,
 			undefined,
 			ctx,

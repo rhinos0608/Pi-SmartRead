@@ -7,7 +7,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import {
   getSharedContextGraphAsync,
   getWorkspaceRevision,
@@ -68,6 +68,11 @@ function sha256(input: string): string {
 
 function isoNow(): ISO8601 {
   return new Date().toISOString() as ISO8601;
+}
+
+/** Entity IDs are always posix-style forward slashes, even on Windows. */
+function toPosixRel(nativeRel: string): string {
+  return nativeRel.split(sep).join("/");
 }
 
 function readFileSafe(root: string, relPath: string): string {
@@ -237,9 +242,10 @@ class RepoIntelService implements RepositoryIntelligenceService {
     const fileEntries: SourceEntry[] = [];
     for (const absPath of allFiles) {
       if (Date.now() >= deadline) break;
+      const nativeRel = relative(input.root, absPath);
       fileEntries.push({
-        path: relative(input.root, absPath),
-        contentHash: sha256(readFileSafe(input.root, relative(input.root, absPath))),
+        path: toPosixRel(nativeRel),
+        contentHash: sha256(readFileSafe(input.root, nativeRel)),
       });
     }
 
@@ -372,8 +378,8 @@ class RepoIntelService implements RepositoryIntelligenceService {
       const graph = await getSharedContextGraphAsync(root);
       const edges = graph.getProvenanceEdges();
       for (const edge of edges) {
-        const from = relative(root, edge.from);
-        const to = relative(root, edge.to);
+        const from = toPosixRel(relative(root, edge.from));
+        const to = toPosixRel(relative(root, edge.to));
         if (relCount.has(from)) relCount.set(from, (relCount.get(from) ?? 0) + 1);
         if (relCount.has(to)) relCount.set(to, (relCount.get(to) ?? 0) + 1);
       }
