@@ -46,12 +46,17 @@ function scoreExtension(path: string): number {
 	return 0;
 }
 
+function inDir(normalized: string, dir: string): boolean {
+	return normalized.includes(`/${dir}/`) || normalized.startsWith(`${dir}/`);
+}
+
 function scorePenalty(pathLower: string): number {
-	if (pathLower.includes("/node_modules/") || pathLower.includes("/dist/") || pathLower.includes("/build/")) return -5.0;
+	const normalized = pathLower.replace(/\\/g, "/");
+	if (inDir(normalized, "node_modules") || inDir(normalized, "dist") || inDir(normalized, "build")) return -5.0;
 	let penalty = 0;
-	if (pathLower.includes("/test/") || pathLower.includes("/tests/")) penalty -= 1.0;
-	if (pathLower.includes("/spec/") || pathLower.includes("/__tests__/")) penalty -= 1.0;
-	if (pathLower.includes(".config.") || pathLower.includes(".test.") || pathLower.includes(".spec.")) penalty -= 1.0;
+	if (inDir(normalized, "test") || inDir(normalized, "tests")) penalty -= 1.0;
+	if (inDir(normalized, "spec") || inDir(normalized, "__tests__")) penalty -= 1.0;
+	if (normalized.includes(".config.") || normalized.includes(".test.") || normalized.includes(".spec.")) penalty -= 1.0;
 	return penalty;
 }
 
@@ -148,14 +153,40 @@ function resolvePartialPath(candidates: FileCandidate[], plan: PackingPlan): str
 	return c.path;
 }
 
+function assembledSize(content: string, hintText: string): { lines: number; bytes: number } {
+	if (hintText.length === 0) {
+		return { lines: content === "" ? 0 : content.split("\n").length, bytes: Buffer.byteLength(content, "utf8") };
+	}
+	// `${content}\n\n${hints}` adds one blank separator line and two separator bytes.
+	const contentLines = content === "" ? 0 : content.split("\n").length;
+	return {
+		lines: contentLines + 1 + hintText.split("\n").length,
+		bytes: Buffer.byteLength(content, "utf8") + 2 + Buffer.byteLength(hintText, "utf8"),
+	};
+}
+
 /** Render full + partial sections in request order, truncate combined output, add recovery hints. */
 export function planAndRender(candidates: FileCandidate[]): PackedOutput {
 	const { plan, rerankingResult } = choosePackingPlan(candidates);
-	const outputTruncation = truncateHead(renderSections(candidates, plan).join("\n\n"), {
-		maxLines: DEFAULT_MAX_LINES,
-		maxBytes: DEFAULT_MAX_BYTES,
-	});
-	const recoveryHints = buildRecoveryHints(candidates, plan, outputTruncation);
+	const sectionsText = renderSections(candidates, plan).join("\n\n");
+	// Reserve hint space before truncation so the final assembly (content +
+	// hints) stays within the documented line/byte budgets. Iterate: each
+	// pass reserves the previous pass's hint footprint, then rebuilds hints
+	// against the re-truncated content until the assembly fits.
+	let maxLines = DEFAULT_MAX_LINES;
+	let maxBytes = DEFAULT_MAX_BYTES;
+	let outputTruncation = truncateHead(sectionsText, { maxLines, maxBytes });
+	let recoveryHints = buildRecoveryHints(candidates, plan, outputTruncation);
+	for (let i = 0; i < 4; i++) {
+		if (recoveryHints.length === 0) break;
+		const hintText = recoveryHints.join("\n");
+		const size = assembledSize(outputTruncation.content, hintText);
+		if (size.lines <= DEFAULT_MAX_LINES && size.bytes <= DEFAULT_MAX_BYTES) break;
+		maxLines = Math.max(1, DEFAULT_MAX_LINES - (hintText.split("\n").length + 1));
+		maxBytes = Math.max(1, DEFAULT_MAX_BYTES - (Buffer.byteLength(hintText, "utf8") + 2));
+		outputTruncation = truncateHead(sectionsText, { maxLines, maxBytes });
+		recoveryHints = buildRecoveryHints(candidates, plan, outputTruncation);
+	}
 	const outputText = recoveryHints.length > 0 ? `${outputTruncation.content}\n\n${recoveryHints.join("\n")}` : outputTruncation.content;
 	return {
 		plan,

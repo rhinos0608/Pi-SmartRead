@@ -113,6 +113,7 @@ async function readInternalUrl(request: BatchFileRequest, index: number): Promis
 	const { path: targetPath, selector } = splitPathAndSelector(request.path);
 	const selArgs = selectorToOffsetLimit(selector);
 	const startLine = selArgs.offset ?? request.offset ?? 1;
+	const effectiveLimit = selArgs.limit ?? request.limit;
 	let body: string;
 	let ok = false;
 	let err = "";
@@ -120,6 +121,13 @@ async function readInternalUrl(request: BatchFileRequest, index: number): Promis
 		const result = await resolveUrl(targetPath);
 		body = result.text;
 		ok = true;
+		// Apply the requested line range before formatting so the
+		// returned body holds only the selected lines.
+		if (ok && (startLine > 1 || effectiveLimit !== undefined)) {
+			const lines = body.split("\n");
+			const end = effectiveLimit === undefined ? undefined : startLine - 1 + effectiveLimit;
+			body = lines.slice(startLine - 1, end).join("\n");
+		}
 	} catch (e) {
 		err = e instanceof Error ? e.message : String(e);
 		body = `[Error: ${err}]`;
@@ -306,6 +314,7 @@ export async function readBatchFiles(args: BatchReadArgs): Promise<BatchReadResu
 			const outcome = await readDiskFile(args, request, i);
 			commitOutcome({ toolCallId: args.toolCallId, candidates, fileDetails, perFileEvidenceByIndex, summarizedIndexes }, outcome, i);
 		} catch (error) {
+			if (args.signal?.aborted) throw error;
 			const failure = readSingleFailure(request, targetPath, i, error);
 			candidates.push(failure.candidate);
 			fileDetails.push(failure.detail);

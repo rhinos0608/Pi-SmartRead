@@ -121,7 +121,8 @@ async function loadFactsWithFallback(
 ): Promise<StructuralFacts> {
     try {
         return await extractStructuralFacts(absolutePath, cwd, input.signal, input.contextGraph);
-    } catch {
+    } catch (e) {
+        if (input.signal?.aborted) throw e;
         return { callers: [], externalDependents: [], dependencies: [], internalCallSites: [], children: [], baseClasses: [], interfaces: [], overrides: [], reExportedBy: [], notices: ["extraction failed"] };
     }
 }
@@ -141,7 +142,8 @@ async function loadSignalsWithFallback(
             input.signal,
             facts.externalDependents,
         );
-    } catch {
+    } catch (e) {
+        if (input.signal?.aborted) throw e;
         return { path: absolutePath, signals: [], computedAt: new Date().toISOString(), fallbackNotices: ["signal computation failed"] };
     }
 }
