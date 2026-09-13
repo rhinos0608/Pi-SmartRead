@@ -7,13 +7,18 @@ import type { Tag } from "./cache.js";
 import { resolveSymbol } from "./symbol-resolver.js";
 import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
 import { LruCache } from "./utils.js";
-import { autoPopulateEdgeStore, extractCoCommitPairs, findGitRoot } from "./git-context.js";
-import { loadGitContextConfig } from "./config.js";
-import { getIncrementalIndex } from "./incremental-index.js";
-import { writeCoverage } from "./index-coverage.js";
 import { chooseConcurrency } from "./adaptive-concurrency.js";
-import { writeSnapshot, computeSourceHash } from "./index-snapshot.js";
 import { EdgeStore } from "./edge-store.js";
+import {
+  buildTagIndices,
+  collectBuildInputs,
+  collectImportEdges,
+  emptyIndices,
+  invalidateIncrementalIndex,
+  populateHistoricalEdges,
+  recordBuildTelemetry,
+  type BuildResult,
+} from "./context-graph-build.js";
 
 // Re-exported for compatibility (moved to edge-store.ts).
 export { EdgeStore, type MutationEvent } from "./edge-store.js";
@@ -182,102 +187,43 @@ export class ContextGraph {
     await this.tagsCache.init();
 
     if (options.forceRefresh) {
-      this.symbolIndex = null;
-      this.fileIndex = null;
-      this.callGraph = null;
-      this.provenances.clear();
-      this._provenancesCapReached = false;
-      this.mutationEdges.clear();
+      this.resetBuildState();
       await this.tagsCache.clearDiskCache();
     }
 
-    // Load mutation edges from EdgeStore (breakage + co-change events)
-    // These are persisted observations from post-edit diagnostic cascades
-    // and git history co-change analysis (Smart-Edit integration).
-    this.loadMutationEdges();
+    // Stage 1: historical populate (EdgeStore + bounded git backfill).
+    await populateHistoricalEdges(this.root, options, {
+      loadMutationEdges: () => this.loadMutationEdges(),
+      mutationEdgeCount: () => this.mutationEdges.size,
+    });
 
-    if (this.mutationEdges.size === 0 && !options.skipGitPopulation) {
-      const GIT_POPULATION_TIMEOUT_MS = 10_000;
-      const config = loadGitContextConfig(this.root);
-      const limit = config.coCommitAnalysisLimit ?? 100;
-      const gitPromise = findGitRoot(this.root).then(async (gitRoot) => {
-        if (!gitRoot) return;
-        const pairs = await extractCoCommitPairs(gitRoot, limit);
-        await autoPopulateEdgeStore(gitRoot, pairs);
-        this.loadMutationEdges();
-      });
-      // Await with bounded timeout to prevent indefinite blocking
-      await Promise.race([
-        gitPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error("git population timed out")), GIT_POPULATION_TIMEOUT_MS)),
-      ]).catch(() => {
-        // Timeout or failure is non-fatal — graph proceeds without git edges
-      });
+    // Stage 2: rebuild decision (file discovery + incremental + safety net).
+    const inputs = await collectBuildInputs(
+      this.root,
+      options,
+      this.lastBuildFilesLength,
+      this.symbolIndex !== null,
+    );
+    const allFiles = inputs.allFiles;
+    if (options.incrementalIndex && inputs.fileCountChanged) {
+      invalidateIncrementalIndex(this.root);
     }
 
-    // Always compute the current source-file set so the file-count safety
-    // net below can detect divergence from the previous build (F-2 fix).
-    const allFiles = await findSrcFiles(this.root);
-
-    // When incremental indexing is enabled, query it for content-level changes.
-    // The incremental index is the primary signal; the file-count delta below
-    // is a secondary check that catches cases where the index missed something.
-    let incrementalChanges: { added: string[]; modified: string[]; deleted: string[]; unchanged: string[] } | null = null;
-    if (options.incrementalIndex) {
-      const idx = getIncrementalIndex(this.root);
-      incrementalChanges = idx.getChanges();
-    }
-
-    // File-count safety net: if the source-file count diverges from the previous
-    // build, the incremental index may have drifted (e.g. on filesystems that
-    // don't propagate child changes up to ancestor directory mtimes). Force
-    // a full re-scan to guarantee the indices reflect the actual tree.
-    const fileCountChanged =
-      this.lastBuildFilesLength >= 0 && allFiles.length !== this.lastBuildFilesLength;
-    if (options.incrementalIndex && fileCountChanged) {
-      getIncrementalIndex(this.root).invalidate();
-    }
-
-    // Decide whether we need to rebuild the symbol/file indices. We rebuild
-    // when ANY of the following are true:
-    //   - No symbol index has ever been built (first build / force-refresh).
-    //   - Incremental index reports added/modified/deleted files.
-    //   - File count diverged from the previous build (safety net).
-    const incrementalHasChanges =
-      incrementalChanges !== null &&
-      (incrementalChanges.added.length > 0 ||
-        incrementalChanges.modified.length > 0 ||
-        incrementalChanges.deleted.length > 0);
-
-    const needsRebuild =
-      this.symbolIndex === null || incrementalHasChanges || fileCountChanged;
-
+    // Lifecycle: call-graph trigger stays here; built lazily on demand.
     if (options.includeCalls && this.callGraph === null && allFiles.length > 0) {
       this.callGraph = await buildCallGraph(allFiles);
     }
 
-    // Fast-path: nothing changed and index already built. Skip rebuilding.
-    if (!needsRebuild) {
+    // Fast-path: nothing changed and index already built. Skip rebuilding,
+    // preserving import adjacency across unchanged builds.
+    if (!inputs.needsRebuild) {
       this.lastBuildFilesLength = allFiles.length;
       return;
     }
 
-    // Rebuild import adjacency only when rebuilding; preserve it across
-    // unchanged fast-path builds.
-    this.importEdges = [];
-
-    // Invalidate indices if the file set changed since last build (F-3 fix:
-    // performed BEFORE any early-return so the indices actually rebuild when
-    // incrementalIndex reports changes).
-    if (this.lastBuildFilesLength >= 0 && allFiles.length !== this.lastBuildFilesLength) {
-      this.symbolIndex = null;
-      this.fileIndex = null;
-    }
-    this.lastBuildFilesLength = allFiles.length;
-
+    // Rebuild path: file-less workspaces commit empty indices.
     if (allFiles.length === 0) {
-      this.symbolIndex = new LruCache(1);
-      this.fileIndex = new LruCache(1);
+      this.commitBuildResult({ ...emptyIndices(), importEdges: [], fileCount: 0 });
       return;
     }
 
@@ -293,57 +239,41 @@ export class ContextGraph {
       chooseConcurrency({ fileCount: fileObjects.length, operation: "parse" }),
     );
 
-    const taggedFiles = new Set(allTags.map((t) => t.fname));
-    writeCoverage(this.root, allFiles.map((file) => ({
-      file: relative(this.root, file),
-      phase: "context-graph",
-      status: taggedFiles.has(file) ? "indexed" as const : "partial" as const,
-      updatedAt: Date.now(),
-    })));
+    // Stage 4: coverage + snapshot telemetry (side-effect only).
+    recordBuildTelemetry(this.root, allFiles, allTags);
 
-    writeSnapshot(this.root, "graph", { tagCount: allTags.length, fileCount: allFiles.length }, {
-      fileCount: allFiles.length,
-      tagCount: allTags.length,
-      sourceHash: computeSourceHash(allFiles),
-    });
+    // Stage 3 (cont.): in-memory indices, built locally and published once.
+    // (Supersedes the old F-3 pre-nulling: the commit below overwrites both
+    // indices unconditionally, so a changed file set always rebuilds.)
+    const { symbolIndex, fileIndex } = buildTagIndices(allTags);
 
+    // Stage 5: import edges from actual import adjacency data. Produces typed
+    // IMPORT edges for buildImportEdges consumers (community detection,
+    // layer analysis). Rebuilt only on a full rebuild; preserved across
+    // unchanged fast-path builds by the early return above.
+    const importEdges = collectImportEdges(allFiles, (file) => this.getImportNeighbours(file));
 
-    // Build symbol → tags index with memory caps
-    const index = new LruCache<Tag[]>(20_000);
-    const fileIdx = new LruCache<Tag[]>(5_000);
-    for (const tag of allTags) {
-      // Symbol index
-      let list = index.get(tag.name);
-      if (!list) {
-        list = [];
-        index.set(tag.name, list);
-      }
-      list.push(tag);
+    // Single build-result commit: publish indices, edges, and the file-count
+    // watermark together so readers never observe a partially rebuilt graph.
+    this.commitBuildResult({ symbolIndex, fileIndex, importEdges, fileCount: allFiles.length });
+  }
 
-      // File index
-      let fileList = fileIdx.get(tag.fname);
-      if (!fileList) {
-        fileList = [];
-        fileIdx.set(tag.fname, fileList);
-      }
-      fileList.push(tag);
-    }
+  /** Clear all built state (force-refresh lifecycle; repopulated by stages). */
+  private resetBuildState(): void {
+    this.symbolIndex = null;
+    this.fileIndex = null;
+    this.callGraph = null;
+    this.provenances.clear();
+    this._provenancesCapReached = false;
+    this.mutationEdges.clear();
+  }
 
-    this.symbolIndex = index;
-    this.fileIndex = fileIdx;
-
-    // ── Build import edges from actual import adjacency data ───
-    // Scan all source files and extract import relationships.
-    // This produces typed IMPORT edges for buildImportEdges consumers
-    // (community detection, layer analysis), replacing the earlier
-    // mixed-provenance approach that conflated imports/symbols/calls.
-    for (const file of allFiles) {
-      const neighbours = this.getImportNeighbours(file);
-      for (const n of neighbours) {
-        this.importEdges.push({ from: file, to: n });
-      }
-    }
-
+  /** Publish a rebuilt graph atomically: indices, edges, watermark. */
+  private commitBuildResult(result: BuildResult): void {
+    this.symbolIndex = result.symbolIndex;
+    this.fileIndex = result.fileIndex;
+    this.importEdges = result.importEdges;
+    this.lastBuildFilesLength = result.fileCount;
   }
 
   /**
