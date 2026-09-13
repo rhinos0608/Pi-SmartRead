@@ -7,7 +7,7 @@
  * text plus its own evidence resources; the budget stage admits both
  * together so omitted sections authorize nothing.
  */
-import { relative as pathRelative } from "node:path";
+import { relative as pathRelative, resolve as pathResolve } from "node:path";
 import type { InspectedResource } from "@rhinos0608/pi-workspace-protocol";
 import { detectDeadCode, expandBlastRadius, classifyFileRisk } from "./impact-analysis.js";
 import { extractRoutes } from "./route-extraction.js";
@@ -98,11 +98,18 @@ type ImpactSectionParams = [
 
 interface AffectedFile { path: string; risk: string; fanIn: number; depth: number }
 
-function fanInForFile(callGraph: CallGraphResult | null, cwd: string, fp: string): number {
-    if (!callGraph) return 0;
-    return callGraph.functions
-        .filter(f => f.file === pathRelative(cwd, fp))
-        .reduce((sum, f) => sum + f.calledBy.length, 0);
+function buildFanInByFile(callGraph: CallGraphResult | null, cwd: string): Map<string, number> {
+    const totals = new Map<string, number>();
+    if (!callGraph) return totals;
+    for (const f of callGraph.functions) {
+        const rel = pathRelative(cwd, f.file);
+        totals.set(rel, (totals.get(rel) ?? 0) + f.calledBy.length);
+    }
+    return totals;
+}
+
+function fanInForFile(fanInByFile: Map<string, number>, fp: string): number {
+    return fanInByFile.get(fp) ?? 0;
 }
 
 function formatBlastRadiusLines(relativePath: string, affectedFiles: AffectedFile[]): string[] {
@@ -132,14 +139,19 @@ async function buildImpactWithGraph(
     const sr = new Map<string, InspectedResource>();
     const contextGraph = input.contextGraph!;
     const blastRadius = await expandBlastRadius(absolutePath, contextGraph, 3, input.cwd);
+    const fanInByFile = buildFanInByFile(callGraph, cwd);
     const affectedFiles: AffectedFile[] = [];
     for (const [fp, { depth: d }] of blastRadius) {
         if (fp === absolutePath) continue;
-        const fanIn = fanInForFile(callGraph, cwd, fp);
+        const fanIn = fanInForFile(fanInByFile, pathRelative(cwd, fp));
         const risk = classifyFileRisk({ filePath: fp, pageRank: 0, fanIn, blastRadiusDepth: d });
         affectedFiles.push({ path: pathRelative(cwd, fp), risk, fanIn, depth: d });
-        addResource(sr, fp, cwd);
     }
+    // Authorize only the displayed slice (same sort + top-15 as rendered).
+    const displayed = [...affectedFiles]
+        .sort((a, b) => riskOrder(a.risk) - riskOrder(b.risk) || b.fanIn - a.fanIn)
+        .slice(0, 15);
+    for (const af of displayed) addResource(sr, pathResolve(cwd, af.path), cwd);
     return { text: formatBlastRadiusLines(relativePath, affectedFiles).join("\n"), resources: sr };
 }
 
@@ -168,7 +180,7 @@ function buildImpactFallback(
 export async function buildFileImpactSection(...args: ImpactSectionParams): Promise<FileSectionResult> {
     const [input, cwd, absolutePath, relativePath, facts, callGraph] = args;
     try {
-        if (input.contextGraph) return buildImpactWithGraph(input, cwd, absolutePath, relativePath, callGraph);
+        if (input.contextGraph) return await buildImpactWithGraph(input, cwd, absolutePath, relativePath, callGraph);
         return buildImpactFallback(cwd, relativePath, facts);
     } catch {
         return { text: "## Impact Analysis\n\n(computation failed)", resources: new Map() };
@@ -378,7 +390,7 @@ function appendDependencySamples(out: string[], cwd: string, facts: GraphSchemaF
 function appendDependentSamples(out: string[], cwd: string, absolutePath: string, facts: GraphSchemaFacts): void {
     const deps = facts.externalDependents ?? [];
     if (deps.length === 0) return;
-    const sample = deps.slice(0, 5).map(d => `${pathRelative(cwd, absolutePath)} → ${pathRelative(cwd, d.file)}`);
+    const sample = deps.slice(0, 5).map(d => `${pathRelative(cwd, d.file)} → ${pathRelative(cwd, absolutePath)}`);
     out.push("Sample dependent edges:");
     for (const s of sample) out.push(`  ${s}`);
 }
