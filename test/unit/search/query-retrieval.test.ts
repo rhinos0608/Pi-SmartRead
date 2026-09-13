@@ -143,6 +143,25 @@ describe("shared query retrieval", () => {
     })).toBe(true);
   });
 
+  it("pins kernel route: index-available returns hybrid index hits with line/score", async () => {
+    await warm();
+    const result = await retrieveQuery({ query: "semanticNeedle auth", cwd: root, directory: "src" });
+    expect(result.strategy).toBe("hybrid");
+    if (result.strategy !== "hybrid") throw new Error("expected hybrid");
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]!.relativePath).toBe("src/auth.ts");
+    expect(result.hits[0]!.lineStart).toBeGreaterThanOrEqual(1);
+    expect(typeof result.hits[0]!.score).toBe("number");
+  });
+
+  it("pins kernel route: index-unavailable returns fallback reason unavailable", async () => {
+    const result = await retrieveQuery({ query: "semanticNeedle", cwd: root, directory: "src" });
+    expect(result.strategy).toBe("fallback");
+    if (result.strategy !== "fallback") throw new Error("expected fallback");
+    expect(result.reason).toBe("unavailable");
+    expect(result.hits.map((hit) => hit.relativePath)).toContain("src/auth.ts");
+  });
+
   it("owns one nearest-project registry entry and disposes live handles", async () => {
     const index = await warm();
     expect(getSemanticIndex(join(root, "src"))).toBe(index);

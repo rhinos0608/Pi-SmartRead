@@ -32,6 +32,10 @@ export interface FileHashEntry {
   hash: string;
   mtimeMs: number;
   size: number;
+  /** ctime changes on any content write even when mtime is preserved (utimes). */
+  ctimeMs?: number;
+  /** Inode catches atomic-save replace (write-tmp + rename) with preserved mtime/size. */
+  ino?: number;
   /** Number of symbols in the file (undefined = unknown, needs rebuild). */
   symbolCount?: number;
   /** Number of edges originating from this file (undefined = unknown, needs rebuild). */
@@ -166,12 +170,12 @@ export function hashFileSync(filePath: string): string {
 function statAndHash(
   filePath: string,
   computeHash: boolean,
-): { mtimeMs: number; size: number; hash: string } | null {
+): { mtimeMs: number; size: number; ctimeMs: number; ino: number; hash: string } | null {
   try {
     const stat = statSync(filePath);
     if (!stat.isFile()) return null;
     const hash = computeHash ? hashFileSync(filePath) : "";
-    return { mtimeMs: stat.mtimeMs, size: stat.size, hash };
+    return { mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs, ino: stat.ino, hash };
   } catch {
     return null;
   }
@@ -298,13 +302,21 @@ export function scanTree(
       }
       if (!stat.isFile()) continue;
 
+      // Identity requires mtime + size + ctime + inode. Entries written before
+      // ctimeMs/ino tracking (undefined) fall through to a one-time re-hash.
+      // mtime/size alone trust timestamp-preserving rewrites; ctime moves on any
+      // write even when mtime is restored, and ino moves on atomic replace.
       if (
         stat.mtimeMs === cached.mtimeMs &&
-        stat.size === cached.size
+        stat.size === cached.size &&
+        cached.ctimeMs !== undefined &&
+        stat.ctimeMs === cached.ctimeMs &&
+        cached.ino !== undefined &&
+        stat.ino === cached.ino
       ) {
-        currentFiles[relFp] = { ...cached };
+        currentFiles[relFp] = { ...cached, ctimeMs: stat.ctimeMs, ino: stat.ino };
       } else {
-        // mtime or size changed — re-hash
+        // identity changed — re-hash
         const info = statAndHash(absPath, true);
         if (info) {
           currentFiles[relFp] = info;

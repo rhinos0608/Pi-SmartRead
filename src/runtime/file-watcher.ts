@@ -159,7 +159,11 @@ function scanFileState(root: string): Map<string, string> {
         if (stat.isDirectory()) {
           queue.push(absolutePath);
         } else if (stat.isFile()) {
-          state.set(relative(root, absolutePath), `${stat.mtimeMs}:${stat.size}`);
+          // ctime/ino close the timestamp-preserving-rewrite hole (a pure
+          // mtime+size identity trusts utimes-restored files). Known price:
+          // metadata-only changes (chmod/chown) bump ctime and read as dirty.
+          // Safe direction — spurious reindex, never a missed content change.
+          state.set(relative(root, absolutePath), `${stat.mtimeMs}:${stat.size}:${stat.ctimeMs}:${stat.ino}`);
         }
       } catch {
         // A file can disappear during a scan; it will be reconciled next pass.

@@ -4,6 +4,8 @@ import { canonicalPath, canonicalRelative } from "../workspace/workspace-boundar
 import { handleCode, handleGrep } from "../search/search-tool.js";
 import { pathPrefixForDirectory } from "../indexing/semantic-index.js";
 import { getSemanticIndex } from "../indexing/semantic-index-registry.js";
+import { persistentIndexChannel, runQueryChannels } from "../retrieval/runner.js";
+import type { ChannelContext } from "../retrieval/types.js";
 
 export interface QueryRetrievalHit {
   absolutePath: string;
@@ -83,11 +85,31 @@ export async function retrieveQuery(options: RetrieveQueryOptions): Promise<Quer
   if (semanticIndex?.isAvailable()) {
     try {
       const prefix = pathPrefixForDirectory(semanticIndex.root, searchDirectory);
-      const results = await semanticIndex.search(query, { topK, pathPrefix: prefix });
+      // P2 kernel route: single minimal indexChannel (queries the resolved
+      // index directly — no discovery, no intent_read) fanned out through the
+      // generic runner. Hit mapping/filtering below is unchanged.
+      const channel = persistentIndexChannel(semanticIndex, { topK, pathPrefix: prefix });
+      const channelContext: ChannelContext = {
+        query,
+        cwd,
+        signal: options.signal,
+        // The index channel never touches ExtensionContext (no discovery,
+        // no intent_read); the field is required by the shared kernel type.
+        ctx: undefined as never,
+        discoveredFiles: [],
+        seedFiles: [],
+        maxResults: topK,
+        limit: topK,
+        depth: "standard",
+      };
+      const { candidates, degraded } = await runQueryChannels([channel], channelContext);
+      if (degraded.length > 0) {
+        return runFallback(query, cwd, searchDirectory, topK, options, "error");
+      }
       return {
         strategy: "hybrid",
-        hits: results.flatMap((result) => {
-          const absolutePath = canonicalFile(resolve(semanticIndex.root, result.filePath));
+        hits: candidates.flatMap((candidate) => {
+          const absolutePath = canonicalFile(candidate.file);
           if (!absolutePath) return [];
           // Filter to searchDirectory scope
           const relToSearchDir = canonicalRelative(searchDirectory, absolutePath);
@@ -95,12 +117,12 @@ export async function retrieveQuery(options: RetrieveQueryOptions): Promise<Quer
           return [{
             absolutePath,
             relativePath: relative(cwd, absolutePath).replace(/\\/g, "/"),
-            lineStart: result.lineStart,
-            lineEnd: result.lineEnd,
-            name: result.symbolKind,
-            kind: result.symbolKind,
-            snippet: result.codeSnippet,
-            score: result.score,
+            lineStart: candidate.line ?? 1,
+            lineEnd: candidate.endLine ?? candidate.line ?? 1,
+            name: candidate.name,
+            kind: candidate.kind,
+            snippet: candidate.snippet,
+            score: candidate.rawScore,
           }];
         }),
       };

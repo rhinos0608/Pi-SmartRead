@@ -75,12 +75,26 @@ function toPosixRel(nativeRel: string): string {
   return nativeRel.split(sep).join("/");
 }
 
-function readFileSafe(root: string, relPath: string): string {
+/**
+ * Read a workspace file, or null when it cannot be read. Null is
+ * deliberately distinct from "" so snapshot/delta semantics never confuse
+ * an unreadable file with an empty one.
+ */
+function readFileOrNull(root: string, relPath: string): string | null {
   try {
     return readFileSync(join(root, relPath), "utf-8");
   } catch {
-    return "";
+    return null;
   }
+}
+
+/** Content-hash marker for unreadable files. Path-bound so two different
+ * unreadable files never share a marker. The `unreadable:` prefix keeps
+ * markers outside the 64-lowercase-hex space of real sha256 digests, so no
+ * file content — including the literal text `unreadable:<path>` — can ever
+ * collide with a marker. Exported for tests. */
+export function unreadableContentHash(posixRel: string): string {
+  return `unreadable:${sha256(posixRel)}`;
 }
 
 // ── Snapshot data registry ──────────────────────────────────────────
@@ -92,6 +106,13 @@ function readFileSafe(root: string, relPath: string): string {
 interface CapturedSnapshot {
   root: string;
   fileEntries: SourceEntry[];
+  unreadablePaths: string[];
+}
+
+function unreadableCoverageReason(unreadablePaths: string[]): string {
+  const shown = unreadablePaths.slice(0, 5).join(", ");
+  const suffix = unreadablePaths.length > 5 ? ` and ${unreadablePaths.length - 5} more` : "";
+  return `${unreadablePaths.length} file(s) unreadable at snapshot time, hashed as unreadable markers (not empty): ${shown}${suffix}`;
 }
 
 const MAX_SNAPSHOTS = 50;
@@ -240,17 +261,24 @@ class RepoIntelService implements RepositoryIntelligenceService {
     scanCache.invalidatePath(input.root);
     const allFiles = await findSrcFiles(input.root);
     const fileEntries: SourceEntry[] = [];
+    const unreadablePaths: string[] = [];
     for (const absPath of allFiles) {
       if (Date.now() >= deadline) break;
       const nativeRel = relative(input.root, absPath);
+      const posixRel = toPosixRel(nativeRel);
+      const content = readFileOrNull(input.root, nativeRel);
+      if (content === null) unreadablePaths.push(posixRel);
       fileEntries.push({
-        path: toPosixRel(nativeRel),
-        contentHash: sha256(readFileSafe(input.root, nativeRel)),
+        path: posixRel,
+        contentHash: content === null ? unreadableContentHash(posixRel) : sha256(content),
       });
     }
 
     // 4. Compute capabilities from captured files
     const capabilities = await computeCapabilityReport(fileEntries);
+    if (unreadablePaths.length > 0) {
+      capabilities.coverageReasons.push(unreadableCoverageReason(unreadablePaths));
+    }
 
     if (Date.now() >= deadline) {
       throw new IntelligenceServiceNotImplementedError({
@@ -265,7 +293,7 @@ class RepoIntelService implements RepositoryIntelligenceService {
     const snapshotId = sha256(`${input.root}:${sourceHash}`) as SnapshotId;
 
     // 6. Register immutable snapshot data for later lookups (bounded eviction)
-    snapshotData.set(snapshotId, { root: input.root, fileEntries });
+    snapshotData.set(snapshotId, { root: input.root, fileEntries, unreadablePaths });
     if (snapshotData.size > MAX_SNAPSHOTS) {
       const oldest = snapshotData.keys().next().value;
       if (oldest) snapshotData.delete(oldest);
@@ -643,6 +671,10 @@ class RepoIntelService implements RepositoryIntelligenceService {
         omittedEdgeCount: 0,
       };
     }
-    return computeCapabilityReport(snapshot.fileEntries);
+    const report = await computeCapabilityReport(snapshot.fileEntries);
+    if (snapshot.unreadablePaths.length > 0) {
+      report.coverageReasons.push(unreadableCoverageReason(snapshot.unreadablePaths));
+    }
+    return report;
   }
 }

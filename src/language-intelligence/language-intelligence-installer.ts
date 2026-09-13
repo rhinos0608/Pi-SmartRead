@@ -12,6 +12,8 @@ import {
   symlinkSync,
   copyFileSync,
   statSync,
+  fstatSync,
+  ftruncateSync,
   writeSync,
   realpathSync,
 } from "node:fs";
@@ -246,6 +248,84 @@ async function acquireLock(packageName: string, home = homedir(), installTimeout
   }
 }
 
+export interface InstallLock {
+  fd: number;
+  path: string;
+  token: string;
+}
+
+/**
+ * Best-effort heartbeat: re-stamp the lock's timestamp when this process still
+ * owns it. Without this, a slow legitimate install (e.g. no-timeout managed
+ * LSP install running past the ~3min stale fallback) looks abandoned and a
+ * waiter reclaims the lock, yielding two concurrent npm installs.
+ *
+ * Returns true when the beat landed. Mutates lock.token so the holder's
+ * eventual releaseLock still matches; the token-guard there then keeps a
+ * stale-token holder from unlinking a new owner's lock.
+ */
+export function refreshInstallLock(lock: InstallLock): boolean {
+  let current: string;
+  try {
+    current = readFileSync(lock.path, "utf-8");
+  } catch {
+    return false; // missing/unreadable — never recreate another owner's lock
+  }
+  if (current !== lock.token) return false; // lost to someone else — don't clobber
+  // Verify lock.path still references the inode owned via lock.fd. A waiter
+  // reclaim (unlink + recreate) between our read and write must not be
+  // clobbered via a path reopen.
+  try {
+    const pathStat = statSync(lock.path);
+    const fdStat = fstatSync(lock.fd);
+    if (pathStat.ino !== fdStat.ino || (pathStat as { dev?: number }).dev !== (fdStat as { dev?: number }).dev) return false;
+  } catch {
+    return false;
+  }
+  const threshold = lock.token.split(":")[2] ?? "";
+  const next = `${process.pid}:${Date.now()}:${threshold}`;
+  try {
+    ftruncateSync(lock.fd, 0);
+    writeSync(lock.fd, next, 0, "utf-8");
+  } catch {
+    return false;
+  }
+  // Post-write verify: path must still reference our inode and carry the token.
+  // Otherwise a concurrent reclaim won the race — refuse to adopt the token
+  // (so releaseLock stays a no-op) and let the heartbeat self-stop.
+  try {
+    const pathStat = statSync(lock.path);
+    const fdStat = fstatSync(lock.fd);
+    if (pathStat.ino !== fdStat.ino || (pathStat as { dev?: number }).dev !== (fdStat as { dev?: number }).dev) return false;
+    if (readFileSync(lock.path, "utf-8") !== next) return false;
+  } catch {
+    return false;
+  }
+  lock.token = next;
+  return true;
+}
+
+/**
+ * Periodically heartbeat an install lock for the duration of the critical
+ * section. Returns a stopper; callers must stop before releaseLock.
+ */
+export function startInstallLockHeartbeat(lock: InstallLock, intervalMs?: number): () => void {
+  const threshold = Number(lock.token.split(":")[2]);
+  const interval = intervalMs ?? (Number.isFinite(threshold) && threshold > 0
+    ? Math.min(30_000, Math.max(5_000, Math.floor(threshold / 3)))
+    : 30_000);
+  const timer = setInterval(() => {
+    let alive = false;
+    try { alive = refreshInstallLock(lock); } catch { alive = false; }
+    // Lost the lock (reclaimed, deleted, or clobbered): stop beating instead
+    // of fighting the new owner on every interval.
+    if (!alive) clearInterval(timer);
+  }, interval);
+  const t = timer as unknown as { unref?: () => void };
+  if (typeof t.unref === "function") t.unref();
+  return () => clearInterval(timer);
+}
+
 function releaseLock(fd: number, path: string, token?: string): void {
   try { closeSync(fd); } catch { /* ignore */ }
   if (token !== undefined) {
@@ -399,6 +479,9 @@ export async function installServer(
 
   const lock = await acquireLock(packageName, home, opts.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS, opts.lockRetryTimeoutMs);
   if (!lock.ok) return { ok: false, error: lock.error };
+
+  // Heartbeat for the whole critical section so slow installs never read as stale.
+  const stopHeartbeat = startInstallLockHeartbeat(lock);
 
   let tempDir: string | null = null;
   try {
@@ -590,6 +673,7 @@ export async function installServer(
 
     return { ok: true, binPath: resolvedBinPath };
   } finally {
+    try { stopHeartbeat(); } catch { /* ignore */ }
     if (tempDir) {
       try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }

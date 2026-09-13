@@ -174,10 +174,10 @@ describe("grep tool — non-literal cascade", () => {
         expect(authResources[0].allowedRanges.length).toBeGreaterThanOrEqual(2);
     });
 });
-// ── Semantic fallback ──────────────────────────────────────────────
+// ── Semantic fusion (always-on in the indexed cascade) ───────────────
 
-describe("grep tool — semantic fallback", () => {
-    it("uses embeddings only after lexical and symbol search return no hits", async () => {
+describe("grep tool — semantic fusion", () => {
+    it("fuses semantic hits when lexical and symbol search return no hits", async () => {
         const embed = vi.fn(async (request: { inputs: string[] }) => ({
             vectors: request.inputs.map((input) => {
                 if (/identity proof|authenticate|validateToken/i.test(input)) return [1, 0, 0];
@@ -252,7 +252,7 @@ describe("grep tool — semantic fallback", () => {
         expect(text).toContain("src/payment.ts");
     });
 
-    it("prefers an exact raw match from a file missing in the semantic index", async () => {
+    it("fuses semantic hits alongside lexical matches and keeps the exact match first", async () => {
         const embed = vi.fn(async (request: { inputs: string[] }) => ({
             vectors: request.inputs.map(() => [0, 0, 1]),
         }));
@@ -283,8 +283,53 @@ describe("grep tool — semantic fallback", () => {
 
         const details = result.details as any;
         const text = (result.content[0] as { text: string }).text;
-        expect(details.engines).toEqual(["lexical-passthrough"]);
+        // Semantic now participates in every indexed grep instead of only on
+        // zero fused results. The mock embed maps every input to the same
+        // vector, so the stale index claims all files match — real embeddings
+        // filter via minScore. The exact raw match still leads.
+        expect(details.engines).toEqual(["lexical", "semantic"]);
         expect(text).toContain("src/payment.ts");
+        expect(text.indexOf("src/payment.ts")).toBeLessThan(text.indexOf("src/auth.ts"));
+    });
+
+    it("runs semantic search even when lexical channels already hit", async () => {
+        const embed = vi.fn(async (request: { inputs: string[] }) => ({
+            vectors: request.inputs.map((input) => {
+                if (/identity proof|authenticate|validateToken/i.test(input)) return [1, 0, 0];
+                if (/database|connectDatabase|DATABASE_URL/i.test(input)) return [0, 1, 0];
+                return [0, 0, 1];
+            }),
+        }));
+        const index = getOrCreateSemanticIndex(workdir, {
+            config: {
+                baseUrl: "http://localhost:11434/v1",
+                model: "test-model",
+                chunkSizeChars: 4096,
+                chunkOverlapChars: 0,
+                maxChunksPerFile: 12,
+            },
+            fetchEmbeddings: embed as never,
+        });
+        await index.updateIndex();
+        embed.mockClear();
+
+        const tool = createGrepTool(makeOpts());
+        const result = await tool.execute(
+            "t-semantic-fused",
+            { pattern: "validateToken" },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+
+        const details = result.details as any;
+        const text = (result.content[0] as { text: string }).text;
+        // Old zero-only retry never ran the query embedding here.
+        expect(embed).toHaveBeenCalledTimes(1);
+        expect(embed.mock.calls[0]?.[0].inputs).toEqual(["validateToken"]);
+        expect(details.engines).toContain("lexical");
+        expect(details.engines).toContain("semantic");
+        expect(text).toContain("src/auth.ts");
     });
 });
 // ── Glob-aware retrieval ─────────────────────────────────────────

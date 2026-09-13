@@ -8,6 +8,8 @@ import {
   writeFileSync,
   mkdirSync,
   existsSync,
+  statSync,
+  utimesSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -316,6 +318,37 @@ describe("buildCache", () => {
 
     const changes = buildCache(tmpDir);
     expect(changes.deleted).toContain("main.ts");
+  });
+
+  it("migrates legacy entries to ctime+ino identity on scan", () => {
+    const { currentFiles } = scanTree(tmpDir, {}, {});
+    const rel = "src/a.ts";
+    expect(currentFiles[rel]).toBeDefined();
+    // Simulate a pre-upgrade cache entry: strip the new identity fields.
+    const legacy = { ...currentFiles };
+    delete (legacy[rel] as { ctimeMs?: number }).ctimeMs;
+    delete (legacy[rel] as { ino?: number }).ino;
+    const rescanned = scanTree(tmpDir, legacy, {});
+    expect(rescanned.currentFiles[rel]!.ctimeMs).toBeDefined();
+    expect(rescanned.currentFiles[rel]!.ino).toBeDefined();
+    expect(rescanned.currentFiles[rel]!.hash).toBe(currentFiles[rel]!.hash);
+  });
+
+  it("detects same-size rewrites that preserve mtime", () => {
+    buildCache(tmpDir);
+    const target = join(tmpDir, "src", "a.ts");
+    const original = statSync(target);
+    // Same byte length, different content, mtime restored — the old
+    // mtime+size fast path trusted this as unchanged.
+    writeFileSync(target, "export const a = 2;");
+    // Second-floats preserve sub-second precision (Date args truncate to seconds).
+    utimesSync(target, original.atimeMs / 1000, original.mtimeMs / 1000);
+    const after = statSync(target);
+    expect(after.size).toBe(original.size);
+    expect(after.mtimeMs).toBe(original.mtimeMs);
+
+    const changes = buildCache(tmpDir);
+    expect(changes.modified).toContain("src/a.ts");
   });
 });
 

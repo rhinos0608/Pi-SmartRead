@@ -105,6 +105,12 @@ export interface DeepSearchDetails {
   scope: DeepSearchScope;
   filesInspected: number;
   discoveryTotal?: number;
+  /** Files the semantic channel's embeddings actually ranked. */
+  semanticInspected?: number;
+  /** Files the semantic preselect scanned (full discovered corpus for bm25-preselect). */
+  semanticScanned?: number;
+  /** How semantic candidates were produced. */
+  semanticStrategy?: "persistent-index" | "bm25-preselect";
   matches: DeepSearchMatch[];
   channelsUsed: ChannelName[];
   degraded: string[];
@@ -121,11 +127,19 @@ export interface PublicDeepSearchDetails extends Omit<DeepSearchDetails, "matche
 // ── Channel imports (used by orchestrator) ────────────────────────────────────
 
 import { RRF_K } from "./deep-search-constants.js";
-import { extractQueryTerms, enrichMatchProvenance, runSemanticChannel } from "./deep-search-semantic.js";
-import { runSearchChannel } from "./deep-search-structural.js";
-import { runSymbolChannel, enrichRelationships } from "./deep-search-symbol.js";
-import { runGraphChannel, selectGraphSeedFiles } from "./deep-search-graph.js";
-import { runLSPChannel } from "./deep-search-lsp.js";
+import { extractQueryTerms, enrichMatchProvenance } from "./deep-search-semantic.js";
+import { enrichRelationships } from "./deep-search-symbol.js";
+import { selectGraphSeedFiles } from "./deep-search-graph.js";
+import { runQueryChannels } from "../retrieval/runner.js";
+import {
+  graphChannel,
+  grepChannel,
+  lspChannel,
+  semanticChannel,
+  structuralChannel,
+  symbolChannel,
+} from "../retrieval/channels.js";
+import type { ChannelContext, RetrievalChannel } from "../retrieval/types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -133,7 +147,6 @@ const DEFAULT_LIMIT = 15;
 const DEFAULT_SNIPPET_CHARS = 400;
 const DEFAULT_OUTPUT_BUDGET = 4096;
 const MAX_DISCOVERY_FILES = 2_000;
-const MAX_GRAPH_CANDIDATES = 30;
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
@@ -423,6 +436,14 @@ function renderMarkdown(details: DeepSearchDetails, maxOutputChars: number): str
   lines.push("## 📊 Summary", "");
   lines.push(`- Channels: ${details.channelsUsed.length > 0 ? details.channelsUsed.join(", ") : "none"}`);
   lines.push(`- Files inspected: ${details.filesInspected}`);
+  if (details.semanticInspected !== undefined) {
+    const scanned = details.semanticScanned ?? details.filesInspected;
+    if (details.semanticStrategy === "persistent-index") {
+      lines.push(`- Semantic channel: persistent-index, repo-wide vector search over ${scanned} files (${details.semanticInspected} hits)`);
+    } else {
+      lines.push(`- Semantic channel: bm25-preselect, embeddings ranked ${details.semanticInspected} of ${scanned} discovered files`);
+    }
+  }
   if (details.discoveryTotal !== undefined && details.discoveryTotal !== details.filesInspected) {
     lines.push(`- Searchable corpus: ${details.discoveryTotal} files (${details.scope} scope filtered to ${details.filesInspected})`);
   }
@@ -651,50 +672,85 @@ export async function executeDeepSearch(
 
   const channelResults: DeepSearchCandidate[] = [];
 
+  // Retrieval-kernel routing: every phase fans out through runQueryChannels
+  // with the matching channel adapter. One adapter per runQueryChannels call
+  // so legacy degraded names survive the kernel's name-based degraded
+  // strings — the grep adapter's kernel name is "structural", and the
+  // semantic legacy prefix is "unavailable", not "failed".
+  // Intentional divergence from runner default: runQueryChannels rethrows
+  // abort errors, but deep-search records aborts as degraded entries (prior
+  // allSettled/try-catch behavior), so each phase catches aborts into the
+  // same degraded strings as before instead of propagating them.
+  // Known wart: ChannelContext.ctx passes deep-search ctx through unchanged.
+  const baseContext: ChannelContext = {
+    query,
+    cwd,
+    signal,
+    ctx,
+    discoveredFiles,
+    seedFiles: [],
+    maxResults: maxChannelResults,
+    limit,
+    depth,
+  };
+  const remapDegraded = (entries: string[], from: string, to: string): void => {
+    for (const entry of entries) {
+      degraded.push(entry.startsWith(`${from} channel failed:`)
+        ? `${to} channel failed:${entry.slice(`${from} channel failed:`.length)}`
+        : entry);
+    }
+  };
+  const abortDegraded = (legacy: string, error: unknown, unavailable = false): void => {
+    const reason = error instanceof Error ? error.message : String(error);
+    degraded.push(unavailable ? `semantic channel unavailable: ${reason}` : `${legacy} channel failed: ${reason}`);
+  };
+
   // Phase 1: AST-aware code, grep, and symbol searches in parallel.
   // Docs skip code-only channels but still need exact text retrieval.
   const phase1Promise = (async () => {
-    const searches: Array<{
-      name: "structural" | "grep" | "symbol";
-      run: () => Promise<DeepSearchCandidate[]>;
-    }> = [
-      {
-        name: "grep",
-        run: () => runSearchChannel(query, cwd, "grep", maxChannelResults, signal, ctx),
-      },
+    const searches: Array<{ name: "structural" | "grep" | "symbol"; adapter: RetrievalChannel }> = [
+      { name: "grep", adapter: grepChannel },
     ];
 
     if (scope !== "docs") {
-      searches.unshift({
-        name: "structural",
-        run: () => runSearchChannel(query, cwd, "code", maxChannelResults, signal, ctx),
-      });
-      searches.push({
-        name: "symbol",
-        run: () => runSymbolChannel(query, cwd, maxChannelResults, signal, ctx),
-      });
+      searches.unshift({ name: "structural", adapter: structuralChannel });
+      searches.push({ name: "symbol", adapter: symbolChannel });
     }
 
-    const results = await Promise.allSettled(searches.map(({ run }) => run()));
+    const results = await Promise.allSettled(
+      searches.map(({ adapter }) => runQueryChannels([adapter], baseContext)),
+    );
     results.forEach((result, index) => {
+      const { name, adapter } = searches[index]!;
       if (result.status === "fulfilled") {
-        channelResults.push(...result.value);
+        channelResults.push(...result.value.candidates);
+        remapDegraded(result.value.degraded, adapter.name, name);
         return;
       }
 
-      const name = searches[index]!.name;
-      const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-      degraded.push(`${name} channel failed: ${reason}`);
+      abortDegraded(name, result.reason);
     });
   })();
 
   // Phase 2: semantic in parallel with phase 1 (it only needs discoveredFiles)
+  let semanticInspected: number | undefined;
+  let semanticScanned: number | undefined;
+  let semanticStrategy: "persistent-index" | "bm25-preselect" | undefined;
   const phase2Promise = (async () => {
     if (depth !== "quick" && discoveredFiles.length > 0) {
       try {
-        channelResults.push(...await runSemanticChannel(query, cwd, discoveredFiles, limit, signal, ctx));
+        const { candidates, degraded: semanticDegraded, results } = await runQueryChannels([semanticChannel], baseContext);
+        channelResults.push(...candidates);
+        for (const entry of semanticDegraded) {
+          degraded.push(entry.startsWith("semantic channel failed:")
+            ? `semantic channel unavailable:${entry.slice("semantic channel failed:".length)}`
+            : entry);
+        }
+        semanticInspected = results[0]?.inspected;
+        semanticScanned = results[0]?.scanned;
+        semanticStrategy = results[0]?.strategy;
       } catch (error) {
-        degraded.push(`semantic channel unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        abortDegraded("semantic", error, true);
       }
     }
   })();
@@ -704,9 +760,11 @@ export async function executeDeepSearch(
   const lspPromise = (async () => {
     if (query.length > 2) {
       try {
-        channelResults.push(...await runLSPChannel(query, cwd, depth, maxChannelResults, signal));
+        const { candidates, degraded: lspDegraded } = await runQueryChannels([lspChannel], baseContext);
+        channelResults.push(...candidates);
+        degraded.push(...lspDegraded);
       } catch (error) {
-        degraded.push(`lsp channel failed: ${error instanceof Error ? error.message : String(error)}`);
+        abortDegraded("lsp", error);
       }
     }
   })();
@@ -718,17 +776,14 @@ export async function executeDeepSearch(
   if (depth !== "quick" && scope !== "docs" && channelResults.length > 0) {
     try {
       const graphSeeds = selectGraphSeedFiles(cwd, channelResults, focusFiles);
-      channelResults.push(
-        ...await runGraphChannel(
-          cwd,
-          graphSeeds,
-          discoveredFiles,
-          Math.min(MAX_GRAPH_CANDIDATES, maxChannelResults),
-          signal,
-        ),
+      const { candidates, degraded: graphDegraded } = await runQueryChannels(
+        [graphChannel],
+        { ...baseContext, seedFiles: graphSeeds },
       );
+      channelResults.push(...candidates);
+      degraded.push(...graphDegraded);
     } catch (error) {
-      degraded.push(`graph channel failed: ${error instanceof Error ? error.message : String(error)}`);
+      abortDegraded("graph", error);
     }
   }
 
@@ -767,6 +822,9 @@ export async function executeDeepSearch(
     scope,
     filesInspected: discoveredFiles.length,
     discoveryTotal,
+    ...(semanticInspected !== undefined && { semanticInspected }),
+    ...(semanticScanned !== undefined && { semanticScanned }),
+    ...(semanticStrategy !== undefined && { semanticStrategy }),
     matches,
     channelsUsed: channelSet(matches),
     degraded,

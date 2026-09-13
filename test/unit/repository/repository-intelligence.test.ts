@@ -2,12 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   createRepositoryIntelligenceService,
   IntelligenceServiceNotImplementedError,
+  unreadableContentHash,
 } from "../../../src/repository/repository-intelligence.js";
 import type {
   RepositoryIntelligenceService,
   SnapshotId,
 } from "../../../src/repository/repository-intelligence-types.js";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, unlinkSync, chmodSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -294,6 +296,57 @@ describe("RepositoryIntelligenceService", () => {
       expect(javaLang!.callGraph).toBe("UNAVAILABLE");
       expect(result.capabilities.graphAssessment).toBe("partial");
       expect(result.capabilities.coverageReasons.some((r) => r.includes("java"))).toBe(true);
+    });
+
+    it("hashes unreadable files distinctly from empty files", () => {
+      const emptyHash = createHash("sha256").update("").digest("hex");
+      const marker = unreadableContentHash("src/locked.ts");
+      expect(marker).not.toBe(emptyHash);
+      // Outside digest space: no file content can collide with a marker,
+      // not even the literal marker preimage text.
+      expect(marker).not.toMatch(/^[a-f0-9]{64}$/);
+      // Path-bound: two different unreadable files never share a hash.
+      expect(unreadableContentHash("src/other.ts")).not.toBe(marker);
+      expect(unreadableContentHash("src/locked.ts")).toBe(marker);
+    });
+
+    it("detects empty file becoming unreadable as a change", async () => {
+      // chmod-based unreadable simulation only works off-root (root bypasses
+      // permission bits) and off-Windows (ACL semantics differ).
+      if (process.platform === "win32" || process.getuid?.() === 0) return;
+      makeFile("src/empty.ts", "");
+      const snap1 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+      expect(
+        snap1.capabilities.coverageReasons.some((r) => r.includes("unreadable")),
+      ).toBe(false);
+
+      chmodSync(join(tmpDir, "src/empty.ts"), 0o000);
+      try {
+        const snap2 = await svc.getWorkspaceSnapshot({
+          root: tmpDir,
+          includeDiagnostics: false,
+          budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+        });
+        expect(
+          snap2.capabilities.coverageReasons.some((r) => r.includes("unreadable")),
+        ).toBe(true);
+        const delta = await svc.compareSnapshots({
+          before: snap1.snapshot.snapshotId,
+          after: snap2.snapshot.snapshotId,
+          budget: { maxMs: 30_000, maxEntities: 2000 },
+        });
+        // Old read-failure-as-empty hashed this as sha256("") both times: missed.
+        expect(delta.changedEntities).toContain("src/empty.ts");
+        // getCapabilities replays the same unreadable notice for the snapshot.
+        const caps = await svc.getCapabilities({ snapshotId: snap2.snapshot.snapshotId });
+        expect(caps.coverageReasons.some((r) => r.includes("unreadable"))).toBe(true);
+      } finally {
+        chmodSync(join(tmpDir, "src/empty.ts"), 0o644);
+      }
     });
 
     it("reports empty workspace honestly", async () => {

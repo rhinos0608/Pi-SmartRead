@@ -229,6 +229,73 @@ describe("SemanticIndex", () => {
     expect([...stores.at(-1)!.chunks.values()].every((chunk) => chunk.filePath === "a.ts")).toBe(true);
   });
 
+  it("partial failure leaves index not ready with lastError and recovers on retry", async () => {
+    writeFileSync(join(root, "a.ts"), "export const auth = true;\n");
+    writeFileSync(join(root, "b.ts"), "export const database = true;\n");
+    let failB = true;
+    const embed = vi.fn(async (request: { inputs: string[] }) => {
+      if (failB && request.inputs.some((input) => input.includes("database"))) throw new Error("offline");
+      return { vectors: request.inputs.map((input) => vectorFor(input)) };
+    });
+    const { index } = makeIndex(root, { fetchEmbeddings: embed as never });
+
+    await index.updateIndex();
+    const stats = index.getStats();
+    expect(stats.indexedFileCount).toBe(1);
+    expect(stats.ready).toBe(false);
+    expect(index.isAvailable()).toBe(false);
+    expect(stats.lastError).toMatch(/offline/);
+    await expect(index.search("auth")).rejects.toBeInstanceOf(SemanticUnavailableError);
+
+    failB = false;
+    await index.updateIndex();
+    const recovered = index.getStats();
+    expect(recovered.ready).toBe(true);
+    expect(recovered.indexedFileCount).toBe(2);
+    expect(recovered.lastError).toBeUndefined();
+    const results = await index.search("database");
+    expect(results.map((result) => result.filePath)).toContain("b.ts");
+    index.dispose();
+  });
+
+  it("dimension reset starts a fresh failure epoch", async () => {
+    const alpha = join(root, "alpha.ts");
+    const beta = join(root, "beta.ts");
+    const gamma = join(root, "gamma.ts");
+    writeFileSync(alpha, "export const alpha = 'ALPHA marker';\n");
+    writeFileSync(beta, "export const beta = 'BETA marker';\n");
+    writeFileSync(gamma, "export const gamma = 'GAMMA marker';\n");
+    const orderedDiscover = () => Promise.resolve({ files: [alpha, beta, gamma], diagnostics: {} as never });
+    let alphaCalls = 0;
+    let betaCalls = 0;
+    const dim = (n: number) => Array.from({ length: n }, () => 0);
+    const embed = vi.fn(async (request: { inputs: string[] }) => {
+      const text = request.inputs.join("\n");
+      if (text.includes("ALPHA")) {
+        alphaCalls += 1;
+        if (alphaCalls === 1) throw new Error("boom-alpha");
+        return { vectors: request.inputs.map(() => dim(8)) };
+      }
+      if (text.includes("BETA")) {
+        betaCalls += 1;
+        return { vectors: request.inputs.map(() => dim(betaCalls === 1 ? 7 : 8)) };
+      }
+      return { vectors: request.inputs.map(() => dim(8)) };
+    });
+    const { index } = makeIndex(root, {
+      discoverFiles: orderedDiscover as never,
+      fetchEmbeddings: embed as never,
+    });
+
+    // alpha fails, beta pins dim 7, gamma triggers reset; all retried at dim 8.
+    await index.updateIndex();
+    const stats = index.getStats();
+    expect(stats.indexedFileCount).toBe(3);
+    expect(stats.ready).toBe(true);
+    expect(stats.lastError).toBeUndefined();
+    index.dispose();
+  });
+
   it("coalesces concurrent startup updates", async () => {
     writeFileSync(join(root, "a.ts"), "export const auth = true;\n");
     let release!: () => void;

@@ -312,9 +312,11 @@ async function searchIndexedBm25(
     return hits;
 }
 
-// Semantic retry only fires on genuine zero fused results. Mutates engines.
-async function searchSemanticRetry(ctx: IndexedCascadeCtx, engines: string[]): Promise<GrepHit[]> {
-    if (!ctx.semanticIndex?.isAvailable()) return [];
+// Semantic hits: always computed alongside lexical/BM25/symbol and fused —
+// embeddings participate in every grep, not only on zero fused results.
+async function searchSemanticHits(ctx: IndexedCascadeCtx): Promise<Map<string, GrepHit>> {
+    const hits = new Map<string, GrepHit>();
+    if (!ctx.semanticIndex?.isAvailable()) return hits;
     try {
         const prefix = pathPrefixForDirectory(ctx.semanticIndex.root, ctx.scopedFile ?? ctx.searchDir);
         const results = await ctx.semanticIndex.search(ctx.pattern, {
@@ -324,11 +326,10 @@ async function searchSemanticRetry(ctx: IndexedCascadeCtx, engines: string[]): P
             minScore: GREP_MIN_SEMANTIC_SCORE,
             fileGlob: ctx.fileGlob,
         });
-        const retryHits = new Map<string, GrepHit>();
         for (const r of results) {
             const absPath = tryCanonical(resolve(ctx.semanticIndex.root, r.filePath));
             if (isScopedOut(absPath, ctx.scopedFile)) continue;
-            retryHits.set(`${absPath}:${r.lineStart}`, {
+            hits.set(`${absPath}:${r.lineStart}`, {
                 file: absPath,
                 relFile: relative(ctx.cwd, absPath).replace(/\\/g, "/"),
                 line: r.lineStart,
@@ -340,32 +341,35 @@ async function searchSemanticRetry(ctx: IndexedCascadeCtx, engines: string[]): P
                 score: r.score,
             });
         }
-        if (retryHits.size === 0) return [];
-        engines.push("semantic");
-        return [...retryHits.values()];
+        return hits;
     } catch {
         ctx.degradation.push({ backend: "semantic", code: "semantic_failed" });
         recordDegradation("semantic_failed", "semantic");
-        return [];
+        return hits;
     }
 }
 
 async function runIndexedCascade(
     ctx: IndexedCascadeCtx,
 ): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[] }> {
-    const bm25Hits = await searchIndexedBm25(ctx, ctx.degradation);
+    // All engines run concurrently: semantic participates in every grep via
+    // fusion, not only when lexical/BM25/symbol draw zero.
     const symbolHits = new Map<string, GrepHit>();
+    const [bm25Hits, symbolOk, semanticHits] = await Promise.all([
+        searchIndexedBm25(ctx, ctx.degradation),
+        collectSymbolSearchHits(
+            { pattern: ctx.pattern, bigK: ctx.bigK, searchDir: ctx.searchDir, cwd: ctx.cwd, signal: ctx.signal, fileGlob: ctx.fileGlob, scopedFile: ctx.scopedFile },
+            symbolHits,
+            ctx.degradation,
+        ),
+        searchSemanticHits(ctx),
+    ]);
     const engines: string[] = [];
     if (bm25Hits.size > 0) engines.push("bm25");
-    throwIfAborted(ctx.signal);
-    const symbolOk = await collectSymbolSearchHits(
-        { pattern: ctx.pattern, bigK: ctx.bigK, searchDir: ctx.searchDir, cwd: ctx.cwd, signal: ctx.signal, fileGlob: ctx.fileGlob, scopedFile: ctx.scopedFile },
-        symbolHits,
-        ctx.degradation,
-    );
     if (symbolOk) engines.push("symbol");
+    if (semanticHits.size > 0) engines.push("semantic");
     throwIfAborted(ctx.signal);
-    let fused = fuseAndDedup(bm25Hits, symbolHits);
+    let fused = fuseAndDedup(bm25Hits, symbolHits, semanticHits);
     if (ctx.exactHits.length > 0) {
         if (fused.length === 0) {
             return { hits: ctx.exactHits, engines: ["lexical-passthrough"], degradation: ctx.degradation };
@@ -373,7 +377,6 @@ async function runIndexedCascade(
         fused = prependExactHits(ctx.exactHits, fused);
         engines.unshift("lexical");
     }
-    if (fused.length === 0) fused = await searchSemanticRetry(ctx, engines);
     throwIfAborted(ctx.signal);
     if (fused.length === 0) {
         // Genuine zero results are NOT a backend failure — no degradation code.
@@ -755,32 +758,26 @@ export async function runFallbackBm25(
 export function fuseAndDedup(
     bm25Hits: Map<string, GrepHit>,
     symbolHits: Map<string, GrepHit>,
+    semanticHits: Map<string, GrepHit> = new Map(),
 ): GrepHit[] {
     const merged = new Map<string, GrepHit>();
 
-    let rank = 0;
-    for (const [key, hit] of bm25Hits) {
-        rank++;
-        const existing = merged.get(key);
-        if (existing) {
-            existing.score += 1 / (60 + rank);
-            if (!existing.engines.includes("bm25")) existing.engines.push("bm25");
-        } else {
-            merged.set(key, { ...hit, score: 1 / (60 + rank) });
+    const fuseRankList = (hits: Map<string, GrepHit>, engine: string): void => {
+        let rank = 0;
+        for (const [key, hit] of hits) {
+            rank++;
+            const existing = merged.get(key);
+            if (existing) {
+                existing.score += 1 / (60 + rank);
+                if (!existing.engines.includes(engine)) existing.engines.push(engine);
+            } else {
+                merged.set(key, { ...hit, score: 1 / (60 + rank) });
+            }
         }
-    }
-
-    rank = 0;
-    for (const [key, hit] of symbolHits) {
-        rank++;
-        const existing = merged.get(key);
-        if (existing) {
-            existing.score += 1 / (60 + rank);
-            if (!existing.engines.includes("symbol")) existing.engines.push("symbol");
-        } else {
-            merged.set(key, { ...hit, score: 1 / (60 + rank) });
-        }
-    }
+    };
+    fuseRankList(bm25Hits, "bm25");
+    fuseRankList(symbolHits, "symbol");
+    fuseRankList(semanticHits, "semantic");
 
     const results = [...merged.values()];
     results.sort((a, b) => b.score - a.score);

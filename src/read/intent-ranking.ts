@@ -17,7 +17,8 @@ import { isAbsolute, resolve } from "node:path";
 import { type EmbedRequest, type EmbedResult, fetchEmbeddingsSharded, SHARD_SIZE } from "../indexing/embedding.js";
 import { embeddingProfileId } from "../indexing/embedding-profile.js";
 import { PersistentEmbeddingCache } from "../indexing/persistent-embedding-cache.js";
-import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "../scoring.js";
+import { computeRanks, maxChunkSimilarity } from "../scoring.js";
+import { applyAdrBoost, computeKeywordStage, fuseRrfScores } from "../retrieval/rerank-channels.js";
 import { type ResolvedEmbeddingConfig } from "../config.js";
 import { LruCache } from "../utils.js";
 import { chunkTextAst } from "../structural/chunking.js";
@@ -221,9 +222,8 @@ export async function rankCandidates<TFileDetail extends RankingFileDetail>(
     const bodies = files.map((f) => f.body!);
     const paths = files.map((f) => f.path);
 
-    // Always compute BM25 scores on whole-file bodies
-    const keywordScoresArr = bm25Scores(query, bodies);
-    const keywordRanks = computeRanks(keywordScoresArr, paths);
+    // Always compute BM25 scores on whole-file bodies (kernel channel stage 1)
+    const { keywordScores: keywordScoresArr, keywordRanks } = computeKeywordStage(query, bodies, paths);
 
     const semanticScores: number[] = [];
     let semanticRanks: number[] = [];
@@ -340,36 +340,19 @@ export async function rankCandidates<TFileDetail extends RankingFileDetail>(
     }
     }  // end embedding attempt when config is available
 
-    let rrfScores: number[];
-    let rrfRanks: number[];
+    // RRF fusion (kernel channel stage 2, including the BM25-only fallback)
+    const fusion = fuseRrfScores(keywordRanks, embeddingStatus === "ok" ? semanticRanks : null, paths);
+    let rrfScores = fusion.rrfScores;
+    let rrfRanks = fusion.rrfRanks;
 
-    if (embeddingStatus === "ok" && semanticRanks.length > 0) {
-      rrfScores = computeRrfScores(semanticRanks, keywordRanks);
-      rrfRanks = computeRanks(rrfScores, paths);
-    } else {
-      // BM25-only fallback
-      rrfScores = keywordRanks.map((kr) => 1 / (60 + kr));
-      rrfRanks = computeRanks(rrfScores, paths);
-    }
-
-    // WP-8: ADR boost — additive signal from cross-session ADRs
+    // WP-8: ADR boost — additive signal from cross-session ADRs (kernel channel stage 3)
     adrBoosts = new Array<number>(files.length).fill(0) as number[];
     try {
       const adrs = listAdrs(cwd, { status: "accepted" });
-      if (adrs.length > 0) {
-        for (let i = 0; i < files.length; i++) {
-          const fp = paths[i]!;
-          const basename = fp.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, "") ?? "";
-          for (const adr of adrs) {
-            if (adr.tags.some((t) => fp.includes(t) || basename === t)) {
-              adrBoosts[i] = ADR_BOOST;
-              rrfScores[i]! += ADR_BOOST;
-              break;
-            }
-          }
-        }
-        rrfRanks = computeRanks(rrfScores, paths);
-      }
+      const boosted = applyAdrBoost(rrfScores, rrfRanks, paths, adrs, ADR_BOOST);
+      rrfScores = boosted.rrfScores;
+      rrfRanks = boosted.rrfRanks;
+      adrBoosts = boosted.adrBoosts;
     } catch {
       /* fail-safe: corrupt/missing ADR store leaves ranking unchanged */
     }

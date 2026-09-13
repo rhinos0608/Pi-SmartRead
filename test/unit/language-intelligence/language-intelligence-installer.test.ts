@@ -469,6 +469,140 @@ describe("language-intelligence-installer", () => {
     try { rmSync(lockFile, { force: true }); } catch {}
   });
 
+  it("refreshInstallLock re-stamps owned locks and refuses foreign ones", async () => {
+    const { refreshInstallLock, startInstallLockHeartbeat } = await import("../../../src/language-intelligence/language-intelligence-installer.js");
+    const { statSync, openSync, writeSync, closeSync } = await import("node:fs");
+    const locksDir = __installerPaths.locksDir(home);
+    mkdirSync(locksDir, { recursive: true });
+    const lockFile = join(locksDir, "heartbeat-unit.lock");
+    const owned: Array<{ fd: number }> = [];
+    const ownLock = (token: string): { fd: number; path: string; token: string } => {
+      try { rmSync(lockFile, { force: true }); } catch {}
+      const fd = openSync(lockFile, "wx");
+      writeSync(fd, token);
+      const lock = { fd, path: lockFile, token };
+      owned.push(lock);
+      return lock;
+    };
+    try {
+      const token = `${process.pid}:${Date.now() - 200_000}:180000`;
+      const lock = ownLock(token);
+      expect(refreshInstallLock(lock)).toBe(true);
+      const after = readFileSync(lockFile, "utf-8");
+      expect(after).not.toBe(token);
+      expect(after.split(":")[2]).toBe("180000");
+      expect(after.startsWith(`${process.pid}:`)).toBe(true);
+      // Holder object tracks the new token so release still matches.
+      expect(lock.token).toBe(after);
+      expect(statSync(lockFile).mtimeMs).toBeGreaterThan(Date.now() - 5000);
+
+      // Foreign content: must not clobber.
+      writeFileSync(lockFile, "99999:12345:180000", "utf-8");
+      expect(refreshInstallLock(lock)).toBe(false);
+      expect(readFileSync(lockFile, "utf-8")).toBe("99999:12345:180000");
+
+      // Recreated lock (new inode): must not clobber via path reopen.
+      try { rmSync(lockFile, { force: true }); } catch {}
+      writeFileSync(lockFile, "99999:12345:180000", "utf-8");
+      expect(refreshInstallLock(lock)).toBe(false);
+      expect(readFileSync(lockFile, "utf-8")).toBe("99999:12345:180000");
+
+      // Missing file: never recreate.
+      expect(refreshInstallLock({ fd: -1, path: join(locksDir, "absent.lock"), token: "1:2:3" })).toBe(false);
+      expect(existsSync(join(locksDir, "absent.lock"))).toBe(false);
+
+      // Heartbeat stopper fires beats on schedule.
+      const token2 = `${process.pid}:${Date.now()}:180000`;
+      const lock2 = ownLock(token2);
+      const stop = startInstallLockHeartbeat(lock2, 20);
+      await new Promise((r) => setTimeout(r, 70));
+      stop();
+      expect(lock2.token).not.toBe(token2);
+      expect(readFileSync(lockFile, "utf-8")).toBe(lock2.token);
+
+      // Lost lock: beats self-stop instead of fighting the new owner.
+      const token3 = `${process.pid}:${Date.now()}:180000`;
+      const lock3 = ownLock(token3);
+      const stop3 = startInstallLockHeartbeat(lock3, 20);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(lock3.token).not.toBe(token3);
+      writeFileSync(lockFile, "99999:12345:180000", "utf-8");
+      const frozen = lock3.token;
+      await new Promise((r) => setTimeout(r, 80));
+      stop3();
+      expect(readFileSync(lockFile, "utf-8")).toBe("99999:12345:180000");
+      expect(lock3.token).toBe(frozen);
+    } finally {
+      for (const o of owned) { try { closeSync(o.fd); } catch {} }
+      try { rmSync(lockFile, { force: true }); } catch {}
+    }
+  });
+
+  it("heartbeat keeps a past-threshold install lock from being reclaimed", async () => {
+    const { utimesSync } = await import("node:fs");
+    const locksDir = __installerPaths.locksDir(home);
+    mkdirSync(locksDir, { recursive: true });
+    const lockFile = join(locksDir, "yaml-language-server.lock");
+    vi.useFakeTimers();
+    try {
+      let firstEE: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
+      const hangingSpawn = vi.fn((_cmd: string, args: string[]) => {
+        const prefixIdx = args.indexOf("--prefix");
+        const prefix = prefixIdx >= 0 ? args[prefixIdx + 1]! : "";
+        const p = join(prefix, "node_modules", ".bin", "yaml-language-server");
+        mkdirSync(join(prefix, "node_modules", ".bin"), { recursive: true });
+        writeFileSync(p, "#!/bin/sh\necho mock", "utf-8");
+        const pkgDir = join(prefix, "node_modules", "yaml-language-server");
+        mkdirSync(pkgDir, { recursive: true });
+        writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "yaml-language-server", version: "1.24.0" }), "utf-8");
+        firstEE = Object.assign(new EventEmitter() as EventEmitter, {
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+          kill: () => {},
+        }) as typeof firstEE;
+        return firstEE as unknown as ReturnType<typeof import("node:child_process").spawn>;
+      });
+      _setSpawnForTests(hangingSpawn as unknown as typeof import("node:child_process").spawn);
+      const p1 = installServer({ packageName: "yaml-language-server", version: "1.24.0", bin: "yaml-language-server" }, { homedir: home, timeoutMs: 0 });
+      for (let i = 0; i < 50 && !existsSync(lockFile); i++) await vi.advanceTimersByTimeAsync(20);
+      expect(existsSync(lockFile)).toBe(true);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(hangingSpawn).toHaveBeenCalled();
+
+      // Simulate a slow install: age the live lock's mtime past the 180s
+      // fallback (content token untouched so the holder still owns it), then
+      // advance fake timers so installServer's own heartbeat interval fires.
+      const liveToken = readFileSync(lockFile, "utf-8");
+      const liveParts = liveToken.split(":");
+      const t = new Date(Date.now() - 200_000);
+      utimesSync(lockFile, t, t);
+      await vi.advanceTimersByTimeAsync(31_000);
+      const current = readFileSync(lockFile, "utf-8");
+      expect(current.split(":")[0]).toBe(liveParts[0]);
+      expect(current).not.toBe(liveToken);
+
+      const spawn2 = fakeSpawnSuccessFactory();
+      _setSpawnForTests(spawn2 as unknown as typeof import("node:child_process").spawn);
+      const p2 = installServer({ packageName: "yaml-language-server", version: "1.24.0", bin: "yaml-language-server" }, { homedir: home, timeoutMs: 0, lockRetryTimeoutMs: 300 });
+      await vi.advanceTimersByTimeAsync(1000);
+      const res = await p2;
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error).toMatch(/already in progress/);
+      expect(spawn2).not.toHaveBeenCalled();
+      // Still our lock — not reclaimed.
+      expect(readFileSync(lockFile, "utf-8").split(":")[0]).toBe(liveParts[0]);
+
+      firstEE!.emit("close", 0);
+      const r1 = await p1;
+      expect(r1.ok).toBe(true);
+      // installServer's releaseLock removes its own lock — no detached cleanup.
+      expect(existsSync(lockFile)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      try { rmSync(lockFile, { force: true }); } catch {}
+    }
+  });
+
   it("stale-threshold-respects-custom-timeout", async () => {
     const { utimesSync } = await import("node:fs");
     const customTimeoutMs = 200_000;

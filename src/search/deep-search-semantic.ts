@@ -1,9 +1,12 @@
 // deep-search-semantic.ts
 // BM25 + embedding re-rank, intent-read integration, matched term extraction
 
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createIntentReadTool } from "../read/intent-read.js";
+import { bm25Scores } from "../scoring.js";
+import { scorePathByQuery } from "./resolver.js";
 import {
   type RelevanceClass,
   relevanceClassWeight,
@@ -88,8 +91,152 @@ function toRelativePath(cwd: string, path: string): string {
   return rel && !rel.startsWith("..") ? rel.replace(/\\/g, "/") : path.replace(/\\/g, "/");
 }
 
+/** Max files the semantic channel feeds to embeddings (intent-read cap is 500). */
+export const MAX_SEMANTIC_PRESELECT = 100;
+/** Per-file bytes read during BM25 preselect; keeps a 2,000-file scan bounded. */
+const PRESELECT_MAX_FILE_BYTES = 128 * 1024;
+
+export type SemanticChannelStrategy = "persistent-index" | "bm25-preselect";
+
+export interface SemanticChannelResult {
+  candidates: DeepSearchCandidate[];
+  /** Files embeddings actually ranked (intent-read input count, or index hits mapped). */
+  inspected: number;
+  /** Files the preselect scanned before narrowing (== files.length for preselect). */
+  scanned: number;
+  strategy: SemanticChannelStrategy;
+}
+
+function defaultReadBody(path: string): string | null {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size === 0) return "";
+    // Bounded prefix read: never pull a whole multi-MB file into memory
+    // to score a 128KB prefix.
+    if (stat.size <= PRESELECT_MAX_FILE_BYTES) return readFileSync(path, "utf-8");
+    const fd = openSync(path, "r");
+    try {
+      const buffer = Buffer.alloc(PRESELECT_MAX_FILE_BYTES + 1);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+      return buffer.subarray(0, bytesRead).toString("utf-8");
+    } finally {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Narrow the full discovered corpus to the embedding budget using cheap signals
+ * over ALL files: content BM25 first, path-token overlap as tiebreak/fallback.
+ * Pure ordering — no file is excluded by alphabetical position.
+ */
+export function preselectSemanticFiles(
+  files: string[],
+  query: string,
+  limit: number,
+  readBody: (path: string) => string | null = defaultReadBody,
+): string[] {
+  const count = Math.min(MAX_SEMANTIC_PRESELECT, Math.max(limit * 2, limit));
+  if (files.length <= count) return files;
+  const bodies = files.map((file) => readBody(file) ?? "");
+  const bm25 = bm25Scores(query, bodies);
+  const pathScores = files.map((file) => scorePathByQuery(file, query));
+  const order = files.map((file, i) => ({
+    file,
+    index: i,
+    bm25: bm25[i] ?? 0,
+    pathScore: pathScores[i] ?? 0,
+  }));
+  order.sort((a, b) => b.bm25 - a.bm25 || b.pathScore - a.pathScore || a.index - b.index);
+  return order.slice(0, count).map((entry) => entry.file);
+}
+
+/**
+ * Async variant used by the production channel: identical BM25 + path-score
+ * ordering, but bodies are read in bounded batches with event-loop yields so
+ * parallel phases and abort handling progress instead of one sync block
+ * retaining the whole discovery set. Throws on abort.
+ */
+export async function preselectSemanticFilesAsync(
+  files: string[],
+  query: string,
+  limit: number,
+  readBody: (path: string) => string | null = defaultReadBody,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const count = Math.min(MAX_SEMANTIC_PRESELECT, Math.max(limit * 2, limit));
+  if (files.length <= count) return files;
+  // Cheap path-token signals first (no IO) so the expensive content stage
+  // has its tiebreak inputs ready before any file is touched.
+  const pathScores = files.map((file) => scorePathByQuery(file, query));
+  const bodies: string[] = new Array(files.length);
+  const BATCH = 32;
+  for (let start = 0; start < files.length; start += BATCH) {
+    if (signal?.aborted) throw new Error("Operation aborted");
+    const end = Math.min(start + BATCH, files.length);
+    for (let i = start; i < end; i++) bodies[i] = readBody(files[i]!) ?? "";
+    // Yield so parallel channel phases and abort listeners run.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const bm25 = bm25Scores(query, bodies);
+  const order = files.map((file, i) => ({
+    file,
+    index: i,
+    bm25: bm25[i] ?? 0,
+    pathScore: pathScores[i] ?? 0,
+  }));
+  order.sort((a, b) => b.bm25 - a.bm25 || b.pathScore - a.pathScore || a.index - b.index);
+  return order.slice(0, count).map((entry) => entry.file);
+}
+
+/**
+ * Query the persistent semantic index when one is registered and ready.
+ * Returns null when no usable index exists so the caller falls back to preselect.
+ */
+async function tryPersistentIndex(
+  query: string,
+  cwd: string,
+  files: string[],
+  count: number,
+): Promise<DeepSearchCandidate[] | null> {
+  try {
+    const { getSemanticIndex } = await import("../indexing/semantic-index-registry.js");
+    const index = getSemanticIndex(cwd);
+    if (!index?.isAvailable()) return null;
+    // Filter-before-limit: the index ranks its whole corpus, so requesting only
+    // `count` rows then dropping out-of-scope hits starves in-scope results.
+    // Over-fetch up to the index cap and filter to the discovered set first,
+    // then apply the count limit. Callers keep BM25 fallback when null.
+    const results = await index.search(query, { topK: 100 });
+    if (results.length === 0) return null;
+    const discovered = new Set(files.map((file) => toRelativePath(cwd, file)));
+    const candidates: DeepSearchCandidate[] = [];
+    for (const result of results) {
+      if (candidates.length >= count) break;
+      const rel = toRelativePath(cwd, resolve(index.root, result.filePath));
+      if (!discovered.has(rel)) continue;
+      candidates.push({
+        file: rel,
+        kind: "file",
+        name: rel.split("/").pop() ?? rel,
+        rawScore: result.score,
+        rank: candidates.length + 1,
+        snippet: result.codeSnippet,
+        channel: "semantic",
+      });
+    }
+    return candidates.length > 0 ? candidates : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Run the semantic channel using the intent-read engine for embedding-based ranking.
+ * Candidates are preselected by relevance over the full corpus — never by
+ * alphabetical position — or served repo-wide from the persistent semantic index.
  */
 export async function runSemanticChannel(
   query: string,
@@ -98,9 +245,17 @@ export async function runSemanticChannel(
   limit: number,
   signal: AbortSignal | undefined,
   ctx: ExtensionContext,
-): Promise<DeepSearchCandidate[]> {
+): Promise<SemanticChannelResult> {
+  const count = Math.min(MAX_SEMANTIC_PRESELECT, Math.max(limit * 2, limit));
+  const indexed = await tryPersistentIndex(query, cwd, files, count);
+  if (indexed) {
+    // Coverage honesty: the vector store scanned its whole corpus, but only
+    // these hits feed fusion. Report hits as inspected, corpus as scanned.
+    return { candidates: indexed, inspected: indexed.length, scanned: files.length, strategy: "persistent-index" };
+  }
+  if (signal?.aborted) throw new Error("Operation aborted");
   const intentReadTool = createIntentReadTool();
-  const rankedFiles = files.slice(0, Math.max(limit * 2, limit));
+  const rankedFiles = await preselectSemanticFilesAsync(files, query, limit, defaultReadBody, signal);
   const result = await intentReadTool.execute(
     "deep-search:semantic",
     {
@@ -113,7 +268,12 @@ export async function runSemanticChannel(
     undefined,
     ctx,
   );
-  return parseSemanticCandidates(cwd, result);
+  return {
+    candidates: parseSemanticCandidates(cwd, result),
+    inspected: rankedFiles.length,
+    scanned: files.length,
+    strategy: "bm25-preselect",
+  };
 }
 
 /**

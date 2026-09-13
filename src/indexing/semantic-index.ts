@@ -68,6 +68,9 @@ interface FileState {
   hash: string;
   mtimeMs: number;
   size: number;
+  /** See incremental-index: ctime/ino close the timestamp-preserving-rewrite hole. */
+  ctimeMs?: number;
+  ino?: number;
 }
 
 interface SemanticMetadata {
@@ -292,10 +295,13 @@ export class SemanticIndex {
       const rel = normalizeRelative(canonicalRelative(this.root, absolutePath));
       if (!rel || rel.startsWith("../") || isAbsolute(rel)) continue;
       const previous = this.metadata.files[rel];
-      const hash = previous && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size
+      const unchanged = previous && previous.mtimeMs === stat.mtimeMs && previous.size === stat.size &&
+        previous.ctimeMs !== undefined && previous.ctimeMs === stat.ctimeMs &&
+        previous.ino !== undefined && previous.ino === stat.ino;
+      const hash = unchanged
         ? previous.hash
         : sha256(readFileSync(absolutePath));
-      current.set(rel, { hash, mtimeMs: stat.mtimeMs, size: stat.size });
+      current.set(rel, { hash, mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs, ino: stat.ino });
     }
 
     const nextFiles: Record<string, FileState> = { ...this.metadata.files };
@@ -312,6 +318,7 @@ export class SemanticIndex {
     if (fullRebuild) queue = [...current.keys()];
 
     let cursor = 0;
+    let failedCount = 0;
     while (cursor < queue.length) {
       if (this.disposed) throw new SemanticUnavailableError("Semantic index was disposed during update");
       if (signal?.aborted) throw new Error("Operation aborted");
@@ -359,6 +366,10 @@ export class SemanticIndex {
           for (const key of Object.keys(nextFiles)) delete nextFiles[key];
           queue = [...current.keys()];
           cursor = 0;
+          // Fresh epoch: earlier per-file failures belong to the discarded
+          // dimension and are all retried below; they must not poison completion.
+          failedCount = 0;
+          this.lastError = undefined;
           continue;
         }
         if (!this.store) {
@@ -384,6 +395,7 @@ export class SemanticIndex {
         nextFiles[relPath] = state;
       } catch (error) {
         // Keep previous rows/state on failure. Missing state guarantees retry next startup.
+        failedCount += 1;
         this.lastError = error instanceof Error ? error.message : String(error);
       }
     }
@@ -392,11 +404,13 @@ export class SemanticIndex {
     // Drain any files invalidated during this update so the commit
     // doesn't overwrite markFilesStale() effects.
     this.applyPendingStale(nextFiles);
+    const hasFailures = failedCount > 0;
+    if (!hasFailures) this.lastError = undefined;
     this.metadata = {
       version: METADATA_VERSION,
       fingerprint: this.fingerprint,
       dimension: this.metadata.dimension,
-      completed: current.size === 0 || Object.keys(nextFiles).length > 0,
+      completed: (current.size === 0 || Object.keys(nextFiles).length > 0) && !hasFailures,
       files: nextFiles,
     };
     this.writeMetadata();
