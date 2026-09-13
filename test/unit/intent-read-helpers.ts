@@ -50,8 +50,8 @@ export function makeReadTool(
   return {
     execute: async (_id: string, input: ReadInput) => {
       inspect?.(input);
+      if (!(input.path in map)) throw new Error(`No stub for: ${input.path}`);
       const val = map[input.path];
-      if (!val) throw new Error(`No stub for: ${input.path}`);
       if (val instanceof Error) throw val;
       if (typeof val === "object" && "content" in val) return val;
       return { content: [{ type: "text" as const, text: val }] };

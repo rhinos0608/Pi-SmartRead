@@ -23,6 +23,9 @@ let sharedContextGraphBuilt = false;
 // Invalidation revision: bumped by invalidateSharedGraph() whenever the
 // workspace mutates (watcher event, successful write/edit/graph_mutate).
 let graphRevision = 0;
+// Build generation: bumped by every reset so in-flight builds started before
+// the reset can never promote stale state after it.
+let graphGeneration = 0;
 // Revision of the workspace state that the currently shared graph reflects.
 // -1 until the first successful build. A graph is only fresh for a caller
 // when graphRevision === sharedGraphRevision (the mutation was included).
@@ -130,13 +133,15 @@ export async function getSharedContextGraphAsync(
         // revision at the moment it actually starts building.
         buildTailRoot = root;
         const prev = buildTail;
+        const startGeneration = graphGeneration;
         const tailPromise = (async () => {
             if (prev) { try { await prev; } catch { /* retryable */ } }
             const startRevision = graphRevision;
             const candidate = new ContextGraph(root);
             await candidate.buildContextGraph({ includeCalls: true });
-            // Promote only if no mutation invalidated the build mid-flight.
-            if (graphRevision === startRevision) {
+            // Promote only if no mutation invalidated the build mid-flight
+            // and no reset happened while building (generation match).
+            if (graphRevision === startRevision && graphGeneration === startGeneration) {
                 sharedContextGraph = candidate;
                 sharedContextGraphRoot = root;
                 sharedContextGraphBuilt = true;
@@ -163,6 +168,7 @@ export async function getSharedContextGraphAsync(
 
 /** Dispose the shared ContextGraph (for test isolation / shutdown). */
 export function resetSharedContextGraph(): void {
+    graphGeneration++;
     sharedContextGraph = null;
     sharedContextGraphRoot = null;
     sharedContextGraphBuilt = false;

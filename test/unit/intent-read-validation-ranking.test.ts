@@ -302,15 +302,16 @@ describe("intent_read: Phase 4 filename prefilter in directory mode", () => {
   });
 
   it("presorts directory files by filename match before ranking", async () => {
-    // auth.ts has highest path score for query "auth"
-    // All files have same BM25 potential, but path prefilter moves auth.ts first
+    // auth.ts has highest path score for query "auth". All files share
+    // identical content and embedding vectors, so the filename/path signal
+    // is the only differentiator and path prefilter moves auth.ts first.
     const tool = createIntentReadTool(
       () => makeReadTool({
-        [join(tmpDir, "auth.ts")]: "auth code",
-        [join(tmpDir, "main.ts")]: "main code",
-        [join(tmpDir, "db.ts")]: "db code",
+        [join(tmpDir, "auth.ts")]: "shared content",
+        [join(tmpDir, "main.ts")]: "shared content",
+        [join(tmpDir, "db.ts")]: "shared content",
       }) as any,
-      makeEmbedder([[1, 0], [1, 0], [1, 0], [0, 1]]),
+      makeEmbedder([[1, 0], [1, 0], [1, 0], [1, 0]]),
     );
 
     const result = await runIntentRead(tool, { query: "auth", directory: tmpDir }, "/", "id");

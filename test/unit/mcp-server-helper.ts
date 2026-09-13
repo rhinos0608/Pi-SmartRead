@@ -72,53 +72,19 @@ function collectResponses(
   return { responses, pending };
 }
 
-export function callMcpServer(
+export async function callMcpServer(
   messageOrMessages: Record<string, unknown> | Array<Record<string, unknown>>,
   timeoutMs = 30_000,
   childCwd?: string,
 ): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const child = spawnMcpServer(childCwd);
-    let stderr = "";
-    const { responses } = collectResponses(child, (s) => {
-      stderr = s;
-    });
-    const timeout = setTimeout(() => {
-      clearInterval(pollStartup);
-      child.kill();
-      reject(new Error("MCP server timeout"));
-    }, timeoutMs);
-    child.on("error", (err) => {
-      clearTimeout(timeout);
-      clearInterval(pollStartup);
-      reject(err);
-    });
-    child.on("close", () => {
-      clearTimeout(timeout);
-      clearInterval(pollStartup);
-      if (responses.length === 0) {
-        reject(new Error("No JSON-RPC response from MCP server"));
-        return;
-      }
-      const lastId = messages.length > 0 ? (messages[messages.length - 1] as Record<string, unknown>)?.id : undefined;
-      const match = responses.find((r) => r.id === lastId);
-      if (!match) {
-        reject(new Error("No JSON-RPC response matching the final request id from MCP server"));
-        return;
-      }
-      resolve(match);
-    });
-    const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
-    const pollStartup = setInterval(() => {
-      if (stderr.includes("[pi-smartread] MCP server running on")) {
-        clearInterval(pollStartup);
-        for (const message of messages) {
-          child.stdin.write(JSON.stringify(message) + "\n");
-        }
-        child.stdin.end();
-      }
-    }, 100);
-  });
+  const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
+  const byId = await callMcpServerBatch(messages, timeoutMs, childCwd);
+  const lastId = messages.length > 0 ? (messages[messages.length - 1] as Record<string, unknown>)?.id : undefined;
+  const match = lastId === undefined ? undefined : byId.get(lastId);
+  if (!match) {
+    throw new Error("No JSON-RPC response matching the final request id from MCP server");
+  }
+  return match;
 }
 
 /**

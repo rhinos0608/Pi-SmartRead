@@ -98,7 +98,11 @@ export function commonPathRoot(files: string[]): string {
   let i = 0;
   while (i < parts[0]!.length && parts.every((p) => p[i] === parts[0]![i])) i++;
   if (i === 0) return parse(paths[0]!).root || sep;
-  return parts[0]!.slice(0, i).join(sep) || parse(paths[0]!).root || sep;
+  const prefix = parts[0]!.slice(0, i).join(sep) || parse(paths[0]!).root || sep;
+  // Never return a complete input path: when all paths are identical, or an
+  // input path is a segment-wise prefix of the others, clamp to its directory.
+  if (paths.includes(prefix)) return dirname(prefix);
+  return prefix;
 }
 
 export function resolveWorkspaceFile(cwd: string, requestedPath: string): string {

@@ -8,6 +8,7 @@
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname, basename, join, extname } from "node:path";
 import type { TestLinkage } from "./signals-types.js";
+import { resolveImportPath } from "./structural-imports.js";
 import { extractStructuralFacts } from "./structural-facts.js";
 import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
 import type { StructuralFacts, ChildSymbol } from "./structural-facts-types.js";
@@ -165,6 +166,18 @@ function matchesIndexFile(
   return false;
 }
 
+function jsToTsTranslatedPath(args: { normalized: string; base: string } & MatchContext): string | undefined {
+  if (!/\.(jsx?|mjs|cjs)$/.test(args.normalized)) return undefined;
+  // Shared TS resolver maps ./module.js → module.ts on disk (never module.js.ts).
+  // Anchor the probe importer at base so leading-slash (cwd) and relative
+  // (candidateDir) specifiers resolve against the same directory as above.
+  try {
+    return resolveImportPath(join(args.base, "__smartread_probe__.ts"), args.normalized) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function resolvedPathMatches(args: { normalized: string; base: string } & MatchContext): boolean {
   let resolved: string;
   try {
@@ -173,6 +186,7 @@ function resolvedPathMatches(args: { normalized: string; base: string } & MatchC
     return false;
   }
   if (resolved === args.absolutePath) return true;
+  if (jsToTsTranslatedPath(args) === args.absolutePath) return true;
   const resolveExts = args.isPy ? [".py"] : [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
   if (matchesWithExtension(resolved, args.absolutePath, resolveExts)) return true;
   return matchesIndexFile({ ...args, resolved, resolveExts });
