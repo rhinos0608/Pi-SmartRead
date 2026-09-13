@@ -1,5 +1,5 @@
 import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 export const ALLOWED_ROOT_ENV = "PI_SMARTREAD_ALLOWED_ROOT";
 export const CBM_ALLOWED_ROOT_ENV = "CBM_ALLOWED_ROOT";
@@ -87,6 +87,18 @@ export function resolveWorkspacePath(
   }
 
   return target;
+}
+
+/** Longest common root directory for resolved paths (sep-aware, cross-platform). Empty input returns process.cwd(); a single file returns its dirname; otherwise the longest shared prefix, falling back to the filesystem root. */
+export function commonPathRoot(files: string[]): string {
+  if (!files.length) return process.cwd();
+  const paths = files.map((f) => resolve(f));
+  if (paths.length === 1) return dirname(paths[0]!);
+  const parts = paths.map((p) => p.split(sep));
+  let i = 0;
+  while (i < parts[0]!.length && parts.every((p) => p[i] === parts[0]![i])) i++;
+  if (i === 0) return parse(paths[0]!).root || sep;
+  return parts[0]!.slice(0, i).join(sep) || parse(paths[0]!).root || sep;
 }
 
 export function resolveWorkspaceFile(cwd: string, requestedPath: string): string {

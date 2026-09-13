@@ -1,15 +1,17 @@
-import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
-import { relative, resolve, dirname, basename, extname, join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { relative, resolve, dirname, extname } from "node:path";
 import { createRequire } from "node:module";
 import type { SignalName, SignalResult, FileSignals } from "./signals-types.js";
 import type { TestLinkage } from "./signals-types.js";
 import type { ContextGraph } from "./context-graph.js";
 import type { DependentInfo } from "./structural-facts-types.js";
-import { findImportDependents, extractStructuralFacts } from "./structural-facts.js";
-import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
-import type { StructuralFacts, ChildSymbol } from "./structural-facts-types.js";
+import { findImportDependents } from "./structural-facts.js";
 import { filenameToLang, type SupportedLanguage } from "./languages.js";
 import { fileLastModifiedRelative } from "./git-history.js";
+
+import { findTestLinkage, findTestCoverageGaps } from "./test-linkage.js";
+
+export { findTestLinkage, findTestCoverageGaps, linkageCount } from "./test-linkage.js";
 
 const require = createRequire(import.meta.url);
 
@@ -438,8 +440,9 @@ export async function computeRecency(
 export function detectTests(
   absolutePath: string,
   cwd: string,
+  precomputedLinkage?: TestLinkage[],
 ): SignalResult {
-  const linkage = findTestLinkage(absolutePath, cwd)[0];
+  const linkage = (precomputedLinkage ?? findTestLinkage(absolutePath, cwd))[0];
   if (linkage) {
     return {
       name: "tests",
@@ -495,294 +498,9 @@ export function detectDeprecation(
   };
 }
 
-// ── Extended Test Linkage (WP-3) ──────────────────────────────
-
-/**
- * Find test files that cover a given source file.
- * Uses file-name matching + import analysis for direct/indirect coverage.
- */
-export function findTestLinkage(
-  absolutePath: string,
-  cwd: string,
-): TestLinkage[] {
-  const basenameNoExt = basename(absolutePath).replace(/\.[^.]+$/, "");
-  const dir = dirname(absolutePath);
-  const isPy = isPythonFile(absolutePath);
-  const exts = isPy ? [".py"] : [".ts", ".tsx", ".js", ".jsx"];
-
-  const testCandidates = new Set<string>();
-  const srcDir = dir;
-  const testDir = resolve(dir, "..", "test");
-  const testsDir = resolve(dir, "..", "tests");
-  const srcTestDir = resolve(dir, "__tests__");
-  const repoTestDir = resolve(cwd, "test");
-  const repoTestsDir = resolve(cwd, "tests");
-
-  // Collect bounded subdirectory levels under repo test roots for layouts like test/unit/<name>.test.ts
-  const testSubDirs = new Set<string>();
-  for (const root of [repoTestDir, repoTestsDir]) {
-    testSubDirs.add(root);
-    try {
-      for (const d1 of readdirSync(root, { withFileTypes: true })) {
-        if (d1.isDirectory()) {
-          testSubDirs.add(resolve(root, d1.name));
-          try {
-            for (const d2 of readdirSync(resolve(root, d1.name), { withFileTypes: true })) {
-              if (d2.isDirectory()) testSubDirs.add(resolve(root, d1.name, d2.name));
-            }
-          } catch { /* skip unreadable */ }
-        }
-      }
-    } catch { /* skip if root doesn't exist */ }
-  }
-
-  for (const ext of exts) {
-    testCandidates.add(resolve(testDir, `${basenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(testDir, `${basenameNoExt}.spec${ext}`));
-    testCandidates.add(resolve(testDir, `test_${basenameNoExt}${ext}`));
-    testCandidates.add(resolve(testDir, `${basenameNoExt}_test${ext}`));
-    testCandidates.add(resolve(testsDir, `test_${basenameNoExt}${ext}`));
-    testCandidates.add(resolve(testsDir, `${basenameNoExt}_test${ext}`));
-    testCandidates.add(resolve(srcDir, `${basenameNoExt}.test${ext}`));
-    testCandidates.add(resolve(srcDir, `${basenameNoExt}.spec${ext}`));
-    testCandidates.add(resolve(srcDir, `test_${basenameNoExt}${ext}`));
-    testCandidates.add(resolve(srcTestDir, `${basenameNoExt}.test${ext}`));
-    for (const subDir of testSubDirs) {
-      testCandidates.add(resolve(subDir, `${basenameNoExt}.test${ext}`));
-      testCandidates.add(resolve(subDir, `${basenameNoExt}.spec${ext}`));
-      testCandidates.add(resolve(subDir, `test_${basenameNoExt}${ext}`));
-      testCandidates.add(resolve(subDir, `${basenameNoExt}_test${ext}`));
-    }
-    testCandidates.add(resolve(repoTestsDir, `test_${basenameNoExt}${ext}`));
-  }
-
-  const results: TestLinkage[] = [];
-  for (const candidate of testCandidates) {
-    try {
-      if (existsSync(candidate) && statSync(candidate).isFile()) {
-        let coverage: "direct" | "indirect" = "indirect";
-        try {
-          const testContent = readFileSync(candidate, "utf-8");
-          // Parse import/require specifiers and resolve relative paths
-          const specifierRe = /(?:from\s+['"]([^'"]+)['"])|(?:import\s+['"]([^'"]+)['"])|(?:require\s*\(\s*['"]([^'"]+)['"]\s*\))/g;
-          // Python-specific import patterns: "import package.module" and "from package.module import symbol"
-          const pyImportRe = /^import\s+([a-zA-Z_][\w.]*(?:\s*,\s*[a-zA-Z_][\w.]*)*)\s*$|^from\s+([a-zA-Z_][\w.]+)\s+import\s+/gm;
-          const candidateDir = dirname(candidate);
-          let m: RegExpExecArray | null;
-          let found = false;
-          // Python: parse import/from statements
-          if (isPy) {
-            pyImportRe.lastIndex = 0;
-            while ((m = pyImportRe.exec(testContent)) !== null) {
-              if (m[1]) {
-                // "import package.module" — try each comma-separated module
-                for (const mod of m[1].split(",")) {
-                  const modName = mod.trim();
-                  if (!modName) continue;
-                  // Try module as file or package from candidateDir and cwd
-                  for (const baseDir of [candidateDir, cwd]) {
-                    const modPath = join(baseDir, modName.replace(/\./g, "/"));
-                    if (modPath + ".py" === absolutePath || join(modPath, "__init__.py") === absolutePath) {
-                      found = true; break;
-                    }
-                  }
-                  if (found) break;
-                }
-              } else if (m[2]) {
-                // "from package.module import symbol"
-                const modName = m[2].trim();
-                for (const baseDir of [candidateDir, cwd]) {
-                  const modPath = join(baseDir, modName.replace(/\./g, "/"));
-                  if (modPath + ".py" === absolutePath || join(modPath, "__init__.py") === absolutePath) {
-                    found = true; break;
-                  }
-                }
-              }
-              if (found) break;
-            }
-          }
-          // JS/TS: parse import/require specifiers
-          specifierRe.lastIndex = 0;
-          while ((m = specifierRe.exec(testContent)) !== null) {
-            if (found) break;
-            const specifier = m[1] ?? m[2] ?? m[3];
-            if (!specifier) continue;
-            // Resolve root-relative against cwd, dot-relative against candidateDir
-            // Normalize leading slash: resolve relative to cwd, not filesystem root
-            const normalized = specifier.startsWith("/") ? "." + specifier : specifier;
-            const base = normalized.startsWith("/") ? cwd : candidateDir;
-            if (!specifier.startsWith(".") && !specifier.startsWith("/")) {
-              // Python: try bare module name resolution
-              if (isPy && !specifier.startsWith(".")) {
-                // Try module as file or package
-                for (const ext of [".py"]) {
-                  if (join(candidateDir, specifier + ext) === absolutePath) {
-                    found = true; break;
-                  }
-                  // Try package __init__.py
-                  if (join(candidateDir, specifier, "__init__.py") === absolutePath) {
-                    found = true; break;
-                  }
-                }
-                if (found) break;
-              }
-              continue;
-            }
-            try {
-              const resolved = resolve(base, normalized);
-              // Try exact path
-              let match = resolved === absolutePath;
-              // Try extension resolution
-              const resolveExts = isPy ? [".py"] : [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
-              if (!match) {
-                for (const ext of resolveExts) {
-                  if (resolved + ext === absolutePath) {
-                    match = true;
-                    break;
-                  }
-                }
-              }
-              // Try index-file resolution (directory → index.*)
-              if (!match) {
-                for (const ext of resolveExts) {
-                  if (join(resolved, `index${ext}`) === absolutePath) {
-                    match = true;
-                    break;
-                  }
-                  if (isPy && join(resolved, "__init__.py") === absolutePath) {
-                    match = true;
-                    break;
-                  }
-                }
-              }
-              if (match) { found = true; break; }
-            } catch {
-              // Path resolution failed, skip
-            }
-          }
-          if (found) {
-            coverage = "direct";
-          }
-        } catch {
-          // Read failed — default to indirect
-        }
-        results.push({ sourceFile: absolutePath, testFile: candidate, coverage });
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return results;
-}
-
-/** Count linked test files for a source file. */
-function linkageCount(absolutePath: string, cwd: string): number {
-  return findTestLinkage(absolutePath, cwd).length;
-}
-
-/** Compute the longest common root directory from absolute paths. */
-function commonRoot(files: string[]): string {
-  const paths = files.map(f => resolve(f));
-  if (paths.length === 1) return dirname(paths[0]!);
-  const parts = paths.map(p => p.split("/"));
-  let i = 0;
-  while (i < parts[0]!.length && parts.every(p => p[i] === parts[0]![i])) i++;
-  return parts[0]!.slice(0, Math.max(1, i)).join("/") || "/";
-}
-
-/** Callable-symbol kinds that should appear in coverage gaps. */
-const COVERAGE_KINDS = new Set<ChildSymbol["kind"]>(["function", "method", "class"]);
-
-/**
- * Static test-coverage gap analysis.
- *
- * Uses linked test files from findTestLinkage() + extractStructuralFacts()
- * to identify exported callables that are / are not statically referenced
- * from any linked test file via the call graph.
- *
- * Returns three buckets:
- *  - tested:         exported callables referenced from test files
- *  - unreferenced:   exported callables with no test-file reference found
- *  - unknown:        parser ambiguity or unsupported language (never untested)
- *
- * This is static call-graph linkage only — it does NOT detect runtime
- * coverage, dynamic calls, mocks, aliases, or reflection.
- */
-export async function findTestCoverageGaps(
-  absolutePath: string,
-  cwd: string,
-): Promise<{
-  tested: string[];
-  unreferenced: string[];
-  unknown: string[];
-}> {
-  // (1) Reuse linked tests from findTestLinkage
-  const linkage = findTestLinkage(absolutePath, cwd);
-  if (linkage.length === 0) {
-    return { tested: [], unreferenced: [], unknown: [] };
-  }
-  const testFiles = [...new Set(linkage.map(l => l.testFile))];
-
-  // (2) Use extractStructuralFacts to identify exported/callable symbols
-  let facts: StructuralFacts;
-  try {
-    facts = await extractStructuralFacts(absolutePath, cwd);
-  } catch {
-    // Parse failure → everything unknown, not untested
-    return { tested: [], unreferenced: [], unknown: [] };
-  }
-
-  // Unsupported language (parser returned notices about missing support)
-  const lang = filenameToLang(absolutePath);
-  if (!lang) {
-    return { tested: [], unreferenced: [], unknown: [] };
-  }
-
-  const exportedCallables = facts.children.filter(
-    c => c.isExported && COVERAGE_KINDS.has(c.kind),
-  );
-  if (exportedCallables.length === 0) {
-    return { tested: [], unreferenced: [], unknown: [] };
-  }
-
-  // (3) Build call graph with [source, ...directTests]
-  let callGraph: CallGraphResult;
-  try {
-    callGraph = await buildCallGraph([absolutePath, ...testFiles]);
-  } catch {
-    // Build failure → all exported callables are unknown
-    return {
-      tested: [],
-      unreferenced: [],
-      unknown: exportedCallables.map(c => c.name),
-    };
-  }
-
-  // Compute the common root to resolve relative file paths back to absolute
-  const root = commonRoot([absolutePath, ...testFiles]);
-  const testFileAbsSet = new Set(testFiles.map(f => resolve(f)));
-
-  const tested: string[] = [];
-  const unreferenced: string[] = [];
-
-  // (4) A callable counts as referenced only when a resolved caller
-  //     originates in one of the linked test files
-  for (const callable of exportedCallables) {
-    const callers = callGraph.callersOf(callable.name);
-    const hasTestCaller = callers.some(caller => {
-      const callerAbs = resolve(root, caller.file);
-      return testFileAbsSet.has(callerAbs);
-    });
-    if (hasTestCaller) {
-      tested.push(callable.name);
-    } else {
-      unreferenced.push(callable.name);
-    }
-  }
-
-  return { tested, unreferenced, unknown: [] };
-}
+// Test-linkage candidate discovery + import matching + coverage gaps live in
+// ./test-linkage.js (re-exported above). Signal orchestration below computes
+// linkage once per run and reuses it.
 
 /** Escape special regex characters in a string for use in RegExp constructor. */
 // ── Orchestrator ───────────────────────────────────────────────────────
@@ -824,17 +542,19 @@ export async function computeFileSignals(
         case "recency":
           result = await computeRecency(absolutePath, cwd);
           break;
-        case "tests":
-          result = detectTests(absolutePath, cwd);
+        case "tests": {
+          // Compute linkage once and reuse for the signal + coverage gaps.
+          const linkage = findTestLinkage(absolutePath, cwd);
+          result = detectTests(absolutePath, cwd, linkage);
           // WP-8: enrich with static call-graph coverage gaps
           if (result.confidence !== "none") {
             try {
-              const gaps = await findTestCoverageGaps(absolutePath, cwd);
+              const gaps = await findTestCoverageGaps(absolutePath, cwd, linkage);
               const totalExported = gaps.tested.length + gaps.unreferenced.length + gaps.unknown.length;
               if (totalExported > 0) {
                 const referencedCount = gaps.tested.length;
                 const detailParts = [
-                  `Linked ${linkageCount(absolutePath, cwd)} tests; ${referencedCount}/${totalExported} exported callables statically referenced`,
+                  `Linked ${linkage.length} tests; ${referencedCount}/${totalExported} exported callables statically referenced`,
                 ];
                 if (gaps.unreferenced.length > 0) {
                   const shown = gaps.unreferenced.slice(0, 20);
@@ -847,6 +567,7 @@ export async function computeFileSignals(
             }
           }
           break;
+        }
         case "deprecation":
           result = detectDeprecation(absolutePath);
           break;

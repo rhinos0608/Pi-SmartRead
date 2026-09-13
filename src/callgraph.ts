@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, extname, relative, resolve } from "node:path";
 import Parser from "tree-sitter";
 import { createRequire } from "node:module";
+import { commonPathRoot } from "./workspace-boundary.js";
 import { initParser } from "./tags.js";
 import { filenameToLang, type SupportedLanguage } from "./languages.js";
 
@@ -35,13 +36,6 @@ type FileData = { path: string; rel: string; tree: Parser.Tree; lang: SupportedL
 const declarationTypes = new Set(["function_declaration", "function_definition", "function_item", "method_declaration", "method_definition"]);
 const classTypes = new Set(["class_declaration", "class_definition", "struct_item", "impl_item"]);
 function nodeName(n: Parser.SyntaxNode): string | undefined { return n.childForFieldName("name")?.text; }
-function commonRoot(files: string[]): string {
-  const paths = files.map(file => resolve(file)); if (!paths.length) return process.cwd();
-  if (paths.length === 1) return dirname(paths[0]!);
-  const parts = paths.map(p => p.split("/")); let i = 0;
-  while (i < parts[0]!.length && parts.every(p => p[i] === parts[0]![i])) i++;
-  return parts[0]!.slice(0, Math.max(1, i)).join("/") || "/";
-}
 function classScope(n: Parser.SyntaxNode): string[] { const out: string[] = []; for (let p = n.parent; p; p = p.parent) if (classTypes.has(p.type)) { const name = nodeName(p); if (name) out.unshift(name); } return out; }
 function decls(root: Parser.SyntaxNode, rel: string, abs: string): Decl[] {
   const out: Decl[] = [];
@@ -97,7 +91,7 @@ function target(n: Parser.SyntaxNode): { name: string; receiver?: string } | und
 function enclosing(ds: Decl[], n: Parser.SyntaxNode): Decl | undefined { return ds.filter(d => d.start <= n.startIndex && d.end >= n.endIndex).sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]; }
 
 export async function buildCallGraph(files: string[]): Promise<CallGraphResult> {
-  await initParser(); const root = commonRoot(files), data: FileData[] = []; let skipped = 0;
+  await initParser(); const root = commonPathRoot(files), data: FileData[] = []; let skipped = 0;
   for (const input of files) { const path = resolve(input), lang = filenameToLang(path), g = lang && grammar(lang); if (!lang || !g) { skipped++; continue; } let code: string; try { code = readFileSync(path, "utf8"); } catch { skipped++; continue; } const parser = new Parser(); parser.setLanguage(g); const tree = parser.parse(code); const rel = relative(root, path) || extname(path); data.push({ path, rel, tree, lang, decls: decls(tree.rootNode, rel, path), imports: imports(tree, path, lang) }); }
   const byFile = new Map(data.map(d => [d.path, d])), byId = new Map<string, Decl>();
   for (const d of data) for (const fn of d.decls) byId.set(fn.id, fn);
