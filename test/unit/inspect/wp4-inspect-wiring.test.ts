@@ -470,26 +470,22 @@ describe("symbol read in hook", () => {
     ).rejects.toThrow(/not found in workspace/);
   });
 
-  it("symbol takes precedence over path", async () => {
+  it("symbol and path together violate the XOR contract", async () => {
     const { createExtendedReadTool } = await import("../../../src/hook.js");
-    writeFileSync(join(workdir, "symbol-target.ts"), "export const fromSymbol = true;\n");
 
     const tool = createExtendedReadTool({
-      resolveSymbol: async (sym: string) => {
-        if (sym === "fromSymbol") return { path: join(workdir, "symbol-target.ts"), line: 1 };
-        return null;
-      },
+      resolveSymbol: async () => null,
     });
-    // Pass both symbol and path — symbol should win
-    const result = await tool.execute(
-      "t4",
-      { symbol: "fromSymbol", path: "hello.ts" } as any,
-      undefined,
-      undefined,
-      makeCtx(),
-    );
-    const text = (result as any).content?.[0]?.text ?? "";
-    expect(text).toContain("export const fromSymbol");
+    // Union design: symbol is the fourth XOR branch — combining selectors throws
+    await expect(
+      tool.execute(
+        "t4",
+        { symbol: "fromSymbol", path: "hello.ts" } as any,
+        undefined,
+        undefined,
+        makeCtx(),
+      ),
+    ).rejects.toThrow("Provide exactly one of: path, paths, query, or symbol");
   });
 });
 

@@ -18,6 +18,11 @@ import { getSupportedExtensions as getGrammarExtensions } from "../structural/gr
 import { findSrcFiles } from "../file-discovery.js";
 import { computeSourceHash, type SourceEntry } from "../indexing/index-snapshot.js";
 import { getFsScanCache } from "../workspace/fs-scan-cache.js";
+import { computeSemanticDelta } from "./semantic-delta.js";
+import type { SymbolTag } from "./lineage-symbols.js";
+import type { Provenance } from "../context-graph.js";
+import { getTagsBatch } from "../structural/tags.js";
+import type { Tag } from "../structural/cache.js";
 import type {
   RepositoryIntelligenceService,
   SnapshotRef,
@@ -97,6 +102,86 @@ export function unreadableContentHash(posixRel: string): string {
   return `unreadable:${sha256(posixRel)}`;
 }
 
+/** Clamp a maxEntities budget to a non-negative integer, optionally capped. Shared by compareSnapshots and rankWorkspace. */
+function clampMaxEntities(raw: number, upperBound = Number.POSITIVE_INFINITY): number {
+  return Math.min(upperBound, Math.max(0, Math.floor(raw)));
+}
+
+/** Truncate one delta change list to budget; null reason when untouched. */
+function truncateChangeList<T>(items: readonly T[], maxEntities: number, noun: string): { items: readonly T[]; truncated: boolean; reason: string | null } {
+  if (items.length <= maxEntities) return { items, truncated: false, reason: null };
+  return {
+    items: items.slice(0, maxEntities),
+    truncated: true,
+    reason: `${noun} truncated to ${maxEntities} of ${items.length} to fit maxEntities budget`,
+  };
+}
+
+/** Apply maxEntities budget to all three delta change lists (order-preserving, identical to inline slices). */
+function applyMaxEntitiesBudget(delta: SemanticDelta, maxEntities: number): SemanticDelta {
+  const file = truncateChangeList(delta.fileChanges, maxEntities, "fileChanges");
+  const symbol = truncateChangeList(delta.symbolChanges, maxEntities, "symbolChanges");
+  const rel = truncateChangeList(delta.relationshipChanges, maxEntities, "relationshipChanges");
+  if (!file.truncated && !symbol.truncated && !rel.truncated) return delta;
+  const coverageReasons = [...delta.coverageReasons];
+  if (file.reason) coverageReasons.push(file.reason);
+  if (symbol.reason) coverageReasons.push(symbol.reason);
+  if (rel.reason) coverageReasons.push(rel.reason);
+  return {
+    ...delta,
+    fileChanges: file.items,
+    symbolChanges: symbol.items,
+    relationshipChanges: rel.items,
+    truncated: true,
+    assessment: "partial",
+    coverageReasons,
+  };
+}
+
+/** Mark a delta partial when either snapshot capture degraded (file-level fallback). */
+function withDegradedAssessment(delta: SemanticDelta, degraded: boolean): SemanticDelta {
+  if (!degraded) return delta;
+  return {
+    ...delta,
+    assessment: "partial" as const,
+    coverageReasons: [
+      ...delta.coverageReasons,
+      "snapshot symbol/provenance capture exhausted budget; delta is file-level with partial symbol and relationship coverage",
+    ],
+  };
+}
+
+/** Count snapshot-time relationships per entity file. */
+function countRelationshipsByFile(files: readonly string[], edges: readonly { from: string; to: string }[]): Map<string, number> {
+  const relCount = new Map<string, number>();
+  for (const f of files) {
+    relCount.set(f, 0);
+  }
+  for (const edge of edges) {
+    if (relCount.has(edge.from)) relCount.set(edge.from, (relCount.get(edge.from) ?? 0) + 1);
+    if (relCount.has(edge.to)) relCount.set(edge.to, (relCount.get(edge.to) ?? 0) + 1);
+  }
+  return relCount;
+}
+
+/** Sort by relationship count descending (path tiebreak), then cap to budget. */
+function topRankedByRelationships(relCount: ReadonlyMap<string, number>, maxEntities: number): Array<[string, number]> {
+  return [...relCount.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, maxEntities);
+}
+
+/** Assessment + reasons for rankWorkspace based on capture-degraded flag. */
+function buildRankAssessment(degraded: boolean): Pick<RankResult, "assessment" | "coverageReasons"> {
+  if (degraded) {
+    return {
+      assessment: "partial",
+      coverageReasons: ["snapshot symbol/provenance capture exhausted budget; ranking is based on partial relationship data"],
+    };
+  }
+  return { assessment: "complete", coverageReasons: [] };
+}
+
 // ── Snapshot data registry ──────────────────────────────────────────
 
 /**
@@ -107,6 +192,12 @@ interface CapturedSnapshot {
   root: string;
   fileEntries: SourceEntry[];
   unreadablePaths: string[];
+  /** Per-file definition symbols for symbol-level lineage. Empty when tag capture degraded. */
+  symbols: SymbolTag[];
+  /** Provenance edges (posix-relative paths) for relationship-change detection. */
+  edges: Provenance[];
+  /** True when symbol/provenance capture exhausted budget; delta degrades to file-level. */
+  captureDegraded: boolean;
 }
 
 function unreadableCoverageReason(unreadablePaths: string[]): string {
@@ -115,76 +206,109 @@ function unreadableCoverageReason(unreadablePaths: string[]): string {
   return `${unreadablePaths.length} file(s) unreadable at snapshot time, hashed as unreadable markers (not empty): ${shown}${suffix}`;
 }
 
+/** Group snapshot provenance edges by source file for file-lineage inputs. */
+function edgesForFile(
+  edges: Provenance[],
+  path: string,
+): Array<{ to: string; type: string }> {
+  const out: Array<{ to: string; type: string }> = [];
+  for (const e of edges) {
+    if (e.from === path) out.push({ to: e.to, type: e.type });
+  }
+  return out;
+}
+
 const MAX_SNAPSHOTS = 50;
 const snapshotData = new Map<string, CapturedSnapshot>();
 
-// ── Capability computation ──────────────────────────────────────────
+/** Chunk size for bounded tag extraction during snapshot capture. */
+const SYMBOL_CAPTURE_CHUNK = 10;
+/** Max body tokens stored per symbol (file-agnostic name parts first). */
+const SYMBOL_BODY_TOKEN_CAP = 128;
 
-async function computeCapabilityReport(
-  fileEntries: SourceEntry[],
-): Promise<CapabilityReport> {
-  const allFiles = fileEntries.map((e) => e.path);
-  const grammarExts = new Set(getGrammarExtensions());
+/** Split an identifier into lowercase parts on camel/underscore boundaries. */
+function symbolNameParts(name: string): string[] {
+  return name.split(/(?=[A-Z])|_+|\W+/).map((s) => s.toLowerCase()).filter(Boolean);
+}
 
-  // Group files by language
-  const byLang = new Map<string, number>();
-  for (const f of allFiles) {
-    const lang = filenameToLang(f);
-    const key = lang ?? "_unsupported";
-    byLang.set(key, (byLang.get(key) ?? 0) + 1);
-  }
-
-  const byLanguage: CapabilityReport["byLanguage"] = [];
-
-  for (const [langKey, fileCount] of byLang) {
-    if (langKey === "_unsupported") {
-      byLanguage.push({
-        language: "unsupported",
-        files: fileCount,
-        tags: "UNAVAILABLE",
-        structuralFacts: "UNAVAILABLE",
-        callGraph: "UNAVAILABLE",
-        lsp: "UNAVAILABLE",
-        reasons: ["language not recognized by tree-sitter tag indexer"],
-      });
-      continue;
+/**
+ * Convert tree-sitter def tags into SymbolTag lineage inputs.
+ * Identity is file-agnostic (name-derived signature hash) so a symbol that
+ * moves between files still matches; body hash binds the symbol to its
+ * file's content hash so in-place edits surface as modified. File-content
+ * tokens back the scoring fallback when hashes differ.
+ * NOTE: Tag carries only a single def `line` (no endLine range), so body hash/tokens stay whole-file — any unrelated edit to the file flips every symbol's hash (move+unrelated-edit test pins current behavior).
+ */
+function tagsToSymbolTags(tags: Tag[], contents: Map<string, string>): SymbolTag[] {
+  const out: SymbolTag[] = [];
+  const tokensCache = new Map<string, string[]>();
+  for (const tag of tags) {
+    if (tag.kind !== "def") continue;
+    const lang = filenameToLang(tag.relFname) ?? "unknown";
+    const content = contents.get(tag.relFname) ?? "";
+    let fileTokens = tokensCache.get(tag.relFname);
+    if (!fileTokens) {
+      fileTokens = content.split(/\W+/).filter(Boolean).slice(0, SYMBOL_BODY_TOKEN_CAP).map((t) => t.toLowerCase());
+      tokensCache.set(tag.relFname, fileTokens);
     }
-
-    const lang = langKey as SupportedLanguage;
-    const hasCallGraph = CALLGRAPH_LANGUAGES.has(lang);
-    const hasTags = TAG_LANGUAGES.has(lang);
-
-    // Structural facts: available when we have tags + grammar for AST
-    const structuralFacts: "AVAILABLE" | "PARTIAL" | "UNAVAILABLE" =
-      hasTags ? (grammarExts.size > 0 ? "AVAILABLE" : "PARTIAL") : "UNAVAILABLE";
-
-    const tags: "AVAILABLE" | "PARTIAL" | "UNAVAILABLE" =
-      hasTags ? "AVAILABLE" : "UNAVAILABLE";
-
-    const callGraph: "AVAILABLE" | "PARTIAL" | "UNAVAILABLE" =
-      hasCallGraph ? "AVAILABLE" : "UNAVAILABLE";
-
-    const reasons: string[] = [];
-    if (!hasTags) reasons.push("no tree-sitter tag queries for this language");
-    if (!hasCallGraph) reasons.push("call graph extraction not supported");
-
-    byLanguage.push({
+    out.push({
+      id: `${tag.relFname}::${tag.name}:${tag.line}`,
       language: lang,
-      files: fileCount,
-      tags,
-      structuralFacts,
-      callGraph,
-      lsp: "UNAVAILABLE",
-      reasons,
+      kind: "def",
+      qualifiedName: tag.name,
+      signature: tag.name,
+      signatureHash: sha256(`sig:${lang}:${tag.name}`),
+      bodyHash: sha256(`${sha256(content)}:${lang}:${tag.name}`),
+      bodyTokens: [...symbolNameParts(tag.name), ...fileTokens],
+      parentQualifiedName: null,
+      relationships: [],
     });
   }
+  return out;
+}
 
-  const hasPartial = byLanguage.some(
-    (l) => l.callGraph === "UNAVAILABLE" || l.tags === "UNAVAILABLE" || l.structuralFacts === "UNAVAILABLE",
-  );
-  const graphAssessment: CapabilityReport["graphAssessment"] =
-    allFiles.length === 0 ? "unavailable" : hasPartial ? "partial" : "complete";
+function pushLanguageEntry(
+  byLanguage: CapabilityReport["byLanguage"],
+  langKey: string,
+  fileCount: number,
+  grammarExts: Set<string>,
+): void {
+  if (langKey === "_unsupported") {
+    byLanguage.push({
+      language: "unsupported",
+      files: fileCount,
+      tags: "UNAVAILABLE",
+      structuralFacts: "UNAVAILABLE",
+      callGraph: "UNAVAILABLE",
+      lsp: "UNAVAILABLE",
+      reasons: ["language not recognized by tree-sitter tag indexer"],
+    });
+    return;
+  }
+  const lang = langKey as SupportedLanguage;
+  const hasCallGraph = CALLGRAPH_LANGUAGES.has(lang);
+  const hasTags = TAG_LANGUAGES.has(lang);
+  // Structural facts: available when we have tags + grammar for AST
+  const structuralFacts: "AVAILABLE" | "PARTIAL" | "UNAVAILABLE" =
+    hasTags ? (grammarExts.size > 0 ? "AVAILABLE" : "PARTIAL") : "UNAVAILABLE";
+  const reasons: string[] = [];
+  if (!hasTags) reasons.push("no tree-sitter tag queries for this language");
+  if (!hasCallGraph) reasons.push("call graph extraction not supported");
+  byLanguage.push({
+    language: lang,
+    files: fileCount,
+    tags: hasTags ? "AVAILABLE" : "UNAVAILABLE",
+    structuralFacts,
+    callGraph: hasCallGraph ? "AVAILABLE" : "UNAVAILABLE",
+    lsp: "UNAVAILABLE",
+    reasons,
+  });
+}
 
+function buildCoverageReasons(
+  allFiles: string[],
+  byLanguage: CapabilityReport["byLanguage"],
+): string[] {
   const coverageReasons: string[] = [];
   if (allFiles.length === 0) {
     coverageReasons.push("no source files found in workspace");
@@ -205,6 +329,38 @@ async function computeCapabilityReport(
       `call graph unavailable for: ${noCallGraph.map((l) => l.language).join(", ")}`,
     );
   }
+  return coverageReasons;
+}
+
+// ── Capability computation ──────────────────────────────────────────
+
+async function computeCapabilityReport(
+  fileEntries: SourceEntry[],
+): Promise<CapabilityReport> {
+  const allFiles = fileEntries.map((e) => e.path);
+  const grammarExts = new Set(getGrammarExtensions());
+
+  // Group files by language
+  const byLang = new Map<string, number>();
+  for (const f of allFiles) {
+    const lang = filenameToLang(f);
+    const key = lang ?? "_unsupported";
+    byLang.set(key, (byLang.get(key) ?? 0) + 1);
+  }
+
+  const byLanguage: CapabilityReport["byLanguage"] = [];
+
+  for (const [langKey, fileCount] of byLang) {
+    pushLanguageEntry(byLanguage, langKey, fileCount, grammarExts);
+  }
+
+  const hasPartial = byLanguage.some(
+    (l) => l.callGraph === "UNAVAILABLE" || l.tags === "UNAVAILABLE" || l.structuralFacts === "UNAVAILABLE",
+  );
+  const graphAssessment: CapabilityReport["graphAssessment"] =
+    allFiles.length === 0 ? "unavailable" : hasPartial ? "partial" : "complete";
+
+  const coverageReasons = buildCoverageReasons(allFiles, byLanguage);
 
   return {
     filesObserved: allFiles.length,
@@ -212,6 +368,111 @@ async function computeCapabilityReport(
     graphAssessment,
     coverageReasons,
     omittedEdgeCount: 0,
+  };
+}
+
+interface CollectedFiles {
+  allFiles: string[];
+  fileEntries: SourceEntry[];
+  unreadablePaths: string[];
+  fileContents: Map<string, string>;
+}
+
+async function collectFileEntries(root: string, deadline: number): Promise<CollectedFiles> {
+  // Invalidate file-discovery cache so snapshot captures actual filesystem state
+  const scanCache = getFsScanCache();
+  scanCache.invalidatePath(root);
+  const allFiles = await findSrcFiles(root);
+  const fileEntries: SourceEntry[] = [];
+  const unreadablePaths: string[] = [];
+  const fileContents = new Map<string, string>();
+  for (const absPath of allFiles) {
+    if (Date.now() >= deadline) break;
+    const nativeRel = relative(root, absPath);
+    const posixRel = toPosixRel(nativeRel);
+    const content = readFileOrNull(root, nativeRel);
+    if (content === null) unreadablePaths.push(posixRel);
+    else fileContents.set(posixRel, content);
+    fileEntries.push({
+      path: posixRel,
+      contentHash: content === null ? unreadableContentHash(posixRel) : sha256(content),
+    });
+  }
+  return { allFiles, fileEntries, unreadablePaths, fileContents };
+}
+
+interface CapturedSignals {
+  symbols: SymbolTag[];
+  edges: Provenance[];
+  captureDegraded: boolean;
+}
+
+async function captureSymbolsAndEdges(
+  root: string,
+  allFiles: string[],
+  fileContents: Map<string, string>,
+  snapshotGraph: { getProvenanceEdges(): Array<{ from: string; to: string }> },
+  deadline: number,
+): Promise<CapturedSignals> {
+  // On exhaustion degrade to file-level delta with a coverageReasons entry
+  // instead of throwing: snapshot stays usable for fileChanges.
+  let captureDegraded = Date.now() >= deadline;
+  const collectedTags: Tag[] = [];
+  const edges: Provenance[] = [];
+  if (!captureDegraded) {
+    const tagFiles = allFiles.filter((absPath) => {
+      const lang = filenameToLang(toPosixRel(relative(root, absPath)));
+      return lang !== undefined && TAG_LANGUAGES.has(lang);
+    });
+    for (let i = 0; i < tagFiles.length; i += SYMBOL_CAPTURE_CHUNK) {
+      if (Date.now() >= deadline) {
+        captureDegraded = true;
+        break;
+      }
+      const chunk = tagFiles.slice(i, i + SYMBOL_CAPTURE_CHUNK);
+      const chunkTags = await getTagsBatch(
+        chunk.map((absPath) => ({
+          fname: absPath,
+          relFname: toPosixRel(relative(root, absPath)),
+        })),
+        null,
+        false,
+      );
+      collectedTags.push(...chunkTags);
+    }
+    try {
+      const rawEdges = snapshotGraph.getProvenanceEdges();
+      for (const e of rawEdges) {
+        if (Date.now() >= deadline) {
+          captureDegraded = true;
+          break;
+        }
+        edges.push({
+          from: toPosixRel(relative(root, e.from)),
+          to: toPosixRel(relative(root, e.to)),
+          type: "imports",
+          confidence: 1.0,
+        });
+      }
+    } catch {
+      captureDegraded = true;
+    }
+  }
+  return { symbols: tagsToSymbolTags(collectedTags, fileContents), edges, captureDegraded };
+}
+
+function truncateCapabilities(capabilities: CapabilityReport, maxBytes: number): CapabilityReport {
+  const capBytes = new TextEncoder().encode(JSON.stringify(capabilities)).byteLength;
+  if (capBytes <= maxBytes) return capabilities;
+  const ratio = maxBytes / capBytes;
+  const maxLangEntries = Math.max(0, Math.floor(ratio * capabilities.byLanguage.length));
+  return {
+    ...capabilities,
+    byLanguage: capabilities.byLanguage.slice(0, maxLangEntries),
+    coverageReasons: [
+      ...capabilities.coverageReasons,
+      `capability report truncated to fit ${maxBytes} byte budget`,
+    ],
   };
 }
 
@@ -232,7 +493,7 @@ class RepoIntelService implements RepositoryIntelligenceService {
     const deadline = Date.now() + input.budget.maxMs;
 
     // 1. Build the context graph (single entry point for all graph access)
-    await getSharedContextGraphAsync(input.root);
+    const snapshotGraph = await getSharedContextGraphAsync(input.root);
 
     if (Date.now() >= deadline) {
       throw new IntelligenceServiceNotImplementedError({
@@ -255,24 +516,19 @@ class RepoIntelService implements RepositoryIntelligenceService {
       });
     }
 
-    // 3. Compute source files with content hashes
-    // Invalidate file-discovery cache so snapshot captures actual filesystem state
-    const scanCache = getFsScanCache();
-    scanCache.invalidatePath(input.root);
-    const allFiles = await findSrcFiles(input.root);
-    const fileEntries: SourceEntry[] = [];
-    const unreadablePaths: string[] = [];
-    for (const absPath of allFiles) {
-      if (Date.now() >= deadline) break;
-      const nativeRel = relative(input.root, absPath);
-      const posixRel = toPosixRel(nativeRel);
-      const content = readFileOrNull(input.root, nativeRel);
-      if (content === null) unreadablePaths.push(posixRel);
-      fileEntries.push({
-        path: posixRel,
-        contentHash: content === null ? unreadableContentHash(posixRel) : sha256(content),
-      });
-    }
+    // 3. Source files with content hashes + 3b. symbols/edges (both bounded;
+    // exhaustion degrades to file-level instead of throwing).
+    const { allFiles, fileEntries, unreadablePaths, fileContents } = await collectFileEntries(
+      input.root,
+      deadline,
+    );
+    const { symbols, edges, captureDegraded } = await captureSymbolsAndEdges(
+      input.root,
+      allFiles,
+      fileContents,
+      snapshotGraph,
+      deadline,
+    );
 
     // 4. Compute capabilities from captured files
     const capabilities = await computeCapabilityReport(fileEntries);
@@ -293,27 +549,14 @@ class RepoIntelService implements RepositoryIntelligenceService {
     const snapshotId = sha256(`${input.root}:${sourceHash}`) as SnapshotId;
 
     // 6. Register immutable snapshot data for later lookups (bounded eviction)
-    snapshotData.set(snapshotId, { root: input.root, fileEntries, unreadablePaths });
+    snapshotData.set(snapshotId, { root: input.root, fileEntries, unreadablePaths, symbols, edges, captureDegraded });
     if (snapshotData.size > MAX_SNAPSHOTS) {
       const oldest = snapshotData.keys().next().value;
       if (oldest) snapshotData.delete(oldest);
     }
 
     // 7. Truncate capabilities if they exceed byte budget
-    let finalCapabilities = capabilities;
-    const capBytes = new TextEncoder().encode(JSON.stringify(capabilities)).byteLength;
-    if (capBytes > input.budget.maxBytes) {
-      const ratio = input.budget.maxBytes / capBytes;
-      const maxLangEntries = Math.max(0, Math.floor(ratio * capabilities.byLanguage.length));
-      finalCapabilities = {
-        ...capabilities,
-        byLanguage: capabilities.byLanguage.slice(0, maxLangEntries),
-        coverageReasons: [
-          ...capabilities.coverageReasons,
-          `capability report truncated to fit ${input.budget.maxBytes} byte budget`,
-        ],
-      };
-    }
+    const finalCapabilities = truncateCapabilities(capabilities, input.budget.maxBytes);
 
     return {
       snapshot: {
@@ -346,38 +589,45 @@ class RepoIntelService implements RepositoryIntelligenceService {
       });
     }
 
-    const maxEntities = Math.min(input.budget.maxEntities, 2000);
-
-    // Diff against stored immutable snapshot data
-    const entriesBefore = snapBefore.fileEntries;
-    const entriesAfter = snapAfter.fileEntries;
-
-    const mapBefore = new Map(entriesBefore.map((e) => [e.path, e.contentHash]));
-    const mapAfterByPath = new Map(entriesAfter.map((e) => [e.path, e.contentHash]));
-
-    const pathsBefore = entriesBefore.map((e) => e.path);
-    const pathsAfter = entriesAfter.map((e) => e.path);
-
-    const added = pathsAfter.filter((f) => !mapBefore.has(f)).slice(0, maxEntities);
-    const removed = pathsBefore.filter((f) => !mapAfterByPath.has(f)).slice(0, maxEntities);
-
-    const modified: string[] = [];
-    const commonPaths = pathsBefore.filter((f) => mapAfterByPath.has(f));
-    const maxCommon = Math.min(commonPaths.length, maxEntities);
-    for (let i = 0; i < maxCommon; i++) {
-      const relPath = commonPaths[i]!;
-      if (mapBefore.get(relPath) !== mapAfterByPath.get(relPath)) {
-        modified.push(relPath);
-      }
+    // Honor maxMs: snapshots are immutable so delta compute is sync; throw BUDGET_EXCEEDED on exceed (same convention as getWorkspaceSnapshot).
+    const deadline = Date.now() + input.budget.maxMs;
+    if (Date.now() >= deadline) {
+      throw new IntelligenceServiceNotImplementedError({
+        code: "BUDGET_EXCEEDED",
+        message: "compareSnapshots exceeded maxMs budget",
+        retryable: true,
+      });
     }
 
-    return {
-      __phasePlaceholder: "SemanticDelta" as const,
-      snapshotId: input.after,
-      addedEntities: added,
-      removedEntities: removed,
-      changedEntities: modified,
-    };
+    const beforeFiles = snapBefore.fileEntries.map((e) => ({
+      path: e.path,
+      contentHash: e.contentHash,
+      edges: edgesForFile(snapBefore.edges, e.path),
+    }));
+    const afterFiles = snapAfter.fileEntries.map((e) => ({
+      path: e.path,
+      contentHash: e.contentHash,
+      edges: edgesForFile(snapAfter.edges, e.path),
+    }));
+    const delta = computeSemanticDelta(beforeFiles, afterFiles, {
+      beforeSnapshotId: input.before,
+      afterSnapshotId: input.after,
+      beforeSymbols: snapBefore.symbols,
+      afterSymbols: snapAfter.symbols,
+      beforeEdges: snapBefore.edges,
+      afterEdges: snapAfter.edges,
+    });
+    if (Date.now() >= deadline) {
+      throw new IntelligenceServiceNotImplementedError({
+        code: "BUDGET_EXCEEDED",
+        message: "compareSnapshots exceeded maxMs budget",
+        retryable: true,
+      });
+    }
+    // Honor maxEntities via SemanticDelta's own truncation stage (real fields: truncated + coverageReasons).
+    const maxEntities = clampMaxEntities(input.budget.maxEntities);
+    const bounded = applyMaxEntitiesBudget(delta, maxEntities);
+    return withDegradedAssessment(bounded, snapBefore.captureDegraded || snapAfter.captureDegraded);
   }
 
   // ── Phase 3: relationship-count ranking ──────────────────────
@@ -391,40 +641,22 @@ class RepoIntelService implements RepositoryIntelligenceService {
         retryable: true,
       });
     }
-    const root = snapshot.root;
-
-    const maxEntities = Math.min(input.maxEntities, 2000);
-    const relFiles = snapshot.fileEntries.map((e) => e.path);
-
-    // Count relationships per entity from the context graph
-    const relCount = new Map<string, number>();
-    for (const f of relFiles) {
-      relCount.set(f, 0);
-    }
-
-    try {
-      const graph = await getSharedContextGraphAsync(root);
-      const edges = graph.getProvenanceEdges();
-      for (const edge of edges) {
-        const from = toPosixRel(relative(root, edge.from));
-        const to = toPosixRel(relative(root, edge.to));
-        if (relCount.has(from)) relCount.set(from, (relCount.get(from) ?? 0) + 1);
-        if (relCount.has(to)) relCount.set(to, (relCount.get(to) ?? 0) + 1);
-      }
-    } catch {
-      // Graph unavailable — fall back to file-order ranking
-    }
-
+    const maxEntities = clampMaxEntities(input.maxEntities, 2000);
+    // Count relationships per entity from snapshot-time edges. CapturedSnapshot.edges
+    // is always populated at capture, so ranking never consults the live graph.
+    const relCount = countRelationshipsByFile(
+      snapshot.fileEntries.map((e) => e.path),
+      snapshot.edges,
+    );
     // Sort by relationship count descending, stable sort for ties
-    const ranked = [...relCount.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, maxEntities)
-      .map(([path]) => path);
-
+    const ranked = topRankedByRelationships(relCount, maxEntities);
+    const { assessment, coverageReasons } = buildRankAssessment(snapshot.captureDegraded);
     return {
-      __phasePlaceholder: "RankResult" as const,
       snapshotId: input.snapshotId,
-      rankedEntityIds: ranked,
+      rankedEntityIds: ranked.map(([path]) => path),
+      rankedScores: ranked.map(([, score]) => score),
+      assessment,
+      coverageReasons,
     };
   }
 

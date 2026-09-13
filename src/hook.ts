@@ -546,28 +546,65 @@ async function interceptContextualRead(
 }
 
 // ── Extended Read Schema ────────────────────────────────────────────
+// Four-branch discriminated union: the required selector key (path | paths
+// | query | symbol) discriminates. additionalProperties:false makes the XOR
+// schema-level; the runtime rejectForeignKeys below mirrors it for good errors.
 
-const ReadSchema = Type.Object({
-  path: Type.Optional(Type.String({ description: "Path to a single file (relative or absolute). Use with optional offset/limit." })),
+const PathEntrySchema = Type.Object({
+  path: Type.String({ description: "Path to the file (relative or absolute)" }),
+  offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
+}, { additionalProperties: false });
+
+const SingleFileBranch = Type.Object({
+  path: Type.String({ description: "Path to a single file (relative or absolute). Use with optional offset/limit." }),
   offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line. Single file mode only." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read. Single file mode only." })),
-  paths: Type.Optional(Type.Array(
-    Type.Object({
-      path: Type.String({ description: "Path to the file (relative or absolute)" }),
-      offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line" })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
-    }),
-    { minItems: 1, maxItems: 100, description: "Multiple files to read in the exact order listed (max 100)." },
-  )),
-  query: Type.Optional(Type.String({ description: "Natural-language intent. Ranks and reads most relevant files in cwd/directory. Falls back to grep+AST when semantic search unavailable." })),
+}, { additionalProperties: false });
+
+const MultiFileBranch = Type.Object({
+  paths: Type.Array(PathEntrySchema, { minItems: 1, maxItems: 100, description: "Multiple files to read in the exact order listed (max 100)." }),
+  stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)." })),
+}, { additionalProperties: false });
+
+const QueryBranch = Type.Object({
+  query: Type.String({ description: "Natural-language intent. Ranks and reads most relevant files in cwd/directory. Falls back to grep+AST when semantic search unavailable." }),
   directory: Type.Optional(Type.String({ description: "Directory to scan (only with query; default: cwd)." })),
   topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to return when query is set (default: 20)." })),
-  stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)." })),
-  symbol: Type.Optional(Type.String({ description: "Resolve qualified name (e.g. 'AuthService.login') to file+line via LSP, then read surrounding code."
-  })),
+}, { additionalProperties: false });
+
+const SymbolBranch = Type.Object({
+  symbol: Type.String({ description: "Resolve qualified name (e.g. 'AuthService.login') to file+line via LSP, then read surrounding code." }),
+  offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line. Overrides the symbol-line window." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read." })),
+}, { additionalProperties: false });
+
+const ReadSchema = Type.Union([SingleFileBranch, MultiFileBranch, QueryBranch, SymbolBranch], {
+  description: "Read modes: { path, offset?, limit? } single file; { paths, stopOnError? } batch; { query, directory?, topK? } intent; { symbol, offset?, limit? } symbol. Exactly one selector per call.",
 });
 
 type ReadInput = Static<typeof ReadSchema>;
+
+export interface SingleFileReadParams { path: string; offset?: number; limit?: number; }
+export interface MultiFileReadParams { paths: { path: string; offset?: number; limit?: number; }[]; stopOnError?: boolean; }
+export interface QueryReadParams { query: string; directory?: string; topK?: number; }
+export interface SymbolReadParams { symbol: string; offset?: number; limit?: number; }
+export type ReadParams = SingleFileReadParams | MultiFileReadParams | QueryReadParams | SymbolReadParams;
+
+/** Reject keys that do not belong to this branch — the runtime half of the discriminated union. */
+function rejectForeignKeys(raw: Record<string, unknown>, selector: string, allowed: ReadonlySet<string>): string | undefined {
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) {
+      return `Error: read param "${key}" cannot be combined with "${selector}" mode`;
+    }
+  }
+  return undefined;
+}
+
+const PATH_KEYS: ReadonlySet<string> = new Set(["path", "offset", "limit"]);
+const PATHS_KEYS: ReadonlySet<string> = new Set(["paths", "stopOnError"]);
+const QUERY_KEYS: ReadonlySet<string> = new Set(["query", "directory", "topK"]);
+const SYMBOL_KEYS: ReadonlySet<string> = new Set(["symbol", "offset", "limit"]);
 
 // ── WrapReadToolOptions ──────────────────────────────────────────
 
@@ -597,6 +634,122 @@ function requirePositiveInteger(value: unknown, name: string): void {
   }
 }
 
+interface ReadBranchCtx {
+  toolCallId: string;
+  signal: AbortSignal | undefined;
+  onUpdate: unknown;
+  ctx: ExtensionContext;
+  opts?: WrapReadToolOptions;
+}
+
+async function handleSymbolRead(symbol: SymbolReadParams, b: ReadBranchCtx): Promise<unknown> {
+  const raw = symbol as unknown as Record<string, unknown>;
+  const foreignErr = rejectForeignKeys(raw, "symbol", SYMBOL_KEYS);
+  if (foreignErr) throw new Error(foreignErr);
+  if (!symbol.symbol.trim()) throw new Error("symbol must not be empty");
+  requirePositiveInteger(symbol.offset, "offset");
+  requirePositiveInteger(symbol.limit, "limit");
+  if (!b.opts?.resolveSymbol) {
+    throw new Error(`Symbol "${symbol.symbol}" not found in workspace`);
+  }
+  const resolution = await b.opts.resolveSymbol(symbol.symbol, b.ctx.cwd);
+  if (!resolution) {
+    throw new Error(`Symbol "${symbol.symbol}" not found in workspace`);
+  }
+  const offset = resolution.line ? Math.max(1, resolution.line - 5) : symbol.offset;
+  return interceptContextualRead(
+    { path: resolution.path, offset, limit: symbol.limit } as Record<string, unknown>,
+    createDelegatedExecute(b.ctx),
+    b.toolCallId,
+    b.signal,
+    b.onUpdate,
+    b.ctx,
+    b.opts,
+  );
+}
+
+async function handleSingleRead(single: SingleFileReadParams, b: ReadBranchCtx): Promise<unknown> {
+  const raw = single as unknown as Record<string, unknown>;
+  const foreignErr = rejectForeignKeys(raw, "path", PATH_KEYS);
+  if (foreignErr) throw new Error(foreignErr);
+  if (!single.path.trim()) throw new Error("path must not be empty");
+  requirePositiveInteger(single.offset, "offset");
+  requirePositiveInteger(single.limit, "limit");
+  return interceptContextualRead(
+    { path: single.path, offset: single.offset, limit: single.limit } as Record<string, unknown>,
+    createDelegatedExecute(b.ctx),
+    b.toolCallId,
+    b.signal,
+    b.onUpdate,
+    b.ctx,
+    b.opts,
+    true, // top-level single-path dispatch: eligible for the large-file outline
+  );
+}
+
+async function handlePathsRead(multi: MultiFileReadParams, b: ReadBranchCtx): Promise<unknown> {
+  const raw = multi as unknown as Record<string, unknown>;
+  const foreignErr = rejectForeignKeys(raw, "paths", PATHS_KEYS);
+  if (foreignErr) throw new Error(foreignErr);
+  if (multi.paths.length === 0) throw new Error("paths must contain at least one file");
+  for (const [index, request] of multi.paths.entries()) {
+    requirePositiveInteger(request.offset, `paths[${index}].offset`);
+    requirePositiveInteger(request.limit, `paths[${index}].limit`);
+  }
+  const singleReadFactory = createEvidenceReadFactory(b.ctx);
+  const manyTool = createReadManyTool(singleReadFactory, { publishInspection: b.opts?.publishInspection });
+  return manyTool.execute(b.toolCallId, {
+    files: multi.paths,
+    stopOnError: multi.stopOnError,
+  } as never, b.signal, b.onUpdate as never, b.ctx);
+}
+
+async function handleQueryRead(queryParams: QueryReadParams, b: ReadBranchCtx): Promise<unknown> {
+  const raw = queryParams as unknown as Record<string, unknown>;
+  const foreignErr = rejectForeignKeys(raw, "query", QUERY_KEYS);
+  if (foreignErr) throw new Error(foreignErr);
+  const query = queryParams.query.trim();
+  if (!query) throw new Error("query must not be empty or whitespace-only");
+  requirePositiveInteger(queryParams.topK, "topK");
+  const retrieval = await retrieveQuery({
+    query,
+    cwd: b.ctx.cwd,
+    directory: queryParams.directory,
+    topK: queryParams.topK,
+    signal: b.signal,
+    toolCallId: b.toolCallId,
+  });
+  if (retrieval.hits.length === 0) {
+    return {
+      content: [{ type: "text" as const, text: `[No ${retrieval.strategy} matches for "${query}".]` }],
+      details: {
+        query,
+        retrievalStrategy: retrieval.strategy,
+        ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
+        processedCount: 0,
+        successCount: 0,
+        errorCount: 0,
+      },
+    };
+  }
+  const singleReadFactory = createEvidenceReadFactory(b.ctx);
+  const manyTool = createReadManyTool(singleReadFactory, { publishInspection: b.opts?.publishInspection });
+  const result = await manyTool.execute(b.toolCallId, {
+    files: retrieval.hits.map((hit) => ({ path: hit.absolutePath })),
+    stopOnError: false,
+  } as never, b.signal, b.onUpdate as never, b.ctx);
+  const details = result.details && typeof result.details === "object" ? result.details as Record<string, unknown> : {};
+  return {
+    ...result,
+    details: {
+      ...details,
+      query,
+      retrievalStrategy: retrieval.strategy,
+      ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
+    },
+  };
+}
+
 /**
  * Factory for an extended `read` tool that supports three modes:
  *   - Single file: { path, offset?, limit? }
@@ -620,112 +773,22 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
       onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
-      // Symbol param takes precedence over path/query (spec §1.3)
-      if (params.symbol !== undefined && params.symbol.trim().length > 0) {
-        if (!opts?.resolveSymbol) {
-          throw new Error(`Symbol "${params.symbol}" not found in workspace`);
-        }
-        const resolution = await opts.resolveSymbol(params.symbol, ctx.cwd);
-        if (!resolution) {
-          throw new Error(`Symbol "${params.symbol}" not found in workspace`);
-        }
-        const offset = resolution.line ? Math.max(1, resolution.line - 5) : params.offset;
-        return interceptContextualRead(
-          { path: resolution.path, offset, limit: params.limit } as Record<string, unknown>,
-          createDelegatedExecute(ctx),
-          toolCallId,
-          signal,
-          onUpdate,
-          ctx,
-          opts,
-        );
-      }
-
-      const selectedModes = [params.path !== undefined, params.paths !== undefined, params.query !== undefined]
-        .filter(Boolean).length;
+      const raw = params as unknown as Record<string, unknown>;
+      const hasPath = raw.path !== undefined;
+      const hasPaths = raw.paths !== undefined;
+      const hasQuery = raw.query !== undefined;
+      const hasSymbol = raw.symbol !== undefined;
+      const selectedModes = [hasPath, hasPaths, hasQuery, hasSymbol].filter(Boolean).length;
       if (selectedModes !== 1) {
-        throw new Error("Provide exactly one of: path, paths, or query");
+        throw new Error("Provide exactly one of: path, paths, query, or symbol");
       }
 
-      const singleReadFactory = createEvidenceReadFactory(ctx);
-      if (params.path !== undefined) {
-        if (!params.path.trim()) throw new Error("path must not be empty");
-        requirePositiveInteger(params.offset, "offset");
-        requirePositiveInteger(params.limit, "limit");
-        if (params.directory !== undefined || params.topK !== undefined || params.stopOnError !== undefined) {
-          throw new Error("directory, topK, and stopOnError are not valid with path mode");
-        }
-        return interceptContextualRead(
-          { path: params.path, offset: params.offset, limit: params.limit } as Record<string, unknown>,
-          createDelegatedExecute(ctx),
-          toolCallId,
-          signal,
-          onUpdate,
-          ctx,
-          opts,
-          true, // top-level single-path dispatch: eligible for the large-file outline
-        );
-      }
-
-      if (params.paths !== undefined) {
-        if (params.paths.length === 0) throw new Error("paths must contain at least one file");
-        for (const [index, request] of params.paths.entries()) {
-          requirePositiveInteger(request.offset, `paths[${index}].offset`);
-          requirePositiveInteger(request.limit, `paths[${index}].limit`);
-        }
-        if (params.offset !== undefined || params.limit !== undefined || params.directory !== undefined || params.topK !== undefined) {
-          throw new Error("offset, limit, directory, and topK are not valid with paths mode");
-        }
-        const manyTool = createReadManyTool(singleReadFactory, { publishInspection: opts?.publishInspection });
-        return manyTool.execute(toolCallId, {
-          files: params.paths,
-          stopOnError: params.stopOnError,
-        } as never, signal, onUpdate as never, ctx);
-      }
-
-      const query = params.query!.trim();
-      if (!query) throw new Error("query must not be empty or whitespace-only");
-      requirePositiveInteger(params.topK, "topK");
-      if (params.offset !== undefined || params.limit !== undefined || params.stopOnError !== undefined) {
-        throw new Error("offset, limit, and stopOnError are not valid with query mode");
-      }
-      const retrieval = await retrieveQuery({
-        query,
-        cwd: ctx.cwd,
-        directory: params.directory,
-        topK: params.topK,
-        signal,
-        toolCallId,
-      });
-      if (retrieval.hits.length === 0) {
-        return {
-          content: [{ type: "text" as const, text: `[No ${retrieval.strategy} matches for "${query}".]` }],
-          details: {
-            query,
-            retrievalStrategy: retrieval.strategy,
-            ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
-            processedCount: 0,
-            successCount: 0,
-            errorCount: 0,
-          },
-        };
-      }
-
-      const manyTool = createReadManyTool(singleReadFactory, { publishInspection: opts?.publishInspection });
-      const result = await manyTool.execute(toolCallId, {
-        files: retrieval.hits.map((hit) => ({ path: hit.absolutePath })),
-        stopOnError: false,
-      } as never, signal, onUpdate as never, ctx);
-      const details = result.details && typeof result.details === "object" ? result.details as Record<string, unknown> : {};
-      return {
-        ...result,
-        details: {
-          ...details,
-          query,
-          retrievalStrategy: retrieval.strategy,
-          ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
-        },
-      };
+      const branch: ReadBranchCtx = { toolCallId, signal, onUpdate, ctx, opts };
+      if (hasSymbol) return handleSymbolRead(params as SymbolReadParams, branch);
+      if (hasPath) return handleSingleRead(params as SingleFileReadParams, branch);
+      if (hasPaths) return handlePathsRead(params as MultiFileReadParams, branch);
+      // hasQuery implied by the selectedModes check above
+      return handleQueryRead(params as QueryReadParams, branch);
     },
   } as unknown as ToolDefinition;
 }

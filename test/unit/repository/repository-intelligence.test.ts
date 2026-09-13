@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   createRepositoryIntelligenceService,
   IntelligenceServiceNotImplementedError,
@@ -12,6 +12,8 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, unlinkSync, chmodSync } 
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { getSharedContextGraphAsync } from "../../../src/graph/shared-context-graph.js";
+import { getFsScanCache } from "../../../src/workspace/fs-scan-cache.js";
 
 describe("RepositoryIntelligenceService", () => {
   let svc: RepositoryIntelligenceService;
@@ -64,7 +66,7 @@ describe("RepositoryIntelligenceService", () => {
     });
   });
 
-  describe("compareSnapshots (correctness)", () => {
+  describe("compareSnapshots (correctness, lineage-v1)", () => {
     it("detects changed, added, and removed files between snapshots", async () => {
       // Initial workspace: two files
       makeFile("src/a.ts", "export const a = 1;");
@@ -93,12 +95,60 @@ describe("RepositoryIntelligenceService", () => {
         budget: { maxMs: 30_000, maxEntities: 2000 },
       });
 
-      expect(delta.changedEntities).toContain("src/a.ts");
-      expect(delta.addedEntities).toContain("src/c.ts");
-      expect(delta.removedEntities).toContain("src/b.ts");
+      expect(delta.algorithmVersion).toBe("lineage-v1");
+      const kinds = (path: string) =>
+        delta.fileChanges.filter((c) => c.beforePath === path || c.afterPath === path);
+      // Added and removed files surface as ADDED / REMOVED changes.
+      expect(kinds("src/c.ts").map((c) => c.kind)).toContain("ADDED");
+      expect(kinds("src/b.ts").map((c) => c.kind)).toContain("REMOVED");
+      // Fully-rewritten small file scores below the lineage match threshold,
+      // so the modification surfaces as a REMOVED + ADDED pair on the same path.
+      const aKinds = kinds("src/a.ts").map((c) => c.kind);
+      expect(aKinds).toContain("REMOVED");
+      expect(aKinds).toContain("ADDED");
     });
 
-    it("caps added and removed arrays to maxEntities budget", async () => {
+    it("detects a symbol move between files with lineage-v1 symbolChanges", async () => {
+      // keep.ts stays byte-identical so file lineage has a verified anchor;
+      // symbol lineage only runs on medium-or-better file matches.
+      makeFile("src/keep.ts", "export const keep = 1;");
+      makeFile("src/m1.ts", "export function foo() { return 1; }\n");
+      makeFile("src/touch.ts", "export const t = 1;");
+
+      const snap1 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      // Move foo from m1.ts to m2.ts with identical body, plus an unrelated edit
+      // in a different file (whole-file body hashes flip touch.ts symbols only —
+      // the m1→m2 move must still be detected).
+      unlinkSync(join(tmpDir, "src/m1.ts"));
+      makeFile("src/m2.ts", "export function foo() { return 1; }\n");
+      writeFileSync(join(tmpDir, "src/touch.ts"), "export const t = 2;", "utf-8");
+
+      const snap2 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      const delta = await svc.compareSnapshots({
+        before: snap1.snapshot.snapshotId,
+        after: snap2.snapshot.snapshotId,
+        budget: { maxMs: 30_000, maxEntities: 2000 },
+      });
+
+      expect(delta.algorithmVersion).toBe("lineage-v1");
+      expect(delta.symbolChanges.length).toBeGreaterThan(0);
+      const move = delta.symbolChanges.find(
+        (r) => r.beforeId?.includes("src/m1.ts") && r.afterId?.includes("src/m2.ts"),
+      );
+      expect(move).toBeDefined();
+    });
+
+    it("lineage-v1 truncates fileChanges to maxEntities budget", async () => {
       // snapshot1: one file
       makeFile("src/keep.ts", "export const keep = 1;");
 
@@ -108,12 +158,18 @@ describe("RepositoryIntelligenceService", () => {
         budget: { maxMs: 30_000, maxBytes: 1_000_000 },
       });
 
-      // snapshot2: keep.ts + 5 new files, remove nothing
-      makeFile("src/new1.ts", "export const n1 = 1;");
-      makeFile("src/new2.ts", "export const n2 = 2;");
-      makeFile("src/new3.ts", "export const n3 = 3;");
-      makeFile("src/new4.ts", "export const n4 = 4;");
-      makeFile("src/new5.ts", "export const n5 = 5;");
+      // snapshot2: keep.ts + 5 new files, remove nothing.
+      // Each new file imports keep.ts so relationshipChanges also exceed budget.
+      makeFile("src/new1.ts", "import './keep';\nexport const n1 = 1;");
+      makeFile("src/new2.ts", "import './keep';\nexport const n2 = 2;");
+      makeFile("src/new3.ts", "import './keep';\nexport const n3 = 3;");
+      makeFile("src/new4.ts", "import './keep';\nexport const n4 = 4;");
+      makeFile("src/new5.ts", "import './keep';\nexport const n5 = 5;");
+      // Rebuild the shared graph so snapshot2 captures the new import edges.
+      // Invalidate the fs scan cache first: the graph build reuses cached
+      // discovery, which still reflects snapshot1's file set.
+      getFsScanCache().invalidatePath(tmpDir);
+      await getSharedContextGraphAsync(tmpDir, true);
 
       const snap2 = await svc.getWorkspaceSnapshot({
         root: tmpDir,
@@ -127,10 +183,32 @@ describe("RepositoryIntelligenceService", () => {
         budget: { maxMs: 30_000, maxEntities: 2 },
       });
 
-      // All three arrays should be bounded by maxEntities=2
-      expect(delta.addedEntities.length).toBeLessThanOrEqual(2);
-      expect(delta.removedEntities.length).toBeLessThanOrEqual(2);
-      expect(delta.changedEntities.length).toBeLessThanOrEqual(2);
+      // maxEntities budget truncates fileChanges via SemanticDelta truncation stage.
+      expect(delta.fileChanges).toHaveLength(2);
+      expect(delta.truncated).toBe(true);
+      expect(delta.assessment).toBe("partial");
+      expect(
+        delta.coverageReasons.some((r) =>
+          r.includes("fileChanges truncated to 2 of") &&
+          r.includes("to fit maxEntities budget"),
+        ),
+      ).toBe(true);
+      expect(delta.algorithmVersion).toBe("lineage-v1");
+      // The same maxEntities budget bounds symbol and relationship changes too.
+      expect(delta.symbolChanges.length).toBeLessThanOrEqual(2);
+      expect(delta.relationshipChanges.length).toBeLessThanOrEqual(2);
+      expect(
+        delta.coverageReasons.some((r) =>
+          r.includes("symbolChanges truncated to 2 of") &&
+          r.includes("to fit maxEntities budget"),
+        ),
+      ).toBe(true);
+      expect(
+        delta.coverageReasons.some((r) =>
+          r.includes("relationshipChanges truncated to 2 of") &&
+          r.includes("to fit maxEntities budget"),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -138,7 +216,6 @@ describe("RepositoryIntelligenceService", () => {
     it("throws IntelligenceServiceNotImplementedError", async () => {
       await expect(
         svc.rankWorkspace({
-          __phasePlaceholder: "RankRequest" as const,
           snapshotId: "aaa" as SnapshotId,
           maxEntities: 100,
         }),
@@ -148,7 +225,6 @@ describe("RepositoryIntelligenceService", () => {
     it("error has code INTERNAL and retryable true", async () => {
       try {
         await svc.rankWorkspace({
-          __phasePlaceholder: "RankRequest" as const,
           snapshotId: "aaa" as SnapshotId,
           maxEntities: 100,
         });
@@ -176,13 +252,14 @@ describe("RepositoryIntelligenceService", () => {
       });
 
       const result = await svc.rankWorkspace({
-        __phasePlaceholder: "RankRequest" as const,
         snapshotId: snap.snapshot.snapshotId,
         maxEntities: 100,
       });
 
       expect(result.snapshotId).toBe(snap.snapshot.snapshotId);
       expect(result.rankedEntityIds.length).toBeGreaterThanOrEqual(3);
+      expect(result.rankedScores.length).toBe(result.rankedEntityIds.length);
+      expect(["complete", "partial"]).toContain(result.assessment);
       // All three files should be present in the ranking
       expect(result.rankedEntityIds).toContain("src/a.ts");
       expect(result.rankedEntityIds).toContain("src/b.ts");
@@ -204,7 +281,6 @@ describe("RepositoryIntelligenceService", () => {
       unlinkSync(join(tmpDir, "src/b.ts"));
 
       const result = await svc.rankWorkspace({
-        __phasePlaceholder: "RankRequest" as const,
         snapshotId: snap.snapshot.snapshotId,
         maxEntities: 100,
       });
@@ -213,6 +289,88 @@ describe("RepositoryIntelligenceService", () => {
       expect(result.rankedEntityIds).toContain("src/a.ts");
       expect(result.rankedEntityIds).toContain("src/b.ts");
       expect(result.rankedEntityIds).not.toContain("src/new.ts");
+    });
+
+    it("counts relationships from snapshot-time edges, not live graph edits", async () => {
+      makeFile("src/a.ts", "import './b';\nexport const a = 1;");
+      makeFile("src/b.ts", "export const b = 1;");
+      makeFile("src/c.ts", "export const c = 1;");
+
+      const snap1 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+
+      const before = await svc.rankWorkspace({
+        snapshotId: snap1.snapshot.snapshotId,
+        maxEntities: 100,
+      });
+      // Snapshot-time graph has the a→b import edge, so unconnected c.ts ranks last.
+      expect(before.rankedEntityIds).toContain("src/a.ts");
+      expect(before.rankedEntityIds[before.rankedEntityIds.length - 1]).toBe("src/c.ts");
+
+      // Mutate imports AFTER snapshot, then force the live graph to rebuild so it
+      // reflects the new state: c.ts is now the most-connected file.
+      writeFileSync(join(tmpDir, "src/a.ts"), "export const a = 1;", "utf-8");
+      writeFileSync(join(tmpDir, "src/c.ts"), "import './a';\nimport './b';\nexport const c = 1;", "utf-8");
+      await getSharedContextGraphAsync(tmpDir, true);
+
+      const snap2 = await svc.getWorkspaceSnapshot({
+        root: tmpDir,
+        includeDiagnostics: false,
+        budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+      });
+      const live = await svc.rankWorkspace({
+        snapshotId: snap2.snapshot.snapshotId,
+        maxEntities: 100,
+      });
+      // Live state is observably different: c.ts now ranks first.
+      expect(live.rankedEntityIds[0]).toBe("src/c.ts");
+
+      // Ranking the old snapshot still reflects snapshot-time edges, not live edits.
+      const after = await svc.rankWorkspace({
+        snapshotId: snap1.snapshot.snapshotId,
+        maxEntities: 100,
+      });
+      expect(after.rankedEntityIds).toEqual(before.rankedEntityIds);
+      expect(after.rankedScores).toEqual(before.rankedScores);
+      expect(after.assessment).toBe("complete");
+    });
+
+    it("returns partial assessment when snapshot capture degraded", async () => {
+      makeFile("src/a.ts", "export const a = 1;");
+      // Force provenance capture to fail so the snapshot is stored degraded.
+      const graph = await getSharedContextGraphAsync(tmpDir, true);
+      const spy = vi.spyOn(graph, "getProvenanceEdges").mockImplementation(() => {
+        throw new Error("provenance unavailable");
+      });
+      try {
+        const snap = await svc.getWorkspaceSnapshot({
+          root: tmpDir,
+          includeDiagnostics: false,
+          budget: { maxMs: 30_000, maxBytes: 1_000_000 },
+        });
+        const result = await svc.rankWorkspace({
+          snapshotId: snap.snapshot.snapshotId,
+          maxEntities: 100,
+        });
+        expect(result.assessment).toBe("partial");
+        expect(result.coverageReasons).toBeDefined();
+        expect(result.coverageReasons!.some((r) => r.includes("partial relationship data"))).toBe(true);
+        // Files still rank; only the completeness claim is downgraded.
+        expect(result.rankedEntityIds).toContain("src/a.ts");
+        // Negative budgets clamp to zero instead of slicing from the end.
+        const empty = await svc.rankWorkspace({
+          snapshotId: snap.snapshot.snapshotId,
+          maxEntities: -5,
+        });
+        expect(empty.rankedEntityIds).toHaveLength(0);
+        expect(empty.rankedScores).toHaveLength(0);
+        expect(empty.assessment).toBe("partial");
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 
@@ -340,7 +498,12 @@ describe("RepositoryIntelligenceService", () => {
           budget: { maxMs: 30_000, maxEntities: 2000 },
         });
         // Old read-failure-as-empty hashed this as sha256("") both times: missed.
-        expect(delta.changedEntities).toContain("src/empty.ts");
+        // Lineage-v1: empty -> unreadable-marker hash change surfaces as a
+        // REMOVED + ADDED pair on the same path (below match threshold).
+        const emptyChanges = delta.fileChanges.filter(
+          (c) => c.beforePath === "src/empty.ts" || c.afterPath === "src/empty.ts",
+        );
+        expect(emptyChanges.length).toBeGreaterThan(0);
         // getCapabilities replays the same unreadable notice for the snapshot.
         const caps = await svc.getCapabilities({ snapshotId: snap2.snapshot.snapshotId });
         expect(caps.coverageReasons.some((r) => r.includes("unreadable"))).toBe(true);

@@ -47,18 +47,49 @@ describe("repository-intelligence-types", () => {
     >();
   });
 
-  it("RankRequest/RankResult/SemanticDelta are structurally valid placeholders", () => {
-    const req: RankRequest = { __phasePlaceholder: "RankRequest", snapshotId: "x" as SnapshotId, maxEntities: 100 };
-    const res: RankResult = { __phasePlaceholder: "RankResult", snapshotId: "x" as SnapshotId, rankedEntityIds: [] };
-    const delta: SemanticDelta = {
-      __phasePlaceholder: "SemanticDelta",
+  it("RankRequest/RankResult carry no phase marker", () => {
+    const req: RankRequest = { snapshotId: "x" as SnapshotId, maxEntities: 100 };
+    const res: RankResult = {
       snapshotId: "x" as SnapshotId,
-      addedEntities: [],
-      removedEntities: [],
-      changedEntities: [],
+      rankedEntityIds: [],
+      rankedScores: [],
+      assessment: "complete",
     };
-    expectTypeOf(req.__phasePlaceholder).toEqualTypeOf<"RankRequest">();
-    expectTypeOf(res.__phasePlaceholder).toEqualTypeOf<"RankResult">();
-    expectTypeOf(delta.__phasePlaceholder).toEqualTypeOf<"SemanticDelta">();
+    expectTypeOf(req.snapshotId).toEqualTypeOf<SnapshotId>();
+    expectTypeOf(res.rankedScores).toEqualTypeOf<number[]>();
+    expectTypeOf(res.assessment).toEqualTypeOf<"complete" | "partial">();
+  });
+
+  it("SemanticDelta is the lineage-owned single truth", () => {
+    const delta: SemanticDelta = {
+      before: "a",
+      after: "b",
+      algorithmVersion: "lineage-v1",
+      fileChanges: [],
+      symbolChanges: [],
+      relationshipChanges: [],
+      diagnosticChanges: [],
+      capabilityChange: {
+        before: {
+          filesObserved: 0,
+          byLanguage: [],
+          graphAssessment: "complete",
+          coverageReasons: [],
+          omittedEdgeCount: 0,
+        },
+        after: {
+          filesObserved: 0,
+          byLanguage: [],
+          graphAssessment: "complete",
+          coverageReasons: [],
+          omittedEdgeCount: 0,
+        },
+        changedKeys: [],
+      },
+      assessment: "complete",
+      coverageReasons: [],
+      truncated: false,
+    };
+    expectTypeOf(delta.algorithmVersion).toEqualTypeOf<"lineage-v1">();
   });
 });

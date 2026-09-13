@@ -12,26 +12,25 @@ export type ISO8601 = string & { readonly __brand: "ISO8601" };
 
 // ── §3G: Ranking and delta types ────────────────────────────────────
 
+/** Single truth for semantic deltas — owned by ./semantic-delta.js. */
+import type { SemanticDelta as LineageSemanticDelta } from "./semantic-delta.js";
+export type SemanticDelta = LineageSemanticDelta;
+
 export type RankRequest = {
-  readonly __phasePlaceholder: "RankRequest";
-  snapshotId: SnapshotId;
+  readonly snapshotId: SnapshotId;
   /** Maximum entities to return (capped at 2,000). */
-  maxEntities: number;
+  readonly maxEntities: number;
 };
 
 export type RankResult = {
-  readonly __phasePlaceholder: "RankResult";
-  snapshotId: SnapshotId;
+  readonly snapshotId: SnapshotId;
   /** Ranked entity IDs in descending priority order. */
-  rankedEntityIds: string[];
-};
-
-export type SemanticDelta = {
-  readonly __phasePlaceholder: "SemanticDelta";
-  snapshotId: SnapshotId;
-  addedEntities: string[];
-  removedEntities: string[];
-  changedEntities: string[];
+  readonly rankedEntityIds: string[];
+  /** Raw relationship counts parallel to rankedEntityIds. */
+  readonly rankedScores: number[];
+  readonly assessment: "complete" | "partial";
+  /** Present when assessment is partial (e.g. degraded snapshot capture). */
+  readonly coverageReasons?: string[];
 };
 
 // ── §3G: Error union ─────────────────────────────────────────────────
