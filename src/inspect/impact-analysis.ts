@@ -91,6 +91,27 @@ const TEST_FILE_RE = /\.(test|spec)\.[^.]+$/;
 
 // ── Risk classification ──────────────────────────────────────────
 
+function isCriticalSignal(params: {
+  pageRank: number;
+  fanIn: number;
+  blastRadiusDepth: number;
+  isEntryPoint: boolean;
+}): boolean {
+  return (
+    params.pageRank > PR_CRITICAL ||
+    params.fanIn > FANIN_CRITICAL ||
+    (params.isEntryPoint && params.blastRadiusDepth >= ENTRY_BLAST_CRITICAL_DEPTH)
+  );
+}
+
+function isHighSignal(params: { pageRank: number; fanIn: number; isPublicApi: boolean }): boolean {
+  return params.pageRank > PR_HIGH || params.fanIn > FANIN_HIGH || params.isPublicApi;
+}
+
+function isMediumSignal(params: { fanIn: number; blastRadiusDepth: number }): boolean {
+  return params.fanIn > FANIN_MEDIUM || params.blastRadiusDepth >= ENTRY_BLAST_HIGH_DEPTH;
+}
+
 function classifyRisk(params: {
   pageRank: number;
   fanIn: number;
@@ -98,31 +119,9 @@ function classifyRisk(params: {
   isEntryPoint: boolean;
   isPublicApi: boolean;
 }): RiskLevel {
-  const { pageRank, fanIn, blastRadiusDepth, isEntryPoint, isPublicApi } = params;
-
-  // Critical: highest signals
-  if (
-    pageRank > PR_CRITICAL ||
-    fanIn > FANIN_CRITICAL ||
-    (isEntryPoint && blastRadiusDepth >= ENTRY_BLAST_CRITICAL_DEPTH)
-  ) {
-    return "critical";
-  }
-
-  // High: strong signals
-  if (
-    pageRank > PR_HIGH ||
-    fanIn > FANIN_HIGH ||
-    isPublicApi
-  ) {
-    return "high";
-  }
-
-  // Medium: moderate signals
-  if (fanIn > FANIN_MEDIUM || blastRadiusDepth >= ENTRY_BLAST_HIGH_DEPTH) {
-    return "medium";
-  }
-
+  if (isCriticalSignal(params)) return "critical";
+  if (isHighSignal(params)) return "high";
+  if (isMediumSignal(params)) return "medium";
   return "low";
 }
 
@@ -165,153 +164,191 @@ function isPublicApi(filePath: string, callGraph: CallGraphResult | null, worksp
  * - findSymbolFiles() — symbol definition files (used for call targets)
  * - getMutationNeighbours() — breakage/co-change edges from EdgeStore
  */
-export async function computeImpact(params: ImpactParams): Promise<ImpactResult> {
-  const {
-    targetFile,
-    maxDepth = 3,
-    pageRankScores,
-    contextGraph,
-    workspaceRoot,
-  } = params;
+interface CoverageInfo {
+  assessment: ImpactResult["assessment"];
+  coverageReasons: string[];
+  omittedEdgeCount: number;
+}
 
-  // Normalize target path to absolute for consistent call-graph lookups.
-  const normalizedTarget = workspaceRoot ? resolve(workspaceRoot, targetFile) : resolve(targetFile);
+function buildCoverage(callGraph: CallGraphResult | undefined): CoverageInfo {
+  if (!callGraph) return { assessment: "unavailable", coverageReasons: ["call graph unavailable"], omittedEdgeCount: 0 };
+  const skipped = readSkippedFileCount(callGraph);
+  const omitted = countEdgeDiagnostics(callGraph);
+  if (!callGraph.diagnostics) return { assessment: "partial", coverageReasons: [], omittedEdgeCount: omitted };
+  if (omitted === 0 && skipped === 0) return { assessment: "complete", coverageReasons: [], omittedEdgeCount: 0 };
+  return { assessment: "partial", coverageReasons: buildPartialReasons(omitted, skipped), omittedEdgeCount: omitted };
+}
 
-  // Helper: normalize any path (call-graph fn.file or graph edge path) against workspaceRoot.
-  const normalizePath = (p: string): string => workspaceRoot ? resolve(workspaceRoot, p) : resolve(p);
+function readSkippedFileCount(callGraph: CallGraphResult | undefined): number {
+  return ((callGraph?.diagnostics as unknown as Record<string, unknown>)?.skippedFileCount as number) || 0;
+}
 
-  // BFS state
-  const visited = new Map<string, { depth: number }>(); // path → depth
-  visited.set(normalizedTarget, { depth: 0 });
+function countEdgeDiagnostics(callGraph: CallGraphResult | undefined): number {
+  if (!callGraph?.diagnostics) return 0;
+  return callGraph.diagnostics.unresolved + callGraph.diagnostics.ambiguous + callGraph.diagnostics.receiverUnknown;
+}
 
-  // When ContextGraph is available, perform real BFS traversal
-  if (contextGraph) {
-    const bfsResult = await expandBlastRadius(targetFile, contextGraph, maxDepth, workspaceRoot ?? "");
-    for (const [path, { depth }] of bfsResult) {
-      visited.set(path, { depth });
+function buildPartialReasons(omitted: number, skipped: number): string[] {
+  const reasons: string[] = [];
+  if (omitted > 0) reasons.push("call graph contains omitted or unresolved edges");
+  if (skipped > 0) reasons.push(`${skipped} file(s) skipped due to unsupported language(s)`);
+  return reasons;
+}
+
+function collectDirectEdges(fns: FunctionInfo[]): { callers: Set<string>; callees: Set<string> } {
+  const callers = new Set<string>();
+  const callees = new Set<string>();
+  for (const fn of fns) {
+    for (const caller of fn.calledBy) callers.add(caller);
+    for (const callee of fn.calls) callees.add(callee);
+  }
+  return { callers, callees };
+}
+
+function expandTransitiveSet(seeds: Set<string>, byName: Map<string, FunctionInfo>, dir: "callers" | "callees"): Set<string> {
+  const seen = new Set<string>(seeds);
+  const queue = [...seeds];
+  let cursor = 0;
+  while (cursor < queue.length) {
+    const name = queue[cursor++]!;
+    const fn = byName.get(name);
+    if (!fn) continue;
+    const next = dir === "callers" ? fn.calledBy : fn.calls;
+    for (const n of next) {
+      if (!seen.has(n)) {
+        seen.add(n);
+        queue.push(n);
+      }
     }
   }
+  return seen;
+}
 
-  const affectedFiles: ImpactResult["affectedFiles"] = [];
-  const affectedSymbols: Set<string> = new Set();
-
-  const { callGraph } = params;
-  // ponytail: forward-compat bridge — reads skippedFileCount if present on diagnostics.
-  // Will become typed once callgraph.ts populates this field (cross-boundary: P1-W4).
-  const skippedFileCount = ((callGraph?.diagnostics as unknown as Record<string, unknown>)?.skippedFileCount as number) || 0;
-  const edgeDiagnosticCount = callGraph?.diagnostics ? callGraph.diagnostics.unresolved + callGraph.diagnostics.ambiguous + callGraph.diagnostics.receiverUnknown : 0;
-  const hasIncompleteCoverage = edgeDiagnosticCount > 0 || skippedFileCount > 0;
-  const assessment: ImpactResult["assessment"] = !callGraph ? "unavailable" : callGraph.diagnostics ? (hasIncompleteCoverage ? "partial" : "complete") : "partial";
-  const coverageReasons: string[] = !callGraph
-    ? ["call graph unavailable"]
-    : assessment === "partial"
-      ? [
-          ...(edgeDiagnosticCount > 0 ? ["call graph contains omitted or unresolved edges"] : []),
-          ...(skippedFileCount > 0 ? [`${skippedFileCount} file(s) skipped due to unsupported language(s)`] : []),
-        ]
-      : [];
-  const omittedEdgeCount = edgeDiagnosticCount;
-  const targetFanIn = computeFanIn(normalizedTarget, callGraph ?? null, workspaceRoot);
-  const targetFns = callGraph?.functions.filter((f) => normalizePath(f.file) === normalizedTarget) ?? [];
-  const targetIsEntryPoint = isEntryPoint(normalizedTarget, targetFns);
-  const targetIsPublicApi = isPublicApi(normalizedTarget, callGraph ?? null, workspaceRoot);
-  const targetPageRank = pageRankScores?.get(normalizedTarget) ?? pageRankScores?.get(targetFile) ?? 0;
-
-  // Pre-compute call graph summary for the target file.
-  const callGraphSummary: ImpactResult["callGraphSummary"] = {
+function buildCallGraphSummary(
+  callGraph: CallGraphResult | undefined,
+  normalizedTarget: string,
+  normalizePath: (p: string) => string,
+): ImpactResult["callGraphSummary"] {
+  const summary: ImpactResult["callGraphSummary"] = {
     directCallers: 0,
     transitiveCallers: 0,
     directCallees: 0,
     transitiveCallees: 0,
   };
-  if (callGraph) {
-    const graphTargetFns = callGraph.functions.filter((f) => normalizePath(f.file) === normalizedTarget);
-    const directCallerSet = new Set<string>();
-    const directCalleeSet = new Set<string>();
-    for (const fn of graphTargetFns) {
-      for (const caller of fn.calledBy) directCallerSet.add(caller);
-      for (const callee of fn.calls) directCalleeSet.add(callee);
-    }
-    callGraphSummary.directCallers = directCallerSet.size;
-    callGraphSummary.directCallees = directCalleeSet.size;
-    // Transitive: BFS through call graph from direct callers/callees.
-    const transCallerSet = new Set<string>(directCallerSet);
-    const transCalleeSet = new Set<string>(directCalleeSet);
-    const callerQueue = [...directCallerSet];
-    const calleeQueue = [...directCalleeSet];
-    while (callerQueue.length > 0) {
-      const name = callerQueue.shift()!;
-      const fn = callGraph.functions.find((f) => f.name === name);
-      if (!fn) continue;
-      for (const caller of fn.calledBy) {
-        if (!transCallerSet.has(caller)) {
-          transCallerSet.add(caller);
-          callerQueue.push(caller);
-        }
-      }
-    }
-    while (calleeQueue.length > 0) {
-      const name = calleeQueue.shift()!;
-      const fn = callGraph.functions.find((f) => f.name === name);
-      if (!fn) continue;
-      for (const callee of fn.calls) {
-        if (!transCalleeSet.has(callee)) {
-          transCalleeSet.add(callee);
-          calleeQueue.push(callee);
-        }
-      }
-    }
-    callGraphSummary.transitiveCallers = transCallerSet.size;
-    callGraphSummary.transitiveCallees = transCalleeSet.size;
-  }
+  if (!callGraph) return summary;
+  const targetFns = callGraph.functions.filter((f) => normalizePath(f.file) === normalizedTarget);
+  const { callers, callees } = collectDirectEdges(targetFns);
+  summary.directCallers = callers.size;
+  summary.directCallees = callees.size;
+  const byName = new Map(callGraph.functions.map((f) => [f.name, f]));
+  summary.transitiveCallers = expandTransitiveSet(callers, byName, "callers").size;
+  summary.transitiveCallees = expandTransitiveSet(callees, byName, "callees").size;
+  return summary;
+}
 
-  let maxDepthReached = 0;
+function rankAffectedFiles(files: ImpactResult["affectedFiles"]): void {
+  files.sort((a, b) => RISK_ORDER[a.risk] - RISK_ORDER[b.risk] || b.fanIn - a.fanIn);
+}
 
-  for (const [path, { depth }] of visited) {
-    const normalizedPath = normalizePath(path);
-    if (normalizedPath === normalizedTarget) continue;
-    const fanIn = computeFanIn(normalizedPath, callGraph ?? null, workspaceRoot);
-    const risk = classifyRisk({
-      pageRank: pageRankScores?.get(normalizedPath) ?? pageRankScores?.get(path) ?? 0,
-      fanIn,
-      blastRadiusDepth: depth,
-      isEntryPoint: isEntryPoint(path, callGraph?.functions.filter((f) => normalizePath(f.file) === normalizePath(path)) ?? []),
-      isPublicApi: isPublicApi(path, callGraph ?? null, workspaceRoot),
-    });
-    affectedFiles.push({ path, risk, fanIn, depth });
-    if (depth > maxDepthReached) maxDepthReached = depth;
-    // Collect affected symbols from call graph for this file.
-    if (callGraph) {
-      const normalizedPath2 = normalizePath(path);
-      for (const fn of callGraph.functions) {
-        if (normalizePath(fn.file) === normalizedPath2) affectedSymbols.add(fn.name);
-      }
-    }
-  }
-
-  affectedFiles.sort((a, b) => {
-    const riskDiff = RISK_ORDER[a.risk] - RISK_ORDER[b.risk];
-    if (riskDiff !== 0) return riskDiff;
-    return b.fanIn - a.fanIn;
-  });
-
-  // Reclassify target risk with actual blast-radius depth reached.
-  const targetRisk = classifyRisk({
-    pageRank: targetPageRank,
-    fanIn: targetFanIn,
-    blastRadiusDepth: maxDepthReached,
-    isEntryPoint: targetIsEntryPoint,
-    isPublicApi: targetIsPublicApi,
-  });
-
-  // Final risk: highest severity across target and all affected files.
+function pickFinalRisk(
+  assessment: ImpactResult["assessment"],
+  targetRisk: RiskLevel,
+  affectedFiles: ImpactResult["affectedFiles"],
+): RiskLevel | undefined {
   let finalRisk: RiskLevel | undefined = assessment === "complete" ? targetRisk : undefined;
   for (const af of affectedFiles) {
-    if (finalRisk && RISK_ORDER[af.risk] < RISK_ORDER[finalRisk]) {
-      finalRisk = af.risk;
-    }
+    if (finalRisk && RISK_ORDER[af.risk] < RISK_ORDER[finalRisk]) finalRisk = af.risk;
   }
+  return finalRisk;
+}
 
+interface TargetSignals {
+  fanIn: number;
+  fns: FunctionInfo[];
+  isEntryPoint: boolean;
+  isPublicApi: boolean;
+  pageRank: number;
+}
+
+function readTargetSignals(
+  normalizedTarget: string,
+  targetFile: string,
+  callGraph: CallGraphResult | undefined,
+  pageRankScores: Map<string, number> | undefined,
+  normalizePath: (p: string) => string,
+  workspaceRoot?: string,
+): TargetSignals {
+  const fanIn = computeFanIn(normalizedTarget, callGraph ?? null, workspaceRoot);
+  const fns = callGraph?.functions.filter((f) => normalizePath(f.file) === normalizedTarget) ?? [];
+  return {
+    fanIn,
+    fns,
+    isEntryPoint: isEntryPoint(normalizedTarget, fns),
+    isPublicApi: isPublicApi(normalizedTarget, callGraph ?? null, workspaceRoot),
+    pageRank: pageRankScores?.get(normalizedTarget) ?? pageRankScores?.get(targetFile) ?? 0,
+  };
+}
+
+function collectAffectedEntry(
+  path: string,
+  depth: number,
+  ctx: {
+    callGraph: CallGraphResult | undefined;
+    pageRankScores: Map<string, number> | undefined;
+    workspaceRoot?: string;
+    normalizePath: (p: string) => string;
+    symbols: Set<string>;
+  },
+): ImpactResult["affectedFiles"][0] {
+  const normalizedPath = ctx.normalizePath(path);
+  const fanIn = computeFanIn(normalizedPath, ctx.callGraph ?? null, ctx.workspaceRoot);
+  const fileFns = ctx.callGraph?.functions.filter((f) => ctx.normalizePath(f.file) === normalizedPath) ?? [];
+  const risk = classifyRisk({
+    pageRank: ctx.pageRankScores?.get(normalizedPath) ?? ctx.pageRankScores?.get(path) ?? 0,
+    fanIn,
+    blastRadiusDepth: depth,
+    isEntryPoint: isEntryPoint(path, fileFns),
+    isPublicApi: isPublicApi(path, ctx.callGraph ?? null, ctx.workspaceRoot),
+  });
+  collectFileSymbols(ctx.callGraph, ctx.normalizePath, normalizedPath, ctx.symbols);
+  return { path, risk, fanIn, depth };
+}
+
+function collectFileSymbols(
+  callGraph: CallGraphResult | undefined,
+  normalizePath: (p: string) => string,
+  normalizedPath: string,
+  symbols: Set<string>,
+): void {
+  if (!callGraph) return;
+  for (const fn of callGraph.functions) {
+    if (normalizePath(fn.file) === normalizedPath) symbols.add(fn.name);
+  }
+}
+
+export async function computeImpact(params: ImpactParams): Promise<ImpactResult> {
+  const { targetFile, maxDepth = 3, pageRankScores, contextGraph, workspaceRoot } = params;
+  const normalizedTarget = workspaceRoot ? resolve(workspaceRoot, targetFile) : resolve(targetFile);
+  const normalizePath = (p: string): string => (workspaceRoot ? resolve(workspaceRoot, p) : resolve(p));
+  const visited = await buildVisitedSet(targetFile, normalizedTarget, contextGraph, maxDepth, workspaceRoot ?? "");
+  const { callGraph } = params;
+  const { assessment, coverageReasons, omittedEdgeCount } = buildCoverage(callGraph);
+  const signals = readTargetSignals(normalizedTarget, targetFile, callGraph, pageRankScores, normalizePath, workspaceRoot);
+  const callGraphSummary = buildCallGraphSummary(callGraph, normalizedTarget, normalizePath);
+  const { affectedFiles, affectedSymbols, maxDepthReached } = collectAffectedFiles(
+    visited,
+    normalizedTarget,
+    { callGraph, pageRankScores, workspaceRoot, normalizePath },
+  );
+  rankAffectedFiles(affectedFiles);
+  const targetRisk = classifyRisk({
+    pageRank: signals.pageRank,
+    fanIn: signals.fanIn,
+    blastRadiusDepth: maxDepthReached,
+    isEntryPoint: signals.isEntryPoint,
+    isPublicApi: signals.isPublicApi,
+  });
+  const finalRisk = pickFinalRisk(assessment, targetRisk, affectedFiles);
   return {
     target: targetFile,
     ...(finalRisk ? { risk: finalRisk } : {}),
@@ -325,6 +362,42 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
   };
 }
 
+async function buildVisitedSet(
+  targetFile: string,
+  normalizedTarget: string,
+  contextGraph: ContextGraph | undefined,
+  maxDepth: number,
+  workspaceRoot: string,
+): Promise<Map<string, { depth: number }>> {
+  const visited = new Map<string, { depth: number }>();
+  visited.set(normalizedTarget, { depth: 0 });
+  if (!contextGraph) return visited;
+  const bfsResult = await expandBlastRadius(targetFile, contextGraph, maxDepth, workspaceRoot);
+  for (const [path, { depth }] of bfsResult) visited.set(path, { depth });
+  return visited;
+}
+
+function collectAffectedFiles(
+  visited: Map<string, { depth: number }>,
+  normalizedTarget: string,
+  ctx: {
+    callGraph: CallGraphResult | undefined;
+    pageRankScores: Map<string, number> | undefined;
+    workspaceRoot?: string;
+    normalizePath: (p: string) => string;
+  },
+): { affectedFiles: ImpactResult["affectedFiles"]; affectedSymbols: Set<string>; maxDepthReached: number } {
+  const affectedFiles: ImpactResult["affectedFiles"] = [];
+  const affectedSymbols = new Set<string>();
+  let maxDepthReached = 0;
+  for (const [path, { depth }] of visited) {
+    if (ctx.normalizePath(path) === normalizedTarget) continue;
+    affectedFiles.push(collectAffectedEntry(path, depth, { ...ctx, symbols: affectedSymbols }));
+    if (depth > maxDepthReached) maxDepthReached = depth;
+  }
+  return { affectedFiles, affectedSymbols, maxDepthReached };
+}
+
 /**
  * Build a reverse import index from the context graph's provenance edges.
  * Maps resolved(to) → resolved(from)[] for files that import a given target.
@@ -333,17 +406,43 @@ export async function computeImpact(params: ImpactParams): Promise<ImpactResult>
 function buildReverseImportIndex(graph: ContextGraph, workspaceRoot: string): Map<string, string[]> {
   const index = new Map<string, string[]>();
   const edges = graph.getProvenanceEdges();
-  const _resolve = (p: string) => workspaceRoot ? resolve(workspaceRoot, p) : resolve(p);
+  const resolveEdge = (p: string): string => (workspaceRoot ? resolve(workspaceRoot, p) : resolve(p));
   for (const { from, to } of edges) {
-    const key = _resolve(to);
-    let list = index.get(key);
-    if (!list) {
-      list = [];
-      index.set(key, list);
-    }
-    list.push(_resolve(from));
+    const key = resolveEdge(to);
+    const list = index.get(key);
+    if (list) list.push(resolveEdge(from));
+    else index.set(key, [resolveEdge(from)]);
   }
   return index;
+}
+
+function groupFunctionsByFile(callGraph: CallGraphResult): Map<string, FunctionInfo[]> {
+  const byFile = new Map<string, FunctionInfo[]>();
+  for (const fn of callGraph.functions) {
+    const list = byFile.get(fn.file);
+    if (list) list.push(fn);
+    else byFile.set(fn.file, [fn]);
+  }
+  return byFile;
+}
+
+function isEntryFunction(fnName: string, file: string): boolean {
+  const base = file.split("/").pop() ?? "";
+  return ENTRY_POINT_PATTERNS.some((re) => re.test(fnName)) || ENTRY_POINT_PATTERNS.some((re) => re.test(base));
+}
+
+function collectDeadInFile(file: string, functions: FunctionInfo[]): DeadCodeResult["files"][0]["functions"] {
+  const dead: DeadCodeResult["files"][0]["functions"] = [];
+  for (const fn of functions) {
+    if (fn.calledBy.length > 0) continue;
+    if (isEntryFunction(fn.name, file)) continue;
+    dead.push({ name: fn.name, line: fn.line });
+  }
+  return dead;
+}
+
+function isInScope(file: string, targetPath: string): boolean {
+  return file.startsWith(targetPath) || file === targetPath;
 }
 
 /**
@@ -353,100 +452,98 @@ function buildReverseImportIndex(graph: ContextGraph, workspaceRoot: string): Ma
  * This is the graph-aware version used by inspect.ts which has access to
  * the ContextGraph instance.
  */
+type BlastRadiusMap = Map<string, { depth: number; edgeType: string }>;
+type BlastQueue = Array<{ path: string; depth: number }>;
+
+async function fetchForwardNeighbours(
+  contextGraph: ContextGraph,
+  path: string,
+): Promise<GraphNeighbour[]> {
+  try {
+    return await contextGraph.getFileNeighbours(path, { includeSymbols: true, includeCalls: true });
+  } catch {
+    return [];
+  }
+}
+
+function fetchReverseImports(
+  contextGraph: ContextGraph,
+  workspaceRoot: string,
+  path: string,
+  cache: { index: Map<string, string[]> | null },
+): string[] {
+  try {
+    if (cache.index === null) cache.index = buildReverseImportIndex(contextGraph, workspaceRoot);
+    const resolvePath = (p: string): string => (workspaceRoot ? resolve(workspaceRoot, p) : resolve(p));
+    return cache.index?.get(resolvePath(path)) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function toImportedByNeighbours(paths: string[], currentPath: string): GraphNeighbour[] {
+  return paths.map((p): GraphNeighbour => ({
+    path: p,
+    provenance: { from: p, to: currentPath, type: "imported_by", confidence: 1.0 },
+  }));
+}
+
+function offerNeighbour(
+  visited: BlastRadiusMap,
+  queue: BlastQueue,
+  neighbour: GraphNeighbour,
+  nextDepth: number,
+): void {
+  const known = visited.get(neighbour.path);
+  if (known && known.depth <= nextDepth) return;
+  visited.set(neighbour.path, { depth: nextDepth, edgeType: neighbour.provenance.type });
+  queue.push({ path: neighbour.path, depth: nextDepth });
+}
+
+function offerNeighbours(visited: BlastRadiusMap, queue: BlastQueue, neighbours: GraphNeighbour[], nextDepth: number): void {
+  for (const n of neighbours) offerNeighbour(visited, queue, n, nextDepth);
+}
+
+function fetchMutationNeighbours(contextGraph: ContextGraph, path: string): GraphNeighbour[] {
+  try {
+    return contextGraph.getMutationNeighbours(path);
+  } catch {
+    return [];
+  }
+}
+
+async function expandOneNode(
+  contextGraph: ContextGraph,
+  workspaceRoot: string,
+  visited: BlastRadiusMap,
+  queue: BlastQueue,
+  current: { path: string; depth: number },
+  cache: { index: Map<string, string[]> | null },
+): Promise<void> {
+  const nextDepth = current.depth + 1;
+  const forward = await fetchForwardNeighbours(contextGraph, current.path);
+  const reverse = fetchReverseImports(contextGraph, workspaceRoot, current.path, cache).filter(
+    (p) => !visited.has(p) || (visited.get(p)?.depth ?? Infinity) > nextDepth,
+  );
+  offerNeighbours(visited, queue, [...forward, ...toImportedByNeighbours(reverse, current.path)], nextDepth);
+  offerNeighbours(visited, queue, fetchMutationNeighbours(contextGraph, current.path), nextDepth);
+}
+
 export async function expandBlastRadius(
   targetFile: string,
   contextGraph: ContextGraph,
   maxDepth: number,
   workspaceRoot: string,
 ): Promise<Map<string, { depth: number; edgeType: string }>> {
-  const visited = new Map<string, { depth: number; edgeType: string }>();
-  const queue: Array<{ path: string; depth: number }> = [{ path: targetFile, depth: 0 }];
+  const visited: BlastRadiusMap = new Map();
+  const queue: BlastQueue = [{ path: targetFile, depth: 0 }];
   visited.set(targetFile, { depth: 0, edgeType: "self" });
-
-  // Lazy-built reverse-import index: resolved(to) → resolved(from)[]
-  // Captures files that import a given file (imported_by edges).
-  let reverseImportIndex: Map<string, string[]> | null = null;
-  const _resolve = (p: string) => workspaceRoot ? resolve(workspaceRoot, p) : resolve(p);
-
+  const cache: { index: Map<string, string[]> | null } = { index: null };
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (current.depth >= maxDepth) continue;
-
-    const nextDepth = current.depth + 1;
-
-    // Forward neighbours (imports/calls/references) via the context graph.
-    let forwardNeighbours: GraphNeighbour[] = [];
-    try {
-      forwardNeighbours = await contextGraph.getFileNeighbours(current.path, {
-        includeSymbols: true,
-        includeCalls: true,
-      });
-    } catch {
-      // getFileNeighbours may fail for unreadable files — skip
-    }
-
-    // Reverse-import neighbours (files that import this file).
-    // Best-effort: built lazily from getProvenanceEdges() on first use.
-    let reverseImports: string[] = [];
-    try {
-      if (reverseImportIndex === null) {
-        reverseImportIndex = buildReverseImportIndex(contextGraph, workspaceRoot);
-      }
-      reverseImports = reverseImportIndex.get(_resolve(current.path)) ?? [];
-    } catch {
-      // getProvenanceEdges may fail — skip reverse imports
-    }
-
-    // Combine forward and reverse neighbours
-    const allNeighbours: GraphNeighbour[] = [
-      ...forwardNeighbours,
-      ...reverseImports
-        .filter((p) => !visited.has(p) || (visited.get(p)?.depth ?? Infinity) > nextDepth)
-        .map((p): GraphNeighbour => ({
-          path: p,
-          provenance: { from: p, to: current.path, type: "imported_by", confidence: 1.0 },
-        })),
-    ];
-
-    for (const neighbour of allNeighbours) {
-      if (!visited.has(neighbour.path)) {
-        visited.set(neighbour.path, {
-          depth: nextDepth,
-          edgeType: neighbour.provenance.type,
-        });
-        queue.push({ path: neighbour.path, depth: nextDepth });
-      } else if ((visited.get(neighbour.path)?.depth ?? Infinity) > nextDepth) {
-        visited.set(neighbour.path, {
-          depth: nextDepth,
-          edgeType: neighbour.provenance.type,
-        });
-        queue.push({ path: neighbour.path, depth: nextDepth });
-      }
-    }
-
-    // Expand via mutation edges (breakage, co-change)
-    try {
-      const mutationNeighbours = contextGraph.getMutationNeighbours(current.path);
-      for (const neighbour of mutationNeighbours) {
-        if (!visited.has(neighbour.path)) {
-          visited.set(neighbour.path, {
-            depth: nextDepth,
-            edgeType: neighbour.provenance.type,
-          });
-          queue.push({ path: neighbour.path, depth: nextDepth });
-        } else if ((visited.get(neighbour.path)?.depth ?? Infinity) > nextDepth) {
-          visited.set(neighbour.path, {
-            depth: nextDepth,
-            edgeType: neighbour.provenance.type,
-          });
-          queue.push({ path: neighbour.path, depth: nextDepth });
-        }
-      }
-    } catch {
-      // getMutationNeighbours may fail — skip
-    }
+    await expandOneNode(contextGraph, workspaceRoot, visited, queue, current, cache);
   }
-
   return visited;
 }
 
@@ -483,53 +580,18 @@ export function detectDeadCode(
   targetPath: string,
   callGraph: CallGraphResult | null,
 ): DeadCodeResult {
-  if (!callGraph) {
-    return { files: [], totalDeadFunctions: 0 };
-  }
-
+  if (!callGraph) return { files: [], totalDeadFunctions: 0 };
   const results: DeadCodeResult["files"] = [];
   let totalDead = 0;
-
-  // Group functions by file
-  const functionsByFile = new Map<string, FunctionInfo[]>();
-  for (const fn of callGraph.functions) {
-    if (!functionsByFile.has(fn.file)) {
-      functionsByFile.set(fn.file, []);
-    }
-    functionsByFile.get(fn.file)!.push(fn);
-  }
-
+  const functionsByFile = groupFunctionsByFile(callGraph);
   for (const [file, functions] of functionsByFile) {
-    // Skip test files
     if (TEST_FILE_RE.test(file)) continue;
-
-    // Filter to target scope
-    const inScope = file.startsWith(targetPath) || file === targetPath;
-    if (!inScope) continue;
-
-    const deadFunctions: DeadCodeResult["files"][0]["functions"] = [];
-
-    for (const fn of functions) {
-      // Skip if has callers
-      if (fn.calledBy.length > 0) continue;
-
-      // Skip entry points
-      const base = file.split("/").pop() ?? "";
-      const isEntry = ENTRY_POINT_PATTERNS.some((re) => re.test(fn.name)) ||
-                      ENTRY_POINT_PATTERNS.some((re) => re.test(base));
-      if (isEntry) continue;
-
-      deadFunctions.push({ name: fn.name, line: fn.line });
-      totalDead++;
-    }
-
-    if (deadFunctions.length > 0) {
-      results.push({ path: file, functions: deadFunctions });
-    }
+    if (!isInScope(file, targetPath)) continue;
+    const deadFunctions = collectDeadInFile(file, functions);
+    if (deadFunctions.length === 0) continue;
+    totalDead += deadFunctions.length;
+    results.push({ path: file, functions: deadFunctions });
   }
-
-  // Sort by file path
   results.sort((a, b) => a.path.localeCompare(b.path));
-
   return { files: results, totalDeadFunctions: totalDead };
 }
