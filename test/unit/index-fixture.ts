@@ -7,7 +7,7 @@ export interface IndexHarness {
   api: ExtensionAPI;
 }
 
-type RegisterExtension = (pi: ExtensionAPI) => void;
+type RegisterExtension = (pi: ExtensionAPI) => void | Promise<void>;
 
 /** Shared makeApi fixture: fresh session state + dynamic import + registered/handlers capture. */
 export async function setupExtension(): Promise<IndexHarness> {
@@ -24,6 +24,6 @@ export async function setupExtension(): Promise<IndexHarness> {
       handlers[event] = handler;
     },
   } as unknown as ExtensionAPI;
-  (registerExtension as RegisterExtension)(api);
+  await (registerExtension as RegisterExtension)(api);
   return { registered, handlers, api };
 }

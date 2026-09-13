@@ -72,23 +72,7 @@ export async function installInspectAndResolver(bus: {
     // Replace the eager MCP-stdio fallback (null-resolver) with live wiring
     // bound to this bus. registerOrReplace keeps the fallback when no bus
     // is ever supplied, but guarantees live execute routes to the resolver above.
-    const liveDef = createInspectTool({
-        resolver: {
-            publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
-                resolver.publishInspection(envelope as any, sessionFilePath, workspaceRoot);
-            },
-        },
-        getSessionFilePath: () => null,
-        contextGraph: (root) => getSharedContextGraphAsync(root),
-        lspInspectionProvider: getSharedLspInspectionProvider(),
-    });
-    registry.registerOrReplace({
-        name: "inspect",
-        description: liveDef.description,
-        inputSchema: liveDef.parameters as Record<string, unknown>,
-        execute: liveDef.execute,
-        category: ToolCategory.READ,
-    });
+    registerInspectToolWithBus(bus);
     // Listen for inspect/read tool_result events to re-index envelopes
     const reindex = (raw: unknown) => {
         try {

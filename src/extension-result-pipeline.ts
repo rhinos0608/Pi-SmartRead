@@ -33,6 +33,7 @@ import {
   suggestShellCommands,
 } from "./bash-context-guard.js";
 import { invalidateFsScanCache } from "./fs-scan-cache.js";
+import { canonicalizeWorkspaceRoot } from "@rhinos0608/pi-workspace-protocol";
 import { getLSPBridge } from "./lsp-bridge.js";
 import { invalidateSharedGraph } from "./mcp-registry.js";
 import { getSemanticIndex } from "./semantic-index-registry.js";
@@ -140,7 +141,7 @@ function anchorPathsForEdit(s: PipelineState): string[] {
 }
 
 function recordAnchorDeltaStep(state: ActivationState, s: PipelineState): void {
-  if (s.toolName !== "edit" || !s.details.anchorDelta) return;
+  if (s.toolName !== "edit" || s.outputEvent.isError || !s.details.anchorDelta) return;
   const ad = s.details.anchorDelta as {
     summary: string;
     shifted: number;
@@ -177,54 +178,57 @@ function stringField(input: Record<string, unknown>, key: string): string | unde
   return typeof v === "string" && v ? v : undefined;
 }
 
-function closeLspFiles(paths: string[], root: string): void {
+async function closeLspFiles(paths: string[], root: string): Promise<void> {
   if (paths.length === 0) return;
-  getLSPBridge()
-    .then((bridge) => {
-      if (!bridge) return;
-      for (const p of paths) {
-        bridge.closeFile(p, root).catch(() => {});
-      }
-    })
-    .catch(() => {});
+  try {
+    const bridge = await getLSPBridge();
+    if (!bridge) return;
+    await Promise.all(paths.map((p) => bridge.closeFile(p, root).catch(() => {})));
+  } catch {
+    // LSP tracking is best-effort; never block the tool result.
+  }
 }
 
-function trackReadDocument(lspInput: Record<string, unknown>): void {
+async function trackReadDocument(lspInput: Record<string, unknown>): Promise<void> {
   const readPath = stringField(lspInput, "path") ?? stringField(lspInput, "filePath");
   if (!readPath) return;
-  getLSPBridge()
-    .then((bridge) => bridge?.openFile(readPath, process.cwd()))
+  // Shared canonicalizer only — direct reads stay ungated by
+  // PI_SMARTREAD_ALLOWED_ROOT. A resolution failure propagates (no
+  // process.cwd() fallback); bridge failures stay best-effort below.
+  const root = canonicalizeWorkspaceRoot(process.cwd());
+  await getLSPBridge()
+    .then((bridge) => bridge?.openFile(readPath, root))
     .catch(() => {});
 }
 
-function trackGraphMutateClose(lspInput: Record<string, unknown>): void {
+function trackGraphMutateClose(lspInput: Record<string, unknown>): Promise<void> {
   const closePaths = [stringField(lspInput, "from"), stringField(lspInput, "to")].filter(
     (p): p is string => typeof p === "string",
   );
-  if (closePaths.length === 0) return;
+  if (closePaths.length === 0) return Promise.resolve();
   const root = stringField(lspInput, "root") ?? process.cwd();
-  closeLspFiles(closePaths, root);
+  return closeLspFiles(closePaths, root);
 }
 
-function trackEditClose(s: PipelineState, lspInput: Record<string, unknown>): void {
-  if (s.outputEvent.isError) return;
+function trackMutationClose(s: PipelineState, lspInput: Record<string, unknown>): Promise<void> {
+  if (s.outputEvent.isError) return Promise.resolve();
   const editPaths =
     s.changedPaths.length > 0 ? s.changedPaths : stringField(lspInput, "path") ? [lspInput.path as string] : [];
-  closeLspFiles(editPaths, process.cwd());
+  return closeLspFiles(editPaths, process.cwd());
 }
 
-export function trackLspDocuments(s: PipelineState): void {
+export async function trackLspDocuments(s: PipelineState): Promise<void> {
   if (!s.toolCallId || !s.outputEvent.input) return;
   const lspInput = s.outputEvent.input as Record<string, unknown>;
   if (s.toolName === "read") {
-    trackReadDocument(lspInput);
+    await trackReadDocument(lspInput);
     return;
   }
   if (s.toolName === "graph_mutate") {
-    trackGraphMutateClose(lspInput);
+    await trackGraphMutateClose(lspInput);
     return;
   }
-  if (s.toolName === "edit") trackEditClose(s, lspInput);
+  if (s.toolName === "write" || s.toolName === "edit") await trackMutationClose(s, lspInput);
 }
 
 /**
@@ -423,7 +427,9 @@ export function appendBashFailureSuggestions(s: PipelineState): any | null {
 
 export function appendGrepLowResultHint(state: ActivationState, s: PipelineState): void {
   if (s.toolName !== "grep" || s.outputEvent.isError || !state.grepRegisteredRef.current) return;
-  const textContent = (s.outputEvent.content ?? [])
+  const rawContent = s.outputEvent.content;
+  const textItems = Array.isArray(rawContent) ? rawContent : [];
+  const textContent = textItems
     .filter((c: any): c is { type: "text"; text?: unknown } => c.type === "text")
     .map((c: any) => coerceText(c.text))
     .join("\n");
@@ -432,7 +438,7 @@ export function appendGrepLowResultHint(state: ActivationState, s: PipelineState
   const lowMatches = isNoMatch || (lineCount > 0 && lineCount < 4);
   if (!lowMatches) return;
   const hint = `\n[hint] Low result count. Broaden or rephrase the pattern, or relax the path/glob scope for more matches.`;
-  const content = [...(s.outputEvent.content ?? [])];
+  const content = [...textItems];
   const textIdx = content.findIndex((c: any) => c.type === "text");
   if (textIdx >= 0) {
     content[textIdx] = { ...content[textIdx], text: coerceText((content[textIdx] as any).text) + hint };
@@ -532,7 +538,7 @@ export async function handleToolResult(state: ActivationState, event: any): Prom
   };
 
   recordHygieneAndAnchor(state, s);
-  trackLspDocuments(s);
+  await trackLspDocuments(s);
   invalidateCachesOnMutation(s);
   recordResultForDoomDetection(state, s);
   injectDoomLoopWarning(state, s);
