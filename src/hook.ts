@@ -595,7 +595,7 @@ export type ReadParams = SingleFileReadParams | MultiFileReadParams | QueryReadP
 function rejectForeignKeys(raw: Record<string, unknown>, selector: string, allowed: ReadonlySet<string>): string | undefined {
   for (const key of Object.keys(raw)) {
     if (!allowed.has(key)) {
-      return `Error: read param "${key}" cannot be combined with "${selector}" mode`;
+      return `Error: read param "${key}" is not valid with "${selector}" mode`;
     }
   }
   return undefined;
