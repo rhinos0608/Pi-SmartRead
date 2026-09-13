@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { createGrepTool } from "../../src/grep-tool.js";
 import { disposeSemanticIndexes } from "../../src/semantic-index-registry.js";
+import { _resetAstGrepCacheForTests } from "../../src/structural-search.js";
 import { makeCtx, makeOpts, seedStandardWorkdir } from "../helpers/grep-tool-fixtures.js";
 let workdir: string;
 
@@ -19,6 +20,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    // Clear module-level forced-unavailable state even when assertions fail.
+    _resetAstGrepCacheForTests();
     disposeSemanticIndexes();
     rmSync(workdir, { recursive: true, force: true });
 });

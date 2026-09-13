@@ -99,9 +99,9 @@ async function requireContextGraph(
     params: StructuralQueryParams,
     cwd: string,
     deps: StructuralExecutorDeps,
-): Promise<any> {
+): Promise<ContextGraph> {
     if (!parseGraphFilter(params.graphFilter!)) throw new Error('Invalid graphFilter: expected "EDGE_TYPE->target" format');
-    const contextGraph: any = typeof deps.contextGraph === "function" ? await (deps.contextGraph as any)(cwd) : deps.contextGraph;
+    const contextGraph = typeof deps.contextGraph === "function" ? await deps.contextGraph(cwd) : deps.contextGraph;
     if (!contextGraph) throw new Error("graphFilter requires an indexed context graph");
     return contextGraph;
 }
@@ -174,7 +174,7 @@ async function fetchAllRawMatches(args: { params: StructuralQueryParams; cwd: st
 async function applyGraphFilterToMatches(args: {
     allRaw: StructuralSearchMatch[];
     graphFilter: string;
-    contextGraph: any;
+    contextGraph: ContextGraph;
     cwd: string;
     skip: number;
     topK: number;

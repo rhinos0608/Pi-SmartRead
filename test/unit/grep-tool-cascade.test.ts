@@ -497,8 +497,11 @@ describe("grep no-index BM25 corpus cache", () => {
     expect((result.content[0] as { text: string }).text).toContain("ghostSymbol");
   });
 
-  it("benchmark harness: 100/1k/10k-file cold/warm corpus builds without a timing gate", async () => {
-    for (const n of [100, 1000, 10000]) {
+  // Full 10k-file benchmark runs only with PI_SMARTREAD_BENCH=1; default unit
+  // runs stay lightweight (100/1k) so CI doesn't pay for the heavy corpus.
+  const benchSizes = process.env.PI_SMARTREAD_BENCH ? [100, 1000, 10000] : [100, 1000];
+  it("benchmark harness: cold/warm corpus builds without a timing gate", async () => {
+    for (const n of benchSizes) {
       const r = await _bm25CacheBenchmark(n);
       // Deterministic assertions: warm hit is cached and adds no rebuild.
       expect(r.cachedWarm).toBe(true);

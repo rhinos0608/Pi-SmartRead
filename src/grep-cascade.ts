@@ -539,6 +539,9 @@ function unique<T>(items: T[]): T[] {
 const MAX_BM25_CANDIDATES = 1000; // ponytail: hard cap on corpus reads; raise if big-repo recall suffers
 // Per-file size cap for the BM25 fallback corpus (matches semantic-index's 2MB limit).
 const MAX_BM25_FILE_BYTES = 2 * 1024 * 1024;
+// Total corpus byte budget: caps cumulative UTF-8 bytes admitted across files
+// so a full 1000-file working set of large files cannot blow up memory.
+const MAX_BM25_CORPUS_BYTES = 32 * 1024 * 1024;
 
 // ── Per-workspace-revision BM25 corpus cache ──────────────────────────────
 // Bounds repeated no-index fallback cost: same workspace + same revision ⇒
@@ -584,11 +587,15 @@ async function buildCorpus(
 
     const fileList: string[] = [];
     const contents: string[] = [];
+    let totalBytes = 0;
     for (const f of files) {
+        if (totalBytes >= MAX_BM25_CORPUS_BYTES) break; // total budget reached
         try {
             const st = await fs.stat(f);
             if (st.size > MAX_BM25_FILE_BYTES) continue; // skip oversized files
-            contents.push(await fs.readFile(f, "utf-8"));
+            const text = await fs.readFile(f, "utf-8");
+            totalBytes += Buffer.byteLength(text, "utf-8");
+            contents.push(text);
             fileList.push(f);
         } catch {
             // skip unreadable files
@@ -649,7 +656,6 @@ export async function getSearchCorpus(
             if (result) return { entry: result, cached: false };
             // Revision changed mid-build → loop to rebuild at the new revision.
         } catch (err) {
-            pendingCorpusBuilds.delete(key);
             throw err;
         } finally {
             pendingCorpusBuilds.delete(key);
