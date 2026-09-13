@@ -22,7 +22,7 @@ Node.js provides `fs.watch` (platform-specific, unreliable for recursive watchin
 
 ### Strategy
 
-1. Create `src/file-watcher.ts` — new dependency-free module
+1. Create `src/runtime/file-watcher.ts` — new dependency-free module
 2. On session start, call `startWatching(root, onDirty, options?)` which returns a stop function:
    - Uses `fs.watch(root, { recursive: true })` on macOS/Windows (both support recursive)
    - Falls back to non-recursive `fs.watch` on Linux with a warning log (Linux recursive is unreliable; users can install chokidar for Linux recursive support)

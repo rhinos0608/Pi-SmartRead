@@ -21,8 +21,8 @@ inspection of `Pi-SmartRead/src` + `Pi-SmartEdit/src`.
 | Tool | Owner | Registered as |
 |---|---|---|
 | `read` | Pi-SmartRead (`src/hook.ts`, wraps host read) | single/`paths[]`/`query`/`symbol` dispatch |
-| `grep` | Pi-SmartRead (`src/grep-tool.ts`) | BM25+AST+semantic cascade, `graphFilter` |
-| `inspect` | Pi-SmartRead (`src/inspect-tool.ts`) | directory repo-map / file structural-facts+signals |
+| `grep` | Pi-SmartRead (`src/search/grep-tool.ts`) | BM25+AST+semantic cascade, `graphFilter` |
+| `inspect` | Pi-SmartRead (`src/inspect/inspect-tool.ts`) | directory repo-map / file structural-facts+signals |
 | `edit` | Pi-SmartEdit (`src/patch.ts`) | evidence-gated mutation |
 | `write` | Pi host builtin | Pi-SmartEdit listens on `tool_call`/`tool_result`, does not register it |
 
@@ -42,7 +42,7 @@ tool count.**
 > capability. Pi-SmartEdit already runs post-write/edit LSP + compiler + ESLint
 > + structural + fake-logic diagnostics synchronously (`src/index.ts`,
 > `src/lsp/*`, `src/verification/auto-validate.ts`), and Pi-SmartRead already
-> supplies an unclaimed-mutation LSP fallback (`src/post-edit-fallback.ts`).
+> supplies an unclaimed-mutation LSP fallback (`src/runtime/post-edit-fallback.ts`).
 > Verified against source; see oracle decision log in
 > `docs/parity/pi-lens-oracle-decisions.md` §2.
 

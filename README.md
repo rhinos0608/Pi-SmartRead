@@ -63,7 +63,7 @@ Root detection walks up from the file's directory looking for language-specific 
 
 ### Server catalog
 
-`src/language-server-catalog.ts` declares **17 descriptors** (`LANGUAGE_SERVER_CATALOG`). Each descriptor has `id`, `displayName`, `languageIds`, `extensions`, `filenames`, `rootMarkers`, `commandCandidates`, `priority`, and optional `initializationOptions`/`settings`/`expectedCapabilities`.
+`src/language-intelligence/language-server-catalog.ts` declares **17 descriptors** (`LANGUAGE_SERVER_CATALOG`). Each descriptor has `id`, `displayName`, `languageIds`, `extensions`, `filenames`, `rootMarkers`, `commandCandidates`, `priority`, and optional `initializationOptions`/`settings`/`expectedCapabilities`.
 
 `CommandCandidate` fields: `command`, `args`, `platforms?` (e.g. `["win32"]`), `requiredEnv?`, `managedInstall?` (`{ type: "npm", packageName, version, bin }` — exact pinned version). Candidates are filtered by platform/env at resolve time.
 
@@ -95,7 +95,7 @@ Configure via `/lsp install auto` (writes `installMode: "auto"` to `~/.pi/agent/
 
 ### WorkspaceEdit validation
 
-Untrusted LSP output is validated by `validateWorkspaceEdit()` (`src/workspace-edit-validator.ts`) before it leaves Pi-SmartRead:
+Untrusted LSP output is validated by `validateWorkspaceEdit()` (`src/workspace/workspace-edit-validator.ts`) before it leaves Pi-SmartRead:
 
 - Rejects `documentChanges` resource operations (`create`/`rename`/`delete` via `kind`).
 - Requires `fileEdits: Array<{ filePath, edits }>` (non-empty, max 50 files / 5000 edits / 10 MB total `newText`).
@@ -146,7 +146,7 @@ Examples:
 
 ## RPC Provider
 
-Pi-SmartRead exposes language intelligence over the event-bus RPC channel `pi.workspace.language_intelligence.rpc` (`RPC_CHANNELS.languageIntelligence`). Handler: `createLanguageIntelligenceProvider(bus)` in `src/language-intelligence-provider.ts`.
+Pi-SmartRead exposes language intelligence over the event-bus RPC channel `pi.workspace.language_intelligence.rpc` (`RPC_CHANNELS.languageIntelligence`). Handler: `createLanguageIntelligenceProvider(bus)` in `src/language-intelligence/language-intelligence-provider.ts`.
 
 All methods that return edits validate via `validateWorkspaceEdit()` and enforce a 10s budget (`withBudget`).
 
@@ -261,7 +261,7 @@ Pass a file path to get structural facts plus quality signals, plus optional ana
 All signals degrade gracefully — missing git, unsupported language, or parse errors produce partial results with confidence annotations, never hard failures.
 
 ```json
-{ "path": "src/inspect.ts" }
+{ "path": "src/inspect/inspect.ts" }
 ```
 
 ### Migration from v3
@@ -557,7 +557,7 @@ description: "Auth service conventions"
 Pi-SmartRead includes a benchmark suite measuring recall, precision, MRR, and NDCG:
 
 ```bash
-npx vitest run test/unit/retrieval-benchmark.test.ts
+npx vitest run test/unit/read/retrieval-benchmark.test.ts
 ```
 
 ---
@@ -617,7 +617,7 @@ Pi-SmartRead uses **native tree-sitter bindings** (not WASM) for all AST operati
 - Chunked callback parsing for large files
 - Text fallback when AST tags are unavailable
 
-A **WASM grammar loader** (`src/grammar-loader.ts`) provides additional language support via `@vscode/tree-sitter-wasm` for AST-boundary chunking.
+A **WASM grammar loader** (`src/structural/grammar-loader.ts`) provides additional language support via `@vscode/tree-sitter-wasm` for AST-boundary chunking.
 
 ---
 
@@ -646,7 +646,7 @@ If Pi is already running:
 Focused test runs:
 
 ```bash
-npm test -- --run test/unit/tags.test.ts test/unit/repomap-search.test.ts
+npm test -- --run test/unit/structural/tags.test.ts test/unit/repomap/repomap-search.test.ts
 ```
 
 ---

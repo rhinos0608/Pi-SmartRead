@@ -10,13 +10,13 @@ Core tools below are available through the Pi extension API (`src/index.ts`); li
 
 | # | Tool | Category | File | Status | Description |
 |---|------|----------|------|--------|-------------|
-| 1 | **read** | READ | `src/unified-read.ts` → `src/hook.ts` | Stable | Contextual-enriched file reader. Overrides the built-in read. |
-| 2 | **inspect** | READ | `src/inspect-tool.ts` | Stable | Directory → ranked repo map; file → structural facts + quality signals. |
-| 3 | **grep** | READ | `src/grep-tool.ts` | Stable | Primary code search: BM25 + AST symbol + semantic cascade. |
-| 4 | **graph_mutate** | MUTATE | `src/graph-mutate.ts` | Experimental | Records breakage / co-change edges between files/symbols. |
-| 5 | **skill** | SKILL | `src/skill-tool.ts` | Stable | Agent skill discovery: list, search, read SKILL.md files. |
-| 6 | **git_notes_read** | NOTES | `src/git-notes-tool.ts` | Experimental | Reads AI session notes attached to git commits. |
-| 7 | **git_notes_write** | NOTES | `src/git-notes-tool.ts` | Experimental | Writes AI session notes to git commits. |
+| 1 | **read** | READ | `src/read/unified-read.ts` → `src/hook.ts` | Stable | Contextual-enriched file reader. Overrides the built-in read. |
+| 2 | **inspect** | READ | `src/inspect/inspect-tool.ts` | Stable | Directory → ranked repo map; file → structural facts + quality signals. |
+| 3 | **grep** | READ | `src/search/grep-tool.ts` | Stable | Primary code search: BM25 + AST symbol + semantic cascade. |
+| 4 | **graph_mutate** | MUTATE | `src/graph/graph-mutate.ts` | Experimental | Records breakage / co-change edges between files/symbols. |
+| 5 | **skill** | SKILL | `src/runtime/skill-tool.ts` | Stable | Agent skill discovery: list, search, read SKILL.md files. |
+| 6 | **git_notes_read** | NOTES | `src/git/git-notes-tool.ts` | Experimental | Reads AI session notes attached to git commits. |
+| 7 | **git_notes_write** | NOTES | `src/git/git-notes-tool.ts` | Experimental | Writes AI session notes to git commits. |
 
 ### 1.1 Tool Parameters
 
@@ -30,9 +30,9 @@ Core tools below are available through the Pi extension API (`src/index.ts`); li
 - `stopOnError: boolean`
 - `symbol: string` — Resolve qualified name (e.g. `AuthService.login`) to file+line via LSP, then read surrounding code
 
-Behavior: Wraps the built-in read tool. Single-file mode enriches output with imports, git history, graph context, structural context. Query mode uses shared semantic index for ranked retrieval, then reads files. Batch mode uses `src/read-many.ts` for packing. Symbol mode resolves via LSP bridge or ContextGraph fallback, then delegates to single-file path with offset. Emits `details.workspaceEvidence` envelope on every invocation.
+Behavior: Wraps the built-in read tool. Single-file mode enriches output with imports, git history, graph context, structural context. Query mode uses shared semantic index for ranked retrieval, then reads files. Batch mode uses `src/read/read-many.ts` for packing. Symbol mode resolves via LSP bridge or ContextGraph fallback, then delegates to single-file path with offset. Emits `details.workspaceEvidence` envelope on every invocation.
 
-**`inspect`** (`src/inspect-tool.ts:12-21`)
+**`inspect`** (`src/inspect/inspect-tool.ts:12-21`)
 - `path: string` (required) — File or directory path
 - `signals: Array<"complexity" | "public-api" | "reuse" | "recency" | "tests" | "deprecation">` — Optional signal subset
 - `mapTokens: number` — Token budget for directory mode (256–32768, default 4096)
@@ -41,7 +41,7 @@ Behavior: Wraps the built-in read tool. Single-file mode enriches output with im
 
 Behavior: Directory mode returns a ranked repo map (PageRank + import-based). File mode returns structural facts (callers, parent, children, overrides, re-exports) + quality signals via tree-sitter. Publishes evidence envelope. Query/symbol/action legacy params rejected with migration errors.
 
-**`grep`** (`src/grep-tool.ts:27-35`)
+**`grep`** (`src/search/grep-tool.ts:27-35`)
 - `pattern: string` (required, minLength 1)
 - `path: string` — Directory or file to search in
 - `glob: string` — File filter (minimatch)
@@ -51,9 +51,9 @@ Behavior: Directory mode returns a ranked repo map (PageRank + import-based). Fi
 - `contextLines: number` — Lines per match (default 2, max 10)
 - `graphFilter: string` — Filter results by graph relationship (format: `EDGE_TYPE->target`, e.g. `CALLS->auth.login`)
 
-Behavior: Smart cascade: Layer1 BM25 lexical → Layer2 AST symbol → RRF fusion + dedup → optional embedding retry (wider topK) → lexical grep passthrough fallback. Without an embedding index, conceptual wording does not imply semantic equivalence: retrieval is lexical and symbol-based. `literal:true` bypasses cascade. graphFilter post-filters hits via `src/graph-filter.ts` against the ContextGraph edge index. Emits evidence envelope with `coverage: "search-match"` per hit.
+Behavior: Smart cascade: Layer1 BM25 lexical → Layer2 AST symbol → RRF fusion + dedup → optional embedding retry (wider topK) → lexical grep passthrough fallback. Without an embedding index, conceptual wording does not imply semantic equivalence: retrieval is lexical and symbol-based. `literal:true` bypasses cascade. graphFilter post-filters hits via `src/search/graph-filter.ts` against the ContextGraph edge index. Emits evidence envelope with `coverage: "search-match"` per hit.
 
-**`graph_mutate`** (`src/graph-mutate.ts:15-29`)
+**`graph_mutate`** (`src/graph/graph-mutate.ts:15-29`)
 - `from: string` — Modified file/symbol
 - `to: string` — Broken/co-changed file/symbol
 - `relation: "breakage" | "co-change"` — Default "breakage"
@@ -63,7 +63,7 @@ Behavior: Smart cascade: Layer1 BM25 lexical → Layer2 AST symbol → RRF fusio
 
 Behavior: Appends a `MutationEvent` to `EdgeStore` (JSONL log). Used by SmartEdit post-edit pipeline and manual tool calls.
 
-**`skill`** (`src/skill-tool.ts:31-42`)
+**`skill`** (`src/runtime/skill-tool.ts:31-42`)
 - `action: "list" | "search" | "read"` — Defaults by param presence
 - `name: string` — Skill name (case-insensitive, substring)
 - `query: string` — Search text for names/descriptions
@@ -73,11 +73,11 @@ Behavior: Appends a `MutationEvent` to `EdgeStore` (JSONL log). Used by SmartEdi
 
 Behavior: Scans `~/.pi/agent/skills/`, `.pi/skills/`, project `.pi/skills/` for SKILL.md files with YAML frontmatter.
 
-**`git_notes_read`** (`src/git-notes-tool.ts:11-16`)
+**`git_notes_read`** (`src/git/git-notes-tool.ts:11-16`)
 - `commit: string` — Commit hash (default: all branch commits)
 - `directory: string`
 
-**`git_notes_write`** (`src/git-notes-tool.ts:18-24`)
+**`git_notes_write`** (`src/git/git-notes-tool.ts:18-24`)
 - `content: string` (required, max 64000) — Lore-style trailers: Constraint:, Rejected:, Directive:, Confidence:
 - `commit: string` — Default HEAD
 - `directory: string`
@@ -98,16 +98,16 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
    - `tool_call` → feeds doom-loop detector; invalidates FS scan cache for write/edit/graph_mutate mutations.
    - `tool_result` → records context hygiene; injects doom-loop warnings; applies bash context guard; records anchor deltas from edit results; opens/closes LSP documents; suggests grep when upstream grep has low matches.
    - `context` → applies stale context markers before messages reach the model.
-4. **Evidence RPC resolver** (`src/workspace-evidence-resolver.ts`) — installs on `RPC_CHANNELS.inspectPatch`, listens for `pi.tool_result.inspect/read/grep` events, rebuilds in-memory evidence cache.
+4. **Evidence RPC resolver** (`src/evidence/workspace-evidence-resolver.ts`) — installs on `RPC_CHANNELS.inspectPatch`, listens for `pi.tool_result.inspect/read/grep` events, rebuilds in-memory evidence cache.
 
 ### 2.2 Semantic Index
 
-**Files**: `src/semantic-index.ts`, `src/semantic-index-registry.ts`, `src/sqlite-vec-store.ts`, `src/embedding.ts`, `src/persistent-embedding-cache.ts`
+**Files**: `src/indexing/semantic-index.ts`, `src/indexing/semantic-index-registry.ts`, `src/indexing/sqlite-vec-store.ts`, `src/indexing/embedding.ts`, `src/indexing/persistent-embedding-cache.ts`
 
 - **Class**: `SemanticIndex` — startup-warmed, ignore-aware, model-fingerprinted SQLite vector cache.
 - **Storage**: SQLite database at `<root>/.pi-smartread/semantic-index-<fingerprint>.db` + metadata JSON.
 - **Backing**: `SqliteVecStore` — uses `sqlite-vec` extension (vec0 virtual tables or brute-force fallback for environments without extension loading). Supports both Bun and Node.js (better-sqlite3).
-- **Indexing**: Discovers files via `src/file-discovery.ts` (ignore-aware), chunks via `src/chunking.ts` (AST-based), embeds via configurable provider (OpenAI-compatible API).
+- **Indexing**: Discovers files via `src/file-discovery.ts` (ignore-aware), chunks via `src/structural/chunking.ts` (AST-based), embeds via configurable provider (OpenAI-compatible API).
 - **Search**: BM25 lexical + cosine similarity embedding scores → RRF fusion (k=60).
 - **Persistence**: SQLite DB + metadata JSON survive across sessions. Model fingerprint invalidates stale data.
 - **Defaults**: Max 2000 files, 2MB per file, configurable chunk size/overlap.
@@ -118,14 +118,14 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
 
 ### 2.3 Context Graph & Edge Store
 
-**Files**: `src/context-graph.ts`, `src/graph-mutate.ts`, `src/graph-protocol.ts`, `src/graphify-enricher.ts`, `src/git-context.ts`
+**Files**: `src/context-graph.ts`, `src/graph/graph-mutate.ts`, `src/protocols/graph-protocol.ts`, `src/graph/graphify-enricher.ts`, `src/git/git-context.ts`
 
 **ContextGraph class** (`src/context-graph.ts:90-634`):
 - Builds symbol index (name → tags), file index (file → tags), call graph, mutation edges.
 - **Neighbor types**: imports (direct import resolution), symbols (tree-sitter defs for refs used in file), calls (from call graph), mutations (breakage/co-change from EdgeStore).
 - **Memory caps**: 20,000 symbol index entries, 5,000 file index entries, 50,000 provenances, 10,000 mutation edges.
-- **Incremental**: Uses `src/incremental-index.ts` (Merkle-tree, SHA-256 content hashing) to skip unchanged files.
-- **Git auto-population**: On first build with no edges, extracts co-commit pairs from git history via `src/git-context.ts`.
+- **Incremental**: Uses `src/indexing/incremental-index.ts` (Merkle-tree, SHA-256 content hashing) to skip unchanged files.
+- **Git auto-population**: On first build with no edges, extracts co-commit pairs from git history via `src/git/git-context.ts`.
 
 **EdgeStore** (`src/context-graph.ts:697-894`):
 - Event-sourced JSONL log at `<root>/.pi-smartread/graph-mutations.jsonl`.
@@ -134,14 +134,14 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
 - `toProvenances()` deduplicates by (from, to, type) keeping highest confidence.
 - Consumed by `ContextGraph.loadMutationEdges()` → indexed for O(1) neighbor lookups.
 
-**Graphify enricher** (`src/graphify-enricher.ts`):
+**Graphify enricher** (`src/graph/graphify-enricher.ts`):
 - Reads external `graphify-out/graph.json` (NetworkX node-link format) for knowledge graph data.
 - Enriches intent-read (graph neighbor expansion + centrality), search (boost central nodes), repo_map, read hook.
 - Graceful degradation when graph.json absent.
 
 ### 2.4 File Read Cache
 
-**File**: `src/file-read-cache.ts`
+**File**: `src/read/file-read-cache.ts`
 
 - Per-session `FileSnapshot` (Map<lineNumber, content>) for anchor-stale recovery.
 - **Keyed by session ID**. Stores what the model sees from read/search tools.
@@ -152,9 +152,9 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
 
 ### 2.5 Workspace Evidence System
 
-**Files**: `src/workspace-evidence-resolver.ts`, `src/inspect-tool.ts`, `src/grep-tool.ts`, `src/hook.ts`
+**Files**: `src/evidence/workspace-evidence-resolver.ts`, `src/inspect/inspect-tool.ts`, `src/search/grep-tool.ts`, `src/hook.ts`
 
-**EvidenceResolver** (`src/workspace-evidence-resolver.ts`):
+**EvidenceResolver** (`src/evidence/workspace-evidence-resolver.ts`):
 - In-memory cache of `WorkspaceEvidenceEnvelope` objects (max 200).
 - Rebuilt from `tool_result` events on the event bus (inspect, read, grep).
 - **RPC endpoint**: `resolve_evidence` on `RPC_CHANNELS.inspectPatch` — SmartEdit queries this to authorize edits.
@@ -182,24 +182,24 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
 
 ### 2.6 Repo Map / Inspect Modes
 
-**Files**: `src/repomap.ts` (barrel), `src/repomap-pipeline.ts`, `src/repomap-ranking.ts`, `src/repomap-render.ts`, `src/repomap-tool.ts`, `src/inspect.ts`, `src/inspect-tool.ts`
+**Files**: `src/repomap.ts` (barrel), `src/repomap/repomap-pipeline.ts`, `src/repomap/repomap-ranking.ts`, `src/repomap/repomap-render.ts`, `src/repomap/repomap-tool.ts`, `src/inspect/inspect.ts`, `src/inspect/inspect-tool.ts`
 
-**RepoMap** (`src/repomap-pipeline.ts`):
+**RepoMap** (`src/repomap/repomap-pipeline.ts`):
 - Aider-style repository mapping.
-- **Ranking**: PageRank + import-based edge weighting (from `src/repomap-ranking.ts`).
-- **Rendering**: Token-budgeted, tree-context output (from `src/repomap-render.ts`).
+- **Ranking**: PageRank + import-based edge weighting (from `src/repomap/repomap-ranking.ts`).
+- **Rendering**: Token-budgeted, tree-context output (from `src/repomap/repomap-render.ts`).
 - **Modes**: compact (startup injection), full (explicit tool call).
 - **Search**: `searchIdentifiers()` — finds and ranks identifiers in the repo.
 - **Fallback**: LSP document symbols, regex-based definition patterns.
 
-**Inspect V4** (`src/inspect.ts` + `src/inspect-tool.ts`):
+**Inspect V4** (`src/inspect/inspect.ts` + `src/inspect/inspect-tool.ts`):
 - Directory mode: `executeInspectV4` → ranked repo map via `RepomapTool` → workspace evidence envelope (mode: "map", zero resources).
-- File mode: `executeInspectV4` → structural facts via `src/structural-facts.ts` + quality signals → envelope (mode: "symbol", weak evidence).
+- File mode: `executeInspectV4` → structural facts via `src/structural/structural-facts.ts` + quality signals → envelope (mode: "symbol", weak evidence).
 - Legacy params (query, symbol, action) rejected with migration errors.
 
 ### 2.7 Call Graph Analysis
 
-**File**: `src/callgraph.ts`
+**File**: `src/structural/callgraph.ts`
 
 - Tree-sitter AST extraction of function-call relationships.
 - **Languages**: TypeScript, TSX, JavaScript, Python, Go, Rust.
@@ -209,16 +209,16 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
 
 ### 2.8 Structural Facts
 
-**File**: `src/structural-facts.ts` (1135 lines)
+**File**: `src/structural/structural-facts.ts` (1135 lines)
 
 - Tree-sitter-based extraction for TS/TSX/JS/Python.
 - **Facts**: callers, parent class, children, base classes, overrides, re-exports.
-- **Types**: `StructuralFacts`, `CallerInfo`, `ChildSymbol`, `ParentInfo`, `OverrideInfo`, `ReExportInfo` (from `src/structural-facts-types.ts`).
+- **Types**: `StructuralFacts`, `CallerInfo`, `ChildSymbol`, `ParentInfo`, `OverrideInfo`, `ReExportInfo` (from `src/structural/structural-facts-types.ts`).
 - **Used by**: Inspect file mode.
 
 ### 2.9 LSP Bridge
 
-**File**: `src/lsp-bridge.ts` (874 lines)
+**File**: `src/lsp/lsp-bridge.ts` (874 lines)
 
 - Minimal JSON-RPC LSP client spawning standard language servers over stdio.
 - **Capabilities**: `goToDefinition`, `findReferences`, `getDocumentSymbols`, `goToImplementation`, `workspace/symbol`, `hover`.
@@ -228,40 +228,40 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
 
 ### 2.10 Retrieval Pipeline
 
-**Files**: `src/intent-read.ts`, `src/query-retrieval.ts`, `src/query-probe.ts`, `src/rerank.ts`, `src/hyde.ts`, `src/scoring.ts`
+**Files**: `src/read/intent-read.ts`, `src/read/query-retrieval.ts`, `src/search/query-probe.ts`, `src/ranking/rerank.ts`, `src/search/hyde.ts`, `src/scoring.ts`
 
-**Query retrieval** (`src/query-retrieval.ts`):
+**Query retrieval** (`src/read/query-retrieval.ts`):
 - Used by `read { query: "..." }` mode.
 - BM25 + embedding RRF ranking → file selection → read through single-read evidence path.
 
-**Intent-read** (`src/intent-read.ts`, 1035 lines):
+**Intent-read** (`src/read/intent-read.ts`, 1035 lines):
 - Full retrieval pipeline: BM25 scoring, embedding similarity, context graph neighbor expansion, graphify enrichment, HyDE expansion, reranking, query probing, confidence classification.
 - **Phases**: query embedding → BM25 scores → RRF fusion → graph neighbor expansion → graphify centrality boost → HyDE expansion → structural reranking → probe confidence → final ranking.
 
-**Structural reranker** (`src/rerank.ts`, 815 lines):
+**Structural reranker** (`src/ranking/rerank.ts`, 815 lines):
 - Reorders RRF candidates using: graph distance, PageRank, path proximity, probe confidence, temporal score (git co-commit correlation).
 
-**HyDE** (`src/hyde.ts`, 233 lines):
+**HyDE** (`src/search/hyde.ts`, 233 lines):
 - Template-based hypothetical document expansion (no LLM required).
 - Extracts code-like identifiers, generates synthetic code doc, falls back to raw query.
 
 ### 2.11 Context Hygiene & Doom Loop
 
-**Files**: `src/context-hygiene.ts`, `src/context-application.ts`, `src/doom-loop.ts`
+**Files**: `src/runtime/context-hygiene.ts`, `src/runtime/context-application.ts`, `src/runtime/doom-loop.ts`
 
-**Context hygiene** (`src/context-hygiene.ts`, 632 lines):
+**Context hygiene** (`src/runtime/context-hygiene.ts`, 632 lines):
 - Tracks all tool results, classifies as: read-context, search-context, command-output, mutation.
 - When mutation occurs (edit/write/graph_mutate), prior results referencing mutated files marked stale.
 - `context-application.ts` replaces stale messages with placeholders in the context window before model sees them.
 - **Anchor hygiene**: Tracks edit delta events (shifted/deleted/changed lines) for churn detection.
 
-**Doom loop detection** (`src/doom-loop.ts`, 530 lines):
+**Doom loop detection** (`src/runtime/doom-loop.ts`, 530 lines):
 - Detects: identical-tail repeats, alternating subsequences, content chanting, action stagnation, read-file loops, global duplicates.
 - Injects warning prefix into tool result text for self-correction.
 
 ### 2.12 Bash Context Guard
 
-**File**: `src/bash-context-guard.ts` (359 lines)
+**File**: `src/runtime/bash-context-guard.ts` (359 lines)
 
 - Caps oversized bash output: writes full to temp file, shows head/tail preview.
 - **Per-tool profiles**: Different maxLines/maxBytes/headLines/tailLines for bash vs SmartRead tools.
@@ -271,51 +271,51 @@ Both: Uses `refs/notes/pi-smartread` (with compat `refs/notes/lore`).
 
 | Subsystem | File | Description |
 |-----------|------|-------------|
-| **Microagents** | `src/microagents.ts` | Scans `.pi-smartread/microagents/` and `.openhands/microagents/` for Markdown files with YAML frontmatter triggers. Session-cached. Always-loaded agents injected into system prompt. |
-| **Internal URL Router** | `src/internal-url-router.ts` | `skill://`, `memory://`, `graph://` URL schemes. Transparent resolution in read tool. |
-| **Memory Protocol** | `src/memory-protocol.ts` | `memory://<query>` handler. Searches agentmemory via MCP gateway. Falls back to placeholder when gateway unavailable. |
-| **Workspace Boundary** | `src/workspace-boundary.ts` | Canonical path resolution, allowed root validation (`PI_SMARTREAD_ALLOWED_ROOT` env). Kind-aware (file/directory/path). |
-| **Workspace Scope** | `src/workspace-scope.ts` | Project root detection via marker files (package.json, go.mod, Cargo.toml, etc.). |
-| **Near-Clone Detection** | `src/near-clone.ts` | MinHash + LSH for near-duplicate file detection. Jaccard similarity scoring. |
-| **ADR Store** | `src/adr-store.ts` | Architecture Decision Records. Markdown-based storage at `.pi-smartread/adrs/`. Status: proposed/accepted/superseded/rejected. |
-| **Code Summary** | `src/code-summary.ts` | Structural summaries via tree-sitter. Elides function/class bodies, comments, imports for compact output. |
+| **Microagents** | `src/runtime/microagents.ts` | Scans `.pi-smartread/microagents/` and `.openhands/microagents/` for Markdown files with YAML frontmatter triggers. Session-cached. Always-loaded agents injected into system prompt. |
+| **Internal URL Router** | `src/protocols/internal-url-router.ts` | `skill://`, `memory://`, `graph://` URL schemes. Transparent resolution in read tool. |
+| **Memory Protocol** | `src/protocols/memory-protocol.ts` | `memory://<query>` handler. Searches agentmemory via MCP gateway. Falls back to placeholder when gateway unavailable. |
+| **Workspace Boundary** | `src/workspace/workspace-boundary.ts` | Canonical path resolution, allowed root validation (`PI_SMARTREAD_ALLOWED_ROOT` env). Kind-aware (file/directory/path). |
+| **Workspace Scope** | `src/workspace/workspace-scope.ts` | Project root detection via marker files (package.json, go.mod, Cargo.toml, etc.). |
+| **Near-Clone Detection** | `src/ranking/near-clone.ts` | MinHash + LSH for near-duplicate file detection. Jaccard similarity scoring. |
+| **ADR Store** | `src/repository/adr-store.ts` | Architecture Decision Records. Markdown-based storage at `.pi-smartread/adrs/`. Status: proposed/accepted/superseded/rejected. |
+| **Code Summary** | `src/structural/code-summary.ts` | Structural summaries via tree-sitter. Elides function/class bodies, comments, imports for compact output. |
 | **File Discovery** | `src/file-discovery.ts` | Ignore-aware file scanning (gitignore patterns). |
-| **Tags** | `src/tags.ts` | Tree-sitter tag extraction (defs + refs) with disk cache. |
-| **Symbol Resolver** | `src/symbol-resolver.ts` | Import-aware symbol resolution with LSP fallback. |
-| **Tool Guidance** | `src/tool-guidance.ts` | SmartRead tool guide rendered into system prompt. |
-| **Resource Diagnostics** | `src/resource-diagnostics.ts` | Resource usage tracking for diagnostic output. |
-| **FS Scan Cache** | `src/fs-scan-cache.ts` | Filesystem scan cache, invalidated on mutations. |
-| **Hashline** | `src/hashline.ts` | Line-content hashing for stable anchors in edits. |
-| **Tree Context** | `src/tree-context.ts` | Tree-based context rendering for repo maps. |
-| **Deep Search** | `src/deep-search.ts` + modules | Multi-channel deep search (graph, LSP, semantic, structural, symbol). |
-| **Monorepo Detector** | `src/monorepo-detector.ts` | Detects monorepo structures. |
-| **Persistent Embedding Cache** | `src/persistent-embedding-cache.ts` | Disk-based embedding cache (`.pi-smartread.embeddings.cache/`). |
-| **Incremental Index** | `src/incremental-index.ts` | Merkle-tree content-addressable file change detection. Persistent at `.pi-smartread/file-hashes.json`. |
-| **Index Coverage** | `src/index-coverage.ts` | Tracks indexing coverage stats. |
-| **Index Snapshot** | `src/index-snapshot.ts` | Source hash snapshots for change detection. |
-| **Index Lock** | `src/index-lock.ts` | File-based locking for concurrent index operations. |
+| **Tags** | `src/structural/tags.ts` | Tree-sitter tag extraction (defs + refs) with disk cache. |
+| **Symbol Resolver** | `src/structural/symbol-resolver.ts` | Import-aware symbol resolution with LSP fallback. |
+| **Tool Guidance** | `src/runtime/tool-guidance.ts` | SmartRead tool guide rendered into system prompt. |
+| **Resource Diagnostics** | `src/runtime/resource-diagnostics.ts` | Resource usage tracking for diagnostic output. |
+| **FS Scan Cache** | `src/workspace/fs-scan-cache.ts` | Filesystem scan cache, invalidated on mutations. |
+| **Hashline** | `src/read/hashline.ts` | Line-content hashing for stable anchors in edits. |
+| **Tree Context** | `src/structural/tree-context.ts` | Tree-based context rendering for repo maps. |
+| **Deep Search** | `src/search/deep-search.ts` + modules | Multi-channel deep search (graph, LSP, semantic, structural, symbol). |
+| **Monorepo Detector** | `src/workspace/monorepo-detector.ts` | Detects monorepo structures. |
+| **Persistent Embedding Cache** | `src/indexing/persistent-embedding-cache.ts` | Disk-based embedding cache (`.pi-smartread.embeddings.cache/`). |
+| **Incremental Index** | `src/indexing/incremental-index.ts` | Merkle-tree content-addressable file change detection. Persistent at `.pi-smartread/file-hashes.json`. |
+| **Index Coverage** | `src/indexing/index-coverage.ts` | Tracks indexing coverage stats. |
+| **Index Snapshot** | `src/indexing/index-snapshot.ts` | Source hash snapshots for change detection. |
+| **Index Lock** | `src/indexing/index-lock.ts` | File-based locking for concurrent index operations. |
 | **Adaptive Concurrency** | `src/adaptive-concurrency.ts` | Dynamically adjusts parallelism based on file count and operation type. |
 | **Config** | `src/config.ts` | Reads `.pi-smartread.json` for embedding, search, git context, experimental feature flags. |
 | **MCP Server** | `src/mcp-server.ts` | Standalone MCP stdio server. |
-| **MCP Resources** | `src/mcp-resources.ts` | MCP resource endpoints. |
-| **MCP Prompts** | `src/mcp-prompts.ts` | MCP prompt templates. |
-| **Cache** | `src/cache.ts` | Generic TagsCache with disk persistence. |
-| **Query Probe** | `src/query-probe.ts` | Symbol-based query probing for confidence estimation. |
-| **Classifiers** | `src/classifiers.ts` | Confidence/relevance classification for retrieval results. |
-| **PageRank** | `src/pagerank.ts` | PageRank implementation for repo map ranking. |
-| **Chunking** | `src/chunking.ts` | AST-based code chunking for semantic index. |
-| **AST Chunker** | `src/ast-chunker.ts` | Tree-sitter-based code chunking. |
+| **MCP Resources** | `src/mcp/mcp-resources.ts` | MCP resource endpoints. |
+| **MCP Prompts** | `src/mcp/mcp-prompts.ts` | MCP prompt templates. |
+| **Cache** | `src/structural/cache.ts` | Generic TagsCache with disk persistence. |
+| **Query Probe** | `src/search/query-probe.ts` | Symbol-based query probing for confidence estimation. |
+| **Classifiers** | `src/ranking/classifiers.ts` | Confidence/relevance classification for retrieval results. |
+| **PageRank** | `src/ranking/pagerank.ts` | PageRank implementation for repo map ranking. |
+| **Chunking** | `src/structural/chunking.ts` | AST-based code chunking for semantic index. |
+| **AST Chunker** | `src/structural/ast-chunker.ts` | Tree-sitter-based code chunking. |
 | **Scoring** | `src/scoring.ts` | BM25 scoring, RRF computation, tokenization. |
 | **Languages** | `src/languages.ts` | Language detection from file extensions. |
-| **Git Context** | `src/git-context.ts` | Git log, branch detection, co-commit pair extraction. |
-| **Git History** | `src/git-history.ts` | Git history queries. |
-| **Path Evidence** | `src/path-evidence.ts` | Per-file content hashing for path-mode evidence. |
-| **Skill Protocol** | `src/skill-protocol.ts` | Skill URL handler registration. |
-| **Signals** | `src/signals.ts` / `src/signals-types.ts` | Quality signal computation. |
-| **File Context** | `src/file-context.ts` | Context lines for read enrichment. |
-| **Doom Loop Suggestions** | `src/doom-loop-suggestions.ts` | Suggested actions for doom loop recovery. |
+| **Git Context** | `src/git/git-context.ts` | Git log, branch detection, co-commit pair extraction. |
+| **Git History** | `src/git/git-history.ts` | Git history queries. |
+| **Path Evidence** | `src/evidence/path-evidence.ts` | Per-file content hashing for path-mode evidence. |
+| **Skill Protocol** | `src/protocols/skill-protocol.ts` | Skill URL handler registration. |
+| **Signals** | `src/structural/signals.ts` / `src/structural/signals-types.ts` | Quality signal computation. |
+| **File Context** | `src/read/file-context.ts` | Context lines for read enrichment. |
+| **Doom Loop Suggestions** | `src/runtime/doom-loop-suggestions.ts` | Suggested actions for doom loop recovery. |
 | **Dump** | `src/dump.ts` | Debug dump utilities. |
-| **Search Replace** | `src/search-replace.ts` | Search-and-replace utilities. |
+| **Search Replace** | `src/structural/search-replace.ts` | Search-and-replace utilities. |
 
 ---
 
@@ -469,80 +469,80 @@ Key files referenced in this document:
 | `src/mcp-registry.ts` | 201 | Tool registry + MCP server tool list builder |
 | `src/tool-registry.ts` | 87 | Singleton tool registry with categories |
 | `src/hook.ts` | 800+ | Read tool wrapper with enrichment + startup hooks |
-| `src/unified-read.ts` | 13 | Read tool factory (delegates to hook.ts) |
-| `src/inspect-tool.ts` | 134 | Inspect tool v4 (directory/file modes) |
-| `src/grep-tool.ts` | 491 | Wrapped grep with BM25+symbol+semantic cascade |
-| `src/graph-mutate.ts` | 80 | Graph mutation tool |
-| `src/skill-tool.ts` | 356 | Skill discovery tool |
-| `src/git-notes-tool.ts` | 167 | Git notes read/write tools |
+| `src/read/unified-read.ts` | 13 | Read tool factory (delegates to hook.ts) |
+| `src/inspect/inspect-tool.ts` | 134 | Inspect tool v4 (directory/file modes) |
+| `src/search/grep-tool.ts` | 491 | Wrapped grep with BM25+symbol+semantic cascade |
+| `src/graph/graph-mutate.ts` | 80 | Graph mutation tool |
+| `src/runtime/skill-tool.ts` | 356 | Skill discovery tool |
+| `src/git/git-notes-tool.ts` | 167 | Git notes read/write tools |
 | `src/context-graph.ts` | 894 | ContextGraph class + EdgeStore |
-| `src/semantic-index.ts` | 502 | SemanticIndex class (SQLite vector cache) |
-| `src/semantic-index-registry.ts` | 62 | Index lifecycle management |
-| `src/sqlite-vec-store.ts` | 549 | SQLite-vec wrapper |
-| `src/workspace-evidence-resolver.ts` | 230+ | Evidence RPC resolver |
-| `src/file-read-cache.ts` | 276 | Per-session file snapshots |
-| `src/intent-read.ts` | 1035 | Full retrieval pipeline |
-| `src/query-retrieval.ts` | — | Query-based file retrieval |
-| `src/callgraph.ts` | 443 | Call graph extraction via tree-sitter |
-| `src/structural-facts.ts` | 1135 | Structural facts extraction |
-| `src/structural-facts-types.ts` | — | Structural facts type definitions |
+| `src/indexing/semantic-index.ts` | 502 | SemanticIndex class (SQLite vector cache) |
+| `src/indexing/semantic-index-registry.ts` | 62 | Index lifecycle management |
+| `src/indexing/sqlite-vec-store.ts` | 549 | SQLite-vec wrapper |
+| `src/evidence/workspace-evidence-resolver.ts` | 230+ | Evidence RPC resolver |
+| `src/read/file-read-cache.ts` | 276 | Per-session file snapshots |
+| `src/read/intent-read.ts` | 1035 | Full retrieval pipeline |
+| `src/read/query-retrieval.ts` | — | Query-based file retrieval |
+| `src/structural/callgraph.ts` | 443 | Call graph extraction via tree-sitter |
+| `src/structural/structural-facts.ts` | 1135 | Structural facts extraction |
+| `src/structural/structural-facts-types.ts` | — | Structural facts type definitions |
 | `src/repomap.ts` | 36 | RepoMap barrel (re-exports pipeline/ranking/render) |
-| `src/repomap-pipeline.ts` | — | RepoMap class orchestration |
-| `src/repomap-ranking.ts` | — | PageRank + import-based ranking |
-| `src/repomap-render.ts` | — | Token-budgeted rendering |
-| `src/inspect.ts` | — | Inspect V4 execution logic |
-| `src/lsp-bridge.ts` | 874 | LSP client for symbol queries |
-| `src/graphify-enricher.ts` | 1259 | External knowledge graph enricher |
-| `src/hyde.ts` | 233 | HyDE query expansion |
-| `src/rerank.ts` | 815 | Structural reranker |
+| `src/repomap/repomap-pipeline.ts` | — | RepoMap class orchestration |
+| `src/repomap/repomap-ranking.ts` | — | PageRank + import-based ranking |
+| `src/repomap/repomap-render.ts` | — | Token-budgeted rendering |
+| `src/inspect/inspect.ts` | — | Inspect V4 execution logic |
+| `src/lsp/lsp-bridge.ts` | 874 | LSP client for symbol queries |
+| `src/graph/graphify-enricher.ts` | 1259 | External knowledge graph enricher |
+| `src/search/hyde.ts` | 233 | HyDE query expansion |
+| `src/ranking/rerank.ts` | 815 | Structural reranker |
 | `src/scoring.ts` | — | BM25 + RRF scoring |
-| `src/chunking.ts` | — | AST-based code chunking |
-| `src/query-probe.ts` | — | Symbol-based query probing |
-| `src/classifiers.ts` | — | Confidence/relevance classifiers |
-| `src/context-hygiene.ts` | 632 | Stale context tracking |
-| `src/context-application.ts` | 121 | Stale context replacement |
-| `src/doom-loop.ts` | 530 | Doom loop detection |
-| `src/bash-context-guard.ts` | 359 | Bash output capping |
+| `src/structural/chunking.ts` | — | AST-based code chunking |
+| `src/search/query-probe.ts` | — | Symbol-based query probing |
+| `src/ranking/classifiers.ts` | — | Confidence/relevance classifiers |
+| `src/runtime/context-hygiene.ts` | 632 | Stale context tracking |
+| `src/runtime/context-application.ts` | 121 | Stale context replacement |
+| `src/runtime/doom-loop.ts` | 530 | Doom loop detection |
+| `src/runtime/bash-context-guard.ts` | 359 | Bash output capping |
 | `src/config.ts` | 335 | Configuration loading |
-| `src/microagents.ts` | 274 | Microagent system |
-| `src/internal-url-router.ts` | 71 | Internal URL scheme router |
-| `src/memory-protocol.ts` | 75 | memory:// handler |
-| `src/workspace-boundary.ts` | 84 | Workspace boundary enforcement |
-| `src/workspace-scope.ts` | 38 | Project root detection |
-| `src/file-read-cache.ts` | 276 | Per-session file snapshots |
-| `src/near-clone.ts` | 129 | MinHash near-clone detection |
-| `src/adr-store.ts` | 99 | ADR storage |
-| `src/code-summary.ts` | 558 | Structural code summaries |
-| `src/persistent-embedding-cache.ts` | 233 | Disk-based embedding cache |
-| `src/incremental-index.ts` | 664 | Merkle-tree incremental indexing |
-| `src/pagerank.ts` | — | PageRank implementation |
-| `src/git-context.ts` | — | Git log + co-commit analysis |
-| `src/git-notes.ts` | 141 | Git notes read/write |
-| `src/symbol-resolver.ts` | — | Import-aware symbol resolution |
-| `src/tags.ts` | — | Tree-sitter tag extraction |
+| `src/runtime/microagents.ts` | 274 | Microagent system |
+| `src/protocols/internal-url-router.ts` | 71 | Internal URL scheme router |
+| `src/protocols/memory-protocol.ts` | 75 | memory:// handler |
+| `src/workspace/workspace-boundary.ts` | 84 | Workspace boundary enforcement |
+| `src/workspace/workspace-scope.ts` | 38 | Project root detection |
+| `src/read/file-read-cache.ts` | 276 | Per-session file snapshots |
+| `src/ranking/near-clone.ts` | 129 | MinHash near-clone detection |
+| `src/repository/adr-store.ts` | 99 | ADR storage |
+| `src/structural/code-summary.ts` | 558 | Structural code summaries |
+| `src/indexing/persistent-embedding-cache.ts` | 233 | Disk-based embedding cache |
+| `src/indexing/incremental-index.ts` | 664 | Merkle-tree incremental indexing |
+| `src/ranking/pagerank.ts` | — | PageRank implementation |
+| `src/git/git-context.ts` | — | Git log + co-commit analysis |
+| `src/git/git-notes.ts` | 141 | Git notes read/write |
+| `src/structural/symbol-resolver.ts` | — | Import-aware symbol resolution |
+| `src/structural/tags.ts` | — | Tree-sitter tag extraction |
 | `src/file-discovery.ts` | — | Ignore-aware file scanning |
-| `src/tool-guidance.ts` | — | Tool guide rendering |
-| `src/resource-diagnostics.ts` | — | Resource usage diagnostics |
-| `src/fs-scan-cache.ts` | — | Filesystem scan cache |
-| `src/hashline.ts` | — | Line-content hashing |
-| `src/tree-context.ts` | — | Tree-based context rendering |
-| `src/deep-search.ts` | — | Multi-channel deep search |
-| `src/monorepo-detector.ts` | — | Monorepo detection |
+| `src/runtime/tool-guidance.ts` | — | Tool guide rendering |
+| `src/runtime/resource-diagnostics.ts` | — | Resource usage diagnostics |
+| `src/workspace/fs-scan-cache.ts` | — | Filesystem scan cache |
+| `src/read/hashline.ts` | — | Line-content hashing |
+| `src/structural/tree-context.ts` | — | Tree-based context rendering |
+| `src/search/deep-search.ts` | — | Multi-channel deep search |
+| `src/workspace/monorepo-detector.ts` | — | Monorepo detection |
 | `src/adaptive-concurrency.ts` | — | Dynamic parallelism |
-| `src/index-lock.ts` | — | File-based index locking |
-| `src/index-coverage.ts` | — | Indexing coverage tracking |
-| `src/index-snapshot.ts` | — | Source hash snapshots |
-| `src/path-evidence.ts` | — | Per-file content hashing |
-| `src/skill-protocol.ts` | — | Skill URL handler |
-| `src/signals.ts` | — | Quality signal computation |
-| `src/file-context.ts` | — | Read enrichment context |
-| `src/doom-loop-suggestions.ts` | — | Doom loop recovery suggestions |
+| `src/indexing/index-lock.ts` | — | File-based index locking |
+| `src/indexing/index-coverage.ts` | — | Indexing coverage tracking |
+| `src/indexing/index-snapshot.ts` | — | Source hash snapshots |
+| `src/evidence/path-evidence.ts` | — | Per-file content hashing |
+| `src/protocols/skill-protocol.ts` | — | Skill URL handler |
+| `src/structural/signals.ts` | — | Quality signal computation |
+| `src/read/file-context.ts` | — | Read enrichment context |
+| `src/runtime/doom-loop-suggestions.ts` | — | Doom loop recovery suggestions |
 | `src/dump.ts` | — | Debug dump utilities |
-| `src/search-replace.ts` | — | Search-and-replace utilities |
+| `src/structural/search-replace.ts` | — | Search-and-replace utilities |
 | `src/mcp-server.ts` | — | MCP stdio server |
-| `src/mcp-resources.ts` | — | MCP resource endpoints |
-| `src/mcp-prompts.ts` | — | MCP prompt templates |
-| `src/cache.ts` | — | Generic TagsCache with disk persistence |
+| `src/mcp/mcp-resources.ts` | — | MCP resource endpoints |
+| `src/mcp/mcp-prompts.ts` | — | MCP prompt templates |
+| `src/structural/cache.ts` | — | Generic TagsCache with disk persistence |
 | `src/languages.ts` | — | Language detection |
 | `src/utils.ts` | — | Shared utilities (LruCache, hashline, etc.) |
 | `src/types.ts` | — | ToolDefinition conversion helpers |

@@ -24,11 +24,11 @@ Pi-SmartRead has building blocks: `structural-facts.ts` (AST extraction), `signa
 
 | inspect param | New module | Behavior |
 |---|---|---|
-| `routes` (boolean) | `src/route-extraction.ts` | AST pattern-match for Express (`app.get/post/...`), Fastify (`fastify.get/...`), Next.js (`export default function handler`/route.ts exports), tRPC router definitions. Returns `[{ method, path, file, line, handler }]`. |
-| `tests` (already exists in `signals` param, but shallow) | Extended `src/signals.ts` | `signals: ["tests"]` now also does file-name matching (`.test.ts` ↔ `.ts`) + call graph overlap. Returns `[{ sourceFile, testFile, coverage: "direct"\|"indirect" }]`. |
-| `clusters` (boolean) | `src/community-detection.ts` | Louvain algorithm on import graph (from ContextGraph). Returns partition map: `{clusterId → [filePaths]}` with modularity score. Directory mode only. |
-| `layers` (boolean) | `src/layer-analysis.ts` | Derives layers from import patterns + naming conventions: controller/handler → service → repository/model/dao. Returns `{layer → [filePaths]}`. Directory mode only. |
-| `boundaries` (boolean) | Extended `src/monorepo-detector.ts` | Detects service boundaries from package.json workspaces, docker-compose.yml, nx.json, turbo.json. Returns `[{name, rootPath, dependencies}]`. Directory mode only. |
+| `routes` (boolean) | `src/inspect/route-extraction.ts` | AST pattern-match for Express (`app.get/post/...`), Fastify (`fastify.get/...`), Next.js (`export default function handler`/route.ts exports), tRPC router definitions. Returns `[{ method, path, file, line, handler }]`. |
+| `tests` (already exists in `signals` param, but shallow) | Extended `src/structural/signals.ts` | `signals: ["tests"]` now also does file-name matching (`.test.ts` ↔ `.ts`) + call graph overlap. Returns `[{ sourceFile, testFile, coverage: "direct"\|"indirect" }]`. |
+| `clusters` (boolean) | `src/graph/community-detection.ts` | Louvain algorithm on import graph (from ContextGraph). Returns partition map: `{clusterId → [filePaths]}` with modularity score. Directory mode only. |
+| `layers` (boolean) | `src/inspect/layer-analysis.ts` | Derives layers from import patterns + naming conventions: controller/handler → service → repository/model/dao. Returns `{layer → [filePaths]}`. Directory mode only. |
+| `boundaries` (boolean) | Extended `src/workspace/monorepo-detector.ts` | Detects service boundaries from package.json workspaces, docker-compose.yml, nx.json, turbo.json. Returns `[{name, rootPath, dependencies}]`. Directory mode only. |
 | `hotspots` (boolean) | Uses existing `callgraph.ts` fan-in data | Top-N functions by caller count. Returns `[{name, file, line, fanIn}]`. File and directory mode. |
 
 ### Integration with inspect

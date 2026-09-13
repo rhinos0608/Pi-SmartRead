@@ -14,7 +14,7 @@
 **New TypeBox schemas:**
 
 ```typescript
-// Added to InspectV4Schema in src/inspect-tool.ts
+// Added to InspectV4Schema in src/inspect/inspect-tool.ts
 callDepth: Type.Optional(Type.Number({
   minimum: 1, maximum: 5,
   description: "BFS call graph traversal depth (1-5, default 1). File mode."
@@ -402,24 +402,24 @@ New dependency-free compute modules (no import cycles):
 
 | Module | Purpose | Inputs | Output |
 |---|---|---|---|
-| `src/file-watcher.ts` | FS change detection | root path | dirty cache invalidation events |
-| `src/impact-analysis.ts` | Blast radius + risk compute | ContextGraph, CallGraphResult, file path | ImpactResult |
-| `src/community-detection.ts` | Louvain clustering | import edges from ContextGraph | ClusterResult |
-| `src/route-extraction.ts` | HTTP route pattern matching | file path + AST | RouteInfo[] |
-| `src/layer-analysis.ts` | Layer derivation | import edges + naming conventions | LayerMap |
-| `src/graph-filter.ts` | `grep { graphFilter }` edge-based filtering | ContextGraph, grep hits, filter string | FilteredGrepHit[] |
+| `src/runtime/file-watcher.ts` | FS change detection | root path | dirty cache invalidation events |
+| `src/inspect/impact-analysis.ts` | Blast radius + risk compute | ContextGraph, CallGraphResult, file path | ImpactResult |
+| `src/graph/community-detection.ts` | Louvain clustering | import edges from ContextGraph | ClusterResult |
+| `src/inspect/route-extraction.ts` | HTTP route pattern matching | file path + AST | RouteInfo[] |
+| `src/inspect/layer-analysis.ts` | Layer derivation | import edges + naming conventions | LayerMap |
+| `src/search/graph-filter.ts` | `grep { graphFilter }` edge-based filtering | ContextGraph, grep hits, filter string | FilteredGrepHit[] |
 
 Modified modules:
 
 | Module | Changes |
 |---|---|
-| `src/inspect-tool.ts` | New param schemas, dispatch to new compute modules |
-| `src/inspect.ts` | Wire new params to compute modules, render output sections |
-| `src/inspect-types.ts` | Add types for new params and result shapes |
-| `src/grep-tool.ts` | Add `graphFilter` param, wire to `graph-filter.ts` |
+| `src/inspect/inspect-tool.ts` | New param schemas, dispatch to new compute modules |
+| `src/inspect/inspect.ts` | Wire new params to compute modules, render output sections |
+| `src/inspect/inspect-types.ts` | Add types for new params and result shapes |
+| `src/search/grep-tool.ts` | Add `graphFilter` param, wire to `graph-filter.ts` |
 | `src/hook.ts` | Add `symbol` param to read, resolve via LSP |
 | `src/index.ts` | Wire file watcher start/stop to session lifecycle |
-| `src/incremental-index.ts` | Extend with per-file graph stats (symbol/edge counts) |
-| `src/signals.ts` | Extend `tests` signal with file-name matching + call graph overlap |
-| `src/monorepo-detector.ts` | Extend with boundary detection from workspace configs |
+| `src/indexing/incremental-index.ts` | Extend with per-file graph stats (symbol/edge counts) |
+| `src/structural/signals.ts` | Extend `tests` signal with file-name matching + call graph overlap |
+| `src/workspace/monorepo-detector.ts` | Extend with boundary detection from workspace configs |
 | `src/tool-registry.ts` | No changes (no new tools registered) |

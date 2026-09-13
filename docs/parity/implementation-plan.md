@@ -39,7 +39,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 **ADR:** ADR-003
 
 **Files to CREATE:**
-- `src/file-watcher.ts` (~150 LOC)
+- `src/runtime/file-watcher.ts` (~150 LOC)
   - `startWatching(root: string, onDirty: (paths: string[]) => void): () => void`
   - Uses `fs.watch(root, { recursive: true })` on macOS/Windows
   - Falls back to non-recursive on Linux with console.warn
@@ -56,7 +56,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
   - Store watcher stop handle in extension activation scope
 
 **Dependencies:** None (Wave 1 independence)
-**Tests:** `test/unit/file-watcher.test.ts` — mock fs.watch, verify debounce, verify stop, verify test-mode no-op
+**Tests:** `test/unit/runtime/file-watcher.test.ts` — mock fs.watch, verify debounce, verify stop, verify test-mode no-op
 
 ---
 
@@ -67,28 +67,28 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 **ADR:** ADR-001, ADR-004
 
 **Files to CREATE:**
-- `src/impact-analysis.ts` (~250 LOC)
+- `src/inspect/impact-analysis.ts` (~250 LOC)
   - `computeImpact(params): ImpactResult`
   - BFS from target file through call+import graph (uses `ContextGraph.getFileNeighbours()` for file-level neighbor expansion; `ContextGraph.findSymbolFiles()` for symbol→file resolution; `ContextGraph.getMutationNeighbours()` for breakage/co-change edges)
   - Risk classification: PageRank + fan-in + blast radius depth
   - Returns `{ risk, affectedFiles[], affectedSymbols[], blastRadiusDepth, callGraphSummary }`
   - Also exports `detectDeadCode(fileOrDir, contextGraph, callGraph): DeadCodeResult`
-- `src/graph-filter.ts` (~80 LOC)
+- `src/search/graph-filter.ts` (~80 LOC)
   - `applyGraphFilter(hits: GrepHit[], filter: string, contextGraph: ContextGraph): GrepHit[]`
   - Parses `"EDGE_TYPE->target"` format
   - For each hit, checks if a graph edge exists from the hit file to the target
   - Returns filtered hits array
 
 **Files to MODIFY:**
-- `src/grep-tool.ts`:
+- `src/search/grep-tool.ts`:
   - **WP-2 boundary: only add `graphFilter` to `GrepSchema` (TypeBox Optional String).**
   - **Do NOT edit `GrepToolOptions` interface or `execute()` wiring — that is WP-5's sole responsibility.**
-  - `applyGraphFilter()` is a standalone dependency-free function in `src/graph-filter.ts`; WP-2 does not wire it into grep-tool.ts execution path.
+  - `applyGraphFilter()` is a standalone dependency-free function in `src/search/graph-filter.ts`; WP-2 does not wire it into grep-tool.ts execution path.
 
 **Dependencies:** None (Wave 1 independence — graph-filter.ts is dependency-free; grep-tool.ts schema-only edit requires no runtime ContextGraph import)
 **Tests:**
-- `test/unit/impact-analysis.test.ts` — BFS traversal, risk classification, dead code detection with fixture data
-- `test/unit/graph-filter.test.ts` — filter parsing, edge matching, error cases
+- `test/unit/inspect/impact-analysis.test.ts` — BFS traversal, risk classification, dead code detection with fixture data
+- `test/unit/search/graph-filter.test.ts` — filter parsing, edge matching, error cases
 - Extend `test/unit/grep-tool.test.ts` — add `graphFilter` param schema test cases
 
 ---
@@ -100,7 +100,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 **ADR:** ADR-001, ADR-005
 
 **Files to CREATE:**
-- `src/route-extraction.ts` (~200 LOC)
+- `src/inspect/route-extraction.ts` (~200 LOC)
   - `extractRoutes(filePath: string): RouteInfo[]`
   - Pattern matching via tree-sitter AST for:
     - Express: `app.get/post/put/delete/patch(path, handler)`
@@ -109,62 +109,62 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
     - Next.js Pages Router: `export default function handler` in pages/api/
     - tRPC: `.query()`, `.mutation()` on router definitions
   - `scanRoutes(dirPath: string): RouteInfo[]` — recursive directory scan
-- `src/community-detection.ts` (~200 LOC)
+- `src/graph/community-detection.ts` (~200 LOC)
   - `detectCommunities(importEdges: Array<{from, to}>): ClusterResult`
   - Louvain algorithm: initialize each node as its own community → local moving phase → aggregation → repeat
   - Returns `{ clusters: Map<number, string[]>, modularity: number }`
   - Lightweight implementation (~150 LOC for the algorithm core)
-- `src/layer-analysis.ts` (~120 LOC)
+- `src/inspect/layer-analysis.ts` (~120 LOC)
   - `deriveLayers(importEdges, filePaths: string[]): LayerMap`
   - Heuristic: controller/handler files have route registrations or export handlers; service files have `.service.` or `Service` in name; repository files import DB/ORM adapters; model files export interfaces/types/schemas
   - Returns `{ layers: Map<string, string[]>, unclassified: string[] }`
 
 **Files to MODIFY:**
-- `src/signals.ts`:
+- `src/structural/signals.ts`:
   - Extend `tests` signal: when computing `signals: ["tests"]`, also do:
     - File-name matching: for `src/auth/login.ts`, look for `test/auth/login.test.ts`, `src/auth/__tests__/login.test.ts`, `test/auth/login.spec.ts`
     - Call graph overlap: check if test files import from the source file's module
     - Return `{ sourceFile, testFile, coverage: "direct" | "indirect" }`
-- `src/monorepo-detector.ts`:
+- `src/workspace/monorepo-detector.ts`:
   - Extend `detectMonorepo` to also detect service boundaries:
     - Parse `package.json` workspaces → service names + root paths
     - Parse `docker-compose.yml` → service names
     - Parse `nx.json` / `turbo.json` → project names
     - Build dependency graph from `package.json` dependencies between workspace packages
     - Export `detectServiceBoundaries(root): BoundaryResult`
-- `src/incremental-index.ts`:
+- `src/indexing/incremental-index.ts`:
   - Extend `IncrementalIndex` metadata to store per-file `{ symbolCount, edgeCount }` alongside hash
   - `diff()` returns per-file graph stats diff, not just hash changes
   - Backward-compatible — old `file-hashes.json` without these fields treated as "unknown, needs rebuild"
 
 **Dependencies:** None (Wave 1 independence — all new modules are self-contained)
 **Tests:**
-- `test/unit/route-extraction.test.ts` — Express, Fastify, Next.js, tRPC patterns
-- `test/unit/community-detection.test.ts` — algorithm correctness on known graphs
-- `test/unit/layer-analysis.test.ts` — layer classification accuracy
-- Extend `test/unit/signals.test.ts` — test linkage
-- Extend `test/unit/incremental-index.test.ts` — per-file graph stats
-- Extend `test/unit/monorepo-detector.test.ts` — boundary detection
+- `test/unit/inspect/route-extraction.test.ts` — Express, Fastify, Next.js, tRPC patterns
+- `test/unit/graph/community-detection.test.ts` — algorithm correctness on known graphs
+- `test/unit/inspect/layer-analysis.test.ts` — layer classification accuracy
+- Extend `test/unit/structural/signals.test.ts` — test linkage
+- Extend `test/unit/indexing/incremental-index.test.ts` — per-file graph stats
+- Extend `test/unit/workspace/monorepo-detector.test.ts` — boundary detection
 
 ---
 
 ### WP-7: Multi-Signal Scoring Expansion
 
 **Wave:** 1 — Parallel with WP-1, WP-2, WP-3, WP-8
-**Scope:** Add Halstead-lite complexity, AST-profile, and MinHash-proximity signals to the existing reranker. New signal computation lives in dependency-free modules; wired into `src/rerank.ts`.
+**Scope:** Add Halstead-lite complexity, AST-profile, and MinHash-proximity signals to the existing reranker. New signal computation lives in dependency-free modules; wired into `src/ranking/rerank.ts`.
 **ADR:** N/A (coverage matrix item 11)
 
 **Definition of Done item covered:** "Multi-signal scoring includes complexity, AST profile, proximity"
 
 **Files to CREATE:**
-- `src/complexity-signals.ts` (~150 LOC)
+- `src/ranking/complexity-signals.ts` (~150 LOC)
   - `computeHalsteadLite(ast: ASTNode): { operandCount, operatorCount, vocabulary, volume }` — lightweight Halstead metrics from tree-sitter AST (operand/operator count, vocabulary size, difficulty approximation)
   - `computeAstProfile(ast: ASTNode): { depth, branchingFactor, cyclomaticComplexity, nodeCount }` — structural profile: max nesting depth, average branching factor, cyclomatic complexity, total AST node count
   - `computeMinHashProximity(sourceAst: ASTNode, candidateAst: ASTNode): number` — MinHash-based structural similarity score (0.0–1.0) using shingle sets of AST node type sequences; used for near-clone proximity ranking
   - All functions are pure, dependency-free, take AST input and return numeric scores
 
 **Files to MODIFY:**
-- `src/rerank.ts`:
+- `src/ranking/rerank.ts`:
   - Extend `RerankerInput` (already has `pageRank`, `graphDistance`, `temporalScore` fields at lines 11–21) with three new optional fields: `halsteadComplexity?: number`, `astProfile?: number`, `minHashProximity?: number`
   - Import and call `complexity-signals.ts` functions to compute new signal values from the AST of each candidate file
   - Add new signals to the scoring formula in `rerank()` with tunable weights (additive, backward-compatible — zero-value defaults preserve existing ranking when signals absent)
@@ -177,11 +177,11 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 - `RerankerInput` remains backward-compatible: new fields optional, zero default = no ranking change
 - Existing `rerank()` output shape unchanged — only ranking order may shift when new signals present
 
-**File overlap verification:** `src/rerank.ts` is NOT touched by WP-1, WP-2, or WP-3. `src/scoring.ts` is NOT touched by WP-1, WP-2, or WP-3. No wave-1 collision.
+**File overlap verification:** `src/ranking/rerank.ts` is NOT touched by WP-1, WP-2, or WP-3. `src/scoring.ts` is NOT touched by WP-1, WP-2, or WP-3. No wave-1 collision.
 
 **Test requirements:**
-- `test/unit/complexity-signals.test.ts` — Halstead-lite on known ASTs, AST profile correctness, MinHash proximity for identical/similar/different ASTs
-- Extend `test/unit/inspect-v4.test.ts` or dedicated rerank test — verify new signals affect ranking order, verify backward-compatible zero-signal behavior
+- `test/unit/ranking/complexity-signals.test.ts` — Halstead-lite on known ASTs, AST profile correctness, MinHash proximity for identical/similar/different ASTs
+- Extend `test/unit/inspect/inspect-v4.test.ts` or dedicated rerank test — verify new signals affect ranking order, verify backward-compatible zero-signal behavior
 
 **Acceptance criteria:**
 1. `computeHalsteadLite()` returns correct metrics for a fixture AST with known operator/operand counts
@@ -195,18 +195,18 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 ### WP-8: ADR Retrieval Integration
 
 **Wave:** 1 — Parallel with WP-1, WP-2, WP-3, WP-7
-**Scope:** Cross-session ADRs feed retrieval ranking as boost signals in `src/intent-read.ts`. Reads `AdrRecord` from `src/adr-store.ts` (with `status` and `tags` fields) and applies ranking boosts.
+**Scope:** Cross-session ADRs feed retrieval ranking as boost signals in `src/read/intent-read.ts`. Reads `AdrRecord` from `src/repository/adr-store.ts` (with `status` and `tags` fields) and applies ranking boosts.
 **ADR:** N/A (coverage matrix item 12)
 
 **Definition of Done item covered:** "Cross-session ADRs feed into retrieval ranking"
 
 **Files to MODIFY:**
-- `src/intent-read.ts`:
-  - Import `AdrRecord` type and `listAdrs` (or equivalent read accessor) from `src/adr-store.ts`
+- `src/read/intent-read.ts`:
+  - Import `AdrRecord` type and `listAdrs` (or equivalent read accessor) from `src/repository/adr-store.ts`
   - After initial retrieval ranking (BM25/embedding scores), apply ADR-based boost: for each candidate file, check if any ADR references it (by path or symbol in `AdrRecord.tags` or body). Matching ADRs with `status: "accepted"` apply a configurable boost multiplier; `status: "proposed"` or `status: "deprecated"` apply no boost or a penalty.
   - Boost is additive to existing score — does not replace or override retrieval ranking
   - Guard: if ADR store is empty or unavailable, skip boost (zero overhead)
-- `src/adr-store.ts`:
+- `src/repository/adr-store.ts`:
   - Export `listAdrs(filter?: { status?: string, tags?: string[] }): AdrRecord[]` if not already exported (verify existing API surface)
   - No schema changes — `AdrRecord` already has `status` and `tags` fields
 
@@ -215,11 +215,11 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 - `listAdrs()` is called once per retrieval query, result cached for query duration
 - No import cycles: `adr-store.ts` does not import from `intent-read.ts`; `intent-read.ts` imports from `adr-store.ts` (unidirectional)
 
-**File overlap verification:** `src/intent-read.ts` is NOT touched by WP-1, WP-2, WP-3, or WP-7. `src/adr-store.ts` is NOT touched by WP-1, WP-2, WP-3, or WP-7. No wave-1 collision.
+**File overlap verification:** `src/read/intent-read.ts` is NOT touched by WP-1, WP-2, WP-3, or WP-7. `src/repository/adr-store.ts` is NOT touched by WP-1, WP-2, WP-3, or WP-7. No wave-1 collision.
 
 **Test requirements:**
 - `test/unit/intent-read.test.ts` (extend) — verify ADR boost re-ranks candidates, verify no boost when ADR store empty, verify accepted-only boost filtering
-- `test/unit/adr-store.test.ts` (extend) — verify `listAdrs()` filter behavior if new accessor added
+- `test/unit/repository/adr-store.test.ts` (extend) — verify `listAdrs()` filter behavior if new accessor added
 
 **Acceptance criteria:**
 1. Retrieval query with no ADRs returns identical ranking to baseline
@@ -236,19 +236,19 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 **ADR:** ADR-001, ADR-004, ADR-005
 **Status:** ~95% complete — schema, compute wiring, validation, symbol resolution, and WP-5 runtime DI wiring (contextGraph for grep graphFilter + inspect) all implemented.
 
-**Inspect DI ownership:** WP-4 extends `InspectV4Input` (src/inspect-types.ts) with an optional `contextGraph?: ContextGraph` field. This is the type-level contract. WP-5 is responsible for populating this field from `inspect-tool.ts` options at runtime.
+**Inspect DI ownership:** WP-4 extends `InspectV4Input` (src/inspect/inspect-types.ts) with an optional `contextGraph?: ContextGraph` field. This is the type-level contract. WP-5 is responsible for populating this field from `inspect-tool.ts` options at runtime.
 
 **Files to MODIFY:**
-- `src/inspect-types.ts`:
+- `src/inspect/inspect-types.ts`:
   - Add `CallDirection`, `DiffTarget` types
   - Extend `InspectV4Input` with all new optional params **and add `contextGraph?: ContextGraph`** (import ContextGraph type only — no runtime dependency)
   - Add `ImpactResult`, `DeadCodeResult`, `ClusterResult`, `RouteInfo`, `LayerMap`, `BoundaryResult` type imports/exports
   - Add `GraphSchemaResult` type
-- `src/inspect-tool.ts`:
+- `src/inspect/inspect-tool.ts`:
   - Extend `InspectV4Schema` with all new TypeBox schemas (see spec §1.1) ✓
   - Add mode-only param validation in `execute()`: file-only (`callDepth`, `callDirection`) rejected on dir mode; dir-only (`clusters`, `boundaries`, `layers`) rejected on file mode ✓
   - Pass new params through to `executeInspectV4()` via extended `InspectV4Input` ✓
-- `src/inspect.ts`:
+- `src/inspect/inspect.ts`:
   - `executeFileInspect()`: call compute modules for enabled params (impact, deadCode, callDepth, hotspots, routes, graphSchema, diff), append output sections to content text ✓
   - `executeDirectoryInspect()`: call compute modules for enabled params (clusters, layers, boundaries, deadCode, hotspots, routes, diff), append output sections ✓
   - Token budget tracking: accumulate rendered line count, stop appending sections when budget exceeded ✓
@@ -262,9 +262,9 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 
 **Dependencies:** WP-2 (impact-analysis.ts, graph-filter.ts), WP-3 (route-extraction.ts, community-detection.ts, layer-analysis.ts, monorepo-detector.ts, signals.ts extension)
 **Tests:**
-- Extend `test/unit/inspect-v4.test.ts` — new params, dir-only error, combined params, token budget truncation
+- Extend `test/unit/inspect/inspect-v4.test.ts` — new params, dir-only error, combined params, token budget truncation
 - Extend `test/unit/hook.test.ts` — symbol param resolution (watch for known flake: "before_agent_start returns system prompt with repo map" — avoid adding assertions that touch that path)
-- `test/unit/inspect-enrichment.test.ts` — verify evidence envelope resources for new params
+- `test/unit/inspect/inspect-enrichment.test.ts` — verify evidence envelope resources for new params
 
 ---
 
@@ -274,7 +274,7 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 **Scope:** Wire everything together in index.ts, typecheck pass, evidence envelope validation
 **ADR:** All ADRs
 
-**grep-tool.ts ownership:** WP-5 adds `contextGraph?: ContextGraph` to the `GrepToolOptions` interface and wires it into `execute()` so that `applyGraphFilter()` (created by WP-2 in `src/graph-filter.ts`) can be called when `params.graphFilter` is present. WP-2 must NOT have edited `GrepToolOptions` or `execute()` — this is WP-5's sole responsibility for grep-tool.ts runtime wiring.
+**grep-tool.ts ownership:** WP-5 adds `contextGraph?: ContextGraph` to the `GrepToolOptions` interface and wires it into `execute()` so that `applyGraphFilter()` (created by WP-2 in `src/search/graph-filter.ts`) can be called when `params.graphFilter` is present. WP-2 must NOT have edited `GrepToolOptions` or `execute()` — this is WP-5's sole responsibility for grep-tool.ts runtime wiring.
 
 **inspect-tool.ts ownership:** WP-5 populates the `contextGraph` field on `InspectV4Input` (type extended by WP-4) by reading it from `InspectToolOptions` and threading it through to `executeInspectV4()`. WP-4 defined the type contract; WP-5 implements the runtime wiring.
 
@@ -288,11 +288,11 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
 - `src/mcp-registry.ts`:
   - `buildInspectToolForExtension()` already passes resolver and session file path; extend to pass ContextGraph instance
   - `createGrepTool()` already passes resolver; extend to pass ContextGraph instance
-- `src/grep-tool.ts`:
+- `src/search/grep-tool.ts`:
   - Add `contextGraph?: ContextGraph` to `GrepToolOptions` interface (WP-2 did NOT edit this interface — schema-only boundary)
   - In `execute()`, when `params.graphFilter` is present and `options.contextGraph` is available, call `applyGraphFilter(hits, params.graphFilter, options.contextGraph)` after the glob filter step
   - When `graphFilter` specified but no ContextGraph available: return error `"graphFilter requires an indexed context graph"`
-- `src/inspect-tool.ts`:
+- `src/inspect/inspect-tool.ts`:
   - Add `contextGraph?: ContextGraph` to `InspectToolOptions`
   - In `execute()`, populate `input.contextGraph = options.contextGraph` before passing to `executeInspectV4()`
 
@@ -318,21 +318,21 @@ Wave 1 (parallel)          Wave 2 (serial, needs W1)     Wave 3 (needs W2)     W
    Known flake: `hook.test.ts` "before_agent_start returns system prompt with repo map" — not a regression signal.
 
 2. **Unit tests for new modules** (if not already created in their WPs):
-   - `test/unit/file-watcher.test.ts`
-   - `test/unit/impact-analysis.test.ts`
-   - `test/unit/graph-filter.test.ts`
-   - `test/unit/route-extraction.test.ts`
-   - `test/unit/community-detection.test.ts`
-   - `test/unit/layer-analysis.test.ts`
-   - `test/unit/complexity-signals.test.ts`
+   - `test/unit/runtime/file-watcher.test.ts`
+   - `test/unit/inspect/impact-analysis.test.ts`
+   - `test/unit/search/graph-filter.test.ts`
+   - `test/unit/inspect/route-extraction.test.ts`
+   - `test/unit/graph/community-detection.test.ts`
+   - `test/unit/inspect/layer-analysis.test.ts`
+   - `test/unit/ranking/complexity-signals.test.ts`
 
 3. **Extended tests for modified modules** (if not already created in their WPs):
-   - `test/unit/inspect-v4.test.ts` — new params
+   - `test/unit/inspect/inspect-v4.test.ts` — new params
    - `test/unit/grep-tool.test.ts` — graphFilter param
    - `test/unit/hook.test.ts` — symbol param
-   - `test/unit/signals.test.ts` — extended tests signal
-   - `test/unit/incremental-index.test.ts` — per-file graph stats
-   - `test/unit/monorepo-detector.test.ts` — boundary detection
+   - `test/unit/structural/signals.test.ts` — extended tests signal
+   - `test/unit/indexing/incremental-index.test.ts` — per-file graph stats
+   - `test/unit/workspace/monorepo-detector.test.ts` — boundary detection
    - `test/unit/intent-read.test.ts` — ADR boost
 
 4. **Typecheck:**
@@ -386,40 +386,40 @@ WP-8 ──┘
 
 | File | WP | Action |
 |---|---|---|
-| `src/file-watcher.ts` | WP-1 | CREATE |
-| `src/impact-analysis.ts` | WP-2 | CREATE |
-| `src/graph-filter.ts` | WP-2 | CREATE |
-| `src/route-extraction.ts` | WP-3 | CREATE |
-| `src/community-detection.ts` | WP-3 | CREATE |
-| `src/layer-analysis.ts` | WP-3 | CREATE |
-| `src/complexity-signals.ts` | WP-7 | CREATE |
-| `src/inspect-types.ts` | WP-4 | MODIFY |
-| `src/inspect-tool.ts` | WP-4, WP-5 | MODIFY |
-| `src/inspect.ts` | WP-4 | MODIFY |
+| `src/runtime/file-watcher.ts` | WP-1 | CREATE |
+| `src/inspect/impact-analysis.ts` | WP-2 | CREATE |
+| `src/search/graph-filter.ts` | WP-2 | CREATE |
+| `src/inspect/route-extraction.ts` | WP-3 | CREATE |
+| `src/graph/community-detection.ts` | WP-3 | CREATE |
+| `src/inspect/layer-analysis.ts` | WP-3 | CREATE |
+| `src/ranking/complexity-signals.ts` | WP-7 | CREATE |
+| `src/inspect/inspect-types.ts` | WP-4 | MODIFY |
+| `src/inspect/inspect-tool.ts` | WP-4, WP-5 | MODIFY |
+| `src/inspect/inspect.ts` | WP-4 | MODIFY |
 | `src/hook.ts` | WP-4 | MODIFY |
-| `src/grep-tool.ts` | WP-2 (schema), WP-5 (wiring) | MODIFY |
-| `src/signals.ts` | WP-3 | MODIFY |
-| `src/monorepo-detector.ts` | WP-3 | MODIFY |
-| `src/incremental-index.ts` | WP-3 | MODIFY |
-| `src/rerank.ts` | WP-7 | MODIFY |
+| `src/search/grep-tool.ts` | WP-2 (schema), WP-5 (wiring) | MODIFY |
+| `src/structural/signals.ts` | WP-3 | MODIFY |
+| `src/workspace/monorepo-detector.ts` | WP-3 | MODIFY |
+| `src/indexing/incremental-index.ts` | WP-3 | MODIFY |
+| `src/ranking/rerank.ts` | WP-7 | MODIFY |
 | `src/scoring.ts` | WP-7 (optional) | MODIFY |
-| `src/intent-read.ts` | WP-8 | MODIFY |
-| `src/adr-store.ts` | WP-8 (verify API) | MODIFY (if needed) |
+| `src/read/intent-read.ts` | WP-8 | MODIFY |
+| `src/repository/adr-store.ts` | WP-8 (verify API) | MODIFY (if needed) |
 | `src/index.ts` | WP-1, WP-5 | MODIFY |
 | `src/mcp-registry.ts` | WP-5 | MODIFY |
-| `test/unit/file-watcher.test.ts` | WP-1/WP-6 | CREATE |
-| `test/unit/impact-analysis.test.ts` | WP-2/WP-6 | CREATE |
-| `test/unit/graph-filter.test.ts` | WP-2/WP-6 | CREATE |
-| `test/unit/route-extraction.test.ts` | WP-3/WP-6 | CREATE |
-| `test/unit/community-detection.test.ts` | WP-3/WP-6 | CREATE |
-| `test/unit/layer-analysis.test.ts` | WP-3/WP-6 | CREATE |
-| `test/unit/complexity-signals.test.ts` | WP-7/WP-6 | CREATE |
-| `test/unit/inspect-v4.test.ts` | WP-4/WP-6 | MODIFY |
+| `test/unit/runtime/file-watcher.test.ts` | WP-1/WP-6 | CREATE |
+| `test/unit/inspect/impact-analysis.test.ts` | WP-2/WP-6 | CREATE |
+| `test/unit/search/graph-filter.test.ts` | WP-2/WP-6 | CREATE |
+| `test/unit/inspect/route-extraction.test.ts` | WP-3/WP-6 | CREATE |
+| `test/unit/graph/community-detection.test.ts` | WP-3/WP-6 | CREATE |
+| `test/unit/inspect/layer-analysis.test.ts` | WP-3/WP-6 | CREATE |
+| `test/unit/ranking/complexity-signals.test.ts` | WP-7/WP-6 | CREATE |
+| `test/unit/inspect/inspect-v4.test.ts` | WP-4/WP-6 | MODIFY |
 | `test/unit/grep-tool.test.ts` | WP-2/WP-6 | MODIFY |
 | `test/unit/hook.test.ts` | WP-4/WP-6 | MODIFY |
-| `test/unit/signals.test.ts` | WP-3/WP-6 | MODIFY |
-| `test/unit/incremental-index.test.ts` | WP-3/WP-6 | MODIFY |
-| `test/unit/monorepo-detector.test.ts` | WP-3/WP-6 | MODIFY |
+| `test/unit/structural/signals.test.ts` | WP-3/WP-6 | MODIFY |
+| `test/unit/indexing/incremental-index.test.ts` | WP-3/WP-6 | MODIFY |
+| `test/unit/workspace/monorepo-detector.test.ts` | WP-3/WP-6 | MODIFY |
 | `test/unit/intent-read.test.ts` | WP-8/WP-6 | MODIFY |
 
 **No new tools registered. No changes to `@rhinos0608/pi-workspace-protocol`. No import cycles.**
@@ -468,4 +468,4 @@ All Wave-1 WPs touch disjoint file sets:
 
 4. **signals.ts additive-only changes** — WP-3 modifies the shared `signals.ts` which is consumed by inspect's file mode. The existing `tests` signal output shape must not break. All changes must be additive-only with backward-compatible defaults (new fields added to output object, existing fields unchanged).
 
-5. **IncrementalIndex null-check for old file-hashes.json** — WP-3 adds `symbolCount`/`edgeCount` to `FileHashEntry` (src/incremental-index.ts:31-35). Old `file-hashes.json` files without these fields must be treated as "unknown, needs rebuild". Workers must implement a null-check in `diff()` that treats missing fields as `undefined` and triggers a rebuild for those entries rather than crashing.
+5. **IncrementalIndex null-check for old file-hashes.json** — WP-3 adds `symbolCount`/`edgeCount` to `FileHashEntry` (src/indexing/incremental-index.ts:31-35). Old `file-hashes.json` files without these fields must be treated as "unknown, needs rebuild". Workers must implement a null-check in `diff()` that treats missing fields as `undefined` and triggers a rebuild for those entries rather than crashing.

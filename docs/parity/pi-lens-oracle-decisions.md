@@ -180,8 +180,8 @@ Matrix correction (`pi-lens-capability-matrix.md`) — completed by orchestrator
 
 | WP | Repo | Scope | Create | Modify |
 |---|---|---|---|---|
-| **WP-SR1** | SmartRead | LSP inspection outcome engine (navigation + fresh diagnostics, honesty-labeled) | `src/lsp-inspection.ts`, `test/unit/lsp-inspection.test.ts` | `src/lsp-bridge.ts` (additive outcome methods only — preserve existing `goToDefinition` etc.), `test/unit/lsp-bridge-diagnostics.test.ts` |
-| **WP-SR2** | SmartRead | ast-grep structural search engine (no tool wiring yet) | `src/structural-search.ts`, `test/unit/structural-search.test.ts` | `package.json`/`package-lock.json` (`optionalDependencies: "@ast-grep/napi": "^0.45.1"`) |
+| **WP-SR1** | SmartRead | LSP inspection outcome engine (navigation + fresh diagnostics, honesty-labeled) | `src/lsp/lsp-inspection.ts`, `test/unit/lsp/lsp-inspection.test.ts` | `src/lsp/lsp-bridge.ts` (additive outcome methods only — preserve existing `goToDefinition` etc.), `test/unit/lsp/lsp-bridge-diagnostics.test.ts` |
+| **WP-SR2** | SmartRead | ast-grep structural search engine (no tool wiring yet) | `src/structural/structural-search.ts`, `test/unit/structural/structural-search.test.ts` | `package.json`/`package-lock.json` (`optionalDependencies: "@ast-grep/napi": "^0.45.1"`) |
 | **WP-SE1** | SmartEdit | Diagnostic honesty fix | — | `src/lsp/diagnostics.ts`, `src/index.ts`, `test/lsp.test.ts`, `test/extension-init.test.ts` |
 | **WP-SE2** | SmartEdit | Structural-replace test hardening (verify existing capability; fix only defects the tests expose) | — | `test/edit-contract.test.ts`, `test/edit-planner.test.ts`, `test/edit-tool-capabilities.test.ts`, `test/patch.test.ts` (freshness coverage if missing) |
 
@@ -189,14 +189,14 @@ Matrix correction (`pi-lens-capability-matrix.md`) — completed by orchestrator
 
 | WP | Repo | Scope | Modify | Depends on |
 |---|---|---|---|---|
-| **WP-SR3** | SmartRead | Wire `inspect.navigation` + `inspect.diagnostics` schemas/validation/rendering | `src/inspect-tool.ts`, `src/inspect-types.ts`, `src/inspect.ts`, `test/unit/inspect-v4.test.ts`, `test/unit/inspect-enrichment.test.ts` | WP-SR1 |
-| **WP-SR4** | SmartRead | Wire `grep.structural` schema/validation/rendering | `src/grep-tool.ts`, `test/unit/grep-tool.test.ts`, `test/unit/read-evidence.test.ts`, `test/unit/tool-compatibility-contract.test.ts` | WP-SR2 |
+| **WP-SR3** | SmartRead | Wire `inspect.navigation` + `inspect.diagnostics` schemas/validation/rendering | `src/inspect/inspect-tool.ts`, `src/inspect/inspect-types.ts`, `src/inspect/inspect.ts`, `test/unit/inspect/inspect-v4.test.ts`, `test/unit/inspect/inspect-enrichment.test.ts` | WP-SR1 |
+| **WP-SR4** | SmartRead | Wire `grep.structural` schema/validation/rendering | `src/search/grep-tool.ts`, `test/unit/grep-tool.test.ts`, `test/unit/evidence/read-evidence.test.ts`, `test/unit/tool-compatibility-contract.test.ts` | WP-SR2 |
 
 ### Wave 3 — depends on Wave 2, serial
 
 | WP | Repo | Scope | Modify | Depends on |
 |---|---|---|---|---|
-| **WP-SR5** | SmartRead | Provider wiring: inject one shared LSP inspection provider into inspect; Pi + MCP share definitions; no eager LSP startup from plain inspect | `src/index.ts`, `src/mcp-registry.ts`, `src/tool-guidance.ts` | WP-SR3, WP-SR4 |
+| **WP-SR5** | SmartRead | Provider wiring: inject one shared LSP inspection provider into inspect; Pi + MCP share definitions; no eager LSP startup from plain inspect | `src/index.ts`, `src/mcp-registry.ts`, `src/runtime/tool-guidance.ts` | WP-SR3, WP-SR4 |
 | **WP-SR6** | SmartRead | MCP parity verification (tests only unless a defect surfaces) | MCP schema round-trip tests for all 3 new capabilities | WP-SR5 |
 
 ### Wave 4 — verification (both repos, independent)
