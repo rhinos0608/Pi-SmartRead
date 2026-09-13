@@ -1,14 +1,14 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { findSrcFiles } from "./file-discovery.js";
-import { getTagsBatch, initParser } from "./tags.js";
-import { TagsCache } from "./cache.js";
-import type { Tag } from "./cache.js";
-import { resolveSymbol } from "./symbol-resolver.js";
-import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
+import { getTagsBatch, initParser } from "./structural/tags.js";
+import { TagsCache } from "./structural/cache.js";
+import type { Tag } from "./structural/cache.js";
+import { resolveSymbol } from "./structural/symbol-resolver.js";
+import { buildCallGraph, type CallGraphResult } from "./structural/callgraph.js";
 import { LruCache } from "./utils.js";
 import { chooseConcurrency } from "./adaptive-concurrency.js";
-import { EdgeStore } from "./edge-store.js";
+import { EdgeStore } from "./graph/edge-store.js";
 import {
   buildTagIndices,
   collectBuildInputs,
@@ -18,10 +18,10 @@ import {
   populateHistoricalEdges,
   recordBuildTelemetry,
   type BuildResult,
-} from "./context-graph-build.js";
+} from "./graph/context-graph-build.js";
 
 // Re-exported for compatibility (moved to edge-store.ts).
-export { EdgeStore, type MutationEvent } from "./edge-store.js";
+export { EdgeStore, type MutationEvent } from "./graph/edge-store.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 

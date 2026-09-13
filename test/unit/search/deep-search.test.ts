@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { executeDeepSearch } from "../../src/deep-search.js";
+import { executeDeepSearch } from "../../../src/search/deep-search.js";
 
 let root: string;
 

@@ -9,7 +9,7 @@
  * Keyed by tool session so different sessions don't share snapshots.
  */
 
-import { LruCache } from "./utils.js";
+import { LruCache } from "../utils.js";
 
 const MAX_PATHS_PER_SESSION = 30;
 const MAX_SESSIONS = 50;

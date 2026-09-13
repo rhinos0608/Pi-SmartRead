@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createIntentReadTool } from "../../src/intent-read.js";
+import { createIntentReadTool } from "../../../src/read/intent-read.js";
 import {
   fileByPath,
   makeFailingEmbedder,
@@ -9,7 +9,7 @@ import {
   setupIntentReadEnv,
 } from "./intent-read-helpers.js";
 
-vi.mock("../../src/mcp-registry.js", () => ({
+vi.mock("../../../src/mcp-registry.js", () => ({
   getSharedContextGraphAsync: vi.fn().mockResolvedValue({
     getFileNeighbours: vi.fn().mockResolvedValue([]),
     getMutationNeighbours: vi.fn().mockReturnValue([]),

@@ -3,8 +3,8 @@ import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { createExtendedReadTool } from "../../src/hook.js";
-import { computePathEvidence } from "../../src/path-evidence.js";
+import { createExtendedReadTool } from "../../../src/hook.js";
+import { computePathEvidence } from "../../../src/evidence/path-evidence.js";
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
@@ -66,7 +66,7 @@ describe("read tool enrichment (replaces inspect path mode enrichment)", () => {
       }),
       inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
     };
-    const { createInspectV4Tool: mkTool } = await import("../../src/inspect-tool.js");
+    const { createInspectV4Tool: mkTool } = await import("../../../src/inspect/inspect-tool.js");
     const tool2 = mkTool({ getSessionFilePath: () => session, lspInspectionProvider: navProvider } as any);
     const r2: any = await tool2.execute("enrich-doc-sym", { path: "a.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, { cwd: wd, sessionManager: { getSessionFile: () => session } } as any);
     const res2 = (r2.details as any).workspaceEvidence.resources.find((x: any) => x.canonicalPath.includes("a.ts"));
@@ -81,7 +81,7 @@ describe("read tool enrichment (replaces inspect path mode enrichment)", () => {
     const { join: j2 } = await import("node:path");
     const wd = rp2(m2(j2(td2(), "enrich-empty-")));
     w2(j2(wd, "b.ts"), "x\n".repeat(5));
-    const { executeFileInspect: exec } = await import("../../src/inspect.js");
+    const { executeFileInspect: exec } = await import("../../../src/inspect/inspect.js");
     const emptyProv: any = {
       inspectNavigation: async () => ({ status: "empty", operation: "documentSymbols", items: [], truncated: false }),
       inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
@@ -111,7 +111,7 @@ describe("read tool enrichment (replaces inspect path mode enrichment)", () => {
         truncated: false,
       }),
     };
-    const { executeFileInspect: exec2 } = await import("../../src/inspect.js");
+    const { executeFileInspect: exec2 } = await import("../../../src/inspect/inspect.js");
     const r = await exec2({ path: "c.ts", cwd: wd, sessionFilePath: session, navigation: { operation: "references" as any, line: 1, character: 1 }, diagnostics: { waitMs: 10, maxPerFile: 5 } as any, lspInspectionProvider: prov } as any);
     const sr = r.workspaceEvidence.resources.find((x: any) => x.coverage === "search-match");
     expect(sr).toBeDefined();

@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_BYTES } from "@mariozechner/pi-coding-agent";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { __test, createReadManyTool } from "../../src/read-many.js";
-import { ensureHashlineReady } from "../../src/utils.js";
+import { __test, createReadManyTool } from "../../../src/read/read-many.js";
+import { ensureHashlineReady } from "../../../src/utils.js";
 
 beforeAll(async () => {
   await ensureHashlineReady();

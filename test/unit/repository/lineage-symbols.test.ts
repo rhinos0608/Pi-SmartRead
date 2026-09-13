@@ -4,7 +4,7 @@ import {
   type SymbolTag,
   type MatchConfidence,
   type ParserAvailability,
-} from "../../src/lineage-symbols.js";
+} from "../../../src/repository/lineage-symbols.js";
 
 // ── Fixtures ───────────────────────────────────────────────────────────
 

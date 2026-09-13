@@ -23,9 +23,9 @@ import {
     type WorkspaceEvidenceEnvelope,
     type InspectedResource,
 } from "@rhinos0608/pi-workspace-protocol";
-import type { ContextGraph } from "./context-graph.js";
+import type { ContextGraph } from "../context-graph.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
-import { sessionFileFromContext } from "./inspect-tool.js";
+import { sessionFileFromContext } from "../inspect/inspect-tool.js";
 import { executeStructuralQuery } from "./grep-structural-executor.js";
 export { GREP_STRUCTURAL_FETCH_SIZE, GREP_STRUCTURAL_MAX_ITERATIONS } from "./grep-structural-executor.js";
 import {

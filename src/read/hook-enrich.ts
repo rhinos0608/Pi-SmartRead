@@ -19,12 +19,12 @@ import {
    prefixLinesWithAnchors,
    selectorToOffsetLimit,
    splitPathAndSelector,
-} from "./utils.js";
+} from "../utils.js";
 import {
    attestPathRead,
    publishEvidence,
    resolveAttestedRange,
-} from "./read-evidence.js";
+} from "../evidence/read-evidence.js";
 
 export interface NormalizedReadParams {
    readonly targetPath: string;

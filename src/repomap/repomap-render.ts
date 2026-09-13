@@ -11,7 +11,7 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { isImportantFile } from "./special.js";
-import { renderTreeContext } from "./tree-context.js";
+import { renderTreeContext } from "../structural/tree-context.js";
 import type { RankedTag } from "./repomap-pipeline.js";
 
 // ── Token counting ─────────────────────────────────────────────

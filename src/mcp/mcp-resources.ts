@@ -6,15 +6,15 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Resource } from "@modelcontextprotocol/sdk/types.js";
-import { validateEmbeddingConfig, loadSearchConfig, loadGitContextConfig, loadExperimentalConfig } from "./config.js";
-import { buildToolRegistry } from "./mcp-registry.js";
-import { getGraphifyEnricher } from "./graphify-enricher.js";
-import { readCoverage, summarizeCoverage } from "./index-coverage.js";
-import { readAdrs } from "./adr-store.js";
-import { findNearClones } from "./near-clone.js";
-import { discoverFiles } from "./file-discovery.js";
-import { getIndexLockStatus } from "./index-lock.js";
-import { verifySnapshot } from "./index-snapshot.js";
+import { validateEmbeddingConfig, loadSearchConfig, loadGitContextConfig, loadExperimentalConfig } from "../config.js";
+import { buildToolRegistry } from "../mcp-registry.js";
+import { getGraphifyEnricher } from "../graph/graphify-enricher.js";
+import { readCoverage, summarizeCoverage } from "../indexing/index-coverage.js";
+import { readAdrs } from "../repository/adr-store.js";
+import { findNearClones } from "../ranking/near-clone.js";
+import { discoverFiles } from "../file-discovery.js";
+import { getIndexLockStatus } from "../indexing/index-lock.js";
+import { verifySnapshot } from "../indexing/index-snapshot.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

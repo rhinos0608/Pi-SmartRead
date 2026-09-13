@@ -10,7 +10,7 @@ import {
   applyGraphFilter,
   isFilePath,
   type GrepHit,
-} from "../../src/graph-filter.js";
+} from "../../../src/search/graph-filter.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────
 

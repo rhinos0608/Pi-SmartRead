@@ -12,7 +12,7 @@ import {
 	type PackingPlan,
 	formatRecoveryHint,
 	WRAPPER_LINES,
-} from "./utils.js";
+} from "../utils.js";
 
 export interface PackingChoice {
 	readonly plan: PackingPlan;

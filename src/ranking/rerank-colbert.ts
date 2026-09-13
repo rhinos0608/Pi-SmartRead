@@ -1,7 +1,7 @@
 /**
  * ColBERT-style late-interaction reranker ("poor man's ColBERT").
  */
-import { cosineSimilarity } from "./scoring.js";
+import { cosineSimilarity } from "../scoring.js";
 import {
   normalize,
   rerank,
@@ -191,11 +191,11 @@ function fallbackToStructural(
 
 async function resolveLocalFetcher(): Promise<FetchLocalFn | null> {
   try {
-    const mod = await import("./embedding.js");
+    const mod = await import("../indexing/embedding.js");
     const fetchLocal: FetchLocalFn = mod.fetchLocalEmbeddings;
     // Quick availability check — if the optional dep is missing,
     // calling fetchLocalEmbeddings will throw, so we verify.
-    const { isLocalEmbeddingAvailable } = await import("./local-embedding-provider.js");
+    const { isLocalEmbeddingAvailable } = await import("../indexing/local-embedding-provider.js");
     const available = await isLocalEmbeddingAvailable();
     if (!available) return null;
     return fetchLocal;

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { validateWorkspaceEdit } from "../../src/workspace-edit-validator.js";
+import { validateWorkspaceEdit } from "../../../src/workspace/workspace-edit-validator.js";
 
 let dir: string;
 let fileA: string;

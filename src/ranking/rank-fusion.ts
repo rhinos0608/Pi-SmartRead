@@ -1,4 +1,4 @@
-import { RRF_K } from "./deep-search-constants.js";
+import { RRF_K } from "../search/deep-search-constants.js";
 
 export interface ChannelCandidate {
   file: string;

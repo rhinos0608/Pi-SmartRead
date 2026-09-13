@@ -8,7 +8,7 @@ import {
 	resolveSessionKey,
 	__test__clearAll,
 	type SearchMatchEntry,
-} from "../../src/file-read-cache.js";
+} from "../../../src/read/file-read-cache.js";
 
 beforeEach(() => {
 	__test__clearAll();

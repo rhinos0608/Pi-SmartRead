@@ -11,11 +11,11 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { relative, resolve } from "node:path";
 
-import { classifyRelevance } from "./classifiers.js";
-import { computeRanks } from "./scoring.js";
-import { discoverFiles, type DiscoveryProfile } from "./file-discovery.js";
-import { RepoMap } from "./repomap.js";
-import { expandToMonorepoRoots } from "./monorepo-detector.js";
+import { classifyRelevance } from "../ranking/classifiers.js";
+import { computeRanks } from "../scoring.js";
+import { discoverFiles, type DiscoveryProfile } from "../file-discovery.js";
+import { RepoMap } from "../repomap.js";
+import { expandToMonorepoRoots } from "../workspace/monorepo-detector.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ export interface ProvenanceSignal {
 export interface PublicProvenanceSignal {
   channel: ChannelName;
   signal: string;
-  strength: import("./classifiers.js").RelevanceClass;
+  strength: import("../ranking/classifiers.js").RelevanceClass;
   rank: number;
   matchedTerms?: string[];
 }
@@ -85,7 +85,7 @@ export interface PublicDeepSearchMatch {
   name: string;
   kind: string;
   snippet: string;
-  relevance: import("./classifiers.js").RelevanceClass;
+  relevance: import("../ranking/classifiers.js").RelevanceClass;
   provenance: PublicProvenanceSignal[];
   callers?: Array<{ file: string; name: string }>;
 }

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { resolve as pathResolve } from "node:path";
-import { resolveWorkspaceDirectory } from "./workspace-boundary.js";
+import { resolveWorkspaceDirectory } from "./workspace/workspace-boundary.js";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -93,7 +93,7 @@ export function measureText(text: string): TextMetrics {
 
 // ─── Hashline init tracking ─────────────────────────────────────────────
 
-let _hashlineModule: typeof import("./hashline.js") | null = null;
+let _hashlineModule: typeof import("./read/hashline.js") | null = null;
 let _hashlineInitPromise: Promise<void> | null = null;
 
 /**
@@ -104,7 +104,7 @@ export async function ensureHashlineReady(): Promise<void> {
   if (_hashlineModule) return;
   if (!_hashlineInitPromise) {
     _hashlineInitPromise = (async () => {
-      const mod = await import("./hashline.js");
+      const mod = await import("./read/hashline.js");
       await mod.initHashline();
       _hashlineModule = mod;
     })();
@@ -122,7 +122,7 @@ export function isHashlineReady(): boolean {
 /**
  * Get the hashline module (throws if not initialized).
  */
-function __hashlineModule(): typeof import("./hashline.js") {
+function __hashlineModule(): typeof import("./read/hashline.js") {
   if (!_hashlineModule) {
     throw new Error(
       "Hashline not initialized. Call ensureHashlineReady() before using hashline functions."

@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 
-vi.mock("../../src/repomap-tool.js", () => ({
+vi.mock("../../../src/repomap/repomap-tool.js", () => ({
     clampMapTokens: (n?: number) => n ?? 4096,
     createRepoTool: () => ({ execute: async () => ({ content: [{ type: "text", text: "mock map" }], details: {} }) }),
 }));
@@ -18,10 +18,10 @@ import {
     buildDirGraphSchemaSection,
     buildClustersSection,
     buildBoundariesSection,
-} from "../../src/inspect-directory.js";
-import { executeDirectoryInspect as dirExec } from "../../src/inspect-directory.js";
-import { executeDirectoryInspect as reExec } from "../../src/inspect.js";
-import { tryCanonical, mergeRanges, estimateTokens } from "../../src/inspect-runtime.js";
+} from "../../../src/inspect/inspect-directory.js";
+import { executeDirectoryInspect as dirExec } from "../../../src/inspect/inspect-directory.js";
+import { executeDirectoryInspect as reExec } from "../../../src/inspect/inspect.js";
+import { tryCanonical, mergeRanges, estimateTokens } from "../../../src/inspect/inspect-runtime.js";
 
 describe("directory module boundary", () => {
     it("re-export identity: inspect.ts re-exports directory pipeline", () => {

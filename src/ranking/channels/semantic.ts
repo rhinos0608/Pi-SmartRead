@@ -9,7 +9,7 @@
  * supplied snippet text directly.
  */
 
-import { compileBm25Corpus } from "../scoring.js";
+import { compileBm25Corpus } from "../../scoring.js";
 
 // ── Channel contract ─────────────────────────────────────────────────
 

@@ -8,7 +8,7 @@ import {
   extractDependencies,
   findImportDependents,
   findBarrelReExports,
-} from "../../src/structural-imports.js";
+} from "../../../src/structural/structural-imports.js";
 
 function fixtureDir(name: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), `si-${name}-`)));

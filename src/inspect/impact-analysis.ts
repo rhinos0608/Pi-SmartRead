@@ -12,8 +12,8 @@
  */
 
 import { resolve } from "node:path";
-import { type ContextGraph, type GraphNeighbour } from "./context-graph.js";
-import type { CallGraphResult, FunctionInfo } from "./callgraph.js";
+import { type ContextGraph, type GraphNeighbour } from "../context-graph.js";
+import type { CallGraphResult, FunctionInfo } from "../structural/callgraph.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 

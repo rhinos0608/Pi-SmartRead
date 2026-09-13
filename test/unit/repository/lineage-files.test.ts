@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeFileLineage } from "../../src/lineage-files.js";
+import { computeFileLineage } from "../../../src/repository/lineage-files.js";
 
 type FileEntry = { path: string; contentHash: string; edges?: Array<{ to: string; type: string }> };
 

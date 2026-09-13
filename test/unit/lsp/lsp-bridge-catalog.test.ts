@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ALL_SERVER_CONFIGS, detectLanguageFromExtension, detectProjectLanguages } from "../../src/lsp-bridge.js";
+import { ALL_SERVER_CONFIGS, detectLanguageFromExtension, detectProjectLanguages } from "../../../src/lsp/lsp-bridge.js";
 
 function findCfg(cmd: string) {
   return ALL_SERVER_CONFIGS.find((c) => c.command === cmd);
@@ -180,7 +180,7 @@ describe("LSP catalog expansion", () => {
       const root = mkdtempSync(join(tmpdir(), `lsp-purpose-${outcomeMethod}-`));
       const filePath = join(root, "a.ts");
       writeFileSync(filePath, "export const a = 1;", "utf8");
-      const mod = await import("../../src/lsp-bridge.js");
+      const mod = await import("../../../src/lsp/lsp-bridge.js");
       const { LSPManager, getLSPBridge, resetLSPBridge, shutdownAllManagers } = mod as any;
       // ensure clean bridge/manager cache for this root
       await shutdownAllManagers();
@@ -252,11 +252,11 @@ describe("LSP catalog expansion", () => {
   });
 
   it("resolution goes through runtime (lsp-bridge imports resolveLanguageServer)", async () => {
-    const src = readFileSync("src/lsp-types.ts", "utf-8");
+    const src = readFileSync("src/lsp/lsp-types.ts", "utf-8");
     expect(src).toContain("resolveLanguageServer");
     expect(src).toContain("language-intelligence-runtime");
     // Must not still use execFileSync for which/where (bridge family)
-    for (const f of ["src/lsp-bridge.ts", "src/lsp-types.ts", "src/lsp-manager.ts", "src/lsp-connection.ts"]) {
+    for (const f of ["src/lsp/lsp-bridge.ts", "src/lsp/lsp-types.ts", "src/lsp/lsp-manager.ts", "src/lsp/lsp-connection.ts"]) {
       expect(readFileSync(f, "utf-8")).not.toMatch(/execFileSync.*which/);
     }
   });
@@ -314,7 +314,7 @@ describe("LSP catalog expansion", () => {
   });
 
   it("P1-2: resolver/legacy merge dedupes by languageId, not command string", () => {
-    const src = readFileSync("src/lsp-manager.ts", "utf-8");
+    const src = readFileSync("src/lsp/lsp-manager.ts", "utf-8");
     // Must dedupe legacy by languageId coverage
     expect(src).toContain("coveredLanguages");
     expect(src).toContain("languageIds.some");
@@ -324,7 +324,7 @@ describe("LSP catalog expansion", () => {
   });
 
   it("P2-4: binaryExists dead export removed", () => {
-    const src = readFileSync("src/lsp-bridge.ts", "utf-8");
+    const src = readFileSync("src/lsp/lsp-bridge.ts", "utf-8");
     expect(src).not.toMatch(/export function binaryExists/);
     expect(src).not.toMatch(/function binaryExists/);
   });
@@ -339,7 +339,7 @@ describe("LSP catalog expansion", () => {
       writeFileSync(join(binDir, "typescript-language-server"), "#!/bin/sh\nexit 0", "utf8");
       try { (await import("node:fs")).chmodSync(join(binDir, "typescript-language-server"), 0o755); } catch {}
       process.env.PATH = `${binDir}${require("node:path").delimiter}${origPath}`;
-      const { LSPManager, resolvedServerCache } = await import("../../src/lsp-bridge.js");
+      const { LSPManager, resolvedServerCache } = await import("../../../src/lsp/lsp-bridge.js");
       // Clear any stale cache for this root
       for (const k of [...resolvedServerCache.keys()]) if (k.startsWith(`${root}:`)) resolvedServerCache.delete(k);
       const mgr = new LSPManager(root);
@@ -369,7 +369,7 @@ describe("LSP catalog expansion", () => {
       writeFileSync(join(binDir, "clangd"), "#!/bin/sh\nexit 0", "utf8");
       try { (await import("node:fs")).chmodSync(join(binDir, "clangd"), 0o755); } catch {}
       process.env.PATH = `${binDir}${require("node:path").delimiter}${origPath}`;
-      const { LSPManager, resolvedServerCache } = await import("../../src/lsp-bridge.js");
+      const { LSPManager, resolvedServerCache } = await import("../../../src/lsp/lsp-bridge.js");
       for (const k of [...resolvedServerCache.keys()]) if (k.startsWith(`${root}:`)) resolvedServerCache.delete(k);
       const mgr = new LSPManager(root);
       const configs = mgr.getAvailableConfigs();

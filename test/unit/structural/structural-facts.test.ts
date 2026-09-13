@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractStructuralFacts } from "../../src/structural-facts.js";
+import { extractStructuralFacts } from "../../../src/structural/structural-facts.js";
 
 function fixtureDir(name: string): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), `sf-${name}-`)));
@@ -595,7 +595,7 @@ class MyModel:
     });
 
     it("dependent path: relative Python import resolves the dependent; stdlib-only files are excluded", async () => {
-      const { findImportDependents } = await import("../../src/structural-facts.js");
+      const { findImportDependents } = await import("../../../src/structural/structural-facts.js");
       const dependents = await findImportDependents(targetFile, dir, "python");
       const files = dependents.map((d) => d.file);
       expect(files).toContain(importerFile);
@@ -638,7 +638,7 @@ class MyModel:
     });
 
     it("dependent path: `from .. import top` marks top.py as imported", async () => {
-      const { findImportDependents } = await import("../../src/structural-facts.js");
+      const { findImportDependents } = await import("../../../src/structural/structural-facts.js");
       const dependents = await findImportDependents(join(pkgDir, "top.py"), pkgDir, "python");
       const files = dependents.map((d) => d.file);
       expect(files).toContain(modFile);

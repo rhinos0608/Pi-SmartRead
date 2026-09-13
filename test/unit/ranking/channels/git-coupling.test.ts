@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runGitCouplingChannel } from "../../../src/rank-channels/git-coupling.js";
+import { runGitCouplingChannel } from "../../../../src/ranking/channels/git-coupling.js";
 
 let root: string;
 const LOG_DIR = ".pi-smartread";

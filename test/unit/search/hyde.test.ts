@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   generateHypotheticalDocument,
   applyHyde,
-} from "../../src/hyde.js";
+} from "../../../src/search/hyde.js";
 
 describe("HyDE query expansion", () => {
   describe("generateHypotheticalDocument", () => {

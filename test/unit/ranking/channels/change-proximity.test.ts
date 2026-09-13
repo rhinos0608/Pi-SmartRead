@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { Provenance } from "../../../src/context-graph.js";
+import type { Provenance } from "../../../../src/context-graph.js";
 import {
   runChangeProximity,
   type ChangeProximityOptions,
-} from "../../../src/rank-channels/change-proximity.js";
+} from "../../../../src/ranking/channels/change-proximity.js";
 
 // ── Helpers ──────────────────────────────────────────────────────
 

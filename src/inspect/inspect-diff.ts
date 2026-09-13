@@ -6,9 +6,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve as pathResolve } from "node:path";
-import { findGitRoot } from "./git-history.js";
+import { findGitRoot } from "../git/git-history.js";
 import type { DiffTarget } from "./inspect-types.js";
-import type { CallGraphResult } from "./callgraph.js";
+import type { CallGraphResult } from "../structural/callgraph.js";
 
 const execFileAsync = promisify(execFile);
 

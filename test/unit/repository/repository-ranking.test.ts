@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   RepositoryRankingService,
   type WorkspaceContext,
-} from "../../src/repository-ranking.js";
-import type { ChannelCandidate } from "../../src/rank-fusion.js";
+} from "../../../src/repository/repository-ranking.js";
+import type { ChannelCandidate } from "../../../src/ranking/rank-fusion.js";
 
 // ── Helpers ────────────────────────────────────────────────────
 

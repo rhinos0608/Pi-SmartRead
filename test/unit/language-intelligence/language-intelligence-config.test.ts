@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readdirSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfig, isRootTrusted, trustRoot, listTrustedRoots, resetLanguageIntelligenceCaches, __paths } from "../../src/language-intelligence-config.js";
+import { loadConfig, isRootTrusted, trustRoot, listTrustedRoots, resetLanguageIntelligenceCaches, __paths } from "../../../src/language-intelligence/language-intelligence-config.js";
 
 function makeHome(): string {
   const dir = mkdtempSync(join(tmpdir(), "pi-li-config-"));

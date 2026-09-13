@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LSPBridge, LSPDiagnostic } from "../../src/lsp-bridge.js";
+import type { LSPBridge, LSPDiagnostic } from "../../../src/lsp/lsp-bridge.js";
 
 // Same shared key SmartEdit's mutation-ownership.ts writes to. Duplicated
 // here (per the task spec) rather than imported across repos — SmartRead
@@ -21,15 +21,15 @@ function claimsMap(): Map<string, number> {
 
 let mockBridge: (Partial<LSPBridge> & { isAvailable: () => boolean }) | null;
 
-vi.mock("../../src/lsp-bridge.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/lsp-bridge.js")>();
+vi.mock("../../../src/lsp/lsp-bridge.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/lsp/lsp-bridge.js")>();
   return {
     ...actual,
-    getLSPBridge: vi.fn(async () => mockBridge as unknown as import("../../src/lsp-bridge.js").LSPBridge | null),
+    getLSPBridge: vi.fn(async () => mockBridge as unknown as import("../../../src/lsp/lsp-bridge.js").LSPBridge | null),
   };
 });
 
-const { runPostEditDiagnosticsFallback, formatDiagnosticsBlock } = await import("../../src/post-edit-fallback.js");
+const { runPostEditDiagnosticsFallback, formatDiagnosticsBlock } = await import("../../../src/runtime/post-edit-fallback.js");
 
 describe("post-edit LSP diagnostics fallback", () => {
   let dir: string;

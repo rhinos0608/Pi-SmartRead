@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { computeFileLineage } from "../../src/lineage-files.js";
+import { computeFileLineage } from "../../../src/repository/lineage-files.js";
 
 type Entry = { path: string; contentHash: string; edges?: Array<{ to: string; type: string }> };
 type Expected = { kind: string; beforePath?: string; afterPath?: string };
 type Fixture = { before: Entry[]; after: Entry[]; expected: Expected[]; description: string; category: string };
 
-const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "../fixtures/lineage-v1");
+const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "../../fixtures/lineage-v1");
 const fixtures = readdirSync(fixtureDir).filter((name) => name.endsWith(".json")).sort().map((name) => ({
   name,
   fixture: JSON.parse(readFileSync(join(fixtureDir, name), "utf8")) as Fixture,

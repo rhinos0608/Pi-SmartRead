@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeSemanticDelta } from "../../src/semantic-delta.js";
+import { computeSemanticDelta } from "../../../src/repository/semantic-delta.js";
 
 // ── Helpers ───────────────────────────────────────────────────────
 

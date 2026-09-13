@@ -3,12 +3,12 @@
 
 import { relative, resolve } from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createIntentReadTool } from "./intent-read.js";
+import { createIntentReadTool } from "../read/intent-read.js";
 import {
   type RelevanceClass,
   relevanceClassWeight,
-} from "./classifiers.js";
-import { tokenize } from "./scoring.js";
+} from "../ranking/classifiers.js";
+import { tokenize } from "../scoring.js";
 
 import type { DeepSearchCandidate } from "./deep-search.js";
 

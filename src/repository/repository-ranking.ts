@@ -6,8 +6,8 @@
  * Bounded: max 2000 fused candidates returned.
  */
 
-import type { ChannelCandidate, ChannelResult } from "./rank-fusion.js";
-import { fuseChannels } from "./rank-fusion.js";
+import type { ChannelCandidate, ChannelResult } from "../ranking/rank-fusion.js";
+import { fuseChannels } from "../ranking/rank-fusion.js";
 import {
   renderWorkspaceView,
   type WorkspaceView,
@@ -17,19 +17,19 @@ import {
   getRelationshipEvidence,
   type RelationshipEvidencePage,
 } from "./relationship-evidence.js";
-import type { Provenance } from "./context-graph.js";
+import type { Provenance } from "../context-graph.js";
 
 // Channel imports
-import { rankSemantic, type SemanticEntry } from "./rank-channels/semantic.js";
-import { rankAnnotationProximity } from "./rank-channels/annotation-proximity.js";
-import { runChangeProximity } from "./rank-channels/change-proximity.js";
-import { rankByDiagnosticProximity, type DiagnosticInput } from "./rank-channels/diagnostic-proximity.js";
-import { rankExplicitSeed } from "./rank-channels/explicit-seed.js";
-import { runGitCouplingChannel } from "./rank-channels/git-coupling.js";
-import { runHistoricalBreakageChannel } from "./rank-channels/historical-breakage.js";
-import { structuralPageRank } from "./rank-channels/structural-pagerank.js";
-import { runTestFailureProximity, type TestFailure } from "./rank-channels/test-failure-proximity.js";
-import type { GraphEdge } from "./pagerank.js";
+import { rankSemantic, type SemanticEntry } from "../ranking/channels/semantic.js";
+import { rankAnnotationProximity } from "../ranking/channels/annotation-proximity.js";
+import { runChangeProximity } from "../ranking/channels/change-proximity.js";
+import { rankByDiagnosticProximity, type DiagnosticInput } from "../ranking/channels/diagnostic-proximity.js";
+import { rankExplicitSeed } from "../ranking/channels/explicit-seed.js";
+import { runGitCouplingChannel } from "../ranking/channels/git-coupling.js";
+import { runHistoricalBreakageChannel } from "../ranking/channels/historical-breakage.js";
+import { structuralPageRank } from "../ranking/channels/structural-pagerank.js";
+import { runTestFailureProximity, type TestFailure } from "../ranking/channels/test-failure-proximity.js";
+import type { GraphEdge } from "../ranking/pagerank.js";
 
 // ── Public types ───────────────────────────────────────────────
 

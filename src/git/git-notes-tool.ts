@@ -1,6 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { toToolDefinition, toToolDefinitions } from "./types.js";
+import { toToolDefinition, toToolDefinitions } from "../types.js";
 import { resolve } from "node:path";
 
 import { detectDefaultBranch, findBranchPoint, findGitRoot, getStructuredLog } from "./git-context.js";

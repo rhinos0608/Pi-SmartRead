@@ -3,11 +3,11 @@ import { relative, resolve, dirname, extname } from "node:path";
 import { createRequire } from "node:module";
 import type { SignalName, SignalResult, FileSignals } from "./signals-types.js";
 import type { TestLinkage } from "./signals-types.js";
-import type { ContextGraph } from "./context-graph.js";
+import type { ContextGraph } from "../context-graph.js";
 import type { DependentInfo } from "./structural-facts-types.js";
 import { findImportDependents } from "./structural-facts.js";
-import { filenameToLang, type SupportedLanguage } from "./languages.js";
-import { fileLastModifiedRelative } from "./git-history.js";
+import { filenameToLang, type SupportedLanguage } from "../languages.js";
+import { fileLastModifiedRelative } from "../git/git-history.js";
 
 import { findTestLinkage, findTestCoverageGaps } from "./test-linkage.js";
 

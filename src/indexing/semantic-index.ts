@@ -8,14 +8,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
-import type { ResolvedEmbeddingConfig } from "./config.js";
-import { validateEmbeddingConfig } from "./config.js";
-import { chunkTextAst } from "./chunking.js";
+import type { ResolvedEmbeddingConfig } from "../config.js";
+import { validateEmbeddingConfig } from "../config.js";
+import { chunkTextAst } from "../structural/chunking.js";
 import { fetchEmbeddings, type EmbedRequest, type EmbedResult } from "./embedding.js";
 import { embeddingProfileId } from "./embedding-profile.js";
-import { discoverFiles, type FileDiscoveryResult } from "./file-discovery.js";
-import { canonicalRelative } from "./workspace-boundary.js";
-import { bm25Scores, computeRanks } from "./scoring.js";
+import { discoverFiles, type FileDiscoveryResult } from "../file-discovery.js";
+import { canonicalRelative } from "../workspace/workspace-boundary.js";
+import { bm25Scores, computeRanks } from "../scoring.js";
 import {
   SqliteVecStore,
   type Chunk as VecChunk,

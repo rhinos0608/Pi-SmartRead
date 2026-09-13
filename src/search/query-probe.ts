@@ -4,8 +4,8 @@
  *
  * Phase 3 of the advanced retrieval plan. See docs/advanced-retrieval-implementation-plan.md
  */
-import { tokenize } from "./scoring.js";
-import { ContextGraph } from "./context-graph.js";
+import { tokenize } from "../scoring.js";
+import { ContextGraph } from "../context-graph.js";
 
 export interface ProbeResult {
   status: "off" | "ok" | "failed";

@@ -6,7 +6,7 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createGrepTool, type GrepToolOptions } from "../../src/grep-tool.js";
+import { createGrepTool, type GrepToolOptions } from "../../src/search/grep-tool.js";
 
 export function makeCtx(cwd: string) {
     return { cwd } as any;

@@ -9,8 +9,8 @@ import {
   classifyFileRisk,
   detectDeadCode,
   expandBlastRadius,
-} from "../../src/impact-analysis.js";
-import type { CallGraphResult, FunctionInfo } from "../../src/callgraph.js";
+} from "../../../src/inspect/impact-analysis.js";
+import type { CallGraphResult, FunctionInfo } from "../../../src/structural/callgraph.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────
 
@@ -345,7 +345,7 @@ describe("expandBlastRadius", () => {
 
 describe("computeImpact", () => {
   it("returns target-only result when no ContextGraph provided", async () => {
-    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const { computeImpact } = await import("../../../src/inspect/impact-analysis.js");
     const result = await computeImpact({
       targetFile: "src/a.ts",
     });
@@ -355,7 +355,7 @@ describe("computeImpact", () => {
   });
 
   it("performs real BFS traversal with ContextGraph", async () => {
-    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const { computeImpact } = await import("../../../src/inspect/impact-analysis.js");
     const mockGraph = {
       getFileNeighbours: async (path: string) => {
         const edges: Record<string, string[]> = {
@@ -383,7 +383,7 @@ describe("computeImpact", () => {
   });
 
   it("reports partial assessment when files skipped due to unsupported language", async () => {
-    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const { computeImpact } = await import("../../../src/inspect/impact-analysis.js");
     const cg = {
       functions: [
         { name: "fnA", file: "src/a.ts", line: 1, calls: [], calledBy: [] },
@@ -409,7 +409,7 @@ describe("computeImpact", () => {
   });
 
   it("reports partial when skipped files AND unresolved edges exist", async () => {
-    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const { computeImpact } = await import("../../../src/inspect/impact-analysis.js");
     const cg = {
       functions: [
         { name: "fnA", file: "src/a.ts", line: 1, calls: ["fnB"], calledBy: [] },
@@ -439,7 +439,7 @@ describe("computeImpact", () => {
   });
 
   it("still reports complete when diagnostics present but skippedFileCount is 0", async () => {
-    const { computeImpact } = await import("../../src/impact-analysis.js");
+    const { computeImpact } = await import("../../../src/inspect/impact-analysis.js");
     const cg = {
       functions: [
         { name: "fnA", file: "src/a.ts", line: 1, calls: [], calledBy: [] },

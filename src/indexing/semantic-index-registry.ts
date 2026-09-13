@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { SemanticIndex, type SemanticIndexOptions } from "./semantic-index.js";
-import { findProjectWorkspace } from "./workspace-scope.js";
-import { canonicalPath, getAllowedRoot, isWithinRoot } from "./workspace-boundary.js";
+import { findProjectWorkspace } from "../workspace/workspace-scope.js";
+import { canonicalPath, getAllowedRoot, isWithinRoot } from "../workspace/workspace-boundary.js";
 
 const indexes = new Map<string, SemanticIndex>();
 

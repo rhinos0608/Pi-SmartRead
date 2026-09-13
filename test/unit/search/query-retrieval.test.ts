@@ -2,15 +2,15 @@ import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { retrieveQuery } from "../../src/query-retrieval.js";
-import { canonicalPath } from "../../src/workspace-boundary.js";
+import { retrieveQuery } from "../../../src/read/query-retrieval.js";
+import { canonicalPath } from "../../../src/workspace/workspace-boundary.js";
 import {
   disposeSemanticIndexes,
   effectiveSemanticRoot,
   getOrCreateSemanticIndex,
   getSemanticIndex,
   semanticIndexRegistrySize,
-} from "../../src/semantic-index-registry.js";
+} from "../../../src/indexing/semantic-index-registry.js";
 
 const config = { baseUrl: "http://localhost:11434/v1", model: "test", chunkSizeChars: 100, chunkOverlapChars: 0 };
 

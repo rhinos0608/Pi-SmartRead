@@ -7,7 +7,7 @@
  */
 
 import { createRequire } from "node:module";
-import { filenameToLang, type SupportedLanguage } from "./languages.js";
+import { filenameToLang, type SupportedLanguage } from "../languages.js";
 import {
   computeHalsteadLite,
   computeAstProfile,

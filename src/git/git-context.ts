@@ -226,7 +226,7 @@ export async function getFileCommitContext(gitRoot: string, relPath: string, lim
 export async function autoPopulateEdgeStore(gitRoot: string, pairs: CoCommitPair[]): Promise<void> {
   if (pairs.length === 0) return;
 
-  const { EdgeStore } = await import("./context-graph.js");
+  const { EdgeStore } = await import("../context-graph.js");
   if (EdgeStore.readEdges(gitRoot).length > 0) return;
 
   for (const pair of pairs) {

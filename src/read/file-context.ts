@@ -17,18 +17,18 @@
  */
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { isRecentlyModified } from "./git-history.js";
+import { isRecentlyModified } from "../git/git-history.js";
 import {
    findGitRoot,
    getFileCommitContext,
-} from "./git-context.js";
-import { loadGitContextConfig, type ResolvedGitContextConfig } from "./config.js";
-import { canonicalRelative } from "./workspace-boundary.js";
-import { scanBranchNotes } from "./git-notes.js";
-import { getGraphifyEnricher } from "./graphify-enricher.js";
-import { EdgeStore } from "./context-graph.js";
-import { getLSPBridge } from "./lsp-bridge.js";
-import { projectWorkspaceForFile } from "./workspace-scope.js";
+} from "../git/git-context.js";
+import { loadGitContextConfig, type ResolvedGitContextConfig } from "../config.js";
+import { canonicalRelative } from "../workspace/workspace-boundary.js";
+import { scanBranchNotes } from "../git/git-notes.js";
+import { getGraphifyEnricher } from "../graph/graphify-enricher.js";
+import { EdgeStore } from "../context-graph.js";
+import { getLSPBridge } from "../lsp/lsp-bridge.js";
+import { projectWorkspaceForFile } from "../workspace/workspace-scope.js";
 
 // ── Public interface ──────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ export async function buildFileContextLines(opts: FileContextOptions): Promise<s
   // later channels (git recency, recent commits, git notes, graphify, LSP).
   try {
     if (projectRoot) {
-      const { getSharedContextGraphAsync } = await import("./mcp-registry.js");
+      const { getSharedContextGraphAsync } = await import("../mcp-registry.js");
       const graph = await getSharedContextGraphAsync(projectRoot);
 
       const neighbours = await graph.getFileNeighbours(fullPath, {

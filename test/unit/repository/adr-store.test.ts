@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseAdr, readAdrs, listAdrs, renderAdr, writeAdr } from "../../src/adr-store.js";
+import { parseAdr, readAdrs, listAdrs, renderAdr, writeAdr } from "../../../src/repository/adr-store.js";
 
 let root: string;
 

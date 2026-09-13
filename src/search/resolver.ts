@@ -1,6 +1,6 @@
 import { fdir } from "fdir";
 import { resolve } from "node:path";
-import { tokenize } from "./scoring.js";
+import { tokenize } from "../scoring.js";
 
 export interface DirectoryResolution {
   paths: string[];

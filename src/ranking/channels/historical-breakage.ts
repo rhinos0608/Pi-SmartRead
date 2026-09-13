@@ -5,7 +5,7 @@
  * More recent and more frequent breakage → higher rawScore.
  */
 
-import { EdgeStore } from "../context-graph.js";
+import { EdgeStore } from "../../context-graph.js";
 
 export interface ChannelCandidate {
   file: string;

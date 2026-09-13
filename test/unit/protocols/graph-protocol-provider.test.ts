@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 describe("graph-protocol.ts", () => {
 	it("does not contain any new ContextGraph instantiation", () => {
 		const source = readFileSync(
-			resolve(import.meta.dirname, "../../src/graph-protocol.ts"),
+			resolve(import.meta.dirname, "../../../src/protocols/graph-protocol.ts"),
 			"utf-8",
 		);
 		expect(source).not.toMatch(/new ContextGraph\(/);
@@ -13,20 +13,20 @@ describe("graph-protocol.ts", () => {
 
 	it("imports getSharedContextGraphAsync from mcp-registry via dynamic import", () => {
 		const source = readFileSync(
-			resolve(import.meta.dirname, "../../src/graph-protocol.ts"),
+			resolve(import.meta.dirname, "../../../src/protocols/graph-protocol.ts"),
 			"utf-8",
 		);
 		// Must use dynamic import to avoid circular ES module dependency:
 		// mcp-registry.ts -> grep-tool.ts -> search-tool.ts -> hook.ts ->
 		// read-many.ts -> graph-protocol.ts -> mcp-registry.ts
-		expect(source).toContain('await import("./mcp-registry.js")');
-		expect(source).not.toContain('from "./mcp-registry.js"');
+		expect(source).toContain('await import("../mcp-registry.js")');
+		expect(source).not.toContain('from "../mcp-registry.js"');
 		expect(source).toContain("getSharedContextGraphAsync");
 	});
 
 	it("does not maintain its own _graphCache", () => {
 		const source = readFileSync(
-			resolve(import.meta.dirname, "../../src/graph-protocol.ts"),
+			resolve(import.meta.dirname, "../../../src/protocols/graph-protocol.ts"),
 			"utf-8",
 		);
 		expect(source).not.toContain("_graphCache");
@@ -36,7 +36,7 @@ describe("graph-protocol.ts", () => {
 	it("routes repeated calls through the shared registry", async () => {
 		// Verify that calling resolveGraphUrl twice for the same workspace
 		// invokes getSharedContextGraphAsync consistently (no local cache bypass).
-		const { resolveGraphUrl } = await import("../../src/graph-protocol.js");
+		const { resolveGraphUrl } = await import("../../../src/protocols/graph-protocol.js");
 
 		// We can't easily mock mcp-registry internals here, but we can verify
 		// that the function works and returns consistent structure for invalid

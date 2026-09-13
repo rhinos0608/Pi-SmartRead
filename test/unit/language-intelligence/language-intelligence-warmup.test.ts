@@ -9,7 +9,7 @@ describe("language-intelligence warmup", () => {
   afterEach(() => { try { rmSync(root, { recursive: true, force: true }); } catch {} });
 
   it("warmup path never throws and never blocks on missing servers — pure degradation", async () => {
-    const { detectProjectLanguages, detectLanguageFromExtension } = await import("../../src/lsp-bridge.js");
+    const { detectProjectLanguages, detectLanguageFromExtension } = await import("../../../src/lsp/lsp-bridge.js");
     // Empty project with missing servers should degrade gracefully, not throw or hang
     const start = Date.now();
     const info = detectProjectLanguages(root);
@@ -25,7 +25,7 @@ describe("language-intelligence warmup", () => {
   });
 
   it("openFile fire-and-forget does not throw when server missing", async () => {
-    const { getLSPBridge, resetLSPBridge, shutdownAllManagers } = await import("../../src/lsp-bridge.js");
+    const { getLSPBridge, resetLSPBridge, shutdownAllManagers } = await import("../../../src/lsp/lsp-bridge.js");
     const bridge = await getLSPBridge();
     // Write a file with new language extension — warm hook would call openFile
     const file = join(root, "a.lua");
@@ -38,17 +38,17 @@ describe("language-intelligence warmup", () => {
 
   it("resolver never executes untrusted project-local binary during warmup", async () => {
     // Verify runtime never stats project-local bin when root untrusted (checked in runtime tests, but warmup must also respect it)
-    const src = readFileSync("src/language-intelligence-runtime.ts", "utf-8");
+    const src = readFileSync("src/language-intelligence/language-intelligence-runtime.ts", "utf-8");
     expect(src).toContain("isRootTrusted");
     // lsp-bridge must call resolveLanguageServer which internally checks trust gate — ensure no direct existsSync on node_modules/.bin without trust check
     // (Phase B split: bridge family spans lsp-bridge + lsp-types + lsp-manager + lsp-connection)
-    const bridgeSrc = ["src/lsp-bridge.ts", "src/lsp-types.ts", "src/lsp-manager.ts", "src/lsp-connection.ts"].map((f) => readFileSync(f, "utf-8")).join("\n");
+    const bridgeSrc = ["src/lsp/lsp-bridge.ts", "src/lsp/lsp-types.ts", "src/lsp/lsp-manager.ts", "src/lsp/lsp-connection.ts"].map((f) => readFileSync(f, "utf-8")).join("\n");
     expect(bridgeSrc).toContain("resolveLanguageServer");
     expect(bridgeSrc).not.toMatch(/node_modules.*\\.bin.*existsSync/);
   });
 
   it("no install/prompt code in Phase 1 warmup path", async () => {
-    const bridgeSrc = readFileSync("src/lsp-bridge.ts", "utf-8");
+    const bridgeSrc = readFileSync("src/lsp/lsp-bridge.ts", "utf-8");
     // Warm hook moved from src/index.ts to ordered result pipeline (trackLspDocuments);
     // src/index.ts wires it via handleToolResult. Assert the pipeline hook directly.
     const warmSrc = readFileSync("src/extension-result-pipeline.ts", "utf-8");

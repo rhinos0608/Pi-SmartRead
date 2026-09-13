@@ -16,7 +16,7 @@ import path from "node:path";
 describe("file-context.ts source audit", () => {
   it("contains no `new ContextGraph(` instantiation", () => {
     const src = readFileSync(
-      path.resolve(__dirname, "../../src/file-context.ts"),
+      path.resolve(__dirname, "../../../src/read/file-context.ts"),
       "utf-8",
     );
     expect(src).not.toMatch(/new\s+ContextGraph\s*\(/);
@@ -24,25 +24,25 @@ describe("file-context.ts source audit", () => {
 
   it("imports getSharedContextGraphAsync from mcp-registry", () => {
     const src = readFileSync(
-      path.resolve(__dirname, "../../src/file-context.ts"),
+      path.resolve(__dirname, "../../../src/read/file-context.ts"),
       "utf-8",
     );
     expect(src).toContain('getSharedContextGraphAsync');
-    expect(src).toContain('./mcp-registry.js');
+    expect(src).toContain('../mcp-registry.js');
   });
 
   it("does not import ContextGraph directly", () => {
     const src = readFileSync(
-      path.resolve(__dirname, "../../src/file-context.ts"),
+      path.resolve(__dirname, "../../../src/read/file-context.ts"),
       "utf-8",
     );
-    // Should NOT have: import { ContextGraph } from "./context-graph.js";
+    // Should NOT have: import { ContextGraph } from "../context-graph.js";
     expect(src).not.toMatch(/import\s*\{[^}]*ContextGraph[^}]*\}\s*from\s*["']\.\/context-graph/);
   });
 
   it("does not import LruCache", () => {
     const src = readFileSync(
-      path.resolve(__dirname, "../../src/file-context.ts"),
+      path.resolve(__dirname, "../../../src/read/file-context.ts"),
       "utf-8",
     );
     expect(src).not.toMatch(/import.*LruCache/);
@@ -61,7 +61,7 @@ describe("buildFileContextLines routes through shared registry", () => {
   beforeEach(async () => {
     // Mock the mcp-registry module to intercept getSharedContextGraphAsync calls
     getSharedContextGraphAsyncSpy = vi.fn().mockResolvedValue(graphMock);
-    vi.doMock("../../src/mcp-registry.js", () => ({
+    vi.doMock("../../../src/mcp-registry.js", () => ({
       getSharedContextGraphAsync: getSharedContextGraphAsyncSpy,
     }));
 
@@ -73,26 +73,26 @@ describe("buildFileContextLines routes through shared registry", () => {
         existsSync: vi.fn().mockReturnValue(true),
       };
     });
-    vi.doMock("../../src/workspace-scope.js", () => ({
+    vi.doMock("../../../src/workspace/workspace-scope.js", () => ({
       projectWorkspaceForFile: vi.fn().mockReturnValue("/mock/project"),
     }));
-    vi.doMock("../../src/git-history.js", () => ({
+    vi.doMock("../../../src/git/git-history.js", () => ({
       isRecentlyModified: vi.fn().mockResolvedValue(false),
     }));
-    vi.doMock("../../src/git-context.js", () => ({
+    vi.doMock("../../../src/git/git-context.js", () => ({
       findGitRoot: vi.fn().mockResolvedValue(null),
       getFileCommitContext: vi.fn().mockResolvedValue([]),
     }));
-    vi.doMock("../../src/config.js", () => ({
+    vi.doMock("../../../src/config.js", () => ({
       loadGitContextConfig: vi.fn().mockReturnValue({ enabled: false }),
     }));
-    vi.doMock("../../src/git-notes.js", () => ({
+    vi.doMock("../../../src/git/git-notes.js", () => ({
       scanBranchNotes: vi.fn().mockResolvedValue([]),
     }));
-    vi.doMock("../../src/graphify-enricher.js", () => ({
+    vi.doMock("../../../src/graph/graphify-enricher.js", () => ({
       getGraphifyEnricher: vi.fn().mockReturnValue({ isAvailable: false }),
     }));
-    vi.doMock("../../src/lsp-bridge.js", () => ({
+    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
       getLSPBridge: vi.fn().mockResolvedValue(null),
     }));
   });
@@ -103,7 +103,7 @@ describe("buildFileContextLines routes through shared registry", () => {
   });
 
   it("calls getSharedContextGraphAsync (not new ContextGraph) for the workspace root", async () => {
-    const { buildFileContextLines } = await import("../../src/file-context.js");
+    const { buildFileContextLines } = await import("../../../src/read/file-context.js");
 
     await buildFileContextLines({
       fullPath: "/mock/project/src/index.ts",
@@ -115,7 +115,7 @@ describe("buildFileContextLines routes through shared registry", () => {
   });
 
   it("routes repeated calls through the same shared registry (no duplicate graphs)", async () => {
-    const { buildFileContextLines } = await import("../../src/file-context.js");
+    const { buildFileContextLines } = await import("../../../src/read/file-context.js");
 
     // Call twice with the same workspace root
     await buildFileContextLines({
@@ -139,7 +139,7 @@ describe("buildFileContextLines routes through shared registry", () => {
   });
 
   it("preserves the exact output format (array of strings with header)", async () => {
-    const { buildFileContextLines } = await import("../../src/file-context.js");
+    const { buildFileContextLines } = await import("../../../src/read/file-context.js");
 
     const result = await buildFileContextLines({
       fullPath: "/mock/project/src/index.ts",

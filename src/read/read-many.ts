@@ -15,20 +15,20 @@ import {
 	formatContentBlock,
 	measureText,
 	pickDelimiter,
-} from "./utils.js";
-import { registerHandler } from "./internal-url-router.js";
+} from "../utils.js";
+import { registerHandler } from "../protocols/internal-url-router.js";
 import { createIntentReadTool } from "./intent-read.js";
-import { skillHandler } from "./skill-protocol.js";
-import { memoryHandler } from "./memory-protocol.js";
-import { graphHandler } from "./graph-protocol.js";
+import { skillHandler } from "../protocols/skill-protocol.js";
+import { memoryHandler } from "../protocols/memory-protocol.js";
+import { graphHandler } from "../protocols/graph-protocol.js";
 import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { sessionFileFromContext } from "./inspect-tool.js";
+import { sessionFileFromContext } from "../inspect/inspect-tool.js";
 import { readBatchFiles, type BatchFileDetail } from "./read-many-reader.js";
 import { packingHelp, planAndRender } from "./read-many-plan.js";
 import {
 	aggregateBatchEvidence,
 	buildBatchWorkspaceEvidence,
-} from "./read-many-evidence.js";
+} from "../evidence/read-many-evidence.js";
 
 export { buildBatchWorkspaceEvidence };
 

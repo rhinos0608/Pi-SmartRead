@@ -15,7 +15,7 @@
  *    a single build promise; a failed build stays retryable/dirty and the
  *    shared instance is only replaced after a successful rebuild.
  */
-import { ContextGraph } from "./context-graph.js";
+import { ContextGraph } from "../context-graph.js";
 
 let sharedContextGraph: ContextGraph | null = null;
 let sharedContextGraphRoot: string | null = null;

@@ -11,13 +11,13 @@ import { join, relative, sep } from "node:path";
 import {
   getSharedContextGraphAsync,
   getWorkspaceRevision,
-} from "./mcp-registry.js";
-import { expandBlastRadius } from "./impact-analysis.js";
-import { filenameToLang, type SupportedLanguage } from "./languages.js";
-import { getSupportedExtensions as getGrammarExtensions } from "./grammar-loader.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { computeSourceHash, type SourceEntry } from "./index-snapshot.js";
-import { getFsScanCache } from "./fs-scan-cache.js";
+} from "../mcp-registry.js";
+import { expandBlastRadius } from "../inspect/impact-analysis.js";
+import { filenameToLang, type SupportedLanguage } from "../languages.js";
+import { getSupportedExtensions as getGrammarExtensions } from "../structural/grammar-loader.js";
+import { findSrcFiles } from "../file-discovery.js";
+import { computeSourceHash, type SourceEntry } from "../indexing/index-snapshot.js";
+import { getFsScanCache } from "../workspace/fs-scan-cache.js";
 import type {
   RepositoryIntelligenceService,
   SnapshotRef,

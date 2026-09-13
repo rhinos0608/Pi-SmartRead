@@ -8,7 +8,7 @@
  *
  * Re-exported here so existing `from "./rerank.js"` imports keep working.
  */
-import { cosineSimilarity } from "./scoring.js";
+import { cosineSimilarity } from "../scoring.js";
 
 export { cosineSimilarity };
 

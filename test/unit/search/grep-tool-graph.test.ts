@@ -8,9 +8,9 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
-import { createGrepTool } from "../../src/grep-tool.js";
-import { disposeSemanticIndexes } from "../../src/semantic-index-registry.js";
-import { makeCtx, makeOpts, seedStandardWorkdir } from "../helpers/grep-tool-fixtures.js";
+import { createGrepTool } from "../../../src/search/grep-tool.js";
+import { disposeSemanticIndexes } from "../../../src/indexing/semantic-index-registry.js";
+import { makeCtx, makeOpts, seedStandardWorkdir } from "../../helpers/grep-tool-fixtures.js";
 let workdir: string;
 
 beforeEach(() => {
@@ -57,7 +57,7 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
         { name: "invalid graphFilter format", params: { pattern: "authenticate", graphFilter: "INVALID->target" } as any, error: 'Invalid graphFilter: expected "EDGE_TYPE->target" format', withGraph: true },
     ])("graphFilter errors — $name", async ({ params, error, withGraph }) => {
         // Invalid edge type "INVALID" should throw spec error
-        const { ContextGraph } = await import("../../src/context-graph.js");
+        const { ContextGraph } = await import("../../../src/context-graph.js");
         const tool = withGraph
             ? createGrepTool(makeOpts({ contextGraph: new ContextGraph(workdir) }))
             : createGrepTool(makeOpts());
@@ -67,7 +67,7 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
     });
 
     it("contextGraph is accepted as a valid option", async () => {
-        const { ContextGraph } = await import("../../src/context-graph.js");
+        const { ContextGraph } = await import("../../../src/context-graph.js");
         const graph = new ContextGraph(workdir);
         // Add a file that imports auth.ts so graphFilter has an edge to check
         writeFileSync(
@@ -115,7 +115,7 @@ describe("grep tool — graphFilter wiring (WP-5)", () => {
         let getterRoot: string | undefined;
         // Simulate the runtime DI: an async getter that builds the shared graph
         // (with call graph) — the tool must await it before graphFilter.
-        const { ContextGraph } = await import("../../src/context-graph.js");
+        const { ContextGraph } = await import("../../../src/context-graph.js");
         const tool = createGrepTool(makeOpts({
             contextGraph: async (root) => {
                 getterRoot = root;
@@ -158,8 +158,8 @@ describe("grep tool — graphFilter single-pass over-fetch", () => {
             );
         }
 
-        const { ContextGraph } = await import("../../src/context-graph.js");
-        const graphFilterModule = await import("../../src/graph-filter.js");
+        const { ContextGraph } = await import("../../../src/context-graph.js");
+        const graphFilterModule = await import("../../../src/search/graph-filter.js");
         const graph = new ContextGraph(workdir);
 
         // Force a filter that keeps no hits — the single-pass gather must still

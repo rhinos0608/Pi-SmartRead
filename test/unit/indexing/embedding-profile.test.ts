@@ -3,7 +3,7 @@ import {
   embeddingProfileId,
   formatEmbeddingInputs,
   isEmbeddingGemmaModel,
-} from "../../src/embedding-profile.js";
+} from "../../../src/indexing/embedding-profile.js";
 
 describe("EmbeddingGemma profile", () => {
   it("detects Hugging Face and OpenAI-server aliases", () => {

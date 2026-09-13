@@ -14,9 +14,9 @@ import {
     executeInspectV4,
     executeDirectoryInspect,
     executeFileInspect,
-} from "../../src/inspect.js";
+} from "../../../src/inspect/inspect.js";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { createInspectV4Tool } from "../../src/inspect-tool.js";
+import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
 
 let workdir: string;
 let file: string;
@@ -463,7 +463,7 @@ describe("createInspectV4Tool (schema and execute)", () => {
         const tool = createInspectV4Tool({
             getSessionFilePath: () => "/sessions/abc.jsonl",
             contextGraph: async () => {
-                const { ContextGraph } = await import("../../src/context-graph.js");
+                const { ContextGraph } = await import("../../../src/context-graph.js");
                 const graph = new ContextGraph(workdir);
                 await graph.buildContextGraph();
                 built = true;
@@ -835,7 +835,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
         }
         // Stronger: empty nav produces zero search-match resources when structural facts stripped?
         // Directly test executeFileInspect with stub to isolate nav section: use fresh file with no deps.
-        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const { executeFileInspect: exec } = await import("../../../src/inspect/inspect.js");
         const direct = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "documentSymbols" as any }, lspInspectionProvider: provider } as any);
         const directNavRanges = direct.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match");
         // empty diagnostics+nav should contribute zero search-match entries (structural facts use different coverage)
@@ -855,7 +855,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
         const result: any = await tool.execute("c-empty-diag", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 5 } }, undefined, undefined, makeCtx());
         const details: any = result.details;
-        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const { executeFileInspect: exec } = await import("../../../src/inspect/inspect.js");
         const direct = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", diagnostics: { waitMs: 10, maxPerFile: 5 } as any, lspInspectionProvider: provider } as any);
         const directRanges = direct.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match");
         expect(directRanges.length).toBe(0);
@@ -876,7 +876,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
                 truncated: false,
             }),
         };
-        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const { executeFileInspect: exec } = await import("../../../src/inspect/inspect.js");
         const direct = await exec({
             path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl",
             navigation: { operation: "references" as any, line: 2, character: 1 },
@@ -894,7 +894,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             inspectNavigation: async () => ({ status: "empty", operation: "hover", items: [], truncated: false }),
             inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
         };
-        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const { executeFileInspect: exec } = await import("../../../src/inspect/inspect.js");
         // hover without line param -> should produce no fake coverage
         const noLine = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "hover" as any }, lspInspectionProvider: provider } as any);
         expect(noLine.workspaceEvidence.resources.filter((r: any) => r.coverage === "search-match").length).toBe(0);
@@ -910,7 +910,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             inspectNavigation: async () => ({ status: "confirmed", operation: "hover", items: [{ contents: "hover text no range" }], truncated: false }),
             inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
         };
-        const { executeFileInspect: exec } = await import("../../src/inspect.js");
+        const { executeFileInspect: exec } = await import("../../../src/inspect/inspect.js");
         // hover with non-empty result but no range, line 7 queried -> should use line 7, not fake 1
         const withRangeLess = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", navigation: { operation: "hover" as any, line: 7, character: 2 }, lspInspectionProvider: provider } as any);
         const res = withRangeLess.workspaceEvidence.resources.find((r: any) => r.coverage === "search-match");

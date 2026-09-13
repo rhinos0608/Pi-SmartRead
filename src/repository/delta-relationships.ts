@@ -8,7 +8,7 @@
  * §3P — ARCHITECTURE.md, P2-W5.
  */
 
-import type { Provenance, EdgeType } from "./context-graph.js";
+import type { Provenance, EdgeType } from "../context-graph.js";
 
 // ── Types (§3P ARCHITECTURE.md) ──────────────────────────────────
 

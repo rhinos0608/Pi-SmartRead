@@ -4,7 +4,7 @@
 
 import { promises as fs } from "node:fs";
 import Parser from "tree-sitter";
-import { loadLanguage } from "./tags.js";
+import { loadLanguage } from "../structural/tags.js";
 
 // ── AST Pattern Search ───────────────────────────────────────────
 

@@ -7,11 +7,11 @@
  * All best-effort catches and the watcher invalidation order match the
  * original src/index.ts activation path.
  */
-import { resetContextHygieneTracker } from "./context-hygiene.js";
-import { createDoomLoopState } from "./doom-loop.js";
-import { resolveBashContextGuardConfig } from "./bash-context-guard.js";
-import { invalidateFsScanCache } from "./fs-scan-cache.js";
-import { startWatching } from "./file-watcher.js";
+import { resetContextHygieneTracker } from "./runtime/context-hygiene.js";
+import { createDoomLoopState } from "./runtime/doom-loop.js";
+import { resolveBashContextGuardConfig } from "./runtime/bash-context-guard.js";
+import { invalidateFsScanCache } from "./workspace/fs-scan-cache.js";
+import { startWatching } from "./runtime/file-watcher.js";
 import type { ContextGraph } from "./context-graph.js";
 import {
   getSharedEvidenceResolver,
@@ -19,9 +19,9 @@ import {
   invalidateSharedGraph,
   resetSharedContextGraph,
 } from "./mcp-registry.js";
-import { getSemanticIndex } from "./semantic-index-registry.js";
-import { getIncrementalIndex } from "./incremental-index.js";
-import { resetLSPBridge, shutdownAllManagers } from "./lsp-bridge.js";
+import { getSemanticIndex } from "./indexing/semantic-index-registry.js";
+import { getIncrementalIndex } from "./indexing/incremental-index.js";
+import { resetLSPBridge, shutdownAllManagers } from "./lsp/lsp-bridge.js";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 export interface ActivationState {

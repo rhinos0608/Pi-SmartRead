@@ -2,7 +2,7 @@
  * Tests for layer-analysis — architectural layer derivation.
  */
 import { describe, it, expect } from "vitest";
-import { deriveLayers, extractPackageSpecifiers } from "../../src/layer-analysis.js";
+import { deriveLayers, extractPackageSpecifiers } from "../../../src/inspect/layer-analysis.js";
 
 describe("deriveLayers", () => {
   it("classifies controller files by name pattern", () => {

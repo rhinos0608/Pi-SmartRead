@@ -2,11 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   createRepositoryIntelligenceService,
   IntelligenceServiceNotImplementedError,
-} from "../../src/repository-intelligence.js";
+} from "../../../src/repository/repository-intelligence.js";
 import type {
   RepositoryIntelligenceService,
   SnapshotId,
-} from "../../src/repository-intelligence-types.js";
+} from "../../../src/repository/repository-intelligence-types.js";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";

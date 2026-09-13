@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   rankByDiagnosticProximity,
   type DiagnosticInput,
-} from "../../../src/rank-channels/diagnostic-proximity.js";
+} from "../../../../src/ranking/channels/diagnostic-proximity.js";
 
 describe("diagnostic-proximity channel", () => {
   it("returns unavailable when inputs are empty", () => {

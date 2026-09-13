@@ -24,7 +24,7 @@ import {
   type DiagnosticChange,
   type CapabilityChange,
 } from "./delta-diagnostics.js";
-import type { Provenance } from "./context-graph.js";
+import type { Provenance } from "../context-graph.js";
 import type { CapabilityReport } from "./repository-intelligence-types.js";
 
 // ── Types ─────────────────────────────────────────────────────────

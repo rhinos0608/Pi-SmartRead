@@ -3,14 +3,14 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-vi.mock("../../src/language-intelligence-installer.js", async () => {
-  const actual: any = await vi.importActual("../../src/language-intelligence-installer.js");
+vi.mock("../../../src/language-intelligence/language-intelligence-installer.js", async () => {
+  const actual: any = await vi.importActual("../../../src/language-intelligence/language-intelligence-installer.js");
   return { ...actual, installServer: vi.fn(), isServerInstalled: actual.isServerInstalled, getInstalledBinPath: actual.getInstalledBinPath, readLockfile: actual.readLockfile };
 });
 
-import { ensureLanguageServerAvailable, _clearFailedInstallAttempts, _clearInFlightInstalls, resolveLanguageServer } from "../../src/language-intelligence-runtime.js";
-import { installServer } from "../../src/language-intelligence-installer.js";
-import { __paths, resetLanguageIntelligenceCaches } from "../../src/language-intelligence-config.js";
+import { ensureLanguageServerAvailable, _clearFailedInstallAttempts, _clearInFlightInstalls, resolveLanguageServer } from "../../../src/language-intelligence/language-intelligence-runtime.js";
+import { installServer } from "../../../src/language-intelligence/language-intelligence-installer.js";
+import { __paths, resetLanguageIntelligenceCaches } from "../../../src/language-intelligence/language-intelligence-config.js";
 
 function makeTempHome(): string {
   const dir = mkdtempSync(join(tmpdir(), "pi-ensure-home-"));

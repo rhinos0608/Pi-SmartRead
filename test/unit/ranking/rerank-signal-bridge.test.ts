@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { enrichRerankSignals } from "../../src/rerank-signal-bridge.js";
-import type { RerankerInput } from "../../src/rerank.js";
+import { enrichRerankSignals } from "../../../src/ranking/rerank-signal-bridge.js";
+import type { RerankerInput } from "../../../src/ranking/rerank.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────
 

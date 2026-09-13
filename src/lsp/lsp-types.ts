@@ -8,7 +8,7 @@
 import type { LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 import { existsSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
-import { resolveLanguageServer } from "./language-intelligence-runtime.js";
+import { resolveLanguageServer } from "../language-intelligence/language-intelligence-runtime.js";
 
 // ── Language intelligence wiring ───────────────────────────────────────
 // Cache of resolved executable/args per `${root}:${languageId}` so that

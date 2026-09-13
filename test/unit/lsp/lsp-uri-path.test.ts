@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lspUriToPath } from "../../src/index.js";
+import { lspUriToPath } from "../../../src/index.js";
 
 describe("lspUriToPath", () => {
   it("converts file:// URIs to filesystem paths", () => {

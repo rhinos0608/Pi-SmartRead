@@ -10,7 +10,7 @@
  * Powered by the same @vscode/tree-sitter-wasm grammar infrastructure
  * used by ast-chunker.ts and grammar-loader.ts.
  */
-import { formatRecoveryHint } from "./utils.js";
+import { formatRecoveryHint } from "../utils.js";
 
 // ══════════════════════════════════════════════════════════════════
 // Public types

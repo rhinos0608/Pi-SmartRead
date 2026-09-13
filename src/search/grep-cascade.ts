@@ -11,16 +11,16 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { canonicalizeWorkspaceRoot } from "@rhinos0608/pi-workspace-protocol";
-import type { ContextGraph } from "./context-graph.js";
+import type { ContextGraph } from "../context-graph.js";
 import { handleGrep } from "./search-tool.js";
 import { handleSymbol } from "./find-symbol-tool.js";
-import { getSemanticIndex } from "./semantic-index-registry.js";
-import { pathPrefixForDirectory } from "./semantic-index.js";
-import { recordDegradation } from "./runtime-health.js";
-import { tokenize, compileBm25Corpus, type Bm25Corpus } from "./scoring.js";
-import { findCodeFiles } from "./file-discovery.js";
-import { LruCache } from "./utils.js";
-import type { StructuralSearchMatch } from "./structural-search.js";
+import { getSemanticIndex } from "../indexing/semantic-index-registry.js";
+import { pathPrefixForDirectory } from "../indexing/semantic-index.js";
+import { recordDegradation } from "../runtime/runtime-health.js";
+import { tokenize, compileBm25Corpus, type Bm25Corpus } from "../scoring.js";
+import { findCodeFiles } from "../file-discovery.js";
+import { LruCache } from "../utils.js";
+import type { StructuralSearchMatch } from "../structural/structural-search.js";
 
 // ── Shared grep types ─────────────────────────────────────────────
 

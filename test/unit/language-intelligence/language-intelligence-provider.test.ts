@@ -9,15 +9,15 @@ import {
     LANGUAGE_INTELLIGENCE_RPC_METHODS,
 } from "@rhinos0608/pi-workspace-protocol";
 import { createRpcClient } from "@rhinos0608/pi-workspace-protocol";
-import { createLanguageIntelligenceProvider } from "../../src/language-intelligence-provider.js";
+import { createLanguageIntelligenceProvider } from "../../../src/language-intelligence/language-intelligence-provider.js";
 
 // mock lsp-bridge
 const mockGetFresh = vi.fn();
-vi.mock("../../src/lsp-bridge.js", () => ({
+vi.mock("../../../src/lsp/lsp-bridge.js", () => ({
     getLSPBridge: vi.fn(),
 }));
 
-import { getLSPBridge } from "../../src/lsp-bridge.js";
+import { getLSPBridge } from "../../../src/lsp/lsp-bridge.js";
 
 function makeBus() {
     const handlers = new Map<string, Array<(d: unknown) => void>>();

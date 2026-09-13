@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   computeDiagnosticChanges,
   computeCapabilityChange,
-} from "../../src/delta-diagnostics.js";
+} from "../../../src/repository/delta-diagnostics.js";
 import type {
   Diagnostic,
   FileLineageResult,
-} from "../../src/delta-diagnostics.js";
-import type { CapabilityReport } from "../../src/repository-intelligence-types.js";
+} from "../../../src/repository/delta-diagnostics.js";
+import type { CapabilityReport } from "../../../src/repository/repository-intelligence-types.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
 

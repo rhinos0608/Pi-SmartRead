@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { detectMonorepo, expandToMonorepoRoots, detectServiceBoundaries } from "../../src/monorepo-detector.js";
+import { detectMonorepo, expandToMonorepoRoots, detectServiceBoundaries } from "../../../src/workspace/monorepo-detector.js";
 
 function writeProjectFile(root: string, path: string, content: string): void {
   mkdirSync(join(root, dirname(path)), { recursive: true });

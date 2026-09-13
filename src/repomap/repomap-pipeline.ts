@@ -13,14 +13,14 @@
 
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import type { Tag } from "./cache.js";
-import { TagsCache } from "./cache.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { getTagsBatch, initParser, getTagsRaw } from "./tags.js";
-import { filenameToLang } from "./languages.js";
-import { getLSPBridge } from "./lsp-bridge.js";
-import type { LSPDocumentSymbol } from "./lsp-bridge.js";
-import { renderTreeContext } from "./tree-context.js";
+import type { Tag } from "../structural/cache.js";
+import { TagsCache } from "../structural/cache.js";
+import { findSrcFiles } from "../file-discovery.js";
+import { getTagsBatch, initParser, getTagsRaw } from "../structural/tags.js";
+import { filenameToLang } from "../languages.js";
+import { getLSPBridge } from "../lsp/lsp-bridge.js";
+import type { LSPDocumentSymbol } from "../lsp/lsp-bridge.js";
+import { renderTreeContext } from "../structural/tree-context.js";
 import {
   getRankedTags,
   getImportRankedTags,

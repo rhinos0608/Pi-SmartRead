@@ -10,9 +10,9 @@ import {
     type LanguageDiagnostic,
 } from "@rhinos0608/pi-workspace-protocol";
 import { createRpcServer, type BusLike, type RequestEvent } from "@rhinos0608/pi-workspace-protocol";
-import { getLSPBridge } from "./lsp-bridge.js";
+import { getLSPBridge } from "../lsp/lsp-bridge.js";
 import { resolveLanguageServer, detectProjectRoot } from "./language-intelligence-runtime.js";
-import { validateWorkspaceEdit } from "./workspace-edit-validator.js";
+import { validateWorkspaceEdit } from "../workspace/workspace-edit-validator.js";
 import type { RenamePreviewRequest, RenamePreviewResponse, LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 
 export interface LanguageIntelligenceProviderBus extends BusLike {}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rankExplicitSeed } from "../../../src/rank-channels/explicit-seed.js";
+import { rankExplicitSeed } from "../../../../src/ranking/channels/explicit-seed.js";
 
 const FILES = [
   "src/auth/login.ts",

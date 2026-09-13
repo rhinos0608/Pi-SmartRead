@@ -4,8 +4,8 @@
  * Pure rendering (no envelopes, no LSP gating). Callers own budgets/resources.
  */
 import { fileURLToPath } from "node:url";
-import type { CallGraphResult } from "./callgraph.js";
-import type { StructuralFacts } from "./structural-facts-types.js";
+import type { CallGraphResult } from "../structural/callgraph.js";
+import type { StructuralFacts } from "../structural/structural-facts-types.js";
 import type { CallDirection } from "./inspect-types.js";
 
 // ── runSection helpers ─────────────────────────────────────────

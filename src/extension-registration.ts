@@ -9,7 +9,7 @@
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerSessionHooks } from "./hook.js";
-import { initHandlers } from "./read-many.js";
+import { initHandlers } from "./read/read-many.js";
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
 import { toToolDefinition } from "./types.js";
 import "./mcp-registry.js";
@@ -22,22 +22,22 @@ import {
   getSharedContextGraphIfBuilt,
 } from "./mcp-registry.js";
 import type { ContextGraph } from "./context-graph.js";
-import { getSharedLspInspectionProvider } from "./lsp-inspection.js";
-import { createGrepTool, GREP_DESCRIPTION } from "./grep-tool.js";
-import { createReadTool } from "./unified-read.js";
-import { getLSPBridge } from "./lsp-bridge.js";
-import { registerRepositoryIntelligence } from "./repository-intelligence-registry.js";
-import { createRepositoryIntelligenceService } from "./repository-intelligence.js";
-import { registerLanguageIntelligenceCommand } from "./language-intelligence-command.js";
-import { createLanguageIntelligenceProvider } from "./language-intelligence-provider.js";
-import { resetDoomLoopState } from "./doom-loop.js";
+import { getSharedLspInspectionProvider } from "./lsp/lsp-inspection.js";
+import { createGrepTool, GREP_DESCRIPTION } from "./search/grep-tool.js";
+import { createReadTool } from "./read/unified-read.js";
+import { getLSPBridge } from "./lsp/lsp-bridge.js";
+import { registerRepositoryIntelligence } from "./repository/repository-intelligence-registry.js";
+import { createRepositoryIntelligenceService } from "./repository/repository-intelligence.js";
+import { registerLanguageIntelligenceCommand } from "./language-intelligence/language-intelligence-command.js";
+import { createLanguageIntelligenceProvider } from "./language-intelligence/language-intelligence-provider.js";
+import { resetDoomLoopState } from "./runtime/doom-loop.js";
 import type { ActivationState } from "./extension-lifecycle.js";
 
 // ── Symbol resolution for read { symbol } (WP-5) ────────────────
 
 // Canonical implementation lives in lsp-server-operation.ts (shared, cycle-free);
 // re-exported here to preserve the public helper path (tests import from index.js).
-import { lspUriToPath } from "./lsp-server-operation.js";
+import { lspUriToPath } from "./lsp/lsp-server-operation.js";
 export { lspUriToPath };
 
 /**

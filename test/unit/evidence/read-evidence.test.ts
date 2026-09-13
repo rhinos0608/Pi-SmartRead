@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { createReadTool } from "../../src/unified-read.js";
-import { shownMatchesAttested } from "../../src/hook.js";
-import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../src/semantic-index-registry.js";
-import { createGrepTool } from "../../src/grep-tool.js";
+import { createReadTool } from "../../../src/read/unified-read.js";
+import { shownMatchesAttested } from "../../../src/hook.js";
+import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../../src/indexing/semantic-index-registry.js";
+import { createGrepTool } from "../../../src/search/grep-tool.js";
 
 function makeCtx(cwd: string, sessionFile: string | null) {
   return {
@@ -306,7 +306,7 @@ describe("grep evidence envelopes", () => {
       expect(result.details.workspaceEvidence.resources[0].coverage).toBe("search-match");
       expect(result.content[0].text).toContain("read=");
     }
-    const { _setUnavailableForTests, _resetAstGrepCacheForTests } = await import("../../src/structural-search.js");
+    const { _setUnavailableForTests, _resetAstGrepCacheForTests } = await import("../../../src/structural/structural-search.js");
     try {
       _setUnavailableForTests("forced unavailable for envelope test");
       const unav: any = await tool.execute("g-struct-unav", { pattern: "console.log($ARG)", structural: {} } as any, undefined, undefined, ctx);

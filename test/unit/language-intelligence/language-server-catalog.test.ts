@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { LANGUAGE_SERVER_CATALOG, getDescriptorsForLanguage, getDescriptorsForExtension } from "../../src/language-server-catalog.js";
+import { LANGUAGE_SERVER_CATALOG, getDescriptorsForLanguage, getDescriptorsForExtension } from "../../../src/language-intelligence/language-server-catalog.js";
 
 describe("language-server-catalog", () => {
   it("contains all required languages", () => {

@@ -6,9 +6,9 @@ import {
   SemanticIndex,
   SemanticUnavailableError,
   type SemanticIndexOptions,
-} from "../../src/semantic-index.js";
-import { SqliteVecStore, type Chunk } from "../../src/sqlite-vec-store.js";
-import type { EmbedRequest } from "../../src/embedding.js";
+} from "../../../src/indexing/semantic-index.js";
+import { SqliteVecStore, type Chunk } from "../../../src/indexing/sqlite-vec-store.js";
+import type { EmbedRequest } from "../../../src/indexing/embedding.js";
 
 class FakeStore {
   chunks = new Map<number, Chunk>();

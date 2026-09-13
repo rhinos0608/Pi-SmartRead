@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { detectProjectLanguages } from "./lsp-bridge.js";
+import { detectProjectLanguages } from "../lsp/lsp-bridge.js";
 import { resolveLanguageServer } from "./language-intelligence-runtime.js";
 import { isRootTrusted, trustRoot, loadConfig, setInstallMode } from "./language-intelligence-config.js";
 import { getDescriptorsForLanguage, LANGUAGE_SERVER_CATALOG } from "./language-server-catalog.js";
-import { invalidateResolvedServerCacheForRoot, evictManagerForRoot } from "./lsp-bridge.js";
+import { invalidateResolvedServerCacheForRoot, evictManagerForRoot } from "../lsp/lsp-bridge.js";
 import { join } from "node:path";
 
 const MAX_LIST = 20;

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { fuseChannels } from "../../src/rank-fusion.js";
-import type { ChannelResult, ChannelCandidate } from "../../src/rank-fusion.js";
-import { RRF_K } from "../../src/deep-search-constants.js";
+import { fuseChannels } from "../../../src/ranking/rank-fusion.js";
+import type { ChannelResult, ChannelCandidate } from "../../../src/ranking/rank-fusion.js";
+import { RRF_K } from "../../../src/search/deep-search-constants.js";
 
 function mkCandidate(overrides: Partial<ChannelCandidate> & { name: string; file: string }): ChannelCandidate {
   return { kind: "function", snippet: "", rawScore: 0, ...overrides };

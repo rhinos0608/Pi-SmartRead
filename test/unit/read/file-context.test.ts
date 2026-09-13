@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, realpathSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { buildFileContextLines } from "../../src/file-context.js";
-import { ContextGraph, EdgeStore } from "../../src/context-graph.js";
+import { buildFileContextLines } from "../../../src/read/file-context.js";
+import { ContextGraph, EdgeStore } from "../../../src/context-graph.js";
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });

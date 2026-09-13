@@ -15,15 +15,15 @@ import {
     canonicalizeWorkspaceRoot,
     type WorkspaceEvidenceEnvelope,
 } from "@rhinos0608/pi-workspace-protocol";
-import { clampMapTokens, createRepoTool } from "./repomap-tool.js";
-import { detectCommunities } from "./community-detection.js";
+import { clampMapTokens, createRepoTool } from "../repomap/repomap-tool.js";
+import { detectCommunities } from "../graph/community-detection.js";
 import { scanRoutes } from "./route-extraction.js";
 import { deriveLayers } from "./layer-analysis.js";
-import { detectServiceBoundaries } from "./monorepo-detector.js";
+import { detectServiceBoundaries } from "../workspace/monorepo-detector.js";
 import { detectDeadCode } from "./impact-analysis.js";
-import type { CallGraphResult } from "./callgraph.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { inspectNavigation as directInspectNavigation, inspectDiagnostics as directInspectDiagnostics, type LspInspectionProvider } from "./lsp-inspection.js";
+import type { CallGraphResult } from "../structural/callgraph.js";
+import { findSrcFiles } from "../file-discovery.js";
+import { inspectNavigation as directInspectNavigation, inspectDiagnostics as directInspectDiagnostics, type LspInspectionProvider } from "../lsp/lsp-inspection.js";
 import { renderNavigationSection, renderDiagnosticsSection, runSection, runSectionAsync } from "./inspect-sections.js";
 import { renderDiffSection } from "./inspect-diff.js";
 import type { InspectV4Input, InspectV4Result } from "./inspect-types.js";

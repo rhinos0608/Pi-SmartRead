@@ -9,7 +9,7 @@ import {
   resolveWorkspaceDirectory,
   resolveWorkspaceFile,
   resolveWorkspacePath,
-} from "../../src/workspace-boundary.js";
+} from "../../../src/workspace/workspace-boundary.js";
 
 const roots: string[] = [];
 

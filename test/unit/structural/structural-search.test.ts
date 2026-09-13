@@ -11,7 +11,7 @@ import {
   _resetAstGrepCacheForTests,
   _setUnavailableForTests,
   SUPPORTED_STRUCTURAL_LANGUAGES,
-} from "../../src/structural-search.js";
+} from "../../../src/structural/structural-search.js";
 
 describe("structural-search engine (WP-SR2)", () => {
   let dir: string;

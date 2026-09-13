@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { promisify } from "node:util";
-import { canonicalRelative } from "./workspace-boundary.js";
+import { canonicalRelative } from "../workspace/workspace-boundary.js";
 
 const execFileAsync = promisify(execFile);
 

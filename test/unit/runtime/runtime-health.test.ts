@@ -4,7 +4,7 @@ const {
   recentDegradations,
   recordDegradation,
   resetRuntimeHealth,
-} = await import("../../src/runtime-health.js");
+} = await import("../../../src/runtime/runtime-health.js");
 
 describe("retrieval degradation tracking", () => {
   beforeEach(() => {

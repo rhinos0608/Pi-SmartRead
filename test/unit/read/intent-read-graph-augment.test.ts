@@ -2,11 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createIntentReadTool } from "../../src/intent-read.js";
-import type { EmbedRequest } from "../../src/embedding.js";
+import { createIntentReadTool } from "../../../src/read/intent-read.js";
+import type { EmbedRequest } from "../../../src/indexing/embedding.js";
 import { makeEmbedder, makeReadTool, runIntentRead, setupIntentReadEnv } from "./intent-read-helpers.js";
 
-vi.mock("../../src/mcp-registry.js", () => ({
+vi.mock("../../../src/mcp-registry.js", () => ({
   getSharedContextGraphAsync: vi.fn().mockResolvedValue({
     getFileNeighbours: vi.fn().mockResolvedValue([]),
     getMutationNeighbours: vi.fn().mockReturnValue([]),
@@ -188,7 +188,7 @@ describe("intent_read: graph-provider consolidation (Keystone P1-W3)", () => {
       writeFileSync(join(root, "package.json"), JSON.stringify({ name: "t" }));
       const fileA = join(root, "a.ts");
       writeFileSync(fileA, "export const auth = 1;\n");
-      const mcp = await import("../../src/mcp-registry.js");
+      const mcp = await import("../../../src/mcp-registry.js");
       const provider = vi.mocked(mcp.getSharedContextGraphAsync);
       provider.mockClear();
       const tool = createIntentReadTool(
@@ -208,7 +208,7 @@ describe("intent_read: graph-provider consolidation (Keystone P1-W3)", () => {
     try {
       const fileA = join(root, "a.ts");
       writeFileSync(fileA, "export const auth = 1;\n");
-      const mcp = await import("../../src/mcp-registry.js");
+      const mcp = await import("../../../src/mcp-registry.js");
       const provider = vi.mocked(mcp.getSharedContextGraphAsync);
       provider.mockClear();
       const tool = createIntentReadTool(

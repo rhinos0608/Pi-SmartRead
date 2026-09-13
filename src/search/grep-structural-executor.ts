@@ -9,10 +9,10 @@
  */
 
 import { relative, resolve } from "node:path";
-import type { ContextGraph } from "./context-graph.js";
+import type { ContextGraph } from "../context-graph.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
-import { structuralSearch, resolveStructuralLang, STRUCTURAL_SEARCH_MAX_LIMIT, STRUCTURAL_SEARCH_RAW_CEILING } from "./structural-search.js";
-import type { StructuralSearchMatch } from "./structural-search.js";
+import { structuralSearch, resolveStructuralLang, STRUCTURAL_SEARCH_MAX_LIMIT, STRUCTURAL_SEARCH_RAW_CEILING } from "../structural/structural-search.js";
+import type { StructuralSearchMatch } from "../structural/structural-search.js";
 import { tryCanonical, type GrepExecutionResult, type GrepHit, type StructuralDetails } from "./grep-cascade.js";
 
 export const GREP_STRUCTURAL_FETCH_SIZE = STRUCTURAL_SEARCH_MAX_LIMIT;

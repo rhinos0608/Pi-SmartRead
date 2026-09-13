@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
-import { rankAnnotationProximity } from "../../../src/rank-channels/annotation-proximity.js";
+import { rankAnnotationProximity } from "../../../../src/ranking/channels/annotation-proximity.js";
 
 let tmpDir: string;
 

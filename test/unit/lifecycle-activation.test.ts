@@ -24,8 +24,8 @@ const watcherCallbacks: Array<(paths: string[]) => void> = [];
 // Record getSharedContextGraph invocations to observe dirty consumption.
 const graphCalls: Array<{ root: string; dirty: boolean }> = [];
 
-vi.mock("../../src/file-watcher.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/file-watcher.js")>();
+vi.mock("../../src/runtime/file-watcher.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/runtime/file-watcher.js")>();
   return {
     ...actual,
     startWatching: (_root: string, onDirty: (paths: string[]) => void) => {

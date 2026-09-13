@@ -6,7 +6,7 @@ import {
   snapshotId,
   type SnapshotRecord,
   type SnapshotStore,
-} from "../../src/snapshot-retention.js";
+} from "../../../src/repository/snapshot-retention.js";
 
 // ── Test helpers ────────────────────────────────────────────────────
 

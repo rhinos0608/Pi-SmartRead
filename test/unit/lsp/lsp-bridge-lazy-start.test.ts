@@ -33,7 +33,7 @@ describe("WP-SR5 lazy LSP start", () => {
       const actual: any = await vi.importActual("node:child_process");
       return { ...actual, spawn: spawnMock };
     });
-    await import("../../src/lsp-bridge.js");
+    await import("../../../src/lsp/lsp-bridge.js");
     await new Promise((r) => setTimeout(r, 50));
     expect(spawnMock).not.toHaveBeenCalled();
   });
@@ -43,12 +43,12 @@ describe("WP-SR5 lazy LSP start", () => {
     const getLSPBridgeMock = vi.fn(async () => {
       throw new Error("getLSPBridge should not be called for plain inspect");
     });
-    vi.doMock("../../src/lsp-bridge.js", () => ({
+    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
       getLSPBridge: getLSPBridgeMock,
       getProjectLSPInfo: vi.fn(() => ({ supportedLanguages: [], servers: [] })),
       resetLSPBridge: vi.fn(),
     }));
-    const { executeInspectV4 } = await import("../../src/inspect.js");
+    const { executeInspectV4 } = await import("../../../src/inspect/inspect.js");
     const result = await executeInspectV4({
       path: "hello.ts",
       cwd: workdir,
@@ -62,7 +62,7 @@ describe("WP-SR5 lazy LSP start", () => {
     // Directory plain inspect may still trigger repomap's optional LSP symbol fallback
     // (augmentWithLspSymbols) — that path is out of scope for WP-SR5's eager-block fix.
     // This test proves the WP-SR3 navigation/diagnostics gate is not hit on plain inspect.
-    const { createInspectV4Tool } = await import("../../src/inspect-tool.js");
+    const { createInspectV4Tool } = await import("../../../src/inspect/inspect-tool.js");
     const provider = {
       inspectNavigation: vi.fn(async () => ({ status: "empty" as const, operation: "documentSymbols" as const, items: [], truncated: false })),
       inspectDiagnostics: vi.fn(async () => ({ status: "empty" as const, diagnostics: [], truncated: false })),
@@ -81,7 +81,7 @@ describe("WP-SR5 lazy LSP start", () => {
   it("inspect with navigation DOES attempt LSP (spawn or bridged)", async () => {
     // This test proves the lazy gate is not over-blocked: navigation still reaches LSP.
     // We provide an injected provider so no real spawn is needed — just verify the provider is called.
-    const { createInspectV4Tool } = await import("../../src/inspect-tool.js");
+    const { createInspectV4Tool } = await import("../../../src/inspect/inspect-tool.js");
     const provider = {
       inspectNavigation: vi.fn(async () => ({ status: "empty" as const, operation: "documentSymbols" as const, items: [], truncated: false })),
       inspectDiagnostics: vi.fn(async () => ({ status: "empty" as const, diagnostics: [], truncated: false })),

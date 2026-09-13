@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { rerank, type RerankerInput } from "../../src/rerank.js";
+import { rerank, type RerankerInput } from "../../../src/ranking/rerank.js";
 
 // ── Backward compatibility: zeroed new signals must not change baseline ──
 

@@ -31,12 +31,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildToolRegistry } from "./mcp-registry.js";
-import { MCP_PROMPTS } from "./mcp-prompts.js";
-import { MCP_RESOURCES, resolveResource } from "./mcp-resources.js";
+import { MCP_PROMPTS } from "./mcp/mcp-prompts.js";
+import { MCP_RESOURCES, resolveResource } from "./mcp/mcp-resources.js";
 import { coerceText } from "./utils.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toExtensionContext } from "./types.js";
-import { renderSmartReadToolGuide } from "./tool-guidance.js";
+import { renderSmartReadToolGuide } from "./runtime/tool-guidance.js";
 
 // Capture cwd once at server start.
 const SERVER_CWD = process.cwd();

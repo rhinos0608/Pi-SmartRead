@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
-import { createIntentReadTool } from "../../src/intent-read.js";
-import { SCENARIOS, createRetrievalFixture, cleanupFixture, RetrievalFixture } from "../helpers/retrieval-fixtures.js";
-import type { EmbedRequest, EmbedResult } from "../../src/embedding.js";
+import { createIntentReadTool } from "../../../src/read/intent-read.js";
+import { SCENARIOS, createRetrievalFixture, cleanupFixture, RetrievalFixture } from "../../helpers/retrieval-fixtures.js";
+import type { EmbedRequest, EmbedResult } from "../../../src/indexing/embedding.js";
 
 
 // Stub fetchEmbeddings: returns unit vectors based on keywords to simulate perfect semantic match

@@ -1,5 +1,5 @@
 import { beforeEach, afterEach } from "vitest";
-import type { EmbedRequest, EmbedResult } from "../../src/embedding.js";
+import type { EmbedRequest, EmbedResult } from "../../../src/indexing/embedding.js";
 
 type ReadMapValue =
   | string

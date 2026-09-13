@@ -150,6 +150,6 @@ export function createMinimalContext(cwd: string): ExtensionContext {
  */
 export const toExtensionContext = createMinimalContext;
 
-export type { StructuralFacts, CallerInfo, ChildSymbol, ParentInfo, OverrideInfo, ReExportInfo } from "./structural-facts-types.js";
-export type { SignalName, SignalResult, FileSignals } from "./signals-types.js";
-export type { InspectV4Mode, InspectV4Input, InspectV4Result } from "./inspect-types.js";
+export type { StructuralFacts, CallerInfo, ChildSymbol, ParentInfo, OverrideInfo, ReExportInfo } from "./structural/structural-facts-types.js";
+export type { SignalName, SignalResult, FileSignals } from "./structural/signals-types.js";
+export type { InspectV4Mode, InspectV4Input, InspectV4Result } from "./inspect/inspect-types.js";

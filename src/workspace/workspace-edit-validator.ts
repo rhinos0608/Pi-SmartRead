@@ -1,4 +1,4 @@
-import { canonicalPathOrNull } from "./canonical-path.js";
+import { canonicalPathOrNull } from "../canonical-path.js";
 import { isAbsolute } from "node:path";
 
 export interface ValidatedWorkspaceEdit {

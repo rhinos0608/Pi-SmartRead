@@ -26,9 +26,9 @@ import {
   executeInspectV4,
   executeFileInspect,
   executeDirectoryInspect,
-} from "../../src/inspect.js";
-import { createInspectV4Tool } from "../../src/inspect-tool.js";
-import type { InspectV4Input } from "../../src/inspect-types.js";
+} from "../../../src/inspect/inspect.js";
+import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
+import type { InspectV4Input } from "../../../src/inspect/inspect-types.js";
 
 let workdir: string;
 let file: string;
@@ -417,7 +417,7 @@ describe("evidence envelope for new params", () => {
 
 describe("symbol read in hook", () => {
   it("read with symbol uses resolveSymbol when provided", async () => {
-    const { createExtendedReadTool } = await import("../../src/hook.js");
+    const { createExtendedReadTool } = await import("../../../src/hook.js");
     writeFileSync(join(workdir, "target.ts"), "export function myFunc() { return 1; }\n");
 
     const tool = createExtendedReadTool({
@@ -438,7 +438,7 @@ describe("symbol read in hook", () => {
   });
 
   it("read with symbol throws when not found", async () => {
-    const { createExtendedReadTool } = await import("../../src/hook.js");
+    const { createExtendedReadTool } = await import("../../../src/hook.js");
 
     const tool = createExtendedReadTool({
       resolveSymbol: async () => null,
@@ -449,7 +449,7 @@ describe("symbol read in hook", () => {
   });
 
   it("read with symbol throws when resolveSymbol not provided", async () => {
-    const { createExtendedReadTool } = await import("../../src/hook.js");
+    const { createExtendedReadTool } = await import("../../../src/hook.js");
 
     const tool = createExtendedReadTool();
     await expect(
@@ -458,7 +458,7 @@ describe("symbol read in hook", () => {
   });
 
   it("symbol takes precedence over path", async () => {
-    const { createExtendedReadTool } = await import("../../src/hook.js");
+    const { createExtendedReadTool } = await import("../../../src/hook.js");
     writeFileSync(join(workdir, "symbol-target.ts"), "export const fromSymbol = true;\n");
 
     const tool = createExtendedReadTool({

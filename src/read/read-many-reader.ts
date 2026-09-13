@@ -11,10 +11,10 @@ import {
 	splitPathAndSelector,
 	resolveReadPath,
 	stripHashlineAnchors,
-} from "./utils.js";
-import { isInternalUrl, resolveUrl } from "./internal-url-router.js";
+} from "../utils.js";
+import { isInternalUrl, resolveUrl } from "../protocols/internal-url-router.js";
 import { recordContiguous, resolveSessionKey } from "./file-read-cache.js";
-import { canSummarize, renderSummary, summarizeCode } from "./code-summary.js";
+import { canSummarize, renderSummary, summarizeCode } from "../structural/code-summary.js";
 
 export interface BatchFileRequest {
 	readonly path: string;

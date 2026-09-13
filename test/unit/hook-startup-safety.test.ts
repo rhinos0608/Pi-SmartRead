@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-vi.mock("../../src/lsp-bridge.js", () => ({
+vi.mock("../../src/lsp/lsp-bridge.js", () => ({
   getLSPBridge: vi.fn(() => new Promise(() => {})),
 }));
 

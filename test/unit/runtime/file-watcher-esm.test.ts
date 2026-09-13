@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const ROOT = fileURLToPath(new URL("../..", import.meta.url));
+const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
 const CHILD_SCRIPT = String.raw`
 import { startWatching } from "./src/file-watcher.ts";
@@ -77,7 +77,7 @@ describe("file-watcher real ESM chokidar load", () => {
     mkdirSync(chokidarDir, { recursive: true });
     mkdirSync(watchedRoot, { recursive: true });
     writeFileSync(join(fixtureRoot, "package.json"), JSON.stringify({ type: "module" }));
-    copyFileSync(join(ROOT, "src/file-watcher.ts"), join(sourceDir, "file-watcher.ts"));
+    copyFileSync(join(ROOT, "src/runtime/file-watcher.ts"), join(sourceDir, "file-watcher.ts"));
     writeFileSync(
       join(chokidarDir, "package.json"),
       JSON.stringify({ name: "chokidar", version: "0.0.0", main: "index.cjs" }),

@@ -6,7 +6,7 @@ import {
   buildStaleContextRecord,
   renderStaleContextPlaceholder,
   type ContextHygieneTracker,
-} from "../../src/context-hygiene.js";
+} from "../../../src/runtime/context-hygiene.js";
 
 describe("renderStaleContextPlaceholder", () => {
   it("renders repo_map stale guidance", () => {

@@ -8,7 +8,7 @@
  * Bounded to 500 candidates. Returns unavailable when no changes provided.
  */
 
-import type { Provenance } from "../context-graph.js";
+import type { Provenance } from "../../context-graph.js";
 
 // ── Types ────────────────────────────────────────────────────────
 

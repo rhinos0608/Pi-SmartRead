@@ -11,9 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test } from "vitest";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { createGrepTool } from "../../src/grep-tool.js";
-import { disposeSemanticIndexes } from "../../src/semantic-index-registry.js";
-import { makeCtx, makeOpts, seedStandardWorkdir } from "../helpers/grep-tool-fixtures.js";
+import { createGrepTool } from "../../../src/search/grep-tool.js";
+import { disposeSemanticIndexes } from "../../../src/indexing/semantic-index-registry.js";
+import { makeCtx, makeOpts, seedStandardWorkdir } from "../../helpers/grep-tool-fixtures.js";
 let workdir: string;
 
 beforeEach(() => {
@@ -128,7 +128,7 @@ describe("grep tool — literal mode", () => {
 });
 describe("grep tool — per-hit engine provenance rendering", () => {
   it("uniform single-engine result set renders no per-hit annotation", async () => {
-    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const { _formatOutputForTests } = await import("../../../src/search/grep-tool.js");
     const hits: any[] = [
       { relFile: "src/a.ts", line: 1, endLine: 1, name: "foo", snippet: "", engines: ["bm25"] },
       { relFile: "src/b.ts", line: 2, endLine: 2, name: "", snippet: "", engines: ["bm25"] },
@@ -141,7 +141,7 @@ describe("grep tool — per-hit engine provenance rendering", () => {
   });
 
   it("divergent engines across hits render per-hit annotations accurately", async () => {
-    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const { _formatOutputForTests } = await import("../../../src/search/grep-tool.js");
     const hits: any[] = [
       { relFile: "src/a.ts", line: 1, endLine: 1, name: "", snippet: "hit a", engines: ["bm25"] },
       { relFile: "src/b.ts", line: 10, endLine: 12, name: "Bar", snippet: "hit b", engines: ["symbol"] },
@@ -154,7 +154,7 @@ describe("grep tool — per-hit engine provenance rendering", () => {
   });
 
   it("single hit with multiple engines shows combined provenance", async () => {
-    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const { _formatOutputForTests } = await import("../../../src/search/grep-tool.js");
     const hits: any[] = [
       { relFile: "src/a.ts", line: 5, endLine: 5, name: "doThing", snippet: "code", engines: ["lexical", "bm25"] },
     ];
@@ -163,7 +163,7 @@ describe("grep tool — per-hit engine provenance rendering", () => {
   });
 
   it("uniform multi-engine hits still show provenance (confidence signal)", async () => {
-    const { _formatOutputForTests, _shouldShowPerHitEnginesForTests } = await import("../../src/grep-tool.js");
+    const { _formatOutputForTests, _shouldShowPerHitEnginesForTests } = await import("../../../src/search/grep-tool.js");
     const hits: any[] = [
       { relFile: "src/a.ts", line: 1, endLine: 1, name: "", snippet: "", engines: ["lexical", "bm25"] },
       { relFile: "src/b.ts", line: 2, endLine: 2, name: "", snippet: "", engines: ["lexical", "bm25"] },
@@ -174,7 +174,7 @@ describe("grep tool — per-hit engine provenance rendering", () => {
   });
 
   it("empty engines array never renders brackets", async () => {
-    const { _formatOutputForTests } = await import("../../src/grep-tool.js");
+    const { _formatOutputForTests } = await import("../../../src/search/grep-tool.js");
     const hits: any[] = [
       { relFile: "src/a.ts", line: 1, endLine: 1, name: "", snippet: "", engines: [] },
     ];

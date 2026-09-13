@@ -7,14 +7,14 @@
  * file + directory inspect pipelines. No envelopes, no dispatch.
  */
 import { resolve as pathResolve } from "node:path";
-import { canonicalPathOrFallback, canonicalPathOrNull } from "./canonical-path.js";
+import { canonicalPathOrFallback, canonicalPathOrNull } from "../canonical-path.js";
 import { resourceIdFor, type InspectedResource } from "@rhinos0608/pi-workspace-protocol";
 import { uriToFsPath } from "./inspect-sections.js";
 import type { InspectV4Input } from "./inspect-types.js";
-import type { ContextGraph } from "./context-graph.js";
-import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
-import { findSrcFiles } from "./file-discovery.js";
-import type { LspInspectionProvider } from "./lsp-inspection.js";
+import type { ContextGraph } from "../context-graph.js";
+import { buildCallGraph, type CallGraphResult } from "../structural/callgraph.js";
+import { findSrcFiles } from "../file-discovery.js";
+import type { LspInspectionProvider } from "../lsp/lsp-inspection.js";
 
 export const SECTION_NL = "\n";
 export function joinSectionLines(lines: string[]): string {

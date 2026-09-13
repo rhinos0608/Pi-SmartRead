@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { detectCommunities } from "../../src/community-detection.js";
+import { detectCommunities } from "../../../src/graph/community-detection.js";
 
 describe("detectCommunities", () => {
   it("two disconnected triangles → 2 clusters, positive modularity", () => {

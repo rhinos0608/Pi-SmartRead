@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { computeLineHashSync, computeLineHash, initHashline } from "../../src/hashline.js";
+import { computeLineHashSync, computeLineHash, initHashline } from "../../../src/read/hashline.js";
 
 // Parity approach: (b) hardcoded ground truth from Pi-SmartEdit's real computeLineHashSync.
 // Chosen over (a) live cross-repo import because it keeps the test hermetic — no dependency

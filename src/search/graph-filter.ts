@@ -8,7 +8,7 @@
  * Used by WP-5 wiring in grep-tool.ts when graphFilter param is present.
  */
 
-import type { ContextGraph, GraphNeighbour } from "./context-graph.js";
+import type { ContextGraph, GraphNeighbour } from "../context-graph.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderTreeContext } from "../../src/tree-context.js";
+import { renderTreeContext } from "../../../src/structural/tree-context.js";
 
 describe("renderTreeContext", () => {
   it("renders lines with parent context", async () => {

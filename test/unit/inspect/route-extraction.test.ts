@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { extractRoutes, scanRoutes } from "../../src/route-extraction.js";
+import { extractRoutes, scanRoutes } from "../../../src/inspect/route-extraction.js";
 
 let workdir: string;
 

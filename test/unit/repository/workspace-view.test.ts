@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   renderWorkspaceView,
   type ChannelCandidate,
-} from "../../src/workspace-view.js";
+} from "../../../src/repository/workspace-view.js";
 
 function c(overrides: Partial<ChannelCandidate> = {}): ChannelCandidate {
   return {

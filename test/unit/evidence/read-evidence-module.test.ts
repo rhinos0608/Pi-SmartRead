@@ -10,7 +10,7 @@ import {
   attestPathRead,
   attestStructuralOutline,
   publishEvidence,
-} from "../../src/read-evidence.js";
+} from "../../../src/evidence/read-evidence.js";
 
 function makeCtx(cwd: string, sessionFile: string | null) {
   return {

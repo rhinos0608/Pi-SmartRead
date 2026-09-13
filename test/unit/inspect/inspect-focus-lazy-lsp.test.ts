@@ -23,13 +23,13 @@ vi.mock("node:child_process", async () => {
   return { ...actual, spawn: mocks.spawn };
 });
 
-vi.mock("../../src/lsp-bridge.js", () => ({
+vi.mock("../../../src/lsp/lsp-bridge.js", () => ({
   getLSPBridge: mocks.getLSPBridge,
   getProjectLSPInfo: vi.fn(() => ({ supportedLanguages: [], servers: [] })),
   resetLSPBridge: vi.fn(),
 }));
 
-import { executeDirectoryInspect } from "../../src/inspect.js";
+import { executeDirectoryInspect } from "../../../src/inspect/inspect.js";
 
 let workdir: string;
 

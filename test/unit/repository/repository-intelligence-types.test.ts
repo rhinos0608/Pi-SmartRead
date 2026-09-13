@@ -8,7 +8,7 @@ import type {
   SnapshotId,
   ArtifactRef,
   ISO8601,
-} from "../../src/repository-intelligence-types.js";
+} from "../../../src/repository/repository-intelligence-types.js";
 
 // Compile-time structural checks: these verify the types exist and have the
 // expected shape. Runtime assertions are minimal — the point is that tsc

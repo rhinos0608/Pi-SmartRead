@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { probeQuery, type ProbeOptions } from "../../src/query-probe.js";
+import { probeQuery, type ProbeOptions } from "../../../src/search/query-probe.js";
 
 
 /**

@@ -14,9 +14,9 @@ import {
     _bm25CorpusCacheForTests,
     _resetBm25CorpusCacheForTests,
     createGrepTool,
-} from "../../src/grep-tool.js";
-import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../src/semantic-index-registry.js";
-import { makeCtx, makeOpts, runGrep, seedStandardWorkdir } from "../helpers/grep-tool-fixtures.js";
+} from "../../../src/search/grep-tool.js";
+import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../../src/indexing/semantic-index-registry.js";
+import { makeCtx, makeOpts, runGrep, seedStandardWorkdir } from "../../helpers/grep-tool-fixtures.js";
 let workdir: string;
 
 beforeEach(() => {
@@ -427,7 +427,7 @@ describe("grep no-index BM25 corpus cache", () => {
 
   it("warm reuse builds the corpus once and reuses the cached result", async () => {
     _resetBm25CorpusCacheForTests();
-    let revision = 0;
+    const revision = 0;
     const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => revision }));
     const p = { pattern: "createToken", path: "src" };
     const r1 = await tool.execute("c1", p as any, undefined, undefined, makeCtx(workdir));

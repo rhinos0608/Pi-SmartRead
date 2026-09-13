@@ -4,7 +4,7 @@
  */
 
 import { statSync } from "node:fs";
-import { canonicalPathOrFallback } from "./canonical-path.js";
+import { canonicalPathOrFallback } from "../canonical-path.js";
 import { resolve, relative, join } from "node:path";
 import { readFile } from "node:fs/promises";
 
@@ -460,7 +460,7 @@ async function discoverFiles(target: string, cwd: string, opts: StructuralSearch
 
   // Use file-discovery helper if available; fallback to manual walk
   try {
-    const { findSearchableTextFiles } = await import("./file-discovery.js");
+    const { findSearchableTextFiles } = await import("../file-discovery.js");
     const files = await findSearchableTextFiles(target, 5000);
     if (!fileGlob) return files;
     const { minimatch } = await import("minimatch");

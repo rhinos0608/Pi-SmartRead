@@ -2,12 +2,12 @@ import { afterEach, describe, it, expect } from "vitest";
 import {
     createEvidenceResolver,
     type ResolverBus,
-} from "../../src/workspace-evidence-resolver.js";
+} from "../../../src/evidence/workspace-evidence-resolver.js";
 import {
     getSharedEvidenceResolver,
     installInspectAndResolver,
     resetSharedEvidenceResolver,
-} from "../../src/mcp-registry.js";
+} from "../../../src/mcp-registry.js";
 import {
     PROTOCOL_SCHEMA_VERSION,
     RPC_CHANNELS,

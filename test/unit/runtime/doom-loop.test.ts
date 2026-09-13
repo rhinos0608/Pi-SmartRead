@@ -13,12 +13,12 @@ import {
   formatDoomLoopMessage,
   resetDoomLoopState,
   type DoomLoopState,
-} from "../../src/doom-loop.js";
+} from "../../../src/runtime/doom-loop.js";
 import {
   SUGGESTIONS,
   type DoomLoopSuggestion,
   type Suggestion,
-} from "../../src/doom-loop-suggestions.js";
+} from "../../../src/runtime/doom-loop-suggestions.js";
 
 describe("makeToolFingerprint", () => {
   it("produces a string fingerprint from tool name and input", () => {

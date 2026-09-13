@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { GUARD_HINT_DEEP_SEARCH } from "../../src/bash-context-guard.js";
+import { GUARD_HINT_DEEP_SEARCH } from "../../src/runtime/bash-context-guard.js";
 import { setupExtension, type IndexHarness } from "./index-fixture.js";
 
 let harness: IndexHarness;
@@ -232,7 +232,7 @@ describe("index extension result pipeline", () => {
   it("post-edit impact wiring: appends impact block when graph data exists (mocked)", async () => {
     const { handlers } = harness;
     // Mock post-edit-impact to return a block for this test via vi.mock-like override
-    const impactMod = await import("../../src/post-edit-impact.js");
+    const impactMod = await import("../../src/runtime/post-edit-impact.js");
     const spy = vi.spyOn(impactMod, "runPostEditImpactSummary").mockResolvedValue({
       content: [{ type: "text", text: "wrote file" }, { type: "text", text: "[Possibly affected: src/b.ts — advisory, based on prior graph data]" }],
     });

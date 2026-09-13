@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { createReadTool } from "../../src/unified-read.js";
+import { createReadTool } from "../../../src/read/unified-read.js";
 
 function makeCtx(cwd: string, sessionFile: string | null) {
   return {

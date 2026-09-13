@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { resolve } from "node:path";
-import { LruCache } from "../../src/utils.js";
-import type { EmbedResult } from "../../src/embedding.js";
-import type { PersistentEmbeddingCache } from "../../src/persistent-embedding-cache.js";
+import { LruCache } from "../../../src/utils.js";
+import type { EmbedResult } from "../../../src/indexing/embedding.js";
+import type { PersistentEmbeddingCache } from "../../../src/indexing/persistent-embedding-cache.js";
 import {
   ADR_BOOST,
   MIN_RELEVANCE_SCORE,
@@ -11,7 +11,7 @@ import {
   normalizeCandidatePath,
   rankCandidates,
   type RankingFileDetail,
-} from "../../src/intent-ranking.js";
+} from "../../../src/read/intent-ranking.js";
 
 function makeParams(overrides: Record<string, unknown> = {}) {
   const fileDetails = new Map<string, Partial<RankingFileDetail>>();

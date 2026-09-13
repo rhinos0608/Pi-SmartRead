@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatImpactBlock, runPostEditImpactSummary } from "../../src/post-edit-impact.js";
+import { formatImpactBlock, runPostEditImpactSummary } from "../../../src/runtime/post-edit-impact.js";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";

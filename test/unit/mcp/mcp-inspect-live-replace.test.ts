@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolRegistry } from "../../src/tool-registry.js";
+import { ToolRegistry } from "../../../src/tool-registry.js";
 
 function makeBus() {
     const subs = new Map<string, Set<(d: unknown) => void>>();
@@ -34,7 +34,7 @@ function ctx() {
 
 describe("mcp-registry live inspect replaces eager fallback", () => {
     it("fallback present pre-bus; registerInspectToolWithBus replaces and routes to live wiring", async () => {
-        const mcp = await import("../../src/mcp-registry.js");
+        const mcp = await import("../../../src/mcp-registry.js");
         const reg = ToolRegistry.getInstance();
         expect(reg.has("inspect")).toBe(true);
         const fallbackExecute = reg.get("inspect")!.execute;
@@ -56,8 +56,8 @@ describe("mcp-registry live inspect replaces eager fallback", () => {
         // Isolate modules so the eager fallback registration is restored:
         // the earlier test already replaced the shared singleton's entry.
         vi.resetModules();
-        const { ToolRegistry: FreshRegistry } = await import("../../src/tool-registry.js");
-        const mcp = await import("../../src/mcp-registry.js");
+        const { ToolRegistry: FreshRegistry } = await import("../../../src/tool-registry.js");
+        const mcp = await import("../../../src/mcp-registry.js");
         const reg = FreshRegistry.getInstance();
         expect(reg.has("inspect")).toBe(true);
         const before = reg.get("inspect")!.execute;

@@ -17,20 +17,20 @@ export type {
   RepoMapStats,
   RankedTag,
   SearchResult,
-} from "./repomap-pipeline.js";
+} from "./repomap/repomap-pipeline.js";
 
 // ── Shared helpers ──────────────────────────────────────────────
 
-export { FALLBACK_DEFINITION_PATTERNS, getFallbackMatch, sortSearchResults, flattenLSPDocumentSymbols } from "./repomap-pipeline.js";
+export { FALLBACK_DEFINITION_PATTERNS, getFallbackMatch, sortSearchResults, flattenLSPDocumentSymbols } from "./repomap/repomap-pipeline.js";
 
 // Ranking helpers
-export { parseTsconfigPaths, buildImportGraph, getRankedTags, getImportRankedTags } from "./repomap-ranking.js";
-export type { ImportEdge } from "./repomap-ranking.js";
-export type { TsAliasMap } from "./repomap-ranking.js";
+export { parseTsconfigPaths, buildImportGraph, getRankedTags, getImportRankedTags } from "./repomap/repomap-ranking.js";
+export type { ImportEdge } from "./repomap/repomap-ranking.js";
+export type { TsAliasMap } from "./repomap/repomap-ranking.js";
 
 // Rendering helpers
-export { countTokens, buildMap, renderTags, renderTagsCompact, prependSpecialFiles } from "./repomap-render.js";
+export { countTokens, buildMap, renderTags, renderTagsCompact, prependSpecialFiles } from "./repomap/repomap-render.js";
 
 // ── Main class ──────────────────────────────────────────────────
 
-export { RepoMap } from "./repomap-pipeline.js";
+export { RepoMap } from "./repomap/repomap-pipeline.js";

@@ -3,8 +3,8 @@ import {
   registerRepositoryIntelligence,
   getRepositoryIntelligence,
   resetRepositoryIntelligenceRegistry,
-} from "../../src/repository-intelligence-registry.js";
-import type { RepositoryIntelligenceService } from "../../src/repository-intelligence-types.js";
+} from "../../../src/repository/repository-intelligence-registry.js";
+import type { RepositoryIntelligenceService } from "../../../src/repository/repository-intelligence-types.js";
 
 // Minimal stub: satisfies the interface for registry tests without implementing logic.
 function stubService(): RepositoryIntelligenceService {

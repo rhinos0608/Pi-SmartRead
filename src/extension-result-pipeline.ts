@@ -19,28 +19,28 @@ import {
   type AnchorHygieneEvent,
   type ContextHygieneMetadata,
   type ContextHygieneResource,
-} from "./context-hygiene.js";
-import { applyContextHygieneStaleContext } from "./context-application.js";
+} from "./runtime/context-hygiene.js";
+import { applyContextHygieneStaleContext } from "./runtime/context-application.js";
 import {
   consumeDoomLoopWarning,
   formatDoomLoopMessage,
   recordToolCall,
   recordToolResult,
-} from "./doom-loop.js";
+} from "./runtime/doom-loop.js";
 import {
   applyBashContextGuard,
   resolveGuardProfile,
   suggestShellCommands,
-} from "./bash-context-guard.js";
-import { invalidateFsScanCache } from "./fs-scan-cache.js";
+} from "./runtime/bash-context-guard.js";
+import { invalidateFsScanCache } from "./workspace/fs-scan-cache.js";
 import { canonicalizeWorkspaceRoot } from "@rhinos0608/pi-workspace-protocol";
-import { getLSPBridge } from "./lsp-bridge.js";
+import { getLSPBridge } from "./lsp/lsp-bridge.js";
 import { invalidateSharedGraph } from "./mcp-registry.js";
-import { getSemanticIndex } from "./semantic-index-registry.js";
-import { getIncrementalIndex } from "./incremental-index.js";
-import { runPostEditDiagnosticsFallback } from "./post-edit-fallback.js";
-import { runPostEditImpactSummary } from "./post-edit-impact.js";
-import { isDiagnosticsClaimed } from "./mutation-ownership.js";
+import { getSemanticIndex } from "./indexing/semantic-index-registry.js";
+import { getIncrementalIndex } from "./indexing/incremental-index.js";
+import { runPostEditDiagnosticsFallback } from "./runtime/post-edit-fallback.js";
+import { runPostEditImpactSummary } from "./runtime/post-edit-impact.js";
+import { isDiagnosticsClaimed } from "./runtime/mutation-ownership.js";
 import type { ActivationState } from "./extension-lifecycle.js";
 
 const SMARTREAD_GUARD_TOOLS = new Set(["inspect", "git_notes_read"]);

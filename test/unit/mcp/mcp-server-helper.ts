@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-export const MCP_SERVER_PATH = join(__dirname, "../../src/mcp-server.ts");
+export const MCP_SERVER_PATH = join(__dirname, "../../../src/mcp-server.ts");
 const require = createRequire(import.meta.url);
 export const TSX_LOADER_PATH = pathToFileURL(require.resolve("tsx")).href;
 
@@ -40,7 +40,7 @@ export function mcpInitialized(): Record<string, unknown> {
 function spawnMcpServer(childCwd?: string) {
   return spawn("node", ["--import", TSX_LOADER_PATH, MCP_SERVER_PATH], {
     stdio: ["pipe", "pipe", "pipe"],
-    cwd: childCwd ?? join(__dirname, "../.."),
+    cwd: childCwd ?? join(__dirname, "../../.."),
   });
 }
 

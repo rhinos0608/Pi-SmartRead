@@ -11,14 +11,14 @@
  */
 
 import { relative } from "node:path";
-import { findSrcFiles } from "./file-discovery.js";
-import type { Tag } from "./cache.js";
-import { LruCache } from "./utils.js";
-import { autoPopulateEdgeStore, extractCoCommitPairs, findGitRoot } from "./git-context.js";
-import { loadGitContextConfig } from "./config.js";
-import { getIncrementalIndex, type IndexChangeSet } from "./incremental-index.js";
-import { writeCoverage } from "./index-coverage.js";
-import { writeSnapshot, computeSourceHash } from "./index-snapshot.js";
+import { findSrcFiles } from "../file-discovery.js";
+import type { Tag } from "../structural/cache.js";
+import { LruCache } from "../utils.js";
+import { autoPopulateEdgeStore, extractCoCommitPairs, findGitRoot } from "../git/git-context.js";
+import { loadGitContextConfig } from "../config.js";
+import { getIncrementalIndex, type IndexChangeSet } from "../indexing/incremental-index.js";
+import { writeCoverage } from "../indexing/index-coverage.js";
+import { writeSnapshot, computeSourceHash } from "../indexing/index-snapshot.js";
 
 // ── Types ─────────────────────────────────────────────────────────────
 

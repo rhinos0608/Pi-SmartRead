@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 
-import { LANGUAGE_SERVER_CATALOG } from "../../src/language-server-catalog.js";
-import { loadConfig, setInstallMode, resetLanguageIntelligenceCaches, __paths as configPaths } from "../../src/language-intelligence-config.js";
+import { LANGUAGE_SERVER_CATALOG } from "../../../src/language-intelligence/language-server-catalog.js";
+import { loadConfig, setInstallMode, resetLanguageIntelligenceCaches, __paths as configPaths } from "../../../src/language-intelligence/language-intelligence-config.js";
 import {
   getInstallerStorageRoot,
   readLockfile,
@@ -17,7 +17,7 @@ import {
   _setSpawnForTests,
   _resetSpawnForTests,
   __installerPaths,
-} from "../../src/language-intelligence-installer.js";
+} from "../../../src/language-intelligence/language-intelligence-installer.js";
 
 function makeHome(): string {
   return mkdtempSync(join(tmpdir(), "pi-li-installer-"));
@@ -307,7 +307,7 @@ describe("language-intelligence-installer", () => {
   });
 
   it("failed finalization (renameSync throw) preserves prior install via backup restore", async () => {
-    const { _setRenameFailureForTests } = await import("../../src/language-intelligence-installer.js");
+    const { _setRenameFailureForTests } = await import("../../../src/language-intelligence/language-intelligence-installer.js");
     const spawnOk = fakeSpawnSuccessFactory();
     _setSpawnForTests(spawnOk as unknown as typeof import("node:child_process").spawn);
     const first = await installServer({ packageName: "pyright", version: "1.1.413", bin: "pyright-langserver" }, { homedir: home });
@@ -339,7 +339,7 @@ describe("language-intelligence-installer", () => {
   });
 
   it("lockfile write failure after swap restores backup so disk matches lockfile", async () => {
-    const { _setLockfileFailureForTests } = await import("../../src/language-intelligence-installer.js");
+    const { _setLockfileFailureForTests } = await import("../../../src/language-intelligence/language-intelligence-installer.js");
     const spawnOk = fakeSpawnSuccessFactory();
     _setSpawnForTests(spawnOk as unknown as typeof import("node:child_process").spawn);
     const first = await installServer({ packageName: "bash-language-server", version: "5.6.0", bin: "bash-language-server" }, { homedir: home });
@@ -364,7 +364,7 @@ describe("language-intelligence-installer", () => {
   });
 
   it("restore-failure-is-surfaced-not-swallowed", async () => {
-    const { _setRenameFailureForTests, _setRestoreFailureForTests } = await import("../../src/language-intelligence-installer.js");
+    const { _setRenameFailureForTests, _setRestoreFailureForTests } = await import("../../../src/language-intelligence/language-intelligence-installer.js");
     const spawnOk = fakeSpawnSuccessFactory();
     _setSpawnForTests(spawnOk as unknown as typeof import("node:child_process").spawn);
     const first = await installServer({ packageName: "pyright", version: "1.1.413", bin: "pyright-langserver" }, { homedir: home });
@@ -391,7 +391,7 @@ describe("language-intelligence-installer", () => {
   });
 
   it("no-timeout lock not reclaimed as stale after 90s (fallback generous threshold)", async () => {
-    const { _staleThresholdMsForTests } = await import("../../src/language-intelligence-installer.js");
+    const { _staleThresholdMsForTests } = await import("../../../src/language-intelligence/language-intelligence-installer.js");
     const { utimesSync } = await import("node:fs");
     expect(_staleThresholdMsForTests(0)).toBe(180_000);
     expect(_staleThresholdMsForTests(-1)).toBe(180_000);

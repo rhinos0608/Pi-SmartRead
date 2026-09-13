@@ -14,24 +14,24 @@
  * fileDetails map (stripped by toPublicFileDetail in intent-read.ts).
  */
 import { isAbsolute, resolve } from "node:path";
-import { type EmbedRequest, type EmbedResult, fetchEmbeddingsSharded, SHARD_SIZE } from "./embedding.js";
-import { embeddingProfileId } from "./embedding-profile.js";
-import { PersistentEmbeddingCache } from "./persistent-embedding-cache.js";
-import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "./scoring.js";
-import { type ResolvedEmbeddingConfig } from "./config.js";
-import { LruCache } from "./utils.js";
-import { chunkTextAst } from "./chunking.js";
-import { applyHyde, type HydeResult } from "./hyde.js";
-import { listAdrs } from "./adr-store.js";
-import { rerank, type RerankerInput } from "./rerank.js";
-import { enrichRerankSignals } from "./rerank-signal-bridge.js";
+import { type EmbedRequest, type EmbedResult, fetchEmbeddingsSharded, SHARD_SIZE } from "../indexing/embedding.js";
+import { embeddingProfileId } from "../indexing/embedding-profile.js";
+import { PersistentEmbeddingCache } from "../indexing/persistent-embedding-cache.js";
+import { bm25Scores, computeRanks, computeRrfScores, maxChunkSimilarity } from "../scoring.js";
+import { type ResolvedEmbeddingConfig } from "../config.js";
+import { LruCache } from "../utils.js";
+import { chunkTextAst } from "../structural/chunking.js";
+import { applyHyde, type HydeResult } from "../search/hyde.js";
+import { listAdrs } from "../repository/adr-store.js";
+import { rerank, type RerankerInput } from "../ranking/rerank.js";
+import { enrichRerankSignals } from "../ranking/rerank-signal-bridge.js";
 import {
   classifyConfidence,
   classifyRelevanceByScore,
   classifySimilarity,
   type ConfidenceClass,
   type RelevanceClass,
-} from "./classifiers.js";
+} from "../ranking/classifiers.js";
 
 export type EmbeddingStatus = "ok" | "failed_fallback_bm25";
 
@@ -425,7 +425,7 @@ export async function rankCandidates<TFileDetail extends RankingFileDetail>(
 
     // Phase 5: optional structural reranker (off by default, gated behind config)
     if (embeddingConfig?.rerankEnabled === true && rankedSuccessOrder.length > 0) {
-      const { isRecentlyModified } = await import("./git-history.js");
+      const { isRecentlyModified } = await import("../git/git-history.js");
 
       // Build body-by-path map for the signal bridge (no extra disk reads)
       const bodyByPath = new Map<string, string>();

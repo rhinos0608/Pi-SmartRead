@@ -6,8 +6,8 @@
  */
 
 import { resolve, relative } from "node:path";
-import { computeImpact } from "./impact-analysis.js";
-import { getSharedContextGraphIfBuilt } from "./mcp-registry.js";
+import { computeImpact } from "../inspect/impact-analysis.js";
+import { getSharedContextGraphIfBuilt } from "../mcp-registry.js";
 
 export interface PostEditImpactEvent {
   toolName: string;

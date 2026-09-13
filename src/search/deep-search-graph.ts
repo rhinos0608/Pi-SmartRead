@@ -2,7 +2,7 @@
 // Context-graph traversal, EdgeStore queries, Graphify enricher
 
 import { resolve, relative } from "node:path";
-import { EdgeStore, findDirectImportNeighbours, isReadableWorkspaceFile } from "./context-graph.js";
+import { EdgeStore, findDirectImportNeighbours, isReadableWorkspaceFile } from "../context-graph.js";
 
 import { RRF_K } from "./deep-search-constants.js";
 import type { DeepSearchCandidate } from "./deep-search.js";

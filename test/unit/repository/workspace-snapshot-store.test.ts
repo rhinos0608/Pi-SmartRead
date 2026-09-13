@@ -8,8 +8,8 @@ import {
   computeSnapshotId,
   WORKSPACE_SNAPSHOT_SCHEMA_VERSION,
   snapshotDir,
-} from "../../src/workspace-snapshot-store.js";
-import type { SnapshotId } from "../../src/repository-intelligence-types.js";
+} from "../../../src/repository/workspace-snapshot-store.js";
+import type { SnapshotId } from "../../../src/repository/repository-intelligence-types.js";
 
 let root: string;
 let store: WorkspaceSnapshotStore;
@@ -28,7 +28,7 @@ const SAMPLE_MANIFEST = {
   workspaceRootHash: "abc123",
   sourceHash: "deadbeef01",
   graphRevision: 1,
-  createdAt: "2025-01-15T10:00:00Z" as import("../../src/repository-intelligence-types.js").ISO8601,
+  createdAt: "2025-01-15T10:00:00Z" as import("../../../src/repository/repository-intelligence-types.js").ISO8601,
   capabilityDigest: "cap0",
 };
 

@@ -12,8 +12,8 @@ import { resolveImportPath } from "./structural-imports.js";
 import { extractStructuralFacts } from "./structural-facts.js";
 import { buildCallGraph, type CallGraphResult } from "./callgraph.js";
 import type { StructuralFacts, ChildSymbol } from "./structural-facts-types.js";
-import { filenameToLang } from "./languages.js";
-import { commonPathRoot } from "./workspace-boundary.js";
+import { filenameToLang } from "../languages.js";
+import { commonPathRoot } from "../workspace/workspace-boundary.js";
 
 function isPythonFile(path: string): boolean {
   const ext = extname(path).toLowerCase();

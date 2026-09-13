@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { createIntentReadTool } from "../../src/intent-read.js";
-import { writeAdr } from "../../src/adr-store.js";
+import { createIntentReadTool } from "../../../src/read/intent-read.js";
+import { writeAdr } from "../../../src/repository/adr-store.js";
 import {
   fileByPath,
   makeEmbedder,
@@ -13,7 +13,7 @@ import {
   setupIntentReadEnv,
 } from "./intent-read-helpers.js";
 
-vi.mock("../../src/mcp-registry.js", () => ({
+vi.mock("../../../src/mcp-registry.js", () => ({
   getSharedContextGraphAsync: vi.fn().mockResolvedValue({
     getFileNeighbours: vi.fn().mockResolvedValue([]),
     getMutationNeighbours: vi.fn().mockReturnValue([]),

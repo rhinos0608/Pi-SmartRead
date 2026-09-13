@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   rankSemantic,
   type SemanticEntry,
-} from "../../../src/rank-channels/semantic.js";
+} from "../../../../src/ranking/channels/semantic.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

@@ -30,7 +30,7 @@ async function callAgentMemorySearch(query: string): Promise<string> {
 	try {
 		// Dynamic import avoids hard coupling. Try to get the gateway from mcp-server.
 		// The gateway pattern is only available when Pi-SmartRead runs as an MCP server.
-		const mcpMod = await import("./mcp-server.js").catch(() => null);
+		const mcpMod = await import("../mcp-server.js").catch(() => null);
 		const gateway = (mcpMod as unknown as { getMcpGateway?: () => McpGateway; defaultGateway?: McpGateway })?.getMcpGateway?.()
 			?? (mcpMod as unknown as { defaultGateway?: McpGateway })?.defaultGateway
 			?? null;

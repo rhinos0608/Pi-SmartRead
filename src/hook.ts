@@ -23,9 +23,9 @@ import {
    autoPopulateEdgeStore,
    buildStartupGitContext,
    findGitRoot as findGitRootAsync,
-} from "./git-context.js";
+} from "./git/git-context.js";
 import { loadGitContextConfig, validateEmbeddingConfig } from "./config.js";
-import { formatBranchNotes, scanBranchNotes } from "./git-notes.js";
+import { formatBranchNotes, scanBranchNotes } from "./git/git-notes.js";
 import {
    ensureHashlineReady,
 } from "./utils.js";
@@ -33,27 +33,27 @@ import {
    applyTextEnrichment,
    attachPathEvidence,
    normalizeReadParams,
-} from "./hook-enrich.js";
-import { buildFileContextLines } from "./file-context.js";
+} from "./read/hook-enrich.js";
+import { buildFileContextLines } from "./read/file-context.js";
 import {
   attestStructuralOutline,
   publishEvidence,
   sessionFileFromCtx,
-} from "./read-evidence.js";
-import { resolveAstOutlineConfig, outlineSupportsPath, buildAstOutline, renderAstOutline } from "./ast-outline.js";
-import { getGraphifyEnricher } from "./graphify-enricher.js";
-import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./tool-guidance.js";
-import { startResourceDiagnostics, stopResourceDiagnostics } from "./resource-diagnostics.js";
+} from "./evidence/read-evidence.js";
+import { resolveAstOutlineConfig, outlineSupportsPath, buildAstOutline, renderAstOutline } from "./structural/ast-outline.js";
+import { getGraphifyEnricher } from "./graph/graphify-enricher.js";
+import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./runtime/tool-guidance.js";
+import { startResourceDiagnostics, stopResourceDiagnostics } from "./runtime/resource-diagnostics.js";
 import {
   scanMicroagents as doScanMicroagents,
   matchMicroagents,
   renderMicroagentContext,
   type Microagent,
-} from "./microagents.js";
-import { findProjectWorkspace, isProjectWorkspace, projectWorkspaceForFile } from "./workspace-scope.js";
-import { createReadManyTool } from "./read-many.js";
-import { retrieveQuery } from "./query-retrieval.js";
-import { disposeSemanticIndexes, effectiveSemanticRoot, getOrCreateSemanticIndex } from "./semantic-index-registry.js";
+} from "./runtime/microagents.js";
+import { findProjectWorkspace, isProjectWorkspace, projectWorkspaceForFile } from "./workspace/workspace-scope.js";
+import { createReadManyTool } from "./read/read-many.js";
+import { retrieveQuery } from "./read/query-retrieval.js";
+import { disposeSemanticIndexes, effectiveSemanticRoot, getOrCreateSemanticIndex } from "./indexing/semantic-index-registry.js";
 
 // ── Key computation ───────────────────────────────────────────────
 
@@ -358,7 +358,7 @@ interface HookResponse {
 // Lifecycle, dispatch, enrichment, anchors, and microagents stay here.
 // Re-exported so existing `import { shownMatchesAttested } from "./hook.js"`
 // call sites keep working.
-export { shownMatchesAttested } from "./read-evidence.js";
+export { shownMatchesAttested } from "./evidence/read-evidence.js";
 
 // ── Contextual read enrichment ────────────────────────────────────
 

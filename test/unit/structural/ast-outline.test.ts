@@ -4,7 +4,7 @@ import {
 	renderAstOutline,
 	resolveAstOutlineConfig,
 	outlineSupportsPath,
-} from "../../src/ast-outline.js";
+} from "../../../src/structural/ast-outline.js";
 
 describe("outlineSupportsPath", () => {
 	it("supports common source extensions", () => {

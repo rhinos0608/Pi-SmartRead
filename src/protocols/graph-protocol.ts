@@ -32,7 +32,7 @@ export async function resolveGraphUrl(
 
 	let text = "";
 	try {
-		const { getSharedContextGraphAsync } = await import("./mcp-registry.js");
+		const { getSharedContextGraphAsync } = await import("../mcp-registry.js");
 		const graph = await getSharedContextGraphAsync(workspace);
 
 		if (nodeType === "file") {

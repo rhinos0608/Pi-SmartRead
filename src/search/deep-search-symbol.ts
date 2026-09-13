@@ -3,7 +3,7 @@
 
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { handleGrep } from "./search-tool.js";
-import { findCallers } from "./callgraph.js";
+import { findCallers } from "../structural/callgraph.js";
 
 import type { DeepSearchCandidate } from "./deep-search.js";
 

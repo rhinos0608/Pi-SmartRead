@@ -4,7 +4,7 @@ import {
   computeAstProfile,
   computeMinHashProximity,
   type ComplexityASTNode,
-} from "../../src/complexity-signals.js";
+} from "../../../src/ranking/complexity-signals.js";
 
 // ── Fixture ASTs ──────────────────────────────────────────────────
 

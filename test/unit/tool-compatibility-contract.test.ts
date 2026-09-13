@@ -32,19 +32,19 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 // sibling worker's change to file-context.ts (adding mcp-registry.ts import)
 // creates a circular dependency that breaks module loading.
 // grep-tool → search-tool → hook → file-context → mcp-registry → grep-tool
-import { resolveGraphUrl } from "../../src/graph-protocol.js";
-import { createIntentReadTool } from "../../src/intent-read.js";
+import { resolveGraphUrl } from "../../src/protocols/graph-protocol.js";
+import { createIntentReadTool } from "../../src/read/intent-read.js";
 import {
   computeImpact,
   classifyFileRisk,
   detectDeadCode,
-} from "../../src/impact-analysis.js";
+} from "../../src/inspect/impact-analysis.js";
 import { ContextGraph } from "../../src/context-graph.js";
 import {
   PROTOCOL_SCHEMA_VERSION,
   validateInspectionEnvelope,
 } from "@rhinos0608/pi-workspace-protocol";
-import { createGrepTool } from "../../src/grep-tool.js";
+import { createGrepTool } from "../../src/search/grep-tool.js";
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -423,7 +423,7 @@ describe("compat: impact-analysis output shape", () => {
 
 describe("compat: file-context enrichment footer", () => {
   it("returns empty array for file outside any project root", async () => {
-    const { buildFileContextLines } = await import("../../src/file-context.js");
+    const { buildFileContextLines } = await import("../../src/read/file-context.js");
     const home = mkdtempSync(join(tmpdir(), "compat-home-"));
     const looseFile = join(home, "loose.txt");
     writeFileSync(looseFile, "just a loose file\n");
@@ -437,7 +437,7 @@ describe("compat: file-context enrichment footer", () => {
   });
 
   it("returns a footer with header line for a project file", async () => {
-    const { buildFileContextLines } = await import("../../src/file-context.js");
+    const { buildFileContextLines } = await import("../../src/read/file-context.js");
     const lines = await buildFileContextLines({
       fullPath: join(workdir, "src", "auth.ts"),
       cwd: workdir,
@@ -456,7 +456,7 @@ describe("compat: file-context enrichment footer", () => {
   });
 
   it("returns empty array when file does not exist", async () => {
-    const { buildFileContextLines } = await import("../../src/file-context.js");
+    const { buildFileContextLines } = await import("../../src/read/file-context.js");
     const lines = await buildFileContextLines({
       fullPath: join(workdir, "src", "missing.ts"),
       cwd: workdir,
@@ -473,7 +473,7 @@ describe("compat: startup-cost invariant", () => {
   it("graph-protocol import does not eagerly trigger ContextGraph.buildContextGraph", async () => {
     const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph");
     const before = buildSpy.mock.calls.length;
-    await import("../../src/graph-protocol.js");
+    await import("../../src/protocols/graph-protocol.js");
     const after = buildSpy.mock.calls.length;
     expect(after).toBe(before);
     buildSpy.mockRestore();
@@ -491,7 +491,7 @@ describe("compat: startup-cost invariant", () => {
   it("intent-read import does not eagerly trigger ContextGraph.buildContextGraph", async () => {
     const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph");
     const before = buildSpy.mock.calls.length;
-    await import("../../src/intent-read.js");
+    await import("../../src/read/intent-read.js");
     const after = buildSpy.mock.calls.length;
     expect(after).toBe(before);
     buildSpy.mockRestore();
@@ -500,7 +500,7 @@ describe("compat: startup-cost invariant", () => {
   it("impact-analysis import does not eagerly trigger any scan", async () => {
     const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph");
     const before = buildSpy.mock.calls.length;
-    await import("../../src/impact-analysis.js");
+    await import("../../src/inspect/impact-analysis.js");
     const after = buildSpy.mock.calls.length;
     expect(after).toBe(before);
     buildSpy.mockRestore();
@@ -509,7 +509,7 @@ describe("compat: startup-cost invariant", () => {
   it("repository-intelligence-registry import does not trigger graph build", async () => {
     const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph");
     const before = buildSpy.mock.calls.length;
-    await import("../../src/repository-intelligence-registry.js");
+    await import("../../src/repository/repository-intelligence-registry.js");
     const after = buildSpy.mock.calls.length;
     expect(after).toBe(before);
     buildSpy.mockRestore();
@@ -519,7 +519,7 @@ describe("compat: startup-cost invariant", () => {
     const buildSpy = vi.spyOn(ContextGraph.prototype, "buildContextGraph");
     const before = buildSpy.mock.calls.length;
     try {
-      await import("../../src/file-context.js");
+      await import("../../src/read/file-context.js");
       const after = buildSpy.mock.calls.length;
       expect(after).toBe(before);
     } catch (e) {

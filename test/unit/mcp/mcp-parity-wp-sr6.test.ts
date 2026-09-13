@@ -14,7 +14,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { buildToolRegistry } from "../../src/mcp-registry.js";
+import { buildToolRegistry } from "../../../src/mcp-registry.js";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
 
 let workdir: string;
@@ -53,7 +53,7 @@ function findTool(name: string): any {
 // ── MCP stdio helpers (exercise src/mcp-server.ts handlers, not registry direct) ──
 const __filenameStdio = fileURLToPath(import.meta.url);
 const __dirnameStdio = dirname(__filenameStdio);
-const MCP_SERVER_PATH = join(__dirnameStdio, "../../src/mcp-server.ts");
+const MCP_SERVER_PATH = join(__dirnameStdio, "../../../src/mcp-server.ts");
 const requireStdio = createRequire(import.meta.url);
 // --import requires a file:// URL on Windows (bare D:\ paths throw
 // ERR_UNSUPPORTED_ESM_URL_SCHEME). Convert the resolved loader to a URL.
@@ -67,7 +67,7 @@ function mcpInited(): Record<string, unknown> {
 function callMcpViaStdio(msgs: Record<string, unknown> | Record<string, unknown>[], childCwd?: string, timeoutMs = 30_000): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => { child.kill(); reject(new Error("MCP server timeout")); }, timeoutMs);
-    const child = spawn("node", ["--import", TSX_LOADER_PATH, MCP_SERVER_PATH], { stdio: ["pipe", "pipe", "pipe"], cwd: childCwd ?? join(__dirnameStdio, "../..") });
+    const child = spawn("node", ["--import", TSX_LOADER_PATH, MCP_SERVER_PATH], { stdio: ["pipe", "pipe", "pipe"], cwd: childCwd ?? join(__dirnameStdio, "../../..") });
     let stderr = "";
     child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
     const responses: Record<string, unknown>[] = [];
@@ -227,7 +227,7 @@ describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details
   });
 
   it("grep.structural unavailable forced: text explains reason and still shows status line (no silent zero)", async () => {
-    const { _setUnavailableForTests, _resetAstGrepCacheForTests } = await import("../../src/structural-search.js");
+    const { _setUnavailableForTests, _resetAstGrepCacheForTests } = await import("../../../src/structural/structural-search.js");
     _setUnavailableForTests("forced unavailable for test");
     try {
       const grep = findTool("grep");
@@ -246,7 +246,7 @@ describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details
   });
 
   it("grep.structural groupByFile: text still self-sufficient when grouping requested", async () => {
-    const { isStructuralSearchAvailable } = await import("../../src/structural-search.js");
+    const { isStructuralSearchAvailable } = await import("../../../src/structural/structural-search.js");
     if (!(await isStructuralSearchAvailable())) return;
     writeFileSync(join(workdir, "src", "g1.ts"), "console.log(x)\n", "utf8");
     writeFileSync(join(workdir, "src", "g2.ts"), "console.log(y)\n", "utf8");
@@ -293,7 +293,7 @@ describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call
     // Real MCP round-trip through the actual registered handler exported from
     // src/mcp-server.ts (handleMcpToolCall), not a hand-rolled Value.Check +
     // coerceText copy of its logic. In-process avoids wasm/LSP stdio cold-boot timeout.
-    const { handleMcpToolCall } = await import("../../src/mcp-server.js");
+    const { handleMcpToolCall } = await import("../../../src/mcp-server.js");
     writeFileSync(join(workdir, "hello.ts"), "export const hello = 'x';\nexport function greet(){ return hello; }\n", "utf8");
     const ctx = makeCtx();
     const mcpResult: any = await handleMcpToolCall("inspect", { path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, ctx as any);
@@ -306,7 +306,7 @@ describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call
   }, 90_000);
 
   it("tools/call inspect diagnostics via MCP handler returns content-only with self-sufficient text", async () => {
-    const { handleMcpToolCall } = await import("../../src/mcp-server.js");
+    const { handleMcpToolCall } = await import("../../../src/mcp-server.js");
     writeFileSync(join(workdir, "hello.ts"), "export const hello = 'x';", "utf8");
     const ctx = makeCtx();
     const mcpResult: any = await handleMcpToolCall("inspect", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } } as any, ctx as any);

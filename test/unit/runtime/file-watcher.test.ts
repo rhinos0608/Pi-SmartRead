@@ -43,7 +43,7 @@ mockModuleRequire.mockImplementation(() => {
 });
 
 // Must import after mocking
-const { startWatching } = await import("../../src/file-watcher.js");
+const { startWatching } = await import("../../../src/runtime/file-watcher.js");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

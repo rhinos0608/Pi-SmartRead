@@ -5,7 +5,7 @@
 import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import type { EdgeType, Provenance } from "./context-graph.js";
+import type { EdgeType, Provenance } from "../context-graph.js";
 
 function canonicalMutationPath(root: string, value: string): string | null {
   // Split off a `:symbol` suffix, skipping a Windows drive-letter colon

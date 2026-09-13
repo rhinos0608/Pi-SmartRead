@@ -11,7 +11,7 @@ vi.mock("web-tree-sitter", () => ({
 	},
 }));
 
-import { getSupportedExtensions, loadGrammar, clearGrammarCache, resetParser } from "../../src/grammar-loader.js";
+import { getSupportedExtensions, loadGrammar, clearGrammarCache, resetParser } from "../../../src/structural/grammar-loader.js";
 
 describe("grammar-loader", () => {
 	beforeEach(() => {
@@ -75,7 +75,7 @@ describe("grammar-loader", () => {
 
 	// Outline consistency: ast-outline EXT_KINDS should support same new extensions
 	it("outline supports new extensions via grammar-loader parity", async () => {
-		const { outlineSupportsPath } = await import("../../src/ast-outline.js");
+		const { outlineSupportsPath } = await import("../../../src/structural/ast-outline.js");
 		for (const ext of [".cs", ".php", ".cc", ".cxx", ".hh", ".hxx"]) {
 			expect(outlineSupportsPath(`foo${ext}`), `outline should support ${ext}`).toBe(true);
 		}

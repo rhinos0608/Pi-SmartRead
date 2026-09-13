@@ -2,7 +2,7 @@
 // LSP workspace symbols, document symbols, hover type
 
 import { resolve, relative } from "node:path";
-import { getLSPBridge } from "./lsp-bridge.js";
+import { getLSPBridge } from "../lsp/lsp-bridge.js";
 
 import type { DeepSearchCandidate, DeepSearchDepth } from "./deep-search.js";
 
@@ -81,7 +81,7 @@ export async function runLSPChannel(
   if (signal?.aborted) return [];
   if (!bridge?.isAvailable()) return [];
 
-  let symbols: import("./lsp-bridge.js").LSPWorkspaceSymbol[];
+  let symbols: import("../lsp/lsp-bridge.js").LSPWorkspaceSymbol[];
   try {
     symbols = await bridge.workspaceSymbol(query, cwd);
   } catch {

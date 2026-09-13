@@ -13,9 +13,9 @@
 
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import type { Tag } from "./cache.js";
-import { filenameToLang } from "./languages.js";
-import { pagerank, buildWeightedEdges } from "./pagerank.js";
+import type { Tag } from "../structural/cache.js";
+import { filenameToLang } from "../languages.js";
+import { pagerank, buildWeightedEdges } from "../ranking/pagerank.js";
 import type { RankedTag } from "./repomap-pipeline.js";
 
 // ── Re-export RankedTag for repomap-tool.ts consumers ────────────

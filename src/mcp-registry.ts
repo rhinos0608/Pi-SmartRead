@@ -10,18 +10,18 @@
  * extension API.
  */
 import { ToolRegistry, ToolCategory } from "./tool-registry.js";
-import { createGraphMutateTool } from "./graph-mutate.js";
-import { createGitNotesTools } from "./git-notes-tool.js";
-import { createSkillTool } from "./skill-tool.js";
+import { createGraphMutateTool } from "./graph/graph-mutate.js";
+import { createGitNotesTools } from "./git/git-notes-tool.js";
+import { createSkillTool } from "./runtime/skill-tool.js";
 import { loadExperimentalConfig } from "./config.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition, toToolDefinitions } from "./types.js";
-import { createInspectTool } from "./inspect-tool.js";
-import { createGrepTool } from "./grep-tool.js";
-import { createEvidenceResolver } from "./workspace-evidence-resolver.js";
+import { createInspectTool } from "./inspect/inspect-tool.js";
+import { createGrepTool } from "./search/grep-tool.js";
+import { createEvidenceResolver } from "./evidence/workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
 import { ContextGraph } from "./context-graph.js";
-import { getSharedLspInspectionProvider, type LspInspectionProvider } from "./lsp-inspection.js";
+import { getSharedLspInspectionProvider, type LspInspectionProvider } from "./lsp/lsp-inspection.js";
 import {
   getSharedContextGraph,
   getSharedContextGraphAsync,
@@ -29,7 +29,7 @@ import {
   getWorkspaceRevision,
   invalidateSharedGraph,
   resetSharedContextGraph,
-} from "./shared-context-graph.js";
+} from "./graph/shared-context-graph.js";
 
 export {
   getSharedContextGraph,

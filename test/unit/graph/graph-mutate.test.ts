@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createGraphMutateTool } from "../../src/graph-mutate.js";
+import { createGraphMutateTool } from "../../../src/graph/graph-mutate.js";
 
 describe("graph_mutate", () => {
   it("records absolute edge paths outside the selected root", async () => {

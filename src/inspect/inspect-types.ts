@@ -1,5 +1,5 @@
 import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import type { ContextGraph } from "./context-graph.js";
+import type { ContextGraph } from "../context-graph.js";
 
 export type InspectV4Mode = "directory" | "file";
 
@@ -47,7 +47,7 @@ export interface InspectV4Input {
   // ── ContextGraph injection (WP-4 owns the type; WP-5 populates at runtime) ──
   contextGraph?: ContextGraph;
   // ── WP-SR5: shared LSP inspection provider (lazy; only used when navigation/diagnostics requested) ──
-  lspInspectionProvider?: import("./lsp-inspection.js").LspInspectionProvider;
+  lspInspectionProvider?: import("../lsp/lsp-inspection.js").LspInspectionProvider;
 }
 
 export type NavigationOperation = "definition" | "references" | "implementation" | "hover" | "documentSymbols" | "workspaceSymbols" | "prepareCallHierarchy" | "incomingCalls" | "outgoingCalls";
@@ -96,7 +96,7 @@ export interface InspectV4Result {
 
 // ── Re-export compute-module result types for consumers ──
 export type { ImpactResult, DeadCodeResult } from "./impact-analysis.js";
-export type { ClusterResult } from "./community-detection.js";
+export type { ClusterResult } from "../graph/community-detection.js";
 export type { RouteInfo } from "./route-extraction.js";
 export type { LayerMap } from "./layer-analysis.js";
-export type { BoundaryResult } from "./monorepo-detector.js";
+export type { BoundaryResult } from "../workspace/monorepo-detector.js";

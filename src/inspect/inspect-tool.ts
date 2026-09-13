@@ -8,7 +8,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { executeInspectV4 } from "./inspect.js";
 import type { InspectV4Input } from "./inspect-types.js";
-import type { ContextGraph } from "./context-graph.js";
+import type { ContextGraph } from "../context-graph.js";
 
 const InspectV4Schema = Type.Object({
     path: Type.String({ description: "File or directory path. Directory → repo map. File → structural facts + signals." }),
@@ -97,7 +97,7 @@ export interface InspectToolOptions {
     /** ContextGraph instance or getter for graph-dependent inspect params (WP-5 DI). */
     readonly contextGraph?: ContextGraph | ((cwd: string) => ContextGraph | Promise<ContextGraph>);
     /** Shared LSP inspection provider — injected by runtime, threaded lazily to inspect (WP-SR5 DI). */
-    readonly lspInspectionProvider?: import("./lsp-inspection.js").LspInspectionProvider;
+    readonly lspInspectionProvider?: import("../lsp/lsp-inspection.js").LspInspectionProvider;
 }
 
 const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality. Pass a directory for a ranked repository map with key symbols and architecture; pass a file for structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) and quality signals. Analysis modes are set via schema params.`;

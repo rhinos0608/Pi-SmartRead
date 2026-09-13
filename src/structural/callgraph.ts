@@ -3,9 +3,9 @@ import { readFileSync, statSync } from "node:fs";
 import { dirname, extname, relative, resolve } from "node:path";
 import Parser from "tree-sitter";
 import { createRequire } from "node:module";
-import { commonPathRoot } from "./workspace-boundary.js";
+import { commonPathRoot } from "../workspace/workspace-boundary.js";
 import { initParser } from "./tags.js";
-import { filenameToLang, type SupportedLanguage } from "./languages.js";
+import { filenameToLang, type SupportedLanguage } from "../languages.js";
 
 const require = createRequire(import.meta.url);
 type Grammar = Parameters<Parser["setLanguage"]>[0];

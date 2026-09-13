@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   getRelationshipEvidence,
-} from "../../src/relationship-evidence.js";
-import type { Provenance } from "../../src/relationship-evidence.js";
+} from "../../../src/repository/relationship-evidence.js";
+import type { Provenance } from "../../../src/repository/relationship-evidence.js";
 
 const edges: Provenance[] = [
   { from: "a", to: "b", type: "uses", confidence: 0.9 },

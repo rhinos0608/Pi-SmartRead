@@ -15,7 +15,7 @@
  * (https://arxiv.org/abs/2212.10496)
  */
 
-import { tokenize } from "./scoring.js";
+import { tokenize } from "../scoring.js";
 
 /** Common English words to exclude from identifier extraction. */
 const STOP_WORDS = new Set([

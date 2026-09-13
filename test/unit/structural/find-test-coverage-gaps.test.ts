@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { findTestCoverageGaps } from "../../src/signals.js";
+import { findTestCoverageGaps } from "../../../src/structural/signals.js";
 
 function runGit(args: string[], cwd: string) {
   execFileSync("git", args, { cwd, stdio: "pipe" });

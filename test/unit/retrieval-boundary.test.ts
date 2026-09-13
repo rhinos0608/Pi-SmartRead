@@ -2,11 +2,11 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { executeInspectV4 } from "../../src/inspect.js";
-import { computePathEvidence } from "../../src/path-evidence.js";
-import { createRepoTool } from "../../src/repomap-tool.js";
-import { createReadTool } from "../../src/unified-read.js";
-import { retrieveQuery } from "../../src/query-retrieval.js";
+import { executeInspectV4 } from "../../src/inspect/inspect.js";
+import { computePathEvidence } from "../../src/evidence/path-evidence.js";
+import { createRepoTool } from "../../src/repomap/repomap-tool.js";
+import { createReadTool } from "../../src/read/unified-read.js";
+import { retrieveQuery } from "../../src/read/query-retrieval.js";
 
 function makeCtx(cwd: string, sessionFile: string) {
   return { cwd, sessionManager: { getSessionFile: () => sessionFile } } as any;

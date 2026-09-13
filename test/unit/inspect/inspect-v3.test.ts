@@ -13,8 +13,8 @@ import { join } from "node:path";
 import {
     resolveInspectV4Mode,
     executeInspectV4,
-} from "../../src/inspect.js";
-import { createInspectV4Tool } from "../../src/inspect-tool.js";
+} from "../../../src/inspect/inspect.js";
+import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
 import {
     validateInspectionEnvelope,
 } from "@rhinos0608/pi-workspace-protocol";

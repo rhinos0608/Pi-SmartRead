@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   runTestFailureProximity,
   type TestFailure,
-} from "../../../src/rank-channels/test-failure-proximity.js";
+} from "../../../../src/ranking/channels/test-failure-proximity.js";
 
 const ALL_FILES = [
   "src/auth.ts",

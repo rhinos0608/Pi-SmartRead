@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveLanguageServer, detectLanguageId } from "../../src/language-intelligence-runtime.js";
-import { resetLanguageIntelligenceCaches as resetConfigCaches, __paths } from "../../src/language-intelligence-config.js";
+import { resolveLanguageServer, detectLanguageId } from "../../../src/language-intelligence/language-intelligence-runtime.js";
+import { resetLanguageIntelligenceCaches as resetConfigCaches, __paths } from "../../../src/language-intelligence/language-intelligence-config.js";
 
 function makeHome(): string {
   const dir = mkdtempSync(join(tmpdir(), "pi-li-rt-"));
@@ -105,7 +105,7 @@ describe("language-intelligence-runtime", () => {
   it("default checkExecutable does not spawn", async () => {
     // Verify runtime module has no exec/spawn import
     const fs = await import("node:fs/promises");
-    const src = await fs.readFile("src/language-intelligence-runtime.ts", "utf-8");
+    const src = await fs.readFile("src/language-intelligence/language-intelligence-runtime.ts", "utf-8");
     expect(src).not.toMatch(/execFileSync/);
     expect(src).not.toMatch(/child_process/);
     expect(src).toMatch(/process\.env\.PATH/);

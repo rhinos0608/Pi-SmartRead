@@ -30,9 +30,9 @@ import {
   createIncrementalIndex,
   getIncrementalIndex,
   clearIncrementalIndexInstance,
-} from "../../src/incremental-index.js";
+} from "../../../src/indexing/incremental-index.js";
 
-import type { FileHashCache, FileHashEntry } from "../../src/incremental-index.js";
+import type { FileHashCache, FileHashEntry } from "../../../src/indexing/incremental-index.js";
 
 describe("hashFileSync", () => {
   it("produces a deterministic 64-char hex hash", () => {
@@ -742,7 +742,7 @@ describe("createIncrementalIndex updateGraphStats", () => {
 
 // ── WP-9: captureFileEntries snapshot adapter ────────────────────
 
-import { captureFileEntries } from "../../src/incremental-index.js";
+import { captureFileEntries } from "../../../src/indexing/incremental-index.js";
 
 describe("captureFileEntries", () => {
   let tmpDir: string;

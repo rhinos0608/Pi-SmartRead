@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { structuralPageRank } from "../../../src/rank-channels/structural-pagerank.js";
-import type { GraphEdge } from "../../../src/pagerank.js";
+import { structuralPageRank } from "../../../../src/ranking/channels/structural-pagerank.js";
+import type { GraphEdge } from "../../../../src/ranking/pagerank.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 

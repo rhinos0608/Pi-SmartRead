@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchEmbeddings, fetchEmbeddingsSharded, SHARD_SIZE } from "../../src/embedding.js";
+import { fetchEmbeddings, fetchEmbeddingsSharded, SHARD_SIZE } from "../../../src/indexing/embedding.js";
 
 const BASE_URL = "http://localhost:11434/v1";
 const MODEL = "nomic-embed-text";

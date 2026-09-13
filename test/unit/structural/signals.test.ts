@@ -11,8 +11,8 @@ import {
   detectTests,
   detectDeprecation,
   findTestLinkage,
-} from "../../src/signals.js";
-import type { ContextGraph } from "../../src/context-graph.js";
+} from "../../../src/structural/signals.js";
+import type { ContextGraph } from "../../../src/context-graph.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 

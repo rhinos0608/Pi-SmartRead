@@ -3,8 +3,8 @@ import {
   computeRelationshipChanges,
   type MatchConfidence,
   type FileLineageResult,
-} from "../../src/delta-relationships.js";
-import type { Provenance, EdgeType } from "../../src/context-graph.js";
+} from "../../../src/repository/delta-relationships.js";
+import type { Provenance, EdgeType } from "../../../src/context-graph.js";
 
 // ── Test helpers ─────────────────────────────────────────────────
 

@@ -46,7 +46,7 @@ vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(() => Buffer.from("")),
 }));
 const { spawn } = await import("node:child_process");
-const { LSPConnection, shutdownAllManagers, resetLSPBridge } = await import("../../src/lsp-bridge.js");
+const { LSPConnection, shutdownAllManagers, resetLSPBridge } = await import("../../../src/lsp/lsp-bridge.js");
 
 async function makeConnection(root: string): Promise<{ conn: InstanceType<typeof LSPConnection>; proc: FakeProc }> {
   const conn = new LSPConnection();

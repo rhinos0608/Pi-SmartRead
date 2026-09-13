@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../../src/lsp-bridge.js", async (importOriginal) => {
+vi.mock("../../../src/lsp/lsp-bridge.js", async (importOriginal) => {
   const orig: any = await importOriginal();
   return {
     ...orig,
@@ -9,11 +9,11 @@ vi.mock("../../src/lsp-bridge.js", async (importOriginal) => {
     evictManagerForRoot: vi.fn().mockResolvedValue(undefined),
   };
 });
-vi.mock("../../src/language-intelligence-runtime.js", async (importOriginal) => {
+vi.mock("../../../src/language-intelligence/language-intelligence-runtime.js", async (importOriginal) => {
   const orig: any = await importOriginal();
   return { ...orig, resolveLanguageServer: vi.fn() };
 });
-vi.mock("../../src/language-intelligence-config.js", async (importOriginal) => {
+vi.mock("../../../src/language-intelligence/language-intelligence-config.js", async (importOriginal) => {
   const orig: any = await importOriginal();
   return {
     ...orig,
@@ -23,11 +23,11 @@ vi.mock("../../src/language-intelligence-config.js", async (importOriginal) => {
     setInstallMode: vi.fn(),
   };
 });
-vi.mock("../../src/language-server-catalog.js", async (importOriginal) => {
+vi.mock("../../../src/language-intelligence/language-server-catalog.js", async (importOriginal) => {
   const orig: any = await importOriginal();
   return { ...orig, getDescriptorsForLanguage: vi.fn().mockReturnValue([]) };
 });
-vi.mock("../../src/language-intelligence-installer.js", async (importOriginal) => {
+vi.mock("../../../src/language-intelligence/language-intelligence-installer.js", async (importOriginal) => {
   const orig: any = await importOriginal();
   return {
     ...orig,
@@ -38,12 +38,12 @@ vi.mock("../../src/language-intelligence-installer.js", async (importOriginal) =
   };
 });
 
-import { registerLanguageIntelligenceCommand } from "../../src/language-intelligence-command.js";
-import { detectProjectLanguages, invalidateResolvedServerCacheForRoot, evictManagerForRoot } from "../../src/lsp-bridge.js";
-import { resolveLanguageServer } from "../../src/language-intelligence-runtime.js";
-import { isRootTrusted, trustRoot, loadConfig, setInstallMode } from "../../src/language-intelligence-config.js";
-import { getDescriptorsForLanguage } from "../../src/language-server-catalog.js";
-import { installServer, updateServer, uninstallServer, isServerInstalled } from "../../src/language-intelligence-installer.js";
+import { registerLanguageIntelligenceCommand } from "../../../src/language-intelligence/language-intelligence-command.js";
+import { detectProjectLanguages, invalidateResolvedServerCacheForRoot, evictManagerForRoot } from "../../../src/lsp/lsp-bridge.js";
+import { resolveLanguageServer } from "../../../src/language-intelligence/language-intelligence-runtime.js";
+import { isRootTrusted, trustRoot, loadConfig, setInstallMode } from "../../../src/language-intelligence/language-intelligence-config.js";
+import { getDescriptorsForLanguage } from "../../../src/language-intelligence/language-server-catalog.js";
+import { installServer, updateServer, uninstallServer, isServerInstalled } from "../../../src/language-intelligence/language-intelligence-installer.js";
 
 function makeCtx(cwd = "/tmp/ws") {
   const notify = vi.fn();

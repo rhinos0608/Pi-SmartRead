@@ -146,7 +146,7 @@ export class LSPManager {
     try {
       const purpose = opts?.purpose ?? "warmup";
       const dummy = dummyFileForLanguage(languageId, this.rootUri);
-      const { ensureLanguageServerAvailable } = await import("./language-intelligence-runtime.js");
+      const { ensureLanguageServerAvailable } = await import("../language-intelligence/language-intelligence-runtime.js");
       let res: Awaited<ReturnType<typeof ensureLanguageServerAvailable>> | null = null;
       try {
         res = await withBudget(ensureLanguageServerAvailable(dummy, this.rootUri, { purpose }), 10000);

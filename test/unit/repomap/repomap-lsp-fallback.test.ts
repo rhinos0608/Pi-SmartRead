@@ -7,13 +7,13 @@ const mocks = vi.hoisted(() => ({
   getDocumentSymbols: vi.fn(() => new Promise<never>(() => {})),
 }));
 
-vi.mock("../../src/lsp-bridge.js", () => ({
+vi.mock("../../../src/lsp/lsp-bridge.js", () => ({
   getLSPBridge: vi.fn(async () => ({
     getDocumentSymbols: mocks.getDocumentSymbols,
   })),
 }));
 
-import { RepoMap } from "../../src/repomap.js";
+import { RepoMap } from "../../../src/repomap.js";
 
 describe("RepoMap LSP fallback", () => {
   let root: string | undefined;

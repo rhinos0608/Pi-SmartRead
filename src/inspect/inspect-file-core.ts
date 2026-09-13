@@ -19,11 +19,11 @@ import {
     type InspectedResource,
     type InspectMode,
 } from "@rhinos0608/pi-workspace-protocol";
-import { extractStructuralFacts } from "./structural-facts.js";
-import { computeFileSignals } from "./signals.js";
+import { extractStructuralFacts } from "../structural/structural-facts.js";
+import { computeFileSignals } from "../structural/signals.js";
 import type { InspectV4Input, InspectV4Result } from "./inspect-types.js";
-import type { StructuralFacts } from "./structural-facts-types.js";
-import type { CallGraphResult } from "./callgraph.js";
+import type { StructuralFacts } from "../structural/structural-facts-types.js";
+import type { CallGraphResult } from "../structural/callgraph.js";
 import {
     buildFileCallGraphSection,
     buildFileImpactSection,

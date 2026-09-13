@@ -7,7 +7,7 @@ import {
   matchAstNodesInFile,
   parseAstPattern,
   tokenizeAstPattern,
-} from "../../src/search-ast-pattern.js";
+} from "../../../src/search/search-ast-pattern.js";
 // NOTE: search-tool.js facade re-export (parseAstPattern, ParsedAstPattern)
 // is verified via `tsc --noEmit`, not imported here: search-tool.js
 // transitively pulls src/hook.ts, which has pre-existing unrelated

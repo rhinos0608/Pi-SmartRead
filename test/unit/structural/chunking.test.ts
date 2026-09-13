@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkText, compressSnippet, cASTChunkText, nwsChars } from "../../src/chunking.js";
+import { chunkText, compressSnippet, cASTChunkText, nwsChars } from "../../../src/structural/chunking.js";
 
 describe("chunkText", () => {
   it("returns empty array for empty string", () => {

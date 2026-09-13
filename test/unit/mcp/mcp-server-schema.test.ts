@@ -6,7 +6,7 @@
  * required fields, and inputSchema shape.
  */
 import { describe, expect, it } from "vitest";
-import { buildToolRegistry } from "../../src/mcp-registry.js";
+import { buildToolRegistry } from "../../../src/mcp-registry.js";
 
 describe("MCP tool registry schema (no subprocess)", () => {
   it("registers expected tools and omits consolidated/experimental ones", () => {

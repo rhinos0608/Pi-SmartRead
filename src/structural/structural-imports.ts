@@ -8,9 +8,9 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve, basename } from "node:path";
 import Parser from "tree-sitter";
 import { createRequire } from "node:module";
-import { filenameToLang, type SupportedLanguage } from "./languages.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { chooseConcurrency } from "./adaptive-concurrency.js";
+import { filenameToLang, type SupportedLanguage } from "../languages.js";
+import { findSrcFiles } from "../file-discovery.js";
+import { chooseConcurrency } from "../adaptive-concurrency.js";
 import type { DependentInfo, DependencyInfo, ReExportInfo } from "./structural-facts-types.js";
 
 const require = createRequire(import.meta.url);

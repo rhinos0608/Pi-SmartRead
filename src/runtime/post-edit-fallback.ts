@@ -14,7 +14,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { getLSPBridge, type LSPDiagnostic } from "./lsp-bridge.js";
+import { getLSPBridge, type LSPDiagnostic } from "../lsp/lsp-bridge.js";
 import { isDiagnosticsClaimed } from "./mutation-ownership.js";
 
 /** Minimal shape of the native write/edit tool_result event we act on. */

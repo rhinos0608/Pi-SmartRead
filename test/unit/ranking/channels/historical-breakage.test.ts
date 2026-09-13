@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { runHistoricalBreakageChannel } from "../../../src/rank-channels/historical-breakage.js";
+import { runHistoricalBreakageChannel } from "../../../../src/ranking/channels/historical-breakage.js";
 
 // Mock EdgeStore.readEdges to avoid filesystem access
-vi.mock("../../../src/context-graph.js", () => ({
+vi.mock("../../../../src/context-graph.js", () => ({
   EdgeStore: {
     readEdges: vi.fn(() => []),
   },
 }));
 
-import { EdgeStore } from "../../../src/context-graph.js";
+import { EdgeStore } from "../../../../src/context-graph.js";
 const mockReadEdges = vi.mocked(EdgeStore.readEdges);
 
 function makeBreakageEvent(

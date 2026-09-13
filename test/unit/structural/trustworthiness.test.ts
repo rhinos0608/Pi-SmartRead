@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildCallGraph } from "../../src/callgraph.js";
-import { extractStructuralFacts } from "../../src/structural-facts.js";
+import { buildCallGraph } from "../../../src/structural/callgraph.js";
+import { extractStructuralFacts } from "../../../src/structural/structural-facts.js";
 
 describe("callgraph foundation", () => {
   it("inventories leaves and gives duplicate declarations distinct IDs", async () => {

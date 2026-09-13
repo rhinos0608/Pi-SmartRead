@@ -8,10 +8,10 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
-import { createGrepTool } from "../../src/grep-tool.js";
-import { disposeSemanticIndexes } from "../../src/semantic-index-registry.js";
-import { _resetAstGrepCacheForTests } from "../../src/structural-search.js";
-import { makeCtx, makeOpts, seedStandardWorkdir } from "../helpers/grep-tool-fixtures.js";
+import { createGrepTool } from "../../../src/search/grep-tool.js";
+import { disposeSemanticIndexes } from "../../../src/indexing/semantic-index-registry.js";
+import { _resetAstGrepCacheForTests } from "../../../src/structural/structural-search.js";
+import { makeCtx, makeOpts, seedStandardWorkdir } from "../../helpers/grep-tool-fixtures.js";
 let workdir: string;
 
 beforeEach(() => {
@@ -44,7 +44,7 @@ describe("grep tool — structural search (WP-SR4)", () => {
     await expect(tool.execute(id, params as any, undefined, undefined, ctx)).rejects.toThrow(error);
   });
   it("structural hits include read args in text and details, evidence stays search-match", async () => {
-    const { _setUnavailableForTests, _resetAstGrepCacheForTests, isStructuralSearchAvailable } = await import("../../src/structural-search.js");
+    const { _setUnavailableForTests, _resetAstGrepCacheForTests, isStructuralSearchAvailable } = await import("../../../src/structural/structural-search.js");
     writeFileSync(join(workdir, "src", "s.ts"), "console.log(a)\n", "utf8");
     const tool = createGrepTool(makeOpts());
     const r: any = await tool.execute("s-ok", { pattern: "console.log($ARG)", structural: {} } as any, undefined, undefined, makeCtx(workdir));
@@ -75,10 +75,10 @@ describe("grep tool — structural search (WP-SR4)", () => {
     }
   });
   it("structural graphFilter paginates filtered results — valid hit beyond first page survives limit", async () => {
-    const avail = (await import("../../src/structural-search.js")).isStructuralSearchAvailable;
+    const avail = (await import("../../../src/structural/structural-search.js")).isStructuralSearchAvailable;
     if (!(await avail())) return;
     // 30 matching files; only files whose caller imports auth-filter target should survive filter
-    const { ContextGraph } = await import("../../src/context-graph.js");
+    const { ContextGraph } = await import("../../../src/context-graph.js");
     for (let i = 0; i < 6; i++) {
       writeFileSync(join(workdir, "src", `sr_struct_${i}.ts`), `console.log(${i})\n`, "utf8");
     }
@@ -103,8 +103,8 @@ describe("grep tool — structural search (WP-SR4)", () => {
     expect(r.details.structuralSearch.truncated).toBe(false);
   });
   it("structural graphFilter with raw matches above cap — bounded pagination, no lost matches, no infinite loop", async () => {
-    const structMod: any = await import("../../src/structural-search.js");
-    const { GREP_STRUCTURAL_FETCH_SIZE } = await import("../../src/grep-structural-executor.js");
+    const structMod: any = await import("../../../src/structural/structural-search.js");
+    const { GREP_STRUCTURAL_FETCH_SIZE } = await import("../../../src/search/grep-structural-executor.js");
     const cap = GREP_STRUCTURAL_FETCH_SIZE;
     const total = cap * 2 + 500; // above cap, e.g. 2500 when cap=1000
     const allFake = Array.from({ length: total }, (_, i) => ({
@@ -149,8 +149,8 @@ describe("grep tool — structural search (WP-SR4)", () => {
     spy.mockRestore();
   });
   it("structural graphFilter at/above raw ceiling — hard cap terminates with truncated:true and no duplicates", async () => {
-    const structMod: any = await import("../../src/structural-search.js");
-    const grepMod: any = await import("../../src/grep-tool.js");
+    const structMod: any = await import("../../../src/structural/structural-search.js");
+    const grepMod: any = await import("../../../src/search/grep-tool.js");
     const { GREP_STRUCTURAL_FETCH_SIZE } = grepMod;
     const cap = GREP_STRUCTURAL_FETCH_SIZE ?? 1000;
     // Simulate ceiling at small value to avoid 10M allocation, but exercise same clamp-repetition bug.

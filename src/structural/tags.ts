@@ -19,7 +19,7 @@ import {
   filenameToLang,
   type SupportedLanguage,
   QUERY_NAME_ALIASES,
-} from "./languages.js";
+} from "../languages.js";
 import { TagsCache } from "./cache.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -28,7 +28,7 @@ const require = createRequire(import.meta.url);
 const TypeScriptGrammar = require("tree-sitter-typescript");
 const JavaScriptGrammar = require("tree-sitter-javascript");
 
-const QUERIES_DIR = path.resolve(__dirname, "queries");
+const QUERIES_DIR = path.resolve(__dirname, "../queries");
 const LANGUAGE_PACK_DIR = path.join(QUERIES_DIR, "tree-sitter-language-pack");
 const LANGUAGES_DIR = path.join(QUERIES_DIR, "tree-sitter-languages");
 

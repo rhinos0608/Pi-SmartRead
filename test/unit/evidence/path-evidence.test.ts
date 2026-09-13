@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
-import { computePathEvidence, computeStructuralOutlineEvidence } from "../../src/path-evidence.js";
+import { computePathEvidence, computeStructuralOutlineEvidence } from "../../../src/evidence/path-evidence.js";
 
 describe("computePathEvidence", () => {
   let dir: string;

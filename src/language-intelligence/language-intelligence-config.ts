@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, unlinkSync } from "node:fs";
-import { canonicalPathOrFallback } from "./canonical-path.js";
+import { canonicalPathOrFallback } from "../canonical-path.js";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 

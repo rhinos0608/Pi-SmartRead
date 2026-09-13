@@ -2,7 +2,7 @@
  * Tests for PageRank implementation.
  */
 import { describe, it, expect } from "vitest";
-import { pagerank } from "../../src/pagerank.js";
+import { pagerank } from "../../../src/ranking/pagerank.js";
 
 describe("pagerank", () => {
   it("returns empty map for empty nodes", () => {

@@ -31,11 +31,11 @@ export {
   parseInternalUrl,
   registerHandler,
   getHandler,
-} from "./internal-url-router.js";
-export { resolveSkillUrl, resolveMemoryUrl, resolveGraphUrl } from "./internal-url-router.js";
+} from "./protocols/internal-url-router.js";
+export { resolveSkillUrl, resolveMemoryUrl, resolveGraphUrl } from "./protocols/internal-url-router.js";
 
 // Workspace evidence resolver
-export { createEvidenceResolver } from "./workspace-evidence-resolver.js";
+export { createEvidenceResolver } from "./evidence/workspace-evidence-resolver.js";
 export {
   buildInspectToolForExtension,
   registerInspectToolWithBus,
@@ -50,12 +50,12 @@ export {
   invalidate,
   clearSession,
   resolveSessionKey,
-} from "./file-read-cache.js";
-export type { FileSnapshot, SearchMatchEntry } from "./file-read-cache.js";
+} from "./read/file-read-cache.js";
+export type { FileSnapshot, SearchMatchEntry } from "./read/file-read-cache.js";
 
 // ── Code summary API ───────────────────────────────────────────────
-export { summarizeCode, renderSummary, canSummarize } from "./code-summary.js";
-export type { SummaryOptions, SummarySegment, SummaryResult } from "./code-summary.js";
+export { summarizeCode, renderSummary, canSummarize } from "./structural/code-summary.js";
+export type { SummaryOptions, SummarySegment, SummaryResult } from "./structural/code-summary.js";
 
 // Preserve the public helper path: tests import lspUriToPath from src/index.js.
 export { lspUriToPath } from "./extension-registration.js";

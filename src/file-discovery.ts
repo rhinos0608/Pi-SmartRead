@@ -12,8 +12,8 @@ import { promises as fs, existsSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import ignoreDefault, { type Ignore } from "ignore";
 import { getSupportedExtensions, isSupportedFile } from "./languages.js";
-import { getFsScanCache } from "./fs-scan-cache.js";
-export { getFsScanCache, invalidateFsScanCache } from "./fs-scan-cache.js";
+import { getFsScanCache } from "./workspace/fs-scan-cache.js";
+export { getFsScanCache, invalidateFsScanCache } from "./workspace/fs-scan-cache.js";
 
 const createIgnore = ignoreDefault as unknown as (options?: {
   allowRelativePaths?: boolean;

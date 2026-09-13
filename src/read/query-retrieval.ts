@@ -1,9 +1,9 @@
 import { statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
-import { canonicalPath, canonicalRelative } from "./workspace-boundary.js";
-import { handleCode, handleGrep } from "./search-tool.js";
-import { pathPrefixForDirectory } from "./semantic-index.js";
-import { getSemanticIndex } from "./semantic-index-registry.js";
+import { canonicalPath, canonicalRelative } from "../workspace/workspace-boundary.js";
+import { handleCode, handleGrep } from "../search/search-tool.js";
+import { pathPrefixForDirectory } from "../indexing/semantic-index.js";
+import { getSemanticIndex } from "../indexing/semantic-index-registry.js";
 
 export interface QueryRetrievalHit {
   absolutePath: string;

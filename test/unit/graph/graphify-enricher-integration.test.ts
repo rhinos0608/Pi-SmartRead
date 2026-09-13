@@ -6,7 +6,7 @@ import {
   clearEnricherCache,
   getGraphifyEnricher,
   GraphifyEnricher,
-} from "../../src/graphify-enricher.js";
+} from "../../../src/graph/graphify-enricher.js";
 
 const TEST_CWD = mkdtempSync(join(tmpdir(), "graphify-enricher-test-"));
 

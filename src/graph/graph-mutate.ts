@@ -6,7 +6,7 @@
 
 import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { EdgeStore } from "./context-graph.js";
+import { EdgeStore } from "../context-graph.js";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 

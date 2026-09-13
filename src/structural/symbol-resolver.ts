@@ -16,8 +16,8 @@ import Parser, { Query } from "tree-sitter";
 import { getTagsBatch, initParser, loadLanguage } from "./tags.js";
 import { TagsCache } from "./cache.js";
 import { renderTreeContext } from "./tree-context.js";
-import { findSrcFiles } from "./file-discovery.js";
-import { filenameToLang } from "./languages.js";
+import { findSrcFiles } from "../file-discovery.js";
+import { filenameToLang } from "../languages.js";
 
 export interface SymbolResolution {
   symbol: string;

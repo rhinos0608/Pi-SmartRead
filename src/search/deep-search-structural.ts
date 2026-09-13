@@ -6,7 +6,7 @@ import { handleGrep, handleCode } from "./search-tool.js";
 import {
   type RelevanceClass,
   relevanceClassWeight,
-} from "./classifiers.js";
+} from "../ranking/classifiers.js";
 
 import { RRF_K } from "./deep-search-constants.js";
 import type { DeepSearchCandidate } from "./deep-search.js";
@@ -105,7 +105,7 @@ export async function runSearchChannel(
     result = await handleGrep(toolCallId, params, cwd, signal);
     return parseGrepCandidates(result, "structural");
   }
-  const { loadSearchConfig } = await import("./config.js");
+  const { loadSearchConfig } = await import("../config.js");
   const config = loadSearchConfig(cwd);
   const enrich =
     config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false;
