@@ -75,6 +75,35 @@ interface SymbolSpan {
  * Exported for use by ast-chunker.ts as fallback when web-tree-sitter WASM is unavailable.
  * Prefer ast-chunker.ts::extractSymbolBoundaries for AST-accurate results.
  */
+function isDuplicateSpan(spans: SymbolSpan[], name: string, declStart: number): boolean {
+  return spans.some((s) => s.startByte === declStart || (s.name === name && Math.abs(s.startByte - declStart) < 50));
+}
+
+function collectPatternSpans(text: string, re: RegExp, type: SymbolSpan["type"], nameGroup: number, spans: SymbolSpan[]): void {
+  re.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const name = match[nameGroup]!;
+    const declStart = match.index;
+    const endByte = findMatchingBrace(text, declStart) ?? Math.min(declStart + 2000, text.length);
+    if (!isDuplicateSpan(spans, name, declStart)) spans.push({ type, name, startByte: declStart, endByte });
+  }
+}
+
+function collectDeclSpans(text: string, patterns: { re: RegExp; type: SymbolSpan["type"]; nameGroup: number }[], spans: SymbolSpan[]): void {
+  for (const { re, type, nameGroup } of patterns) collectPatternSpans(text, re, type, nameGroup, spans);
+}
+
+function mergeOverlappingSpans(spans: SymbolSpan[]): SymbolSpan[] {
+  const merged: SymbolSpan[] = [];
+  for (const span of spans) {
+    const prev = merged[merged.length - 1];
+    if (prev && span.startByte < prev.endByte) prev.endByte = Math.max(prev.endByte, span.endByte);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
 export function extractSymbolBoundaries(text: string): SymbolSpan[] {
   const spans: SymbolSpan[] = [];
 
@@ -88,41 +117,9 @@ export function extractSymbolBoundaries(text: string): SymbolSpan[] {
     { re: /(?:^|\n)(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm, type: "variable", nameGroup: 1 },
   ];
 
-  for (const { re, type, nameGroup } of declPatterns) {
-    // Reset lastIndex since we iterate per pattern
-    re.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(text)) !== null) {
-      const name = match[nameGroup]!;
-      const declStart = match.index;
-      const endByte = findMatchingBrace(text, declStart) ?? Math.min(declStart + 2000, text.length);
-
-      // Avoid duplicating spans from different patterns
-      const duplicate = spans.find(
-        (s) => s.startByte === declStart || s.name === name && Math.abs(s.startByte - declStart) < 50,
-      );
-      if (!duplicate) {
-        spans.push({ type, name, startByte: declStart, endByte });
-      }
-    }
-  }
-
-  // Sort by position
+  collectDeclSpans(text, declPatterns, spans);
   spans.sort((a, b) => a.startByte - b.startByte);
-
-  // Merge overlapping spans (keep the larger one)
-  const merged: SymbolSpan[] = [];
-  for (const span of spans) {
-    const prev = merged[merged.length - 1];
-    if (prev && span.startByte < prev.endByte) {
-      // Overlapping — extend the previous span
-      prev.endByte = Math.max(prev.endByte, span.endByte);
-    } else {
-      merged.push({ ...span });
-    }
-  }
-
-  return merged;
+  return mergeOverlappingSpans(spans);
 }
 
 /**
@@ -139,53 +136,90 @@ export function extractSymbolBoundaries(text: string): SymbolSpan[] {
  *
  * Exported for use by ast-chunker.ts as fallback when web-tree-sitter is unavailable.
  */
+interface BraceScanState {
+  depth: number;
+  inString: string | null;
+  inComment: "line" | "block" | null;
+}
+
+function isQuoteChar(ch: string): boolean {
+  return ch === '"' || ch === "'" || ch === "`";
+}
+
+function isStringCloser(ch: string, prev: string, state: BraceScanState): boolean {
+  return ch === state.inString && prev !== "\\";
+}
+
+function scanOpenStringChar(ch: string, state: BraceScanState): boolean {
+  if (!isQuoteChar(ch)) return false;
+  state.inString = ch;
+  return true;
+}
+
+function scanStringChar(ch: string, prev: string, state: BraceScanState): boolean {
+  if (state.inComment !== null) return false;
+  if (state.inString) {
+    if (isStringCloser(ch, prev, state)) state.inString = null;
+    return true;
+  }
+  return scanOpenStringChar(ch, state);
+}
+
+function closeLineComment(ch: string, state: BraceScanState): boolean {
+  if (ch === "\n") state.inComment = null;
+  return true;
+}
+
+function closeBlockComment(ch: string, prev: string, state: BraceScanState): boolean {
+  if (ch === "/" && prev === "*") state.inComment = null;
+  return true;
+}
+
+function scanCommentChar(ch: string, prev: string, state: BraceScanState): boolean {
+  if (state.inComment === null) return false;
+  return state.inComment === "line"
+    ? closeLineComment(ch, state)
+    : closeBlockComment(ch, prev, state);
+}
+
+function isBlankText(text: string | undefined | null): boolean {
+  if (!text) return true;
+  if (text.length === 0) return true;
+  return /^\s*$/.test(text);
+}
+
+function scanCommentStart(text: string, i: number, state: BraceScanState): boolean {
+  if (state.inString !== null || state.inComment !== null) return false;
+  const ch = text[i];
+  if (ch === "/" && text[i + 1] === "/") { state.inComment = "line"; return true; }
+  if (ch === "/" && text[i + 1] === "*") { state.inComment = "block"; return true; }
+  return false;
+}
+
+function scanBraceChar(ch: string, state: BraceScanState, index: number): number | null {
+  if (ch === "{") state.depth++;
+  else if (ch === "}") {
+    state.depth--;
+    if (state.depth === 0) return index + 1;
+  }
+  return null;
+}
+
 export function findMatchingBrace(text: string, startPos: number): number | null {
   // Find the first { after startPos
   const openIdx = text.indexOf("{", startPos);
   if (openIdx === -1) return null;
 
-  let depth = 0;
-  let inString: string | null = null;
-  let inComment: "line" | "block" | null = null;
-
+  const state: BraceScanState = { depth: 0, inString: null, inComment: null };
   for (let i = openIdx; i < text.length; i++) {
-    const ch = text[i];
-    const prev = i > 0 ? text[i - 1] : "";
-
-    // Handle string boundaries
-    if (inComment === null) {
-      if (inString) {
-        if (ch === inString && prev !== "\\") inString = null;
-        continue;
-      }
-      if (ch === '"' || ch === "'" || ch === "`") {
-        inString = ch;
-        continue;
-      }
-    }
-
-    // Handle comment boundaries
-    if (inComment === "line") {
-      if (ch === "\n") inComment = null;
-      continue;
-    }
-    if (inComment === "block") {
-      if (ch === "/" && prev === "*") inComment = null;
-      continue;
-    }
-    if (inString === null) {
-      if (ch === "/" && text[i + 1] === "/") { inComment = "line"; i++; continue; }
-      if (ch === "/" && text[i + 1] === "*") { inComment = "block"; i++; continue; }
-    }
-
-    // Track brace depth
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return i + 1;
-    }
+    const ch = text[i]!;
+    const prev = i > 0 ? text[i - 1]! : "";
+    if (scanStringChar(ch, prev, state)) continue;
+    if (scanCommentChar(ch, prev, state)) continue;
+    if (scanCommentStart(text, i, state)) { i++; continue; }
+    const done = scanBraceChar(ch, state, i);
+    if (done !== null) return done;
   }
-
   return null;
 }
 
@@ -200,13 +234,14 @@ const DEFAULT_MAX_NWS_CHARS = 2000;
  * Count non-whitespace characters in text.
  * Used by cAST chunking as the size metric.
  */
+function isNwsChar(ch: string): boolean {
+  return ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v";
+}
+
 export function nwsChars(text: string): number {
   let count = 0;
   for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!;
-    if (ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v") {
-      count++;
-    }
+    if (isNwsChar(text[i]!)) count++;
   }
   return count;
 }
@@ -279,6 +314,38 @@ interface CASTSegment {
   endByte: number;
 }
 
+function collectNestedSpans(span: SymbolSpan, candidates: SymbolSpan[], from: number): { nested: SymbolSpan[]; next: number } {
+  const nested: SymbolSpan[] = [];
+  let j = from;
+  while (j < candidates.length && candidates[j]!.startByte < span.endByte) {
+    const cand = candidates[j]!;
+    if (cand.startByte >= span.startByte && cand.endByte <= span.endByte) nested.push(cand);
+    j++;
+  }
+  return { nested, next: j };
+}
+
+function spanToNode(span: SymbolSpan): CASTNode {
+  return { startByte: span.startByte, endByte: span.endByte, type: span.type, name: span.name, children: [] };
+}
+
+function isOutsideParent(span: SymbolSpan, parent: CASTNode): boolean {
+  return span.startByte < parent.startByte || span.endByte > parent.endByte;
+}
+
+function attachSpans(parent: CASTNode, candidates: SymbolSpan[]): void {
+  let i = 0;
+  while (i < candidates.length) {
+    const span = candidates[i]!;
+    if (isOutsideParent(span, parent)) { i++; continue; }
+    const { nested, next } = collectNestedSpans(span, candidates, i + 1);
+    const node = spanToNode(span);
+    attachSpans(node, nested);
+    parent.children.push(node);
+    i = next;
+  }
+}
+
 /**
  * Build a hierarchical tree from flat symbol spans.
  * Spans are nested by containment: if span B is fully inside span A,
@@ -296,40 +363,7 @@ function spansToTree(text: string, spans: SymbolSpan[]): CASTNode {
   // Sort by start, then by end descending (parents before children)
   const sorted = [...spans].sort((a, b) => a.startByte - b.startByte || (b.endByte - b.startByte) - (a.endByte - a.startByte));
 
-  function attach(parent: CASTNode, candidates: SymbolSpan[], depth: number): void {
-    let i = 0;
-    while (i < candidates.length) {
-      const span = candidates[i]!;
-      if (span.startByte < parent.startByte || span.endByte > parent.endByte) {
-        i++;
-        continue;
-      }
-
-      // Collect candidates nested strictly inside this span
-      const nested: SymbolSpan[] = [];
-      let j = i + 1;
-      while (j < candidates.length && candidates[j]!.startByte < span.endByte) {
-        if (candidates[j]!.startByte >= span.startByte && candidates[j]!.endByte <= span.endByte) {
-          nested.push(candidates[j]!);
-        }
-        j++;
-      }
-
-      const node: CASTNode = {
-        startByte: span.startByte,
-        endByte: span.endByte,
-        type: span.type,
-        name: span.name,
-        children: [],
-      };
-
-      attach(node, nested, depth + 1);
-      parent.children.push(node);
-      i = j;
-    }
-  }
-
-  attach(root, sorted, 0);
+  attachSpans(root, sorted);
   return root;
 }
 
@@ -348,17 +382,13 @@ function cASTHardSplit(
   let nwsAccum = 0;
 
   for (let i = startByte; i < endByte; i++) {
-    const ch = text[i]!;
-    const isNws = ch !== " " && ch !== "\n" && ch !== "\r" && ch !== "\t" && ch !== "\f" && ch !== "\v";
-
-    if (isNws) {
-      if (nwsAccum >= maxNws) {
-        segments.push({ startByte: chunkStart, endByte: i });
-        chunkStart = i;
-        nwsAccum = 0;
-      }
-      nwsAccum++;
+    if (!isNwsChar(text[i]!)) continue;
+    if (nwsAccum >= maxNws) {
+      segments.push({ startByte: chunkStart, endByte: i });
+      chunkStart = i;
+      nwsAccum = 0;
     }
+    nwsAccum++;
   }
 
   // Emit remaining
@@ -453,13 +483,19 @@ function buildCastSplitHints(
  * internal structure and exceeds the limit, hard-split over-large atomic
  * hints, otherwise keep as-is.
  */
+function isHintOverLimit(seg: CASTSplitHint, text: string, maxNws: number): boolean {
+  return nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws;
+}
+
+function hasChildStructure(seg: CASTSplitHint): boolean {
+  return !!seg.children && seg.children.length > 0;
+}
+
 function splitCastHint(seg: CASTSplitHint, text: string, maxNws: number): CASTSegment[] {
-  if (seg.children && seg.children.length > 0 && nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
-    return cASTSplitSegments(seg.startByte, seg.endByte, text, seg.children, maxNws);
+  if (hasChildStructure(seg) && isHintOverLimit(seg, text, maxNws)) {
+    return cASTSplitSegments(seg.startByte, seg.endByte, text, seg.children!, maxNws);
   }
-  if (nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
-    return cASTHardSplit(text, seg.startByte, seg.endByte, maxNws);
-  }
+  if (isHintOverLimit(seg, text, maxNws)) return cASTHardSplit(text, seg.startByte, seg.endByte, maxNws);
   return [{ startByte: seg.startByte, endByte: seg.endByte }];
 }
 
@@ -468,40 +504,47 @@ function splitCastHint(seg: CASTSplitHint, text: string, maxNws: number): CASTSe
  * at most maxNws. Adjacent subs in the same batch merge into one segment
  * by extending the batch end (hints are contiguous, so no gaps result).
  */
+interface CastBatch {
+  startByte: number;
+  endByte: number;
+  nws: number;
+}
+
+function appendToCastBatch(batch: CastBatch | null, sub: CASTSegment, subNws: number): CastBatch {
+  if (batch === null) return { startByte: sub.startByte, endByte: sub.endByte, nws: subNws };
+  batch.endByte = sub.endByte;
+  batch.nws += subNws;
+  return batch;
+}
+
+interface PackSubsInput { subs: CASTSegment[]; text: string; maxNws: number; packed: CASTSegment[]; batch: CastBatch | null }
+
+function flushPackBatch(packed: CASTSegment[], current: CastBatch | null): CastBatch | null {
+  if (current === null) return null;
+  packed.push({ startByte: current.startByte, endByte: current.endByte });
+  return null;
+}
+
+function packOneSub(input: PackSubsInput, sub: CASTSegment, current: CastBatch | null): CastBatch | null {
+  const subNws = nwsChars(input.text.slice(sub.startByte, sub.endByte));
+  let next = current;
+  if (next !== null && next.nws + subNws > input.maxNws) next = flushPackBatch(input.packed, next);
+  return appendToCastBatch(next, sub, subNws);
+}
+
+function packHintSubs(input: PackSubsInput): CastBatch | null {
+  let current = input.batch;
+  for (const sub of input.subs) current = packOneSub(input, sub, current);
+  return current;
+}
+
 function packCastSegments(hints: CASTSplitHint[], text: string, maxNws: number): CASTSegment[] {
   const packed: CASTSegment[] = [];
-  let currentBatch: { startByte: number; endByte: number }[] = [];
-  let currentNws = 0;
-
-  const flushBatch = (): void => {
-    if (currentBatch.length > 0) {
-      packed.push({
-        startByte: currentBatch[0]!.startByte,
-        endByte: currentBatch[currentBatch.length - 1]!.endByte,
-      });
-    }
-  };
-
+  let batch: CastBatch | null = null;
   for (const hint of hints) {
-    const segSegments = splitCastHint(hint, text, maxNws);
-    for (const sub of segSegments) {
-      const subNws = nwsChars(text.slice(sub.startByte, sub.endByte));
-      if (currentNws + subNws <= maxNws) {
-        if (currentBatch.length === 0) {
-          currentBatch.push(sub);
-        } else {
-          currentBatch[currentBatch.length - 1]!.endByte = sub.endByte;
-        }
-        currentNws += subNws;
-      } else {
-        flushBatch();
-        currentBatch = [{ startByte: sub.startByte, endByte: sub.endByte }];
-        currentNws = subNws;
-      }
-    }
+    batch = packHintSubs({ subs: splitCastHint(hint, text, maxNws), text, maxNws, packed, batch });
   }
-
-  flushBatch();
+  if (batch !== null) packed.push({ startByte: batch.startByte, endByte: batch.endByte });
   return packed;
 }
 
@@ -581,7 +624,7 @@ export function cASTChunkText(
   text: string,
   options?: ChunkOptions,
 ): ChunkResult[] {
-  if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
+  if (isBlankText(text)) return [];
 
   const maxNws = options?.maxNwsChars ?? DEFAULT_MAX_NWS_CHARS;
   const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
@@ -627,7 +670,7 @@ export function chunkText(
   const useSymbolBoundaries = options?.useSymbolBoundaries ?? false;
   const useCast = options?.useCAST ?? false;
 
-  if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
+  if (isBlankText(text)) return [];
 
   if (useCast) {
     return cASTChunkText(text, options);
@@ -661,6 +704,24 @@ interface SymbolDraftChunk {
  * significant) plus one draft per symbol span. Very large symbols
  * (>2x chunkSizeChars) sub-split via character chunking.
  */
+function pushSubDrafts(chunks: SymbolDraftChunk[], span: SymbolSpan, subChunks: ChunkResult[]): void {
+  for (const sc of subChunks) {
+    chunks.push({ text: sc.text, startChar: span.startByte + sc.startChar, endChar: span.startByte + sc.endChar, span });
+  }
+}
+
+interface SpanDraftInput { chunks: SymbolDraftChunk[]; text: string; span: SymbolSpan; chunkSizeChars: number; options?: ChunkOptions }
+
+function appendSpanDraft(input: SpanDraftInput): void {
+  const slice = input.text.slice(input.span.startByte, input.span.endByte);
+  if (slice.length === 0) return;
+  if (slice.length <= input.chunkSizeChars * 2) {
+    input.chunks.push({ text: slice, startChar: input.span.startByte, endChar: input.span.endByte, span: input.span });
+    return;
+  }
+  pushSubDrafts(input.chunks, input.span, chunkByCharacterSize(slice, { ...input.options, chunkSizeChars: input.chunkSizeChars, maxChunksPerFile: 4 }));
+}
+
 function buildInitialSymbolChunks(
   text: string,
   spans: SymbolSpan[],
@@ -678,33 +739,7 @@ function buildInitialSymbolChunks(
   }
 
   for (let i = 0; i < spans.length; i++) {
-    const span = spans[i]!;
-    const chunkText2 = text.slice(span.startByte, span.endByte);
-
-    if (chunkText2.length === 0) continue;
-
-    if (chunkText2.length > chunkSizeChars * 2) {
-      const subChunks = chunkByCharacterSize(chunkText2, {
-        ...options,
-        chunkSizeChars,
-        maxChunksPerFile: 4,
-      });
-      for (const sc of subChunks) {
-        chunks.push({
-          text: sc.text,
-          startChar: span.startByte + sc.startChar,
-          endChar: span.startByte + sc.endChar,
-          span,
-        });
-      }
-    } else {
-      chunks.push({
-        text: chunkText2,
-        startChar: span.startByte,
-        endChar: span.endByte,
-        span,
-      });
-    }
+    appendSpanDraft({ chunks, text, span: spans[i]!, chunkSizeChars, options });
   }
 
   return chunks;
@@ -821,79 +856,64 @@ export interface AstChunkResult {
  * @param options - Chunking options (must include filePath for language detection)
  * @returns AstChunkResult with chunks and detailed diagnostics
  */
+function emptyAstDiagnostics(parseTimeMs = 0): AstChunkResult["diagnostics"] {
+  return { usedAst: false, wasmAvailable: false, parseTimeMs, symbolCount: 0, grammarExtension: "", wasmFile: null };
+}
+
+function toUsedDiagnostics(d: { usedFallback: boolean; wasmAvailable: boolean; parseTimeMs: number; symbolCount: number; grammarExtension: string; wasmFile: string | null | undefined }): AstChunkResult["diagnostics"] {
+  return { usedAst: !d.usedFallback, wasmAvailable: d.wasmAvailable, parseTimeMs: d.parseTimeMs, symbolCount: d.symbolCount, grammarExtension: d.grammarExtension, wasmFile: d.wasmFile ?? null };
+}
+
+async function tryCastChunk(text: string, filePath: string, options?: ChunkOptions): Promise<AstChunkResult | null> {
+  try {
+    const { cASTChunkByAstBoundaries } = await import("./ast-chunker.js");
+    const { chunks, diagnostics } = await cASTChunkByAstBoundaries(text, filePath, options);
+    return { chunks, diagnostics: toUsedDiagnostics(diagnostics) };
+  } catch {
+    return null;
+  }
+}
+
+async function tryAstBoundaries(text: string, filePath: string, options?: ChunkOptions): Promise<AstChunkResult | null> {
+  try {
+    const { chunkByAstBoundaries } = await import("./ast-chunker.js");
+    const { chunks, diagnostics } = await chunkByAstBoundaries(text, filePath, options);
+    return { chunks, diagnostics: toUsedDiagnostics(diagnostics) };
+  } catch {
+    return null;
+  }
+}
+
+function astFilePath(options?: ChunkOptions): string {
+  if (options && options.filePath) return options.filePath;
+  return "";
+}
+
+function wantsCastChunk(options?: ChunkOptions): boolean {
+  return !!options && options.useCAST === true;
+}
+
+function wantsSymbolChunk(options?: ChunkOptions): boolean {
+  return !!options && options.useSymbolBoundaries === true;
+}
+
+async function runPreferredAstChunk(text: string, filePath: string, options: ChunkOptions | undefined, startTime: number): Promise<AstChunkResult> {
+  if (wantsCastChunk(options)) {
+    const cast = await tryCastChunk(text, filePath, options);
+    if (cast !== null) return cast;
+  }
+  if (!wantsSymbolChunk(options)) return { chunks: chunkText(text, options), diagnostics: emptyAstDiagnostics() };
+  const ast = await tryAstBoundaries(text, filePath, options);
+  if (ast !== null) return ast;
+  return { chunks: chunkBySymbolBoundaries(text, options), diagnostics: emptyAstDiagnostics(Date.now() - startTime) };
+}
+
 export async function chunkTextAst(
   text: string,
   options?: ChunkOptions,
 ): Promise<AstChunkResult> {
-  if (!text || text.length === 0 || /^\s*$/.test(text)) {
-    return { chunks: [], diagnostics: {
-      usedAst: false, wasmAvailable: false, parseTimeMs: 0,
-      symbolCount: 0, grammarExtension: "", wasmFile: null,
-    }};
-  }
-
-  const filePath = options?.filePath ?? "";
-  const startTime = Date.now();
-
-  // Route to cAST when useCAST is set
-  if (options?.useCAST) {
-    try {
-      const { cASTChunkByAstBoundaries } = await import("./ast-chunker.js");
-      const { chunks, diagnostics } = await cASTChunkByAstBoundaries(text, filePath, options);
-      return {
-        chunks,
-        diagnostics: {
-          usedAst: !diagnostics.usedFallback,
-          wasmAvailable: diagnostics.wasmAvailable,
-          parseTimeMs: diagnostics.parseTimeMs,
-          symbolCount: diagnostics.symbolCount,
-          grammarExtension: diagnostics.grammarExtension,
-          wasmFile: diagnostics.wasmFile ?? null,
-        },
-      };
-    } catch {
-      // cAST failed — fall through to symbol-boundary chunking
-    }
-  }
-
-  // Only use AST chunking when useSymbolBoundaries is set
-  if (!options?.useSymbolBoundaries) {
-    return {
-      chunks: chunkText(text, options),
-      diagnostics: {
-        usedAst: false, wasmAvailable: false, parseTimeMs: 0,
-        symbolCount: 0, grammarExtension: "", wasmFile: null,
-      },
-    };
-  }
-
-  try {
-    const { chunkByAstBoundaries } = await import("./ast-chunker.js");
-    const { chunks, diagnostics } = await chunkByAstBoundaries(text, filePath, options);
-
-    return {
-      chunks,
-      diagnostics: {
-        usedAst: !diagnostics.usedFallback,
-        wasmAvailable: diagnostics.wasmAvailable,
-        parseTimeMs: diagnostics.parseTimeMs,
-        symbolCount: diagnostics.symbolCount,
-        grammarExtension: diagnostics.grammarExtension,
-        wasmFile: diagnostics.wasmFile ?? null,
-      },
-    };
-  } catch {
-    // Async AST chunking failed — fall back to sync symbol-boundary chunking
-    const chunks = chunkBySymbolBoundaries(text, options);
-    return {
-      chunks,
-      diagnostics: {
-        usedAst: false, wasmAvailable: false,
-        parseTimeMs: Date.now() - startTime,
-        symbolCount: 0, grammarExtension: "", wasmFile: null,
-      },
-    };
-  }
+  if (isBlankText(text)) return { chunks: [], diagnostics: emptyAstDiagnostics() };
+  return runPreferredAstChunk(text, astFilePath(options), options, Date.now());
 }
 
 /**
@@ -902,45 +922,81 @@ export async function chunkTextAst(
  * Each stage scans backward from targetEnd-1 to offset+1 and takes the
  * first (nearest-to-target) match, returning the position just after it.
  */
+function scanBackward(_text: string, offset: number, targetEnd: number, matches: (i: number) => boolean): number {
+  for (let i = targetEnd - 1; i >= offset + 1; i--) {
+    if (matches(i)) return i + 1;
+  }
+  return -1;
+}
+
 function findPreferredCharacterSplit(
   text: string,
   offset: number,
   targetEnd: number,
 ): { splitPos: number; wasHardSplit: boolean } {
-  let bestPos = -1;
-  for (let i = targetEnd - 1; i >= offset + 1; i--) {
-    if (text[i] === '\n' && text[i - 1] === '\n') {
-      bestPos = i + 1;
-      break;
-    }
-  }
-  if (bestPos >= 0) {
-    return { splitPos: bestPos, wasHardSplit: false };
-  }
-
-  bestPos = -1;
-  for (let i = targetEnd - 1; i >= offset + 1; i--) {
-    if (text[i] === '\n') {
-      bestPos = i + 1;
-      break;
-    }
-  }
-  if (bestPos >= 0) {
-    return { splitPos: bestPos, wasHardSplit: false };
-  }
-
-  bestPos = -1;
-  for (let i = targetEnd - 1; i >= offset + 1; i--) {
-    if (/\s/.test(text[i]!)) {
-      bestPos = i + 1;
-      break;
-    }
-  }
-  if (bestPos >= 0) {
-    return { splitPos: bestPos, wasHardSplit: false };
-  }
-
+  const doubleNl = scanBackward(text, offset, targetEnd, (i) => text[i] === '\n' && text[i - 1] === '\n');
+  if (doubleNl >= 0) return { splitPos: doubleNl, wasHardSplit: false };
+  const singleNl = scanBackward(text, offset, targetEnd, (i) => text[i] === '\n');
+  if (singleNl >= 0) return { splitPos: singleNl, wasHardSplit: false };
+  const space = scanBackward(text, offset, targetEnd, (i) => /\s/.test(text[i]!));
+  if (space >= 0) return { splitPos: space, wasHardSplit: false };
   return { splitPos: targetEnd, wasHardSplit: true };
+}
+
+interface CharChunkParts { text: string; startChar: number; endChar: number; wasHardSplit: boolean; index: number }
+
+function makeCharChunk(parts: CharChunkParts): ChunkResult {
+  return {
+    text: parts.text,
+    chunkIndex: parts.index,
+    startChar: parts.startChar,
+    endChar: parts.endChar,
+    estimatedTokens: Math.ceil(parts.text.length / CHARS_PER_TOKEN),
+    wasHardSplit: parts.wasHardSplit,
+  };
+}
+
+interface CharStepInput { text: string; offset: number; chunkSizeChars: number; chunkOverlapChars: number; minChunkChars: number; resultCount: number }
+
+function finishCharacterRemainder(input: CharStepInput): { chunk: ChunkResult | null; nextOffset: number; done: boolean } {
+  const chunk = input.text.slice(input.offset);
+  return { chunk: makeCharChunk({ text: chunk, startChar: input.offset, endChar: input.text.length, wasHardSplit: false, index: input.resultCount }), nextOffset: input.text.length, done: true };
+}
+
+function keepSplitSlice(slice: string, resultCount: number, minChunkChars: number): boolean {
+  if (resultCount === 0) return true;
+  return slice.length >= minChunkChars;
+}
+
+function nextCharacterStep(input: CharStepInput): { chunk: ChunkResult | null; nextOffset: number; done: boolean } {
+  if (input.text.length - input.offset <= input.chunkSizeChars) return finishCharacterRemainder(input);
+  const { splitPos, wasHardSplit } = findPreferredCharacterSplit(input.text, input.offset, input.offset + input.chunkSizeChars);
+  const slice = input.text.slice(input.offset, splitPos);
+  const chunk = keepSplitSlice(slice, input.resultCount, input.minChunkChars)
+    ? makeCharChunk({ text: slice, startChar: input.offset, endChar: splitPos, wasHardSplit, index: input.resultCount })
+    : null;
+  const nextOffset = Math.max(input.offset + 1, splitPos - input.chunkOverlapChars);
+  if (nextOffset <= input.offset) return { chunk, nextOffset: input.offset, done: true };
+  return { chunk, nextOffset, done: false };
+}
+
+interface CharChunkOptions { chunkSizeChars: number; chunkOverlapChars: number; maxChunksPerFile: number; minChunkChars: number }
+
+function resolveCharChunkOptions(options?: ChunkOptions): CharChunkOptions {
+  return {
+    chunkSizeChars: options?.chunkSizeChars ?? DEFAULT_CHUNK_SIZE_CHARS,
+    chunkOverlapChars: options?.chunkOverlapChars ?? DEFAULT_CHUNK_OVERLAP_CHARS,
+    maxChunksPerFile: options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE,
+    minChunkChars: options?.minChunkChars ?? DEFAULT_MIN_CHUNK_CHARS,
+  };
+}
+
+function finalizeCharChunks(results: ChunkResult[], options?: ChunkOptions): ChunkResult[] {
+  for (let i = 0; i < results.length; i++) {
+    results[i]!.chunkIndex = i;
+    enrichChunk(results[i]!, options ?? {});
+  }
+  return results;
 }
 
 /**
@@ -950,58 +1006,17 @@ function chunkByCharacterSize(
   text: string,
   options?: ChunkOptions,
 ): ChunkResult[] {
-  const chunkSizeChars = options?.chunkSizeChars ?? DEFAULT_CHUNK_SIZE_CHARS;
-  const chunkOverlapChars = options?.chunkOverlapChars ?? DEFAULT_CHUNK_OVERLAP_CHARS;
-  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
-  const minChunkChars = options?.minChunkChars ?? DEFAULT_MIN_CHUNK_CHARS;
-
-  if (!text || text.length === 0 || /^\s*$/.test(text)) return [];
-
+  if (isBlankText(text)) return [];
+  const resolved = resolveCharChunkOptions(options);
   const results: ChunkResult[] = [];
   let offset = 0;
 
-  while (offset < text.length && results.length < maxChunksPerFile) {
-    const remaining = text.length - offset;
-    const targetEnd = offset + chunkSizeChars;
-
-    if (remaining <= chunkSizeChars) {
-      const chunk = text.slice(offset);
-      results.push({
-        text: chunk,
-        chunkIndex: results.length,
-        startChar: offset,
-        endChar: text.length,
-        estimatedTokens: Math.ceil(chunk.length / CHARS_PER_TOKEN),
-        wasHardSplit: false,
-      });
-      break;
-    }
-
-    const { splitPos, wasHardSplit } = findPreferredCharacterSplit(text, offset, targetEnd);
-
-    const chunk = text.slice(offset, splitPos!);
-    const endChar = splitPos;
-
-    if (chunk.length >= minChunkChars || results.length === 0) {
-      results.push({
-        text: chunk,
-        chunkIndex: results.length,
-        startChar: offset,
-        endChar,
-        estimatedTokens: Math.ceil(chunk.length / CHARS_PER_TOKEN),
-        wasHardSplit,
-      });
-    }
-
-    const nextOffset = Math.max(offset + 1, splitPos - chunkOverlapChars);
-    if (nextOffset <= offset) break;
-    offset = nextOffset;
+  while (offset < text.length && results.length < resolved.maxChunksPerFile) {
+    const step = nextCharacterStep({ text, offset, chunkSizeChars: resolved.chunkSizeChars, chunkOverlapChars: resolved.chunkOverlapChars, minChunkChars: resolved.minChunkChars, resultCount: results.length });
+    if (step.chunk !== null) results.push(step.chunk);
+    if (step.done) break;
+    offset = step.nextOffset;
   }
 
-  for (let i = 0; i < results.length; i++) {
-    results[i]!.chunkIndex = i;
-    enrichChunk(results[i]!, options ?? {});
-  }
-
-  return results;
+  return finalizeCharChunks(results, options);
 }

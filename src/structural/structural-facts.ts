@@ -239,29 +239,39 @@ function memberNames(node: Parser.SyntaxNode): Set<string> {
   }
   return names;
 }
+function parseRootForOverrides(code: string, lang: SupportedLanguage): Parser.SyntaxNode | null {
+  const grammar = loadGrammar(lang);
+  if (!grammar) return null;
+  const parser = new Parser();
+  parser.setLanguage(grammar);
+  return parseCode(parser, code).rootNode;
+}
+function collectBaseOverrides(
+  base: ParentInfo, classes: Map<string, Parser.SyntaxNode>, methods: ChildSymbol[],
+  lang: SupportedLanguage, seen: Set<string>, result: OverrideInfo[],
+): void {
+  const parent = classes.get(base.name);
+  if (!parent) return;
+  const names = memberNames(parent);
+  for (const child of methods) {
+    const key = `${base.name}:${child.name}`;
+    if (!names.has(child.name) || seen.has(key)) continue;
+    seen.add(key);
+    result.push({ methodName: child.name, parentName: base.name, line: child.line, isExplicit: lang !== "python" });
+  }
+}
 function detectOverrides(
   children: ChildSymbol[], baseClasses: ParentInfo[], lang: SupportedLanguage, code: string,
 ): OverrideInfo[] {
   if (!baseClasses.length) return [];
-  const grammar = loadGrammar(lang);
-  if (!grammar) return [];
-  const parser = new Parser();
-  parser.setLanguage(grammar);
-  const root = parseCode(parser, code).rootNode;
+  const root = parseRootForOverrides(code, lang);
+  if (!root) return [];
   const classes = collectClasses(root);
   const methods = children.filter((item) => item.kind === "method");
   const result: OverrideInfo[] = [];
   const seen = new Set<string>();
   for (const base of baseClasses) {
-    const parent = classes.get(base.name);
-    if (!parent) continue;
-    const names = memberNames(parent);
-    for (const child of methods) {
-      const key = `${base.name}:${child.name}`;
-      if (!names.has(child.name) || seen.has(key)) continue;
-      seen.add(key);
-      result.push({ methodName: child.name, parentName: base.name, line: child.line, isExplicit: lang !== "python" });
-    }
+    collectBaseOverrides(base, classes, methods, lang, seen, result);
   }
   return result;
 }
@@ -273,6 +283,23 @@ export { findImportDependents } from "./structural-imports.js";
 
 // ── Caller extraction ─────────────────────────────────────────
 
+const DEFINITION_NODE_TYPES = new Set([
+  "function_declaration",
+  "function_definition",
+  "method_definition",
+  "function_item",
+  "class_declaration",
+  "abstract_class_declaration",
+  "class_definition",
+]);
+function isDefinitionNode(type: string): boolean {
+  return DEFINITION_NODE_TYPES.has(type);
+}
+function recordDefinedName(node: Parser.SyntaxNode, names: Set<string>): void {
+  if (!isDefinitionNode(node.type)) return;
+  const nameNode = node.childForFieldName("name");
+  if (nameNode) names.add(nameNode.text);
+}
 function extractDefinedNames(code: string, lang: SupportedLanguage): Set<string> {
   const names = new Set<string>();
 
@@ -285,18 +312,7 @@ function extractDefinedNames(code: string, lang: SupportedLanguage): Set<string>
   const root = tree.rootNode;
 
   function walk(node: Parser.SyntaxNode) {
-    if (
-      node.type === "function_declaration" ||
-      node.type === "function_definition" ||
-      node.type === "method_definition" ||
-      node.type === "function_item" ||
-      node.type === "class_declaration" ||
-      node.type === "abstract_class_declaration" ||
-      node.type === "class_definition"
-    ) {
-      const nameNode = node.childForFieldName("name");
-      if (nameNode) names.add(nameNode.text);
-    }
+    recordDefinedName(node, names);
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
       if (child) walk(child);
@@ -378,29 +394,30 @@ function findCallersInFile(
   return callers;
 }
 
+const FUNCTION_SCOPE_TYPES = new Set([
+  "function_declaration",
+  "function_definition",
+  "method_definition",
+  "function_item",
+]);
+const SCOPE_BOUNDARY_TYPES = new Set([
+  "class_declaration",
+  "abstract_class_declaration",
+  "class_definition",
+  "program",
+  "module",
+  "source_file",
+]);
+function functionScopeName(node: Parser.SyntaxNode): string | null {
+  if (!FUNCTION_SCOPE_TYPES.has(node.type)) return null;
+  return node.childForFieldName("name")?.text ?? "(anonymous)";
+}
 function findEnclosingFunctionName(node: Parser.SyntaxNode): string | null {
   let current: Parser.SyntaxNode | null = node.parent;
   while (current) {
-    if (
-      current.type === "function_declaration" ||
-      current.type === "function_definition" ||
-      current.type === "method_definition" ||
-      current.type === "function_item"
-    ) {
-      const nameNode = current.childForFieldName("name");
-      if (nameNode) return nameNode.text;
-      return "(anonymous)";
-    }
-    if (
-      current.type === "class_declaration" ||
-      current.type === "abstract_class_declaration" ||
-      current.type === "class_definition" ||
-      current.type === "program" ||
-      current.type === "module" ||
-      current.type === "source_file"
-    ) {
-      return null;
-    }
+    const scopeName = functionScopeName(current);
+    if (scopeName !== null) return scopeName;
+    if (SCOPE_BOUNDARY_TYPES.has(current.type)) return null;
     current = current.parent;
   }
   return null;
@@ -514,18 +531,27 @@ function appendTsLexicalChildren(decl: Parser.SyntaxNode, isExported: boolean, a
   }
 }
 
+function appendTsLeafDecl(decl: Parser.SyntaxNode, isExported: boolean, acc: DeclarationCollection): boolean {
+  if (decl.type === "interface_declaration" || decl.type === "function_declaration") {
+    pushChild(decl, isExported, acc);
+    return true;
+  }
+  if (decl.type === "enum_declaration" || decl.type === "type_alias_declaration") {
+    pushChild(decl, isExported, acc);
+    return true;
+  }
+  return false;
+}
 function appendTsJsDecl(decl: Parser.SyntaxNode, isExported: boolean, acc: DeclarationCollection): void {
   if (decl.type === "class_declaration" || decl.type === "abstract_class_declaration") {
     appendTsClassDecl(decl, isExported, acc);
-  } else if (decl.type === "interface_declaration") {
-    pushChild(decl, isExported, acc);
-  } else if (decl.type === "function_declaration") {
-    pushChild(decl, isExported, acc);
-  } else if (decl.type === "lexical_declaration" || decl.type === "variable_declaration") {
-    appendTsLexicalChildren(decl, isExported, acc);
-  } else if (decl.type === "enum_declaration" || decl.type === "type_alias_declaration") {
-    pushChild(decl, isExported, acc);
+    return;
   }
+  if (decl.type === "lexical_declaration" || decl.type === "variable_declaration") {
+    appendTsLexicalChildren(decl, isExported, acc);
+    return;
+  }
+  appendTsLeafDecl(decl, isExported, acc);
 }
 
 function collectTsJsDeclarations(root: Parser.SyntaxNode): DeclarationCollection {
@@ -683,15 +709,7 @@ function emptyFacts(...notices: string[]): StructuralFacts {
 }
 // ── Exported main function ────────────────────────────────────
 
-export async function extractStructuralFacts(
-  absolutePath: string,
-  cwd: string,
-  _signal?: AbortSignal,
-  contextGraph?: ContextGraph,
-): Promise<StructuralFacts> {
-  const notices: string[] = [];
-
-  // File size check
+function checkFileSize(absolutePath: string): StructuralFacts | null {
   let fileSize: number;
   try {
     fileSize = statSync(absolutePath).size;
@@ -699,80 +717,83 @@ export async function extractStructuralFacts(
     return emptyFacts("Cannot stat file");
   }
   if (fileSize > MAX_FILE_SIZE) return emptyFacts("File exceeds 500KB limit — structural facts skipped");
-
-  // Language detection
-  const lang = filenameToLang(absolutePath);
-  if (!lang) return emptyFacts("Unsupported language for structural facts");
-
-  await initParser();
-
+  return null;
+}
+function loadSourceTree(absolutePath: string, lang: SupportedLanguage): { code: string; root: Parser.SyntaxNode } | { error: StructuralFacts } {
   const grammar = loadGrammar(lang);
-  if (!grammar) return emptyFacts("No grammar available for language: " + lang);
-
+  if (!grammar) return { error: emptyFacts("No grammar available for language: " + lang) };
   let code: string;
   try {
     code = readFileSync(absolutePath, "utf-8");
   } catch {
-    return emptyFacts("Cannot read file content");
+    return { error: emptyFacts("Cannot read file content") };
   }
-
   const parser = new Parser();
   parser.setLanguage(grammar);
   let tree: ReturnType<Parser["parse"]> | null = null;
   try {
     tree = parseCode(parser, code);
   } catch {
-    return emptyFacts("Failed to parse file");
+    return { error: emptyFacts("Failed to parse file") };
   }
-  if (!tree) return emptyFacts("Failed to parse file");
-
-  const root = tree.rootNode;
-
-  let facts: StructuralFacts;
-
+  if (!tree) return { error: emptyFacts("Failed to parse file") };
+  return { code, root: tree.rootNode };
+}
+function dispatchFactsByLang(root: Parser.SyntaxNode, code: string, absolutePath: string, cwd: string, lang: SupportedLanguage, notices: string[]): StructuralFacts | null {
   if (lang === "typescript" || lang === "tsx" || lang === "javascript") {
-    facts = extractTSJSFacts(root, code, absolutePath, cwd, lang, notices);
-  } else if (lang === "python") {
-    facts = extractPythonFacts(root, code, absolutePath, cwd, notices);
-  } else {
-    return emptyFacts(...notices, "Structural facts not yet supported for language: " + lang);
+    return extractTSJSFacts(root, code, absolutePath, cwd, lang, notices);
   }
-
-  // Async scan for external dependents (best-effort, import-based)
-  // Use contextGraph if available, otherwise fall back to file scan
+  if (lang === "python") {
+    return extractPythonFacts(root, code, absolutePath, cwd, notices);
+  }
+  return null;
+}
+function collectGraphDependents(facts: StructuralFacts, absolutePath: string, cwd: string, contextGraph: ContextGraph): void {
+  try {
+    const normTarget = resolve(cwd, absolutePath);
+    const edges = typeof (contextGraph as any).getImportDependents === "function"
+      ? (contextGraph as any).getImportDependents(absolutePath).map((from: string) => ({ from, to: normTarget }))
+      : contextGraph.getProvenanceEdges();
+    const dependents: DependentInfo[] = [];
+    const seen = new Set<string>();
+    for (const edge of edges) {
+      if (resolve(cwd, edge.to) !== normTarget) continue;
+      if (seen.has(edge.from)) continue;
+      seen.add(edge.from);
+      dependents.push({ file: edge.from, line: 0, symbolName: "", kind: "import" });
+    }
+    facts.externalDependents = dependents;
+  } catch {
+    // best-effort: leave externalDependents empty
+  }
+}
+async function attachExternalDependents(facts: StructuralFacts, absolutePath: string, cwd: string, lang: SupportedLanguage, contextGraph?: ContextGraph): Promise<void> {
   if (contextGraph && typeof contextGraph.getProvenanceEdges === "function") {
-    try {
-      const normTarget = resolve(cwd, absolutePath);
-      const edges = typeof (contextGraph as any).getImportDependents === "function"
-        ? (contextGraph as any).getImportDependents(absolutePath).map((from: string) => ({ from, to: normTarget }))
-        : contextGraph.getProvenanceEdges();
-      const dependents: DependentInfo[] = [];
-      const seen = new Set<string>();
-      for (const edge of edges) {
-        if (resolve(cwd, edge.to) === normTarget) {
-          if (seen.has(edge.from)) continue;
-          seen.add(edge.from);
-          dependents.push({
-            file: edge.from,
-            line: 0,
-            symbolName: "",
-            kind: "import",
-          });
-        }
-      }
-      // A built graph is authoritative, including an empty match; do not rescan.
-      facts.externalDependents = dependents;
-    } catch {
-      // best-effort: leave externalDependents empty
-    }
-  } else {
-    try {
-      const dependents = await findImportDependents(absolutePath, cwd, lang);
-      facts.externalDependents = dependents;
-    } catch {
-      // best-effort: leave externalDependents empty
-    }
+    collectGraphDependents(facts, absolutePath, cwd, contextGraph);
+    return;
   }
-
+  try {
+    facts.externalDependents = await findImportDependents(absolutePath, cwd, lang);
+  } catch {
+    // best-effort: leave externalDependents empty
+  }
+}
+export async function extractStructuralFacts(
+  absolutePath: string,
+  cwd: string,
+  _signal?: AbortSignal,
+  contextGraph?: ContextGraph,
+): Promise<StructuralFacts> {
+  const notices: string[] = [];
+  const sizeError = checkFileSize(absolutePath);
+  if (sizeError) return sizeError;
+  const lang = filenameToLang(absolutePath);
+  if (!lang) return emptyFacts("Unsupported language for structural facts");
+  await initParser();
+  const loaded = loadSourceTree(absolutePath, lang);
+  if ("error" in loaded) return loaded.error;
+  const facts = dispatchFactsByLang(loaded.root, loaded.code, absolutePath, cwd, lang, notices);
+  if (!facts) return emptyFacts(...notices, "Structural facts not yet supported for language: " + lang);
+  await attachExternalDependents(facts, absolutePath, cwd, lang, contextGraph);
   return facts;
 }

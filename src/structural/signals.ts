@@ -130,78 +130,57 @@ function complexityRegex(src: string): { total: number; maxInFunction: number } 
 
 // ── Exported signal functions ──────────────────────────────────────────
 
-export async function computeComplexity(
-  absolutePath: string,
-  source?: string,
-): Promise<SignalResult> {
-  const src = readSource(absolutePath, source);
-  const lang = filenameToLang(absolutePath);
-  const useAst = lang !== undefined && AST_LANGS.has(lang);
-
-  if (useAst) {
-    try {
-      const Parser = (await import("tree-sitter")).default;
-      const parser = new Parser();
-      const grammar = loadGrammar(lang);
-      if (!grammar) throw new Error("no grammar loaded");
-      parser.setLanguage(grammar as any);
-
-      const tree = parser.parse(src);
-      const root = tree.rootNode;
-
-      const branchTypes = isPythonFile(absolutePath) ? BRANCH_TYPES_PY : BRANCH_TYPES_TS_JS;
-      const funcTypes = isPythonFile(absolutePath) ? FUNCTION_TYPES_PY : FUNCTION_TYPES_TS_JS;
-
-      // Collect per-function and module-level branch counts
-      const perFn: number[] = [];
-      for (let i = 0; i < root.namedChildCount; i++) {
-        const child = root.namedChild(i);
-        if (!child) continue;
-
-        let funcNode: any = null;
-        if (funcTypes.has(child.type)) {
-          funcNode = child;
-        } else if (child.type === "export_statement") {
-          for (let j = 0; j < child.namedChildCount; j++) {
-            const inner = child.namedChild(j);
-            if (inner && funcTypes.has(inner.type)) {
-              funcNode = inner;
-              break;
-            }
-          }
-        }
-
-        if (funcNode) {
-          let fnBranches = 0;
-          for (let j = 0; j < funcNode.namedChildCount; j++) {
-            const body = funcNode.namedChild(j);
-            if (body) {
-              fnBranches += countBranchesRecursive(body, branchTypes, funcTypes);
-            }
-          }
-          perFn.push(fnBranches);
-        } else {
-          const count = countBranchesRecursive(child, branchTypes, funcTypes);
-          if (count > 0) perFn.push(count);
-        }
-      }
-
-      const total = perFn.reduce((a, b) => a + b, 0);
-      const maxFn = Math.max(...perFn, 0);
-      return {
-        name: "complexity",
-        label: complexityLabelAst(maxFn),
-        value: `${total}`,
-        detail: `max ${maxFn} in a single function`,
-        confidence: "high",
-        source: "tree-sitter AST",
-      };
-    } catch {
-      // AST failed, fall through to regex
+function selectTypeSets(absolutePath: string): { branchTypes: Set<string>; funcTypes: Set<string> } {
+  const py = isPythonFile(absolutePath);
+  return { branchTypes: py ? BRANCH_TYPES_PY : BRANCH_TYPES_TS_JS, funcTypes: py ? FUNCTION_TYPES_PY : FUNCTION_TYPES_TS_JS };
+}
+function findTopFuncNode(child: any, funcTypes: Set<string>): any | null {
+  if (funcTypes.has(child.type)) return child;
+  if (child.type !== "export_statement") return null;
+  for (let j = 0; j < child.namedChildCount; j++) {
+    const inner = child.namedChild(j);
+    if (inner && funcTypes.has(inner.type)) return inner;
+  }
+  return null;
+}
+function countFuncBranches(funcNode: any, branchTypes: Set<string>, funcTypes: Set<string>): number {
+  let total = 0;
+  for (let j = 0; j < funcNode.namedChildCount; j++) {
+    const body = funcNode.namedChild(j);
+    if (body) total += countBranchesRecursive(body, branchTypes, funcTypes);
+  }
+  return total;
+}
+function collectPerFnCounts(root: any, branchTypes: Set<string>, funcTypes: Set<string>): number[] {
+  const perFn: number[] = [];
+  for (let i = 0; i < root.namedChildCount; i++) {
+    const child = root.namedChild(i);
+    if (!child) continue;
+    const funcNode = findTopFuncNode(child, funcTypes);
+    if (funcNode) perFn.push(countFuncBranches(funcNode, branchTypes, funcTypes));
+    else {
+      const count = countBranchesRecursive(child, branchTypes, funcTypes);
+      if (count > 0) perFn.push(count);
     }
   }
-
-  // Regex fallback
+  return perFn;
+}
+function astComplexityResult(perFn: number[]): SignalResult {
+  const total = perFn.reduce((a, b) => a + b, 0);
+  const maxFn = Math.max(...perFn, 0);
+  return { name: "complexity", label: complexityLabelAst(maxFn), value: `${total}`, detail: `max ${maxFn} in a single function`, confidence: "high", source: "tree-sitter AST" };
+}
+async function computeAstComplexity(src: string, lang: SupportedLanguage, absolutePath: string): Promise<SignalResult> {
+  const Parser = (await import("tree-sitter")).default;
+  const parser = new Parser();
+  const grammar = loadGrammar(lang);
+  if (!grammar) throw new Error("no grammar loaded");
+  parser.setLanguage(grammar as any);
+  const root = parser.parse(src).rootNode;
+  const { branchTypes, funcTypes } = selectTypeSets(absolutePath);
+  return astComplexityResult(collectPerFnCounts(root, branchTypes, funcTypes));
+}
+function regexComplexityResult(src: string): SignalResult {
   const { total, maxInFunction } = complexityRegex(src);
   return {
     name: "complexity",
@@ -211,6 +190,21 @@ export async function computeComplexity(
     confidence: "low",
     source: "regex fallback",
   };
+}
+export async function computeComplexity(
+  absolutePath: string,
+  source?: string,
+): Promise<SignalResult> {
+  const src = readSource(absolutePath, source);
+  const lang = filenameToLang(absolutePath);
+  if (lang !== undefined && AST_LANGS.has(lang)) {
+    try {
+      return await computeAstComplexity(src, lang, absolutePath);
+    } catch {
+      // AST failed, fall through to regex
+    }
+  }
+  return regexComplexityResult(src);
 }
 
 function complexityLabelAst(maxFn: number): string {
@@ -333,71 +327,59 @@ function reuseFromImportScan(dependents: DependentInfo[]): SignalResult {
   };
 }
 
+async function reuseWithoutGraph(absolutePath: string, precomputedDependents: DependentInfo[] | undefined, cwd: string | undefined): Promise<SignalResult> {
+  if (precomputedDependents) return reuseFromImportScan(precomputedDependents);
+  const scanCwd = cwd ?? dirname(absolutePath);
+  try {
+    if (!existsSync(scanCwd)) return unknownReuse("Graph unavailable — could not scan workspace");
+    const dependents = await findImportDependents(absolutePath, scanCwd, filenameToLang(absolutePath) as any);
+    return reuseFromImportScan(dependents);
+  } catch {
+    return unknownReuse("Graph unavailable — could not scan workspace");
+  }
+}
+function reuseYesResult(count: number, graphPathsSize: number): SignalResult {
+  const noun = count === 1 ? "file" : "files";
+  return {
+    name: "reuse",
+    label: "Yes",
+    value: `Yes (${count} importing ${noun})`,
+    ...(count > graphPathsSize ? { detail: "context graph supplemented by direct import scan" } : {}),
+    confidence: "high",
+    source: count > graphPathsSize ? "context graph + import scan" : "context graph",
+  };
+}
+function reuseNoResult(): SignalResult {
+  return { name: "reuse", label: "No", value: "No importing files", confidence: "high", source: "context graph + import scan" };
+}
+function reuseGraphFailure(precomputedDependents: DependentInfo[] | undefined): SignalResult {
+  if (precomputedDependents) return reuseFromImportScan(precomputedDependents);
+  return { name: "reuse", label: "Unknown", value: "Unknown", detail: "Graph query failed", confidence: "none", source: "context graph" };
+}
+function reuseWithGraph(absolutePath: string, graph: ContextGraph, precomputedDependents: DependentInfo[] | undefined): SignalResult {
+  const targetPath = resolve(absolutePath);
+  const graphPaths = new Set(
+    graph.getProvenanceEdges()
+      .filter((edge) => resolve(edge.to) === targetPath)
+      .map((edge) => resolve(edge.from)),
+  );
+  const scanPaths = new Set((precomputedDependents ?? []).map((dependent) => resolve(dependent.file)));
+  const count = new Set([...graphPaths, ...scanPaths]).size;
+  if (count === 0) return reuseNoResult();
+  if (graphPaths.size === 0 && precomputedDependents) return reuseFromImportScan(precomputedDependents);
+  return reuseYesResult(count, graphPaths.size);
+}
 export async function computeReuseBreadth(
   absolutePath: string,
   graph?: ContextGraph | null,
   precomputedDependents?: DependentInfo[],
   cwd?: string,
 ): Promise<SignalResult> {
-  if (!graph) {
-    // Use precomputed dependents if provided (avoids second scan).
-    if (precomputedDependents) return reuseFromImportScan(precomputedDependents);
-    // Standalone scan: try workspace-wide import resolution
-    const scanCwd = cwd ?? dirname(absolutePath);
-    try {
-      // Quick directory check — findSrcFiles returns [] for non-existent dirs
-      // but we need to distinguish "no workspace" from "no dependents"
-      if (!existsSync(scanCwd)) return unknownReuse("Graph unavailable — could not scan workspace");
-      const dependents = await findImportDependents(absolutePath, scanCwd, filenameToLang(absolutePath) as any);
-      return reuseFromImportScan(dependents);
-    } catch {
-      return unknownReuse("Graph unavailable — could not scan workspace");
-    }
-  }
-
+  if (!graph) return reuseWithoutGraph(absolutePath, precomputedDependents, cwd);
   try {
-    const targetPath = resolve(absolutePath);
-    const graphPaths = new Set(
-      graph.getProvenanceEdges()
-        .filter((edge) => resolve(edge.to) === targetPath)
-        .map((edge) => resolve(edge.from)),
-    );
-    const scanPaths = new Set((precomputedDependents ?? []).map((dependent) => resolve(dependent.file)));
-    const uniquePaths = new Set([...graphPaths, ...scanPaths]);
-    const count = uniquePaths.size;
-
-    if (count > 0) {
-      if (graphPaths.size === 0 && precomputedDependents) {
-        return reuseFromImportScan(precomputedDependents);
-      }
-      const noun = count === 1 ? "file" : "files";
-      return {
-        name: "reuse",
-        label: "Yes",
-        value: `Yes (${count} importing ${noun})`,
-        ...(count > graphPaths.size ? { detail: "context graph supplemented by direct import scan" } : {}),
-        confidence: "high",
-        source: count > graphPaths.size ? "context graph + import scan" : "context graph",
-      };
-    }
-
-    return {
-      name: "reuse",
-      label: "No",
-      value: "No importing files",
-      confidence: "high",
-      source: "context graph + import scan",
-    };
+    return reuseWithGraph(absolutePath, graph, precomputedDependents);
   } catch {
-    if (precomputedDependents) return reuseFromImportScan(precomputedDependents);
-    return {
-      name: "reuse",
-      label: "Unknown",
-      value: "Unknown",
-      detail: "Graph query failed",
-      confidence: "none",
-      source: "context graph",
-    };
+    return reuseGraphFailure(precomputedDependents);
   }
 }
 
@@ -514,6 +496,59 @@ const ALL_SIGNALS: SignalName[] = [
   "deprecation",
 ];
 
+interface SignalContext {
+  absolutePath: string;
+  cwd: string;
+  contextGraph?: ContextGraph | null;
+  externalDependents?: DependentInfo[];
+}
+function formatCoverageDetail(linkage: TestLinkage[], gaps: { tested: string[]; unreferenced: string[]; unknown: string[] }): string | null {
+  const totalExported = gaps.tested.length + gaps.unreferenced.length + gaps.unknown.length;
+  if (totalExported === 0) return null;
+  const parts = [`Linked ${linkage.length} tests; ${gaps.tested.length}/${totalExported} exported callables statically referenced`];
+  if (gaps.unreferenced.length > 0) {
+    const shown = gaps.unreferenced.slice(0, 20);
+    const suffix = gaps.unreferenced.length > 20 ? ` (+${gaps.unreferenced.length - 20} more)` : "";
+    parts.push(`Unreferenced: ${shown.join(", ")}${suffix}`);
+  }
+  return parts.join("; ");
+}
+async function enrichTestsSignal(base: SignalResult, absolutePath: string, cwd: string, linkage: TestLinkage[]): Promise<SignalResult> {
+  if (base.confidence === "none") return base;
+  try {
+    const gaps = await findTestCoverageGaps(absolutePath, cwd, linkage);
+    const detail = formatCoverageDetail(linkage, gaps);
+    return detail ? { ...base, detail } : base;
+  } catch {
+    return base;
+  }
+}
+async function computeTestsSignal(ctx: SignalContext): Promise<SignalResult> {
+  const linkage = findTestLinkage(ctx.absolutePath, ctx.cwd);
+  const base = detectTests(ctx.absolutePath, ctx.cwd, linkage);
+  return enrichTestsSignal(base, ctx.absolutePath, ctx.cwd, linkage);
+}
+async function dispatchSingleSignal(name: SignalName, ctx: SignalContext): Promise<SignalResult> {
+  if (name === "complexity") return computeComplexity(ctx.absolutePath);
+  if (name === "public-api") return detectPublicApi(ctx.absolutePath);
+  if (name === "reuse") return computeReuseBreadth(ctx.absolutePath, ctx.contextGraph, ctx.externalDependents, ctx.cwd);
+  if (name === "recency") return computeRecency(ctx.absolutePath, ctx.cwd);
+  if (name === "tests") return computeTestsSignal(ctx);
+  return detectDeprecation(ctx.absolutePath);
+}
+function errorSignal(name: SignalName, err: unknown): SignalResult {
+  return { name, label: "Error", value: "Error", detail: String(err), confidence: "none", source: "error" };
+}
+async function runSingleSignal(name: SignalName, ctx: SignalContext, signals: SignalResult[], fallbackNotices: string[]): Promise<void> {
+  try {
+    const result = await dispatchSingleSignal(name, ctx);
+    if (result.confidence === "none" && result.detail) fallbackNotices.push(`${name}: ${result.detail}`);
+    signals.push(result);
+  } catch (err) {
+    fallbackNotices.push(`${name}: unexpected error`);
+    signals.push(errorSignal(name, err));
+  }
+}
 export async function computeFileSignals(
   absolutePath: string,
   cwd: string,
@@ -525,72 +560,10 @@ export async function computeFileSignals(
   const names = requestedSignals ?? ALL_SIGNALS;
   const signals: SignalResult[] = [];
   const fallbackNotices: string[] = [];
-
+  const ctx: SignalContext = { absolutePath, cwd, contextGraph, externalDependents };
   for (const name of names) {
-    try {
-      let result: SignalResult;
-      switch (name) {
-        case "complexity":
-          result = await computeComplexity(absolutePath);
-          break;
-        case "public-api":
-          result = detectPublicApi(absolutePath);
-          break;
-        case "reuse":
-          result = await computeReuseBreadth(absolutePath, contextGraph, externalDependents, cwd);
-          break;
-        case "recency":
-          result = await computeRecency(absolutePath, cwd);
-          break;
-        case "tests": {
-          // Compute linkage once and reuse for the signal + coverage gaps.
-          const linkage = findTestLinkage(absolutePath, cwd);
-          result = detectTests(absolutePath, cwd, linkage);
-          // WP-8: enrich with static call-graph coverage gaps
-          if (result.confidence !== "none") {
-            try {
-              const gaps = await findTestCoverageGaps(absolutePath, cwd, linkage);
-              const totalExported = gaps.tested.length + gaps.unreferenced.length + gaps.unknown.length;
-              if (totalExported > 0) {
-                const referencedCount = gaps.tested.length;
-                const detailParts = [
-                  `Linked ${linkage.length} tests; ${referencedCount}/${totalExported} exported callables statically referenced`,
-                ];
-                if (gaps.unreferenced.length > 0) {
-                  const shown = gaps.unreferenced.slice(0, 20);
-                  detailParts.push(`Unreferenced: ${shown.join(", ")}${gaps.unreferenced.length > 20 ? ` (+${gaps.unreferenced.length - 20} more)` : ""}`);
-                }
-                result = { ...result, detail: detailParts.join("; ") };
-              }
-            } catch {
-              // Best-effort: leave base signal unchanged
-            }
-          }
-          break;
-        }
-        case "deprecation":
-          result = detectDeprecation(absolutePath);
-          break;
-      }
-
-      if (result.confidence === "none" && result.detail) {
-        fallbackNotices.push(`${name}: ${result.detail}`);
-      }
-
-      signals.push(result);
-    } catch (err) {
-      fallbackNotices.push(`${name}: unexpected error`);
-      signals.push({
-        name,
-        label: "Error",
-        value: "Error",
-        detail: String(err),
-        confidence: "none",
-        source: "error",
-      });
-    }
+    await runSingleSignal(name, ctx, signals, fallbackNotices);
   }
-
   return {
     path: absolutePath,
     signals,
