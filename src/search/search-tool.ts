@@ -142,78 +142,136 @@ interface DiscoverySummary extends FileDiscoveryDiagnostics {
 // Parser pool keyed by language to avoid rebuilding parsers per file
 const parserPool = new Map<string, Parser>();
 
+function parseMatchCapture(match: Parser.QueryMatch): { name?: string; defNode?: Parser.SyntaxNode; defKind: string } {
+  let name: string | undefined;
+  let defNode: Parser.SyntaxNode | undefined;
+  let defKind = "definition";
+  for (const capture of match.captures) {
+    if (capture.name.startsWith("name.definition")) name = capture.node.text;
+    else if (capture.name.startsWith("definition")) {
+      defNode = capture.node;
+      defKind = capture.name.replace(/^definition\.?/, "") || "definition";
+    }
+  }
+  return { name, defNode, defKind };
+}
+
+function pushDefinition(
+  defs: CodeDefinition[],
+  seen: Set<string>,
+  filePath: string,
+  relFile: string,
+  name: string,
+  defNode: Parser.SyntaxNode,
+  defKind: string,
+): void {
+  const key = `${relFile}:${defNode.startPosition.row}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  const text = defNode.text.trim();
+  if (text.length < 8) return;
+  defs.push({
+    file: filePath,
+    relFile,
+    startLine: defNode.startPosition.row + 1,
+    endLine: defNode.endPosition.row + 1,
+    name,
+    kind: defKind,
+    body: text,
+    score: 0,
+  });
+}
+
+async function loadDefinitionQuery(lang: Parameters<typeof getQueryPath>[0], grammar: NonNullable<ReturnType<typeof loadLanguage>>): Promise<Query | null> {
+  const queryPath = getQueryPath(lang);
+  if (!queryPath || !existsSync(queryPath)) return null;
+  try {
+    const querySource = await fs.readFile(queryPath, "utf-8");
+    return new Query(grammar, querySource);
+  } catch {
+    return null;
+  }
+}
+
 async function extractCodeDefinitions(
   filePath: string,
   relFile: string,
 ): Promise<CodeDefinition[]> {
   const lang = filenameToLang(filePath);
   if (!lang) return [];
-
   const grammar = loadLanguage(lang);
   if (!grammar) return [];
-
   const code = await readTextFileQuiet(filePath);
   if (code === null) return [];
-
   const parser = getSharedParser(lang, grammar);
-  const chunkSize = 1024;
-  const tree = parser.parse((offset) => code.slice(offset, offset + chunkSize));
+  const tree = parser.parse((offset) => code.slice(offset, offset + 1024));
   if (!tree?.rootNode) return [];
+  const query = await loadDefinitionQuery(lang, grammar);
+  if (!query) return [];
+  return collectQueryDefinitions(query.matches(tree.rootNode), filePath, relFile);
+}
 
-  const queryPath = getQueryPath(lang);
-  if (!queryPath || !existsSync(queryPath)) return [];
-
-  let query: Query;
-  try {
-    const querySource = await fs.readFile(queryPath, "utf-8");
-    query = new Query(grammar, querySource);
-  } catch {
-    return [];
-  }
-
-  const matches = query.matches(tree.rootNode);
+function collectQueryDefinitions(
+  matches: Parser.QueryMatch[],
+  filePath: string,
+  relFile: string,
+): CodeDefinition[] {
   const defs: CodeDefinition[] = [];
   const seen = new Set<string>();
-
   for (const match of matches) {
-    let name: string | undefined;
-    let defNode: Parser.SyntaxNode | undefined;
-    let defKind = "definition";
-
-    for (const capture of match.captures) {
-      if (capture.name.startsWith("name.definition")) {
-        name = capture.node.text;
-      } else if (capture.name.startsWith("definition")) {
-        defNode = capture.node;
-        defKind = capture.name.replace(/^definition\.?/, "") || "definition";
-      }
-    }
-
+    const { name, defNode, defKind } = parseMatchCapture(match);
     if (!name || !defNode) continue;
-
-    const key = `${relFile}:${defNode.startPosition.row}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    const text = defNode.text.trim();
-    if (text.length < 8) continue;
-
-    defs.push({
-      file: filePath,
-      relFile,
-      startLine: defNode.startPosition.row + 1,
-      endLine: defNode.endPosition.row + 1,
-      name,
-      kind: defKind,
-      body: text,
-      score: 0,
-    });
+    pushDefinition(defs, seen, filePath, relFile, name, defNode, defKind);
   }
-
   return defs;
 }
 
 // ── BM25 + optional embedding scoring ─────────────────────────────
+
+function applyBm25Scores(defs: CodeDefinition[], query: string): void {
+  const bm25 = bm25Scores(query, defs.map((d) => d.body));
+  for (let i = 0; i < defs.length; i++) defs[i]!.score = bm25[i] ?? 0;
+}
+
+function rankToPositions(order: number[], n: number): number[] {
+  const ranks: number[] = new Array(n);
+  for (let i = 0; i < n; i++) ranks[order[i]!] = i + 1;
+  return ranks;
+}
+
+function applyRrfRescore(defs: CodeDefinition[]): void {
+  const n = defs.length;
+  const bm25Order = defs.map((d, i) => ({ i, score: d.score })).sort((a, b) => b.score - a.score).map((e) => e.i);
+  const simOrder = defs.map((d, i) => ({ i, sim: d.similarity ?? 0 })).sort((a, b) => b.sim - a.sim).map((e) => e.i);
+  const rrfScores = computeRrfScores(rankToPositions(simOrder, n), rankToPositions(bm25Order, n));
+  for (let i = 0; i < n; i++) defs[i]!.score = rrfScores[i] ?? 0;
+}
+
+function applyEmbeddingSimilarities(defs: CodeDefinition[], vectors: number[][]): boolean {
+  if (vectors.length < defs.length + 1) return false;
+  const queryVec = vectors[0]!;
+  for (let i = 0; i < defs.length; i++) defs[i]!.similarity = cosineSimilarity(queryVec, vectors[i + 1]!);
+  applyRrfRescore(defs);
+  return true;
+}
+
+async function fetchQueryEmbeddings(
+  query: string,
+  defs: CodeDefinition[],
+  embeddingConfig: { baseUrl: string; model: string; apiKey?: string },
+): Promise<number[][]> {
+  const embedTexts = defs.map((d) => (d.body.length > 2048 ? d.body.slice(0, 2048) : d.body));
+  const { vectors } = await fetchEmbeddings({
+    baseUrl: embeddingConfig.baseUrl,
+    model: embeddingConfig.model,
+    apiKey: embeddingConfig.apiKey ?? "",
+    inputs: [query, ...embedTexts],
+    inputTypes: ["query", ...embedTexts.map(() => "document" as const)],
+    inputTitles: [undefined, ...defs.map((definition) => `${definition.relFile}:${definition.name}`)],
+    timeoutMs: 30_000,
+  });
+  return vectors;
+}
 
 async function scoreDefinitions(
   defs: CodeDefinition[],
@@ -222,98 +280,40 @@ async function scoreDefinitions(
   signal?: AbortSignal,
 ): Promise<CodeDefinition[]> {
   if (defs.length === 0) return [];
-
-  const bm25 = bm25Scores(query, defs.map((d) => d.body));
-  for (let i = 0; i < defs.length; i++) {
-    defs[i]!.score = bm25[i] ?? 0;
-  }
-
+  applyBm25Scores(defs, query);
   try {
     const { validateEmbeddingConfig } = await import("../config.js");
     const embeddingConfig = validateEmbeddingConfig(cwd);
-
-    if (!embeddingConfig) {
-      return defs.sort((a, b) => b.score - a.score);
-    }
-
+    if (!embeddingConfig) return defs.sort((a, b) => b.score - a.score);
     if (signal?.aborted) throw new Error("Operation aborted");
-
-    const embedTexts = defs.map((d) =>
-      d.body.length > 2048 ? d.body.slice(0, 2048) : d.body,
-    );
-
-    const { vectors } = await fetchEmbeddings({
-      baseUrl: embeddingConfig.baseUrl,
-      model: embeddingConfig.model,
-      apiKey: embeddingConfig.apiKey,
-      inputs: [query, ...embedTexts],
-      inputTypes: ["query", ...embedTexts.map(() => "document" as const)],
-      inputTitles: [undefined, ...defs.map((definition) => `${definition.relFile}:${definition.name}`)],
-      timeoutMs: 30_000,
-    });
-
-    if (vectors.length >= embedTexts.length + 1) {
-      const queryVec = vectors[0]!;
-      for (let i = 0; i < defs.length; i++) {
-        const docVec = vectors[i + 1]!;
-        defs[i]!.similarity = cosineSimilarity(queryVec, docVec);
-      }
-
-      const withBm25 = defs
-        .map((d, i) => ({ i, score: d.score }))
-        .sort((a, b) => b.score - a.score);
-      const bm25Ranks: number[] = [];
-      for (let i = 0; i < defs.length; i++) bm25Ranks[withBm25[i]!.i] = i + 1;
-
-      const withSim = defs
-        .map((d, i) => ({ i, sim: d.similarity ?? 0 }))
-        .sort((a, b) => b.sim - a.sim);
-      const simRanks: number[] = [];
-      for (let i = 0; i < defs.length; i++) simRanks[withSim[i]!.i] = i + 1;
-
-      const rrfScores = computeRrfScores(simRanks, bm25Ranks);
-      for (let i = 0; i < defs.length; i++) {
-        defs[i]!.score = rrfScores[i] ?? 0;
-      }
-    }
+    const vectors = await fetchQueryEmbeddings(query, defs, embeddingConfig);
+    applyEmbeddingSimilarities(defs, vectors);
   } catch {
     // Embedding not available — BM25-only results are fine
   }
-
   return defs.sort((a, b) => b.score - a.score);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
 
+const LSP_KIND_NAMES: Record<number, string> = {
+  5: "class",
+  6: "method",
+  7: "property",
+  8: "property",
+  9: "constructor",
+  10: "enum",
+  11: "interface",
+  12: "function",
+  13: "variable",
+  14: "variable",
+  22: "enum-member",
+  23: "struct",
+  24: "event",
+};
+
 function lspSymbolKindToString(kind: number): string {
-  switch (kind) {
-    case 5:
-      return "class";
-    case 6:
-      return "method";
-    case 7:
-    case 8:
-      return "property";
-    case 9:
-      return "constructor";
-    case 10:
-      return "enum";
-    case 11:
-      return "interface";
-    case 12:
-      return "function";
-    case 13:
-    case 14:
-      return "variable";
-    case 22:
-      return "enum-member";
-    case 23:
-      return "struct";
-    case 24:
-      return "event";
-    default:
-      return "symbol";
-  }
+  return LSP_KIND_NAMES[kind] ?? "symbol";
 }
 
 function defaultCaseSensitive(query: string): boolean {
@@ -328,6 +328,92 @@ function clampContextLines(value: number | undefined): number {
 function clampMaxResults(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return 30;
   return Math.max(1, Math.min(10000, Math.trunc(value)));
+}
+
+function pushLineMatch(
+  matches: GrepSearchMatch[],
+  filePath: string,
+  relFile: string,
+  lines: string[],
+  lineNumber: number,
+  definitions: CodeDefinition[],
+  contextLines: number,
+): void {
+  const line = lines[lineNumber - 1] ?? "";
+  const owner = findOwningDefinition(definitions, lineNumber);
+  const snippet = formatSnippet(lines, lineNumber, contextLines);
+  matches.push({
+    group: owner ? "definition" : "text",
+    file: filePath,
+    relFile,
+    line: lineNumber,
+    endLine: snippet.endLine,
+    kind: owner?.kind ?? "text",
+    name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
+    lineText: truncateLine(line, 200),
+    snippet: snippet.snippet,
+  });
+}
+
+interface GrepScanCtx {
+  cwd: string;
+  definitionCache: Map<string, CodeDefinition[]>;
+  matchLine: (line: string) => boolean;
+  contextLines: number;
+  matches: GrepSearchMatch[];
+  maxResults: number;
+  signal: AbortSignal | undefined;
+}
+
+function scanGrepLines(
+  lines: string[],
+  filePath: string,
+  relFile: string,
+  definitions: CodeDefinition[],
+  ctx: GrepScanCtx,
+): void {
+  for (let index = 0; index < lines.length; index++) {
+    if (ctx.matches.length >= ctx.maxResults) break;
+    if (!ctx.matchLine(lines[index] ?? "")) continue;
+    pushLineMatch(ctx.matches, filePath, relFile, lines, index + 1, definitions, ctx.contextLines);
+  }
+}
+
+async function scanGrepFile(
+  filePath: string,
+  ctx: GrepScanCtx,
+): Promise<void> {
+  if (ctx.signal?.aborted) throw new Error("Operation aborted");
+  if (await shouldSkipOversizedFile(filePath, 10 * 1024 * 1024)) return;
+  const content = await readTextFileQuiet(filePath);
+  if (content === null) return;
+  const relFile = toRelPath(ctx.cwd, filePath);
+  const lines = content.split(/\r?\n/g);
+  const definitions = await getOrExtractDefinitions(ctx.definitionCache, filePath, relFile);
+  scanGrepLines(lines, filePath, relFile, definitions, ctx);
+}
+
+async function resolveGrepFiles(
+  cwd: string,
+  signal: AbortSignal | undefined,
+  options?: { preDiscoveredFiles?: string[]; sharedSummary?: DiscoverySummary; fileGlob?: string },
+): Promise<{ files: string[]; summary: DiscoverySummary }> {
+  let files: string[];
+  let summary: DiscoverySummary;
+  if (options?.preDiscoveredFiles && options.sharedSummary) {
+    files = options.preDiscoveredFiles;
+    summary = options.sharedSummary;
+  } else {
+    const discovered = await discoverAcrossRoots(expandToMonorepoRoots(cwd), "text", signal);
+    files = discovered.files;
+    summary = discovered.summary;
+  }
+  if (options?.fileGlob) {
+    const { minimatch } = await import("minimatch");
+    const glob = options.fileGlob;
+    files = files.filter((filePath) => minimatch(relative(cwd, filePath).replace(/\\/g, "/"), glob));
+  }
+  return { files, summary };
 }
 
 /** Repo-relative path with posix separators for display and evidence keys. */
@@ -606,70 +692,14 @@ export async function handleGrep(
   const contextLines = clampContextLines(params.contextLines);
   const startTime = Date.now();
   const matchLine = buildLineMatcher(query, matchMode, caseSensitive);
-
-  let allFiles: string[];
-  let summary: DiscoverySummary;
-  if (options?.preDiscoveredFiles && options.sharedSummary) {
-    allFiles = options.preDiscoveredFiles;
-    summary = options.sharedSummary;
-  } else {
-    const searchRoots = expandToMonorepoRoots(cwd);
-    const discovered = await discoverAcrossRoots(searchRoots, "text", signal);
-    allFiles = discovered.files;
-    summary = discovered.summary;
-  }
+  const { files: allFiles, summary } = await resolveGrepFiles(cwd, signal, options);
   const definitionCache = options?.sharedDefinitionCache ?? new Map<string, CodeDefinition[]>();
   const matches: GrepSearchMatch[] = [];
-
-  // Glob pre-filter: constrain candidates BEFORE the bounded loop so cutoff
-  // happens after glob (existing post-filter remains as a final safeguard).
-  if (options?.fileGlob) {
-    const { minimatch } = await import("minimatch");
-    const glob = options.fileGlob;
-    allFiles = allFiles.filter((filePath) =>
-      minimatch(relative(cwd, filePath).replace(/\\/g, "/"), glob),
-    );
-  }
-
-  const MAX_FILE_BYTES = 10 * 1024 * 1024;
-
+  const scanCtx: GrepScanCtx = { cwd, definitionCache, matchLine, contextLines, matches, maxResults, signal };
   for (const filePath of allFiles) {
-    if (signal?.aborted) throw new Error("Operation aborted");
     if (matches.length >= maxResults) break;
-
-    // Skip oversized files to avoid unbounded memory reads
-    if (await shouldSkipOversizedFile(filePath, MAX_FILE_BYTES)) continue;
-
-    const content = await readTextFileQuiet(filePath);
-    if (content === null) continue;
-
-    const relFile = toRelPath(cwd, filePath);
-    const lines = content.split(/\r?\n/g);
-    const definitions = await getOrExtractDefinitions(definitionCache, filePath, relFile);
-
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index] ?? "";
-      if (!matchLine(line)) continue;
-
-      const lineNumber = index + 1;
-      const owner = findOwningDefinition(definitions, lineNumber);
-      const snippet = formatSnippet(lines, lineNumber, contextLines);
-      matches.push({
-        group: owner ? "definition" : "text",
-        file: filePath,
-        relFile,
-        line: lineNumber,
-        endLine: snippet.endLine,
-        kind: owner?.kind ?? "text",
-        name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
-        lineText: truncateLine(line, 200),
-        snippet: snippet.snippet,
-      });
-
-      if (matches.length >= maxResults) break;
-    }
+    await scanGrepFile(filePath, scanCtx);
   }
-
   sortGrepMatches(matches);
   recordGrepMatches(resolveSessionKey(toolCallId), matches);
 
@@ -774,6 +804,41 @@ async function rankDefinitions(
   return [...scored, ...bm25Only].sort((a, b) => b.score - a.score);
 }
 
+function toLspDefinition(symbol: { name: string; kind: number; location: { uri: string; range: { start: { line: number }; end: { line: number } } } }, cwd: string): CodeDefinition {
+  const uri = symbol.location.uri;
+  const filePath = uri.startsWith("file://") ? uri.slice(7) : uri;
+  const relFile = relative(cwd, filePath).replace(/\\/g, "/");
+  return {
+    file: filePath,
+    relFile,
+    startLine: symbol.location.range.start.line + 1,
+    endLine: symbol.location.range.end.line + 1,
+    name: symbol.name,
+    kind: lspSymbolKindToString(symbol.kind),
+    body: "",
+    score: 1.0,
+    similarity: undefined,
+  };
+}
+
+function appendNewLspSymbols(
+  allResults: CodeDefinition[],
+  wsSymbols: Array<{ name: string; kind: number; location: { uri: string; range: { start: { line: number }; end: { line: number } } } }>,
+  cwd: string,
+): number {
+  const existingKeys = new Set(allResults.map((d) => `${d.relFile}:${d.name}`));
+  let added = 0;
+  for (const symbol of wsSymbols) {
+    const def = toLspDefinition(symbol, cwd);
+    const key = `${def.relFile}:${def.name}`;
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
+    added++;
+    allResults.push(def);
+  }
+  return added;
+}
+
 /** Append LSP workspace symbols not already present; returns count added. */
 async function mergeLspDefinitions(
   allResults: CodeDefinition[],
@@ -781,44 +846,64 @@ async function mergeLspDefinitions(
   cwd: string,
   searchDir: string | undefined,
 ): Promise<number> {
-  let lspResultsCount = 0;
+  let added = 0;
   try {
     const bridge = await getLSPBridge();
-    if (bridge?.isAvailable() && query.length > 2) {
-      const root = searchDir ? resolve(cwd, searchDir) : cwd;
-      const wsSymbols = await bridge.workspaceSymbol(query, root);
-      if (wsSymbols.length > 0) {
-        const existingKeys = new Set(allResults.map((d) => `${d.relFile}:${d.name}`));
-        for (const symbol of wsSymbols) {
-          const uri = symbol.location.uri;
-          const filePath = uri.startsWith("file://") ? uri.slice(7) : uri;
-          const relFile = relative(cwd, filePath).replace(/\\/g, "/");
-          const key = `${relFile}:${symbol.name}`;
-          if (existingKeys.has(key)) continue;
-          existingKeys.add(key);
-          lspResultsCount++;
-          allResults.push({
-            file: filePath,
-            relFile,
-            startLine: symbol.location.range.start.line + 1,
-            endLine: symbol.location.range.end.line + 1,
-            name: symbol.name,
-            kind: lspSymbolKindToString(symbol.kind),
-            body: "",
-            score: 1.0,
-            similarity: undefined,
-          });
-        }
-      }
-    }
+    if (!bridge?.isAvailable() || query.length <= 2) return 0;
+    const root = searchDir ? resolve(cwd, searchDir) : cwd;
+    const wsSymbols = await bridge.workspaceSymbol(query, root);
+    if (wsSymbols.length === 0) return 0;
+    added = appendNewLspSymbols(allResults, wsSymbols, cwd);
   } catch {
-    // best-effort only
+    return added;
   }
+  if (added > 0) allResults.sort((a, b) => b.score - a.score);
+  return added;
+}
 
-  if (lspResultsCount > 0) {
-    allResults.sort((a, b) => b.score - a.score);
+function pickTopNames(top: CodeDefinition[], limit = 5): Map<string, CodeDefinition> {
+  const byName = new Map<string, CodeDefinition>();
+  for (const entry of top) {
+    if (!byName.has(entry.name)) byName.set(entry.name, entry);
+    if (byName.size >= limit) break;
   }
-  return lspResultsCount;
+  return byName;
+}
+
+async function resolveOneName(
+  name: string,
+  entry: CodeDefinition,
+  cwd: string,
+): Promise<string> {
+  try {
+    const resolution = await resolveSymbol(cwd, name, entry.relFile, entry.startLine, 3);
+    const target = resolution.bestDefinition
+      ? `def: ${resolution.bestDefinition.file}:${resolution.bestDefinition.line}`
+      : "(no definition found)";
+    const refs = resolution.references.length > 0 ? ` (${resolution.references.length} refs)` : "";
+    return `  ${name} -> ${target}${refs}`;
+  } catch {
+    return `  ${name} -> (resolution failed)`;
+  }
+}
+
+async function appendCallerLines(
+  lines: string[],
+  names: string[],
+  allFiles: string[],
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  for (const name of names.slice(0, 3)) {
+    try {
+      const callers = await findCallers(allFiles, name, signal);
+      if (callers.length === 0) continue;
+      const shown = callers.slice(0, 5).map((c) => `${c.callerFunction} in ${c.file}`).join(", ");
+      const extra = callers.length > 5 ? ` (+${callers.length - 5} more)` : "";
+      lines.push(`  ${name} callers: ${shown}${extra}`);
+    } catch {
+      // skip caller enrichment failures
+    }
+  }
 }
 
 /** Best-effort symbol resolution + caller enrichment lines for top names. */
@@ -830,49 +915,13 @@ async function enrichTopDefinitions(
 ): Promise<string[]> {
   const resolvedLines: string[] = ["── Enriched ──", ""];
   try {
-    const nameToEntry = new Map<string, (typeof top)[0]>();
-    for (const entry of top) {
-      if (!nameToEntry.has(entry.name)) {
-        nameToEntry.set(entry.name, entry);
-      }
-    }
-    const topNames = [...nameToEntry.keys()].slice(0, 5);
-
+    const byName = pickTopNames(top);
+    const topNames = [...byName.keys()];
     for (const name of topNames) {
       if (signal?.aborted) break;
-      try {
-        const entry = nameToEntry.get(name)!;
-        const resolution = await resolveSymbol(cwd, name, entry.relFile, entry.startLine, 3);
-        let defLine = `  ${name} -> `;
-        if (resolution.bestDefinition) {
-          defLine += `def: ${resolution.bestDefinition.file}:${resolution.bestDefinition.line}`;
-        } else {
-          defLine += "(no definition found)";
-        }
-        if (resolution.references.length > 0) {
-          defLine += ` (${resolution.references.length} refs)`;
-        }
-        resolvedLines.push(defLine);
-      } catch {
-        resolvedLines.push(`  ${name} -> (resolution failed)`);
-      }
+      resolvedLines.push(await resolveOneName(name, byName.get(name)!, cwd));
     }
-
-    if (topNames.length > 0 && !signal?.aborted) {
-      for (const name of topNames.slice(0, 3)) {
-        try {
-          const callers = await findCallers(allFiles, name, signal);
-          if (callers.length > 0) {
-            resolvedLines.push(
-              `  ${name} callers: ${callers.slice(0, 5).map((caller) => `${caller.callerFunction} in ${caller.file}`).join(", ")}` +
-                (callers.length > 5 ? ` (+${callers.length - 5} more)` : ""),
-            );
-          }
-        } catch {
-          // skip caller enrichment failures
-        }
-      }
-    }
+    if (topNames.length > 0 && !signal?.aborted) await appendCallerLines(resolvedLines, topNames, allFiles, signal);
   } catch {
     // enrichment is best-effort
   }
@@ -958,6 +1007,42 @@ function buildCodeDetails(
   };
 }
 
+function buildEmptyCodeResult(query: string, allFiles: string[], summary: DiscoverySummary, allDefs: CodeDefinition[], startTime: number, lspResultsCount: number) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `[No code definitions found matching "${query}" across ${allFiles.length} source files.]`,
+      },
+    ],
+    details: {
+      mode: "code",
+      total: 0,
+      query,
+      filesScanned: allFiles.length,
+      filesConsidered: summary.filesConsidered,
+      filesSkippedIgnored: summary.filesSkippedIgnored,
+      filesSkippedUnsupported: summary.filesSkippedUnsupported,
+      workspaceRootsSearched: summary.workspaceRootsSearched,
+      definitionsExtracted: allDefs.length,
+      timeMs: Date.now() - startTime,
+      lspResults: lspResultsCount,
+    },
+  };
+}
+
+async function resolveCodeFiles(
+  cwd: string,
+  signal: AbortSignal | undefined,
+  options?: { preDiscoveredFiles?: string[]; sharedSummary?: DiscoverySummary },
+): Promise<{ files: string[]; summary: DiscoverySummary }> {
+  if (options?.preDiscoveredFiles && options.sharedSummary) {
+    return { files: options.preDiscoveredFiles, summary: options.sharedSummary };
+  }
+  const discovered = await discoverAcrossRoots(expandToMonorepoRoots(cwd), "code", signal);
+  return { files: discovered.files, summary: discovered.summary };
+}
+
 export async function handleCode(
   toolCallId: string,
   params: SearchInput,
@@ -970,47 +1055,13 @@ export async function handleCode(
   const startTime = Date.now();
   const query = params.query!.trim();
 
-  let allFiles: string[];
-  let summary: DiscoverySummary;
-  if (options?.preDiscoveredFiles && options.sharedSummary) {
-    allFiles = options.preDiscoveredFiles;
-    summary = options.sharedSummary;
-  } else {
-    const searchRoots = expandToMonorepoRoots(cwd);
-    const discovered = await discoverAcrossRoots(searchRoots, "code", signal);
-    allFiles = discovered.files;
-    summary = discovered.summary;
-  }
+  const { files: allFiles, summary } = await resolveCodeFiles(cwd, signal, options);
   const definitionCache = options?.sharedDefinitionCache ?? new Map<string, CodeDefinition[]>();
   const allDefs = await collectDefinitionsWithinBudget(allFiles, cwd, definitionCache, signal);
   const allResults = await rankDefinitions(allDefs, query, cwd, signal, maxResults);
   const lspResultsCount = await mergeLspDefinitions(allResults, query, cwd, params.directory);
-
   const top = allResults.slice(0, maxResults);
-
-  if (top.length === 0) {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `[No code definitions found matching "${query}" across ${allFiles.length} source files.]`,
-        },
-      ],
-      details: {
-        mode: "code",
-        total: 0,
-        query,
-        filesScanned: allFiles.length,
-        filesConsidered: summary.filesConsidered,
-        filesSkippedIgnored: summary.filesSkippedIgnored,
-        filesSkippedUnsupported: summary.filesSkippedUnsupported,
-        workspaceRootsSearched: summary.workspaceRootsSearched,
-        definitionsExtracted: allDefs.length,
-        timeMs: Date.now() - startTime,
-        lspResults: lspResultsCount,
-      },
-    };
-  }
+  if (top.length === 0) return buildEmptyCodeResult(query, allFiles, summary, allDefs, startTime, lspResultsCount);
 
   const lines = renderCodeMatches(query, top, allDefs.length, allFiles.length, lspResultsCount, Date.now() - startTime, enrich);
 
@@ -1073,6 +1124,38 @@ function appendAstHits(
   }
 }
 
+function isRegexFallbackHit(line: string, astQuery: ParsedAstPattern): boolean {
+  return !!astQuery.fallbackRegex && astQuery.fallbackRegex.test(line);
+}
+
+function isAstDuplicate(matches: GrepSearchMatch[], filePath: string, lineNumber: number): boolean {
+  return matches.some((m) => m.file === filePath && m.line === lineNumber);
+}
+
+function pushRegexFallbackHit(
+  matches: GrepSearchMatch[],
+  filePath: string,
+  relFile: string,
+  lines: string[],
+  lineNumber: number,
+  line: string,
+  definitions: CodeDefinition[],
+): void {
+  const owner = findOwningDefinition(definitions, lineNumber);
+  const snippet = formatSnippet(lines, lineNumber, 3);
+  matches.push({
+    group: owner ? "definition" : "text",
+    file: filePath,
+    relFile,
+    line: lineNumber,
+    endLine: snippet.endLine,
+    kind: owner?.kind ?? "ast_pattern",
+    name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
+    lineText: line,
+    snippet: snippet.snippet,
+  });
+}
+
 /** Regex fallback for non-AST languages or partial matches; skips AST dupes. */
 function appendRegexFallbackHits(
   matches: GrepSearchMatch[],
@@ -1087,29 +1170,10 @@ function appendRegexFallbackHits(
   for (let index = 0; index < lines.length; index++) {
     if (matches.length >= maxResults) break;
     const line = lines[index] ?? "";
-    if (!astQuery.fallbackRegex || !astQuery.fallbackRegex.test(line)) continue;
-
+    if (!isRegexFallbackHit(line, astQuery)) continue;
     const lineNumber = index + 1;
-
-    // Skip if already matched by AST (duplicate)
-    const alreadyMatched = matches.some(
-      (m) => m.file === filePath && m.line === lineNumber,
-    );
-    if (alreadyMatched) continue;
-
-    const owner = findOwningDefinition(definitions, lineNumber);
-    const snippet = formatSnippet(lines, lineNumber, 3);
-    matches.push({
-      group: owner ? "definition" : "text",
-      file: filePath,
-      relFile,
-      line: lineNumber,
-      endLine: snippet.endLine,
-      kind: owner?.kind ?? "ast_pattern",
-      name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
-      lineText: line,
-      snippet: snippet.snippet,
-    });
+    if (isAstDuplicate(matches, filePath, lineNumber)) continue;
+    pushRegexFallbackHit(matches, filePath, relFile, lines, lineNumber, line, definitions);
   }
 }
 
@@ -1191,6 +1255,42 @@ function buildAstPatternDetails(
  * file tries tree-sitter AST matching (JS/TS only) and falls back to regex
  * matching for other languages.
  */
+function buildAstPatternError(query: string, startTime: number) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `[Could not parse AST pattern: "${query}". Use syntax like "fn * -> Result" or "class * extends Base" or "async fn process_*".]`,
+      },
+    ],
+    details: {
+      mode: "ast_pattern",
+      total: 0,
+      query,
+      patternError: true,
+      timeMs: Date.now() - startTime,
+    },
+  };
+}
+
+async function scanOneAstFile(
+  filePath: string,
+  cwd: string,
+  definitionCache: Map<string, CodeDefinition[]>,
+  astQuery: ParsedAstPattern,
+  matches: GrepSearchMatch[],
+  maxResults: number,
+): Promise<void> {
+  if (await shouldSkipOversizedFile(filePath, 10 * 1024 * 1024)) return;
+  const relFile = toRelPath(cwd, filePath);
+  const definitions = await getOrExtractDefinitions(definitionCache, filePath, relFile);
+  const lang = filenameToLang(filePath);
+  appendAstHits(matches, lang ? await scanAstPatternFile(filePath, lang, astQuery) : [], filePath, relFile, definitions, maxResults);
+  if (matches.length >= maxResults) return;
+  const content = await readTextFileQuiet(filePath);
+  if (content !== null) appendRegexFallbackHits(matches, content, filePath, relFile, astQuery, definitions, maxResults);
+}
+
 export async function handleAstPattern(
   toolCallId: string,
   params: SearchInput,
@@ -1202,52 +1302,16 @@ export async function handleAstPattern(
   const startTime = Date.now();
 
   const astQuery = parseAstPattern(query);
-  if (!astQuery) {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `[Could not parse AST pattern: "${query}". Use syntax like "fn * -> Result" or "class * extends Base" or "async fn process_*".]`,
-        },
-      ],
-      details: {
-        mode: "ast_pattern",
-        total: 0,
-        query,
-        patternError: true,
-        timeMs: Date.now() - startTime,
-      },
-    };
-  }
+  if (!astQuery) return buildAstPatternError(query, startTime);
 
   const searchRoots = expandToMonorepoRoots(cwd);
   const { files: allFiles, summary } = await discoverAcrossRoots(searchRoots, "text", signal);
   const definitionCache = new Map<string, CodeDefinition[]>();
   const matches: GrepSearchMatch[] = [];
-
-  const MAX_FILE_BYTES = 10 * 1024 * 1024;
-
   for (const filePath of allFiles) {
     if (signal?.aborted) throw new Error("Operation aborted");
     if (matches.length >= maxResults) break;
-
-    // Skip oversized files
-    if (await shouldSkipOversizedFile(filePath, MAX_FILE_BYTES)) continue;
-
-    const relFile = toRelPath(cwd, filePath);
-    const definitions = await getOrExtractDefinitions(definitionCache, filePath, relFile);
-
-    const lang = filenameToLang(filePath);
-    const astHits = lang ? await scanAstPatternFile(filePath, lang, astQuery) : [];
-    appendAstHits(matches, astHits, filePath, relFile, definitions, maxResults);
-
-    // Run regex fallback for additional coverage (non-AST languages or partial matches)
-    if (matches.length < maxResults) {
-      const content = await readTextFileQuiet(filePath);
-      if (content !== null) {
-        appendRegexFallbackHits(matches, content, filePath, relFile, astQuery, definitions, maxResults);
-      }
-    }
+    await scanOneAstFile(filePath, cwd, definitionCache, astQuery, matches, maxResults);
   }
 
   sortGrepMatches(matches);

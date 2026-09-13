@@ -76,12 +76,11 @@ const parserPool = new Map<string, Parser>();
 
 /** Pooled tree-sitter parser per language; avoids rebuilding parsers per file. */
 function getSharedParser(lang: string, grammar: NonNullable<ReturnType<typeof loadLanguage>>): Parser {
-  let parser = parserPool.get(lang);
-  if (!parser) {
-    parser = new Parser();
-    parser.setLanguage(grammar);
-    parserPool.set(lang, parser);
-  }
+  const cached = parserPool.get(lang);
+  if (cached) return cached;
+  const parser = new Parser();
+  parser.setLanguage(grammar);
+  parserPool.set(lang, parser);
   return parser;
 }
 
@@ -131,12 +130,76 @@ export function globToRegexPattern(glob: string): string {
 export function globMatch(text: string, pattern: string): boolean {
   if (pattern === "*" || pattern === null) return true;
   if (pattern === text) return true;
+  return testGlobRegex(text, pattern);
+}
+
+function testGlobRegex(text: string, pattern: string): boolean {
   const regexStr = `^${globToRegexPattern(pattern)}$`;
   try {
     return new RegExp(regexStr).test(text);
   } catch {
     return text.includes(pattern);
   }
+}
+
+// ── Fallback-regex builders ──────────────────────────────────────
+
+function bodyRegexForTokens(bodyTokens: string[]): string {
+  if (bodyTokens.length === 0) return `\\s*\\{[^}]*\\}`;
+  const literals = bodyTokens.filter((t) => t !== "*" && t !== "*:" && !t.includes("*"));
+  if (literals.length === 0) return `\\s*\\{[^}]*\\}`;
+  const typeCheck = literals.map((t) => `\\b${escapeRegex(t)}\\b`).join("[^}]*");
+  return `\\s*\\{[^}]*${typeCheck}[^}]*\\}`;
+}
+
+/** Consume a "{ ... }" body block starting at tokens[i] === "{". Returns next index. */
+function appendBodyBlockRegex(parts: string[], tokens: string[], i: number): number {
+  let j = i + 1;
+  const bodyTokens: string[] = [];
+  while (j < tokens.length && tokens[j] !== "}") {
+    bodyTokens.push(tokens[j]!);
+    j++;
+  }
+  if (j < tokens.length) j++; // skip "}"
+  parts.push(bodyRegexForTokens(bodyTokens));
+  return j;
+}
+
+function isFallbackKeyword(token: string): boolean {
+  return AST_KEYWORDS.has(token) || AST_QUALIFIERS.has(token) || isFallbackRelation(token);
+}
+
+function isFallbackRelation(token: string): boolean {
+  return token === "extends" || token === "implements" || token === "for" || token === "with";
+}
+
+function singleTokenRegex(token: string): string {
+  if (isFallbackKeyword(token)) return `\\b${token}\\b`;
+  if (token === "*") return `[a-zA-Z_][a-zA-Z0-9_]*`;
+  if (token === "*:") return `[a-zA-Z_][a-zA-Z0-9_]*\\s*:`;
+  if (token === "->" || token === "(" || token === ")") return parenArrowRegex(token);
+  const affix = affixTokenRegex(token);
+  if (affix !== null) return affix;
+  return `\\b${escapeRegex(token)}\\b`;
+}
+
+function parenArrowRegex(token: string): string {
+  if (token === "->") return `->`;
+  if (token === "(") return `\\(`;
+  return `\\)`;
+}
+
+/** Prefix/suffix wildcard ("foo*", "*bar") or null when not an affix pattern. */
+function affixTokenRegex(token: string): string | null {
+  if (token.endsWith("*") && !token.startsWith("*") && token.length > 1) {
+    const prefix = escapeRegex(token.slice(0, -1));
+    return `${prefix}[a-zA-Z_][a-zA-Z0-9_]*`;
+  }
+  if (token.startsWith("*") && token.length > 1) {
+    const suffix = escapeRegex(token.slice(1));
+    return `[a-zA-Z_][a-zA-Z0-9_]*${suffix}`;
+  }
+  return null;
 }
 
 /**
@@ -148,69 +211,156 @@ export function buildPatternFallbackRegex(tokens: string[]): RegExp {
   let i = 0;
   while (i < tokens.length) {
     const token = tokens[i]!;
-
-    // Body block: match { ... } with flexible content
     if (token === "{") {
-      i++;
-      const bodyTokens: string[] = [];
-      while (i < tokens.length && tokens[i] !== "}") {
-        bodyTokens.push(tokens[i]!);
-        i++;
-      }
-      if (i < tokens.length) i++; // skip "}"
-
-      if (bodyTokens.length === 0) {
-        parts.push(`\\s*\\{[^}]*\\}`);
-      } else {
-        // Extract literal type names (non-wildcard) for body matching
-        const literals = bodyTokens.filter(
-          (t) => t !== "*" && t !== "*:" && !t.includes("*"),
-        );
-        if (literals.length > 0) {
-          const typeCheck = literals.map((t) => `\\b${escapeRegex(t)}\\b`).join("[^}]*");
-          parts.push(`\\s*\\{[^}]*${typeCheck}[^}]*\\}`);
-        } else {
-          parts.push(`\\s*\\{[^}]*\\}`);
-        }
-      }
+      i = appendBodyBlockRegex(parts, tokens, i);
       continue;
     }
-
-    // Keywords and qualifiers
-    if (
-      AST_KEYWORDS.has(token) ||
-      AST_QUALIFIERS.has(token) ||
-      token === "extends" ||
-      token === "implements" ||
-      token === "for" ||
-      token === "with"
-    ) {
-      parts.push(`\\b${token}\\b`);
-    } else if (token === "*") {
-      parts.push(`[a-zA-Z_][a-zA-Z0-9_]*`);
-    } else if (token === "*:") {
-      parts.push(`[a-zA-Z_][a-zA-Z0-9_]*\\s*:`);
-    } else if (token === "->") {
-      parts.push(`->`);
-    } else if (token === "(") {
-      parts.push(`\\(`);
-    } else if (token === ")") {
-      parts.push(`\\)`);
-    } else if (token.endsWith("*") && !token.startsWith("*") && token.length > 1) {
-      // prefix* → prefix followed by identifier
-      const prefix = escapeRegex(token.slice(0, -1));
-      parts.push(`${prefix}[a-zA-Z_][a-zA-Z0-9_]*`);
-    } else if (token.startsWith("*") && token.length > 1) {
-      // *suffix → identifier followed by suffix
-      const suffix = escapeRegex(token.slice(1));
-      parts.push(`[a-zA-Z_][a-zA-Z0-9_]*${suffix}`);
-    } else {
-      parts.push(`\\b${escapeRegex(token)}\\b`);
-    }
+    parts.push(singleTokenRegex(token));
     i++;
   }
-
   return new RegExp(parts.join("\\s+"));
+}
+
+// ── Pattern parser ───────────────────────────────────────────────
+
+interface AstPatternBuilder {
+  qualifiers: Set<string>;
+  namePattern: string | null;
+  returnTypePattern: string | null;
+  extendsPattern: string | null;
+  forTypePattern: string | null;
+  bodyFieldPatterns: string[] | null;
+}
+
+function emptyBuilder(): AstPatternBuilder {
+  return {
+    qualifiers: new Set<string>(),
+    namePattern: null,
+    returnTypePattern: null,
+    extendsPattern: null,
+    forTypePattern: null,
+    bodyFieldPatterns: null,
+  };
+}
+
+function findPatternKeyword(tokens: string[]): { keyword: string; idx: number } | null {
+  for (let i = 0; i < tokens.length; i++) {
+    if (AST_KEYWORDS.has(tokens[i]!)) return { keyword: tokens[i]!, idx: i };
+  }
+  return null;
+}
+
+function collectLeadingQualifiers(tokens: string[], keywordIdx: number, into: Set<string>): void {
+  for (let i = 0; i < keywordIdx; i++) {
+    if (AST_QUALIFIERS.has(tokens[i]!)) into.add(tokens[i]!);
+  }
+}
+
+/** Consume "-> Type" at tokens[i]. Returns next index. */
+function takeReturnType(tokens: string[], i: number, b: AstPatternBuilder): number {
+  const next = tokens[i + 1];
+  if (next !== undefined) b.returnTypePattern = next;
+  return i + (next !== undefined ? 2 : 1);
+}
+
+/** Consume "extends Base" at tokens[i]. Returns next index. */
+function takeExtends(tokens: string[], i: number, b: AstPatternBuilder): number {
+  const next = tokens[i + 1];
+  if (next !== undefined) b.extendsPattern = next;
+  return i + (next !== undefined ? 2 : 1);
+}
+
+/** Consume "for Type" at tokens[i]. Returns next index. */
+function takeForType(tokens: string[], i: number, b: AstPatternBuilder): number {
+  const next = tokens[i + 1];
+  if (next !== undefined) b.forTypePattern = next;
+  return i + (next !== undefined ? 2 : 1);
+}
+
+function shouldSkipRelationTarget(tokens: string[], i: number): boolean {
+  const t = tokens[i];
+  return t !== undefined && t !== "{" && t !== "->" && !AST_RELATIONS.has(t);
+}
+
+/** Consume "implements T" / "with T" at tokens[i]. Returns next index. */
+function takeImplementsWith(tokens: string[], i: number): number {
+  if (shouldSkipRelationTarget(tokens, i + 1)) return i + 2;
+  return i + 1;
+}
+
+function cleanBodyFieldToken(ft: string): string {
+  return ft.endsWith(":") ? ft.slice(0, -1) : ft;
+}
+
+function bodyPatternsForFields(fieldTokens: string[]): string[] {
+  if (fieldTokens.length === 0) return ["*"];
+  const types = fieldTokens.filter((t) => t !== "*" && !AST_KEYWORDS.has(t) && !AST_QUALIFIERS.has(t) && !t.startsWith("*"));
+  return types.length > 0 ? types : ["*"];
+}
+
+/** Consume "{ ... }" at tokens[i] === "{". Returns next index. */
+function takeBodyBlock(tokens: string[], i: number, b: AstPatternBuilder): number {
+  let j = i + 1;
+  const fieldTokens: string[] = [];
+  while (j < tokens.length && tokens[j] !== "}") {
+    fieldTokens.push(cleanBodyFieldToken(tokens[j]!));
+    j++;
+  }
+  if (j < tokens.length) j++; // skip "}"
+  b.bodyFieldPatterns = bodyPatternsForFields(fieldTokens);
+  return j;
+}
+
+function isNameToken(token: string): boolean {
+  return token === "*:" || token === "*" || token.includes("*") || /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token);
+}
+
+function normalizeNameToken(token: string): string {
+  if (token === "*:" || token === "*") return "*";
+  return token.replace(/:$/, "");
+}
+
+/** Record name pattern once. Returns next index. */
+function takeNameToken(tokens: string[], i: number, b: AstPatternBuilder): number {
+  if (b.namePattern === null && isNameToken(tokens[i]!)) {
+    b.namePattern = normalizeNameToken(tokens[i]!);
+  }
+  return i + 1;
+}
+
+function stepTypeRelationToken(tokens: string[], i: number, b: AstPatternBuilder): number {
+  const token = tokens[i]!;
+  if (token === "->") return takeReturnType(tokens, i, b);
+  if (token === "extends") return takeExtends(tokens, i, b);
+  if (token === "for") return takeForType(tokens, i, b);
+  return -1;
+}
+
+function stepBlockRelationToken(tokens: string[], i: number, b: AstPatternBuilder): number {
+  const token = tokens[i]!;
+  if (token === "implements" || token === "with") return takeImplementsWith(tokens, i);
+  if (token === "{") return takeBodyBlock(tokens, i, b);
+  if (token === "(" || token === ")") return i + 1;
+  return -1;
+}
+
+/** Dispatch a relation/structural token at index i. Returns next index, or -1 when not a relation token. */
+function stepRelationToken(tokens: string[], i: number, b: AstPatternBuilder): number {
+  const typeNext = stepTypeRelationToken(tokens, i, b);
+  if (typeNext !== -1) return typeNext;
+  return stepBlockRelationToken(tokens, i, b);
+}
+
+/** Dispatch one token at index i. Returns next index. */
+function stepPatternToken(tokens: string[], i: number, b: AstPatternBuilder): number {
+  const token = tokens[i]!;
+  if (AST_QUALIFIERS.has(token)) {
+    b.qualifiers.add(token);
+    return i + 1;
+  }
+  const relNext = stepRelationToken(tokens, i, b);
+  if (relNext !== -1) return relNext;
+  return takeNameToken(tokens, i, b);
 }
 
 /**
@@ -226,148 +376,27 @@ export function buildPatternFallbackRegex(tokens: string[]): RegExp {
 export function parseAstPattern(raw: string): ParsedAstPattern | null {
   const tokens = tokenizeAstPattern(raw);
   if (tokens.length === 0) return null;
+  const found = findPatternKeyword(tokens);
+  if (!found) return null;
 
-  // Find the structural keyword (fn, class, struct, impl, trait, enum, interface)
-  let keyword: string | null = null;
-  let keywordIdx = -1;
-  for (let i = 0; i < tokens.length; i++) {
-    if (AST_KEYWORDS.has(tokens[i]!)) {
-      keyword = tokens[i]!;
-      keywordIdx = i;
-      break;
-    }
-  }
-  if (!keyword) return null;
+  const b = emptyBuilder();
+  collectLeadingQualifiers(tokens, found.idx, b.qualifiers);
 
-  const qualifiers = new Set<string>();
-  let namePattern: string | null = null;
-  let returnTypePattern: string | null = null;
-  let extendsPattern: string | null = null;
-  let forTypePattern: string | null = null;
-  let bodyFieldPatterns: string[] | null = null;
-
-  // Collect qualifiers before keyword
-  for (let i = 0; i < keywordIdx; i++) {
-    if (AST_QUALIFIERS.has(tokens[i]!)) {
-      qualifiers.add(tokens[i]!);
-    }
-  }
-
-  // Keep full token list for regex fallback building
-  const allTokens = [...tokens];
-
-  // Parse tokens after keyword
-  let i = keywordIdx + 1;
+  let i = found.idx + 1;
   while (i < tokens.length) {
-    const token = tokens[i]!;
-
-    // Qualifiers can appear after keyword too
-    if (AST_QUALIFIERS.has(token)) {
-      qualifiers.add(token);
-      i++;
-      continue;
-    }
-
-    // Return type: -> Type
-    if (token === "->") {
-      i++;
-      if (i < tokens.length) {
-        returnTypePattern = tokens[i]!;
-        i++;
-      }
-      continue;
-    }
-
-    // Extends: extends Base
-    if (token === "extends") {
-      i++;
-      if (i < tokens.length) {
-        extendsPattern = tokens[i]!;
-        i++;
-      }
-      continue;
-    }
-
-    // For-type (Rust impl): for Type
-    if (token === "for") {
-      i++;
-      if (i < tokens.length) {
-        forTypePattern = tokens[i]!;
-        i++;
-      }
-      continue;
-    }
-
-    // implements / with — just skip the type name
-    if (token === "implements" || token === "with") {
-      i++;
-      if (
-        i < tokens.length &&
-        tokens[i] !== "{" &&
-        tokens[i] !== "->" &&
-        !AST_RELATIONS.has(tokens[i]!)
-      ) {
-        i++; // skip the type name
-      }
-      continue;
-    }
-
-    // Body block: { field patterns }
-    if (token === "{") {
-      i++;
-      const fieldTokens: string[] = [];
-      while (i < tokens.length && tokens[i] !== "}") {
-        const ft = tokens[i]!;
-        // Strip trailing ":" from field name patterns like "*:"
-        fieldTokens.push(ft.endsWith(":") ? ft.slice(0, -1) : ft);
-        i++;
-      }
-      if (i < tokens.length) i++; // skip "}"
-
-      if (fieldTokens.length > 0) {
-        // Extract literal type names (non-wildcard tokens) for body field matching
-        const types = fieldTokens.filter(
-          (t) => t !== "*" && !AST_KEYWORDS.has(t) && !AST_QUALIFIERS.has(t) && !t.startsWith("*"),
-        );
-        bodyFieldPatterns = types.length > 0 ? types : ["*"];
-      } else {
-        bodyFieldPatterns = ["*"];
-      }
-      continue;
-    }
-
-    // Skip standalone parens — they're decorative in pattern syntax
-    if (token === "(" || token === ")") {
-      i++;
-      continue;
-    }
-
-    // Everything else is a name pattern or wildcard
-    if (namePattern === null) {
-      if (token === "*:" || token === "*") {
-        namePattern = "*";
-      } else if (token.includes("*")) {
-        namePattern = token.replace(/:$/, "");
-      } else if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token)) {
-        namePattern = token;
-      }
-    }
-    i++;
+    i = stepPatternToken(tokens, i, b);
   }
 
-  const nodeTypes = AST_KEYWORD_NODE_TYPES[keyword] ?? [];
-  const isAsync = qualifiers.has("async") ? true : null;
-  const fallbackRegex = buildPatternFallbackRegex(allTokens);
-
+  const nodeTypes = AST_KEYWORD_NODE_TYPES[found.keyword] ?? [];
   return {
     nodeTypes,
-    isAsync,
-    namePattern,
-    returnTypePattern,
-    extendsPattern,
-    forTypePattern,
-    bodyFieldPatterns,
-    fallbackRegex,
+    isAsync: b.qualifiers.has("async") ? true : null,
+    namePattern: b.namePattern,
+    returnTypePattern: b.returnTypePattern,
+    extendsPattern: b.extendsPattern,
+    forTypePattern: b.forTypePattern,
+    bodyFieldPatterns: b.bodyFieldPatterns,
+    fallbackRegex: buildPatternFallbackRegex([...tokens]),
   };
 }
 
@@ -379,18 +408,14 @@ export function parseAstPattern(raw: string): ParsedAstPattern | null {
 export function getNodeName(node: Parser.SyntaxNode): string | null {
   const nameNode = node.childForFieldName("name");
   if (nameNode) return nameNode.text;
-
-  // For Rust impl_item, use "trait" field
   const traitNode = node.childForFieldName("trait");
   if (traitNode) return traitNode.text;
+  return firstIdentifierChildText(node);
+}
 
-  // Fallback to first identifier child
+function firstIdentifierChildText(node: Parser.SyntaxNode): string | null {
   for (const child of node.namedChildren) {
-    if (
-      child.type === "identifier" ||
-      child.type === "type_identifier" ||
-      child.type === "property_identifier"
-    ) {
+    if (child.type === "identifier" || child.type === "type_identifier" || child.type === "property_identifier") {
       return child.text;
     }
   }
@@ -403,106 +428,157 @@ export function getNodeName(node: Parser.SyntaxNode): string | null {
  */
 export function findBodyChild(node: Parser.SyntaxNode): Parser.SyntaxNode | null {
   for (const child of node.namedChildren) {
-    const t = child.type;
-    if (
-      t.endsWith("_body") ||
-      t === "body" ||
-      t === "block" ||
-      t === "statement_block" ||
-      t === "declaration_list" ||
-      t === "field_declaration_list" ||
-      t === "class_body"
-    ) {
-      return child;
-    }
+    if (isBodyNodeType(child.type)) return child;
   }
   return null;
 }
+
+function isBodyNodeType(t: string): boolean {
+  return (
+    t.endsWith("_body") ||
+    t === "body" ||
+    t === "block" ||
+    t === "statement_block" ||
+    t === "declaration_list" ||
+    t === "field_declaration_list" ||
+    t === "class_body"
+  );
+}
+
+// ── Node matchers (one filter each) ──────────────────────────────
 
 /**
  * Check whether a tree-sitter AST node matches the parsed AST pattern query.
  * Applies all non-null filters from the query against the node.
  */
 export function checkAstNodeMatches(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
-  // 1. Node type filter
-  if (!query.nodeTypes.includes(node.type)) return false;
+  return (
+    matchesNodeType(node, query) &&
+    matchesNodeName(node, query) &&
+    matchesNodeAsync(node, query) &&
+    matchesNodeReturnType(node, query) &&
+    matchesNodeExtends(node, query) &&
+    matchesNodeForType(node, query) &&
+    matchesNodeBody(node, query)
+  );
+}
 
-  // 2. Name filter
-  if (query.namePattern !== null && query.namePattern !== "*") {
-    const name = getNodeName(node);
-    if (!name || !globMatch(name, query.namePattern)) return false;
-  }
+function matchesNodeType(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
+  return query.nodeTypes.includes(node.type);
+}
 
-  // 3. Async filter
-  if (query.isAsync === true) {
-    const firstLine = node.text.split("\n")[0] ?? "";
-    if (!/\basync\b/.test(firstLine)) return false;
-  }
+function matchesNodeName(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
+  if (query.namePattern === null || query.namePattern === "*") return true;
+  const name = getNodeName(node);
+  return name !== null && globMatch(name, query.namePattern);
+}
 
-  // 4. Return type filter
-  if (query.returnTypePattern !== null && query.returnTypePattern !== "*") {
-    const rtNode = node.childForFieldName("return_type");
-    if (rtNode) {
-      // Strip leading ": " (TS/Java) or "-> " (Rust/Swift) from return_type text
-      const rtText = rtNode.text.replace(/^[:\->]\s*/, "");
-      if (!globMatch(rtText, query.returnTypePattern)) return false;
-    } else {
-      // Fallback: search for "-> Type" or ": Type" in text
-      const arrowMatch = node.text.match(/(?:->|:)\s*([A-Za-z_][A-Za-z0-9_<>[\]]*)/);
-      if (!arrowMatch || !globMatch(arrowMatch[1]!, query.returnTypePattern)) return false;
+function matchesNodeAsync(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
+  if (query.isAsync !== true) return true;
+  const firstLine = node.text.split("\n")[0] ?? "";
+  return /\basync\b/.test(firstLine);
+}
+
+function matchesNodeReturnType(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
+  if (query.returnTypePattern === null || query.returnTypePattern === "*") return true;
+  const rtNode = node.childForFieldName("return_type");
+  if (rtNode) return matchesReturnTypeField(rtNode.text, query.returnTypePattern);
+  return matchesReturnTypeText(node.text, query.returnTypePattern);
+}
+
+function matchesReturnTypeField(rtText: string, pattern: string): boolean {
+  const cleaned = rtText.replace(/^[:\->]\s*/, "");
+  return globMatch(cleaned, pattern);
+}
+
+function matchesReturnTypeText(nodeText: string, pattern: string): boolean {
+  const arrowMatch = nodeText.match(/(?:->|:)\s*([A-Za-z_][A-Za-z0-9_<>[\]]*)/);
+  return arrowMatch !== null && arrowMatch[1] !== undefined && globMatch(arrowMatch[1], pattern);
+}
+
+function matchesNodeExtends(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
+  if (query.extendsPattern === null || query.extendsPattern === "*") return true;
+  if (extendsInHeritageChild(node, query.extendsPattern)) return true;
+  return extendsInText(node.text, query.extendsPattern);
+}
+
+function extendsInHeritageChild(node: Parser.SyntaxNode, pattern: string): boolean {
+  for (const child of node.children) {
+    if (child.type === "class_heritage" || child.type === "superclass") {
+      if (child.text.includes(pattern)) return true;
     }
   }
+  return false;
+}
 
-  // 5. Extends / superclass filter
-  if (query.extendsPattern !== null && query.extendsPattern !== "*") {
-    let found = false;
-    for (const child of node.children) {
-      if (child.type === "class_heritage" || child.type === "superclass") {
-        if (child.text.includes(query.extendsPattern)) {
-          found = true;
-          break;
-        }
-      }
+function extendsInText(nodeText: string, pattern: string): boolean {
+  return nodeText.includes(`extends ${pattern}`) || nodeText.includes(`extends${pattern}`);
+}
+
+function matchesNodeForType(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
+  if (query.forTypePattern === null || query.forTypePattern === "*") return true;
+  if (node.type === "impl_item") return matchesImplForType(node, query.forTypePattern);
+  return matchesForTypeText(node.text, query.forTypePattern);
+}
+
+function matchesImplForType(node: Parser.SyntaxNode, pattern: string): boolean {
+  const typeNode = node.childForFieldName("type");
+  return typeNode !== null && globMatch(typeNode.text, pattern);
+}
+
+function matchesForTypeText(nodeText: string, pattern: string): boolean {
+  const forMatch = nodeText.match(/\bfor\s+(\S+?)\s*\{/);
+  return forMatch !== null && forMatch[1] !== undefined && globMatch(forMatch[1], pattern);
+}
+
+function matchesNodeBody(node: Parser.SyntaxNode, query: ParsedAstPattern): boolean {
+  if (query.bodyFieldPatterns === null) return true;
+  if (query.bodyFieldPatterns.length === 1 && query.bodyFieldPatterns[0] === "*") return true;
+  const bodyNode = findBodyChild(node);
+  if (!bodyNode) return false;
+  return query.bodyFieldPatterns.some((pattern) => bodyFieldTextMatches(bodyNode.text, pattern));
+}
+
+function bodyFieldTextMatches(bodyText: string, pattern: string): boolean {
+  const re = new RegExp(`:\\s*${globToRegexPattern(pattern)}\\b`);
+  return re.test(bodyText);
+}
+
+// ── File search ──────────────────────────────────────────────────
+
+function parseTreeRoot(content: string, parser: Parser): Parser.Tree | null {
+  const chunkSize = 1024;
+  const tree = parser.parse((offset) => content.slice(offset, offset + chunkSize));
+  if (!tree?.rootNode) return null;
+  return tree;
+}
+
+function collectMatchingNodes(root: Parser.SyntaxNode, query: ParsedAstPattern): { node: Parser.SyntaxNode; name: string }[] {
+  const results: { node: Parser.SyntaxNode; name: string }[] = [];
+  const cursor = root.walk();
+  while (true) {
+    const node = cursor.currentNode;
+    if (node && query.nodeTypes.includes(node.type) && checkAstNodeMatches(node, query)) {
+      results.push({ node, name: getNodeName(node) ?? node.type });
     }
-    if (!found) {
-      if (
-        !node.text.includes(`extends ${query.extendsPattern}`) &&
-        !node.text.includes(`extends${query.extendsPattern}`)
-      ) {
-        return false;
-      }
-    }
+    if (advanceCursor(cursor)) continue;
+    break;
   }
+  return results;
+}
 
-  // 6. For-type filter (Rust impl_item: impl Trait for Type)
-  if (query.forTypePattern !== null && query.forTypePattern !== "*") {
-    if (node.type === "impl_item") {
-      const typeNode = node.childForFieldName("type");
-      if (!typeNode || !globMatch(typeNode.text, query.forTypePattern)) return false;
-    } else {
-      const forMatch = node.text.match(/\bfor\s+(\S+?)\s*\{/);
-      if (!forMatch || !globMatch(forMatch[1]!, query.forTypePattern)) return false;
-    }
+/** Advance cursor depth-first. Returns false when traversal is complete. */
+function advanceCursor(cursor: Parser.TreeCursor): boolean {
+  if (cursor.gotoFirstChild()) return true;
+  if (cursor.gotoNextSibling()) return true;
+  return climbToNextSibling(cursor);
+}
+
+function climbToNextSibling(cursor: Parser.TreeCursor): boolean {
+  while (true) {
+    if (!cursor.gotoParent()) return false;
+    if (cursor.gotoNextSibling()) return true;
   }
-
-  // 7. Body field filter
-  if (query.bodyFieldPatterns !== null) {
-    if (query.bodyFieldPatterns.length === 1 && query.bodyFieldPatterns[0] === "*") {
-      // { * } means any body — always matches
-    } else {
-      const bodyNode = findBodyChild(node);
-      if (!bodyNode) return false;
-
-      const bodyText = bodyNode.text;
-      const matchesOne = query.bodyFieldPatterns.some((pattern) => {
-        const re = new RegExp(`:\\s*${globToRegexPattern(pattern)}\\b`);
-        return re.test(bodyText);
-      });
-      if (!matchesOne) return false;
-    }
-  }
-
-  return true;
 }
 
 /**
@@ -518,41 +594,10 @@ export async function matchAstNodesInFile(
 ): Promise<{ node: Parser.SyntaxNode; name: string }[]> {
   const grammar = loadLanguage(lang as any);
   if (!grammar) return [];
-
   const content = await readTextFileQuiet(filePath);
   if (content === null) return [];
-
   const parser = getSharedParser(lang, grammar);
-
-  const chunkSize = 1024;
-  const tree = parser.parse((offset) => content.slice(offset, offset + chunkSize));
-  if (!tree?.rootNode) return [];
-
-  const results: { node: Parser.SyntaxNode; name: string }[] = [];
-  const cursor = tree.rootNode.walk();
-
-  while (true) {
-    const node = cursor.currentNode;
-    if (node && query.nodeTypes.includes(node.type)) {
-      if (checkAstNodeMatches(node, query)) {
-        const name = getNodeName(node) ?? node.type;
-        results.push({ node, name });
-      }
-    }
-
-    if (cursor.gotoFirstChild()) continue;
-    if (cursor.gotoNextSibling()) continue;
-
-    let reachedRoot = false;
-    while (true) {
-      if (!cursor.gotoParent()) {
-        reachedRoot = true;
-        break;
-      }
-      if (cursor.gotoNextSibling()) break;
-    }
-    if (reachedRoot) break;
-  }
-
-  return results;
+  const tree = parseTreeRoot(content, parser);
+  if (!tree) return [];
+  return collectMatchingNodes(tree.rootNode, query);
 }
