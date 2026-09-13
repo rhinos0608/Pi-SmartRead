@@ -28,16 +28,16 @@ import { loadGitContextConfig, validateEmbeddingConfig } from "./config.js";
 import { formatBranchNotes, scanBranchNotes } from "./git-notes.js";
 import {
    ensureHashlineReady,
-   prefixLinesWithAnchors,
-   selectorToOffsetLimit,
-   splitPathAndSelector,
 } from "./utils.js";
+import {
+   applyTextEnrichment,
+   attachPathEvidence,
+   normalizeReadParams,
+} from "./hook-enrich.js";
 import { buildFileContextLines } from "./file-context.js";
 import {
-  attestPathRead,
   attestStructuralOutline,
   publishEvidence,
-  resolveAttestedRange,
   sessionFileFromCtx,
 } from "./read-evidence.js";
 import { resolveAstOutlineConfig, outlineSupportsPath, buildAstOutline, renderAstOutline } from "./ast-outline.js";
@@ -460,19 +460,8 @@ async function interceptContextualRead(
    if (!filePath) {
       return originalExecute(toolCallId, params, signal, onUpdate, ctx);
    }
-   const embeddedSelector = typeof params.__smartReadSelector === "string"
-      ? params.__smartReadSelector
-      : undefined;
-   const { path: targetPath, selector: pathSelector } = splitPathAndSelector(filePath);
-   const selector = embeddedSelector ?? pathSelector;
-   const selectorArgs = selectorToOffsetLimit(selector);
-   const rawMode = selectorArgs.raw === true;
-   const normalizedParams: Record<string, unknown> = { ...params, path: targetPath };
-   delete normalizedParams.__smartReadSelector;
-   if (selectorArgs.offset !== undefined) normalizedParams.offset = selectorArgs.offset;
-   if (selectorArgs.limit !== undefined) normalizedParams.limit = selectorArgs.limit;
-
-   const displayStartLine = selectorArgs.offset ?? (typeof params.offset === "number" ? params.offset : undefined) ?? 1;
+   // Selector/dispatch normalize lives in ./hook-enrich.js (no boundary gating).
+   const { targetPath, rawMode, normalizedParams, displayStartLine } = normalizeReadParams(params);
 
    if (rawMode) {
       return originalExecute(toolCallId, normalizedParams, signal, onUpdate, ctx);
@@ -512,55 +501,25 @@ async function interceptContextualRead(
    if (!existsSync(fullPath)) return result;
 
    // ── Workspace evidence ────────────────────────────────────────────
-   // Emit the same strong path-mode envelope inspect produces so patch
-   // can accept an evidenceRef from a plain read. Best-effort: never
-   // blocks the read. Three review-blocker rules are enforced:
-   //   1. Binding root: resolve targetPath against ctx.cwd, not the
-   //      params.directory-derived cwd used for enrichment.
-   //   2. Revalidation (TOCTOU): skip evidence when the attested slice
-   //      (evidence.sliceText) differs from what the model was shown.
-   //   3. Zero shown lines: firstLineExceedsLimit / invalid offset/limit
-   //      → no evidence.
+   // Same strong path-mode envelope inspect produces; best-effort, never
+   // blocks the read. Binding root ctx.cwd, TOCTOU revalidation, and
+   // zero-lines skip enforced in ./hook-enrich.js.
    const isImageResult = result.content.some((c: { type: string }) => c.type === "image");
    const sessionFilePath = sessionFileFromCtx(ctx);
    const builtinText = (result.content.find((c: { type: string }) => c.type === "text") as
       | { type: "text"; text: string }
       | undefined)?.text;
-   if (sessionFilePath && !isImageResult && typeof builtinText === "string") {
-      // Attestation (Seam 3) fails closed (null) but never throws:
-      // the read still succeeds with or without evidence.
-      const truncation = (result.details as Record<string, unknown> | undefined)?.truncation as
-         | { truncated?: boolean; outputLines?: number; firstLineExceedsLimit?: boolean; content?: string }
-         | undefined;
-      const range = resolveAttestedRange({
-         normalizedOffset: typeof normalizedParams.offset === "number" ? normalizedParams.offset : undefined,
-         normalizedLimit: typeof normalizedParams.limit === "number" ? normalizedParams.limit : undefined,
-         displayStartLine,
-         truncation,
-      });
-      if (!("zeroLines" in range)) {
-         const attested = attestPathRead({
-            fullPath,
-            cwd: ctx.cwd,
-            sessionFilePath,
-            builtinText,
-            truncation,
-            evidenceOffset: range.evidenceOffset,
-            evidenceLimit: range.evidenceLimit,
-            displayStartLine,
-         });
-         if (attested) {
-            if (!result.details || typeof result.details !== "object") result.details = {};
-            (result.details as Record<string, unknown>).workspaceEvidence = attested.workspaceEvidence;
-            publishEvidence(
-               opts?.publishInspection,
-               attested.workspaceEvidence,
-               sessionFilePath,
-               attested.canonicalWorkspaceRoot,
-            );
-         }
-      }
-   }
+   attachPathEvidence({
+      result,
+      fullPath,
+      cwd: ctx.cwd,
+      sessionFilePath,
+      builtinText,
+      isImageResult,
+      normalizedParams,
+      displayStartLine,
+      ...(opts?.publishInspection ? { publishInspection: opts.publishInspection } : {}),
+   });
 
    // Enrichment footer: imports, git history, git notes, graph, LSP
    const repoKeyForGit = computeRepoKey(cwd);
@@ -578,41 +537,10 @@ async function interceptContextualRead(
          : {}),
    });
 
-   // Find text content for anchor embedding and context appending
-   const textContent = result.content.find(
-      (c: { type: string }) => c.type === "text",
-   ) as { type: "text"; text: string } | undefined;
-
-   if (textContent) {
-      const originalText = textContent.text;
-      if (result.details && typeof result.details === "object") {
-         (result.details as Record<string, unknown>).displayContent = {
-            text: originalText,
-            startLine: displayStartLine,
-         };
-      }
-      // Embed hashline LINE+ID| anchors so the model can reference specific
-      // lines via hashline-format edits (e.g., "42ab|function foo() {").
-      // Only apply anchoring when content doesn't already have anchors.
-      // Detect both legacy "42|" and hashline "42ab|" prefixes.
-      const firstFewLines = textContent.text.split("\n", 5).join("\n");
-      const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
-      if (!alreadyAnchored) {
-         textContent.text = prefixLinesWithAnchors(textContent.text, displayStartLine);
-      }
-
-      // Preserve footer separately for internal batch reads. Batch packing must
-      // keep source text separate from enrichment so evidence, cache, and line
-      // numbering continue to describe only rendered file content.
-      if (result.details && typeof result.details === "object" && contextLines.length > 0) {
-         (result.details as Record<string, unknown>).contextFooter = contextLines.join("\n");
-      }
-
-      // Append contextual annotations to direct single-file output.
-      if (contextLines.length > 0) {
-         textContent.text += contextLines.join("\n");
-      }
-   }
+   // Anchors + footer assembly lives in ./hook-enrich.js; preserves
+   // displayContent snapshot, anchor skip, and contextFooter separation so
+   // batch packing/evidence/cache still describe rendered file content only.
+   applyTextEnrichment(result, displayStartLine, contextLines);
 
    return result;
 }
