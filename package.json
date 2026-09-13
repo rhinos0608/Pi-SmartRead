@@ -53,6 +53,7 @@
     "package.json"
   ],
   "scripts": {
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "mcp-server": "node --import tsx src/mcp-server.ts",
