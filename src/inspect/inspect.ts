@@ -93,15 +93,16 @@ async function executeScriptInspect(input: InspectV4Input): Promise<InspectV4Res
         cwd: input.cwd,
         sessionFilePath: input.sessionFilePath,
         signal: input.signal,
-        ...(input.contextGraph ? { contextGraph: input.contextGraph } : {}),
+        ...(input.contextGraphGetter ?? input.contextGraph
+            ? { contextGraph: (input.contextGraphGetter ?? input.contextGraph)! }
+            : {}),
         ...(input.lspInspectionProvider ? { lspInspectionProvider: input.lspInspectionProvider } : {}),
     });
     const workspaceEvidence = scriptResult.workspaceEvidence ?? emptyQueryEnvelope(input.cwd, input.sessionFilePath);
     return {
         // Runtime "query": script evidence merges per-call envelopes in
-        // query mode. Cast, not a union change — InspectV4Mode stays
-        // "directory" | "file" by contract.
-        mode: "query" as unknown as InspectV4Mode,
+        // query mode (InspectV4ResultMode; InspectV4Mode stays "directory" | "file").
+        mode: "query",
         contentText: scriptResult.contentText,
         workspaceEvidence,
         lineCount: scriptResult.lineCount,

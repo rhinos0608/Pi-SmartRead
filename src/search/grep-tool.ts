@@ -86,7 +86,7 @@ const GrepSchema = Type.Object({
 type GrepInput = Static<typeof GrepSchema>;
 export type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available. Chasing a multi-hop investigation (see \`inspect\`) across dependent calls (grep, then read, then grep again following the lead)? Compose the chase in one call with \`inspect({ script })\``;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ mode: 'file', path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available. Chasing a multi-hop investigation (see \`inspect\`) across dependent calls (grep, then read, then grep again following the lead)? Compose the chase in one call with \`inspect({ mode: 'script', script })\``;
 
 // ── Factory ─────────────────────────────────────────────────────────
 
@@ -171,19 +171,24 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             const queries: GrepQueryInput[] = hasQueries
                 ? params.queries!.map((query) => mergeQueryWithShared(shared, query as unknown as Record<string, unknown>))
                 : [{ ...shared, pattern: params.pattern! }] as unknown as GrepQueryInput[];
-            const queryPairs: Array<{ result: GrepExecutionResult; evidence: WorkspaceEvidenceEnvelope }> = [];
-            for (const query of queries) {
-                queryPairs.push(await runGrepQueryWithEvidence(query, cwd, opts, signal, sessionFilePath));
-            }
-            const queryResults: GrepExecutionResult[] = queryPairs.map((pair) => pair.result);
             // Single-query evidence comes straight from the per-call helper (identical
             // to building from the combined hits when there is one query). Batch
-            // evidence is rebuilt from the combined hits so multi-query range merging
+            // queries skip per-query envelope construction (it would be discarded)
+            // and rebuild one combined envelope so multi-query range merging
             // and inspectionId stay exactly as before.
-            const shownHits = queryResults.flatMap((result) => result.shown);
-            const evidence = !hasQueries
-                ? queryPairs[0]!.evidence
-                : buildEvidence(shownHits, cwd, sessionFilePath);
+            const queryResults: GrepExecutionResult[] = [];
+            let evidence: WorkspaceEvidenceEnvelope;
+            if (!hasQueries) {
+                const single = await runGrepQueryWithEvidence(queries[0]!, cwd, opts, signal, sessionFilePath);
+                queryResults.push(single.result);
+                evidence = single.evidence;
+            } else {
+                for (const query of queries) {
+                    queryResults.push(await executeGrepQuery(query, cwd, opts, signal));
+                }
+                const shownHits = queryResults.flatMap((result) => result.shown);
+                evidence = buildEvidence(shownHits, cwd, sessionFilePath);
+            }
             publishEvidence(evidence, opts, sessionFilePath);
 
             if (!hasQueries) {
@@ -211,7 +216,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                     mode: "query",
                     toolCallId,
                     totalHits: queryResults.reduce((sum, result) => sum + result.totalHits, 0),
-                    shownHits: shownHits.length,
+                    shownHits: queryResults.reduce((sum, result) => sum + result.shown.length, 0),
                     truncated: queryResults.some((result) => result.truncated),
                     engines: unique(queryResults.flatMap((result) => result.engines)),
                     queryResults: queryResults.map((result) => ({

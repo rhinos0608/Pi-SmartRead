@@ -250,7 +250,7 @@ describe("registerSessionHooks", () => {
       const promptText = typed!.systemPrompt;
       expect(promptText).toContain("SmartRead Tool Guide");
       expect(promptText).toContain("BM25+embedding RRF");
-      expect(promptText).toContain("inspect { path }:");
+      expect(promptText).toContain("inspect { mode, path, ... }");
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }

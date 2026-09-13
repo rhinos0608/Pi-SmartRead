@@ -113,11 +113,13 @@ describe("WP-SR6 MCP parity — no new tool names, existing mirror", () => {
     const grep = findTool("grep");
     const inspectSchema: any = inspect.parameters;
     const grepSchema: any = grep.parameters;
-    const iprops = inspectSchema.properties ?? inspectSchema;
+    const iprops = inspectSchema.anyOf ?? inspectSchema.oneOf ?? [];
+    const navigateBranch: any = iprops.find((b: any) => b.properties?.navigation);
+    expect(navigateBranch).toBeDefined();
+    expect(navigateBranch.properties.navigation).toBeDefined();
+    expect(navigateBranch.properties.navigation.properties.operation).toBeDefined();
+    expect(navigateBranch.properties.diagnostics).toBeDefined();
     const gprops = grepSchema.properties ?? grepSchema;
-    expect(iprops.navigation).toBeDefined();
-    expect(iprops.navigation.properties.operation).toBeDefined();
-    expect(iprops.diagnostics).toBeDefined();
     expect(gprops.structural).toBeDefined();
     expect(gprops.structural.properties.skip).toBeDefined();
     expect(gprops.structural.properties.groupByFile).toBeDefined();
@@ -130,7 +132,7 @@ describe("WP-SR6 MCP parity — no new tool names, existing mirror", () => {
 describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details)", () => {
   it("inspect.navigation file documentSymbols: text contains operation/status/source/truncated/items (no details needed)", async () => {
     const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+    const result: any = await inspect.execute("c", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
     // details is rich but MCP drops it — prove text is self-sufficient
     expect(result.details?.navigation).toBeDefined();
     expect(result.details.navigation.schemaVersion).toBe(1);
@@ -149,7 +151,7 @@ describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details
 
   it("inspect.navigation directory workspaceSymbols: text contains query results and stays mode map zero resources", async () => {
     const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { path: "src", navigation: { operation: "workspaceSymbols", query: "a" } }, undefined, undefined, makeCtx());
+    const result: any = await inspect.execute("c", { mode: "navigate", path: "src", navigation: { operation: "workspaceSymbols", query: "a" } }, undefined, undefined, makeCtx());
     expect(result.details.mode).toBe("directory");
     expect(result.details.workspaceEvidence.mode).toBe("map");
     expect(result.details.workspaceEvidence.resources).toEqual([]);
@@ -162,13 +164,13 @@ describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details
 
   it("inspect.navigation validation still reachable via MCP registry (requires/forbids matrix)", async () => {
     const inspect = findTool("inspect");
-    await expect(inspect.execute("c", { path: "hello.ts", navigation: { operation: "definition" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
-    await expect(inspect.execute("c", { path: "src", navigation: { operation: "workspaceSymbols" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires query/);
+    await expect(inspect.execute("c", { mode: "navigate", path: "hello.ts", navigation: { operation: "definition" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
+    await expect(inspect.execute("c", { mode: "navigate", path: "src", navigation: { operation: "workspaceSymbols" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires query/);
   });
 
   it("inspect.diagnostics file: text contains status/source/files/truncated even after MCP detail drop", async () => {
     const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
+    const result: any = await inspect.execute("c", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
     expect(result.details?.diagnostics).toBeDefined();
     expect(result.details.diagnostics.schemaVersion).toBe(1);
     expect(result.details.diagnostics.source).toBe("lsp");
@@ -184,7 +186,7 @@ describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details
 
   it("inspect.diagnostics directory: text contains per-file lines and stays mode map zero resources for directory envelope", async () => {
     const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { path: "src", diagnostics: { waitMs: 10, maxPerFile: 2, maxFiles: 1 } }, undefined, undefined, makeCtx());
+    const result: any = await inspect.execute("c", { mode: "navigate", path: "src", diagnostics: { waitMs: 10, maxPerFile: 2, maxFiles: 1 } }, undefined, undefined, makeCtx());
     expect(result.details.mode).toBe("directory");
     expect(result.details.workspaceEvidence.mode).toBe("map");
     // directory diagnostics keeps zero resources (covers §2 invariants) — navigation/diagnostics are search-match on file mode only
@@ -282,8 +284,11 @@ describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call
     const grep = tools.find((t) => t.name === "grep");
     expect(inspect).toBeDefined();
     expect(grep).toBeDefined();
-    expect(inspect.inputSchema.properties.navigation).toBeDefined();
-    expect(inspect.inputSchema.properties.diagnostics).toBeDefined();
+    const branches: any[] = inspect.inputSchema.anyOf ?? inspect.inputSchema.oneOf ?? [];
+    const navBranch: any = branches.find((b: any) => b.properties?.navigation);
+    expect(navBranch).toBeDefined();
+    expect(navBranch.properties.navigation).toBeDefined();
+    expect(navBranch.properties.diagnostics).toBeDefined();
     expect(grep.inputSchema.properties.structural).toBeDefined();
     // no parallel surface
     expect(tools.map((t) => t.name)).not.toContain("structural_search");
@@ -296,7 +301,7 @@ describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call
     const { handleMcpToolCall } = await import("../../../src/mcp-server.js");
     writeFileSync(join(workdir, "hello.ts"), "export const hello = 'x';\nexport function greet(){ return hello; }\n", "utf8");
     const ctx = makeCtx();
-    const mcpResult: any = await handleMcpToolCall("inspect", { path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, ctx as any);
+    const mcpResult: any = await handleMcpToolCall("inspect", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, ctx as any);
     expect(mcpResult.isError).toBe(false);
     const text = mcpResult.content?.[0]?.text ?? "";
     expect(text).toContain("## LSP Navigation");
@@ -309,7 +314,7 @@ describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call
     const { handleMcpToolCall } = await import("../../../src/mcp-server.js");
     writeFileSync(join(workdir, "hello.ts"), "export const hello = 'x';", "utf8");
     const ctx = makeCtx();
-    const mcpResult: any = await handleMcpToolCall("inspect", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } } as any, ctx as any);
+    const mcpResult: any = await handleMcpToolCall("inspect", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } } as any, ctx as any);
     expect(mcpResult.isError).toBe(false);
     const text = mcpResult.content?.[0]?.text ?? "";
     expect(text).toContain("## LSP Diagnostics");

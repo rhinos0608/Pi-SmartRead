@@ -47,7 +47,7 @@ describe("mcp-registry live inspect replaces eager fallback", () => {
 
         const resolver = mcp.getSharedEvidenceResolver(bus);
         const spy = vi.spyOn(resolver, "publishInspection");
-        const result = await live.execute("t-live", { path: "hello.ts" } as any, undefined, undefined, ctx());
+        const result = await live.execute("t-live", { mode: "file", path: "hello.ts" } as any, undefined, undefined, ctx());
         expect((result as any).details?.workspaceEvidence).toBeDefined();
         expect(spy).toHaveBeenCalled();
     });
@@ -70,7 +70,7 @@ describe("mcp-registry live inspect replaces eager fallback", () => {
 
             const resolver = mcp.getSharedEvidenceResolver(bus);
             const spy = vi.spyOn(resolver, "publishInspection");
-            const result = await live.execute("t-live2", { path: "hello.ts" } as any, undefined, undefined, ctx());
+            const result = await live.execute("t-live2", { mode: "file", path: "hello.ts" } as any, undefined, undefined, ctx());
             expect((result as any).details?.workspaceEvidence).toBeDefined();
             expect(spy).toHaveBeenCalled();
         } finally {

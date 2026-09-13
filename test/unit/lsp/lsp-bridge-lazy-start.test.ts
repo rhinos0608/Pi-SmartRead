@@ -72,7 +72,7 @@ describe("WP-SR5 lazy LSP start", () => {
       lspInspectionProvider: provider as any,
     });
     const ctx = { cwd: workdir, sessionManager: undefined } as any;
-    const result: any = await tool.execute("c-plain-dir", { path: "src" } as any, undefined, undefined, ctx);
+    const result: any = await tool.execute("c-plain-dir", { mode: "directory", path: "src" } as any, undefined, undefined, ctx);
     expect(result.details.mode).toBe("directory");
     expect(provider.inspectNavigation).not.toHaveBeenCalled();
     expect(provider.inspectDiagnostics).not.toHaveBeenCalled();
@@ -91,7 +91,7 @@ describe("WP-SR5 lazy LSP start", () => {
       lspInspectionProvider: provider as any,
     });
     const ctx = { cwd: workdir, sessionManager: undefined } as any;
-    await tool.execute("c-nav", { path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, undefined, undefined, ctx);
+    await tool.execute("c-nav", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, undefined, undefined, ctx);
     expect(provider.inspectNavigation).toHaveBeenCalledTimes(1);
   });
 });

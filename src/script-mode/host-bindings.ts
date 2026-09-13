@@ -41,6 +41,7 @@ import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protoco
 import { executeInspectV4 } from "../inspect/inspect.js";
 import type {
     CallDirection,
+    ContextGraphGetter,
     DiffTarget,
     InspectV4Input,
     NavigationOperation,
@@ -56,7 +57,7 @@ export interface HostBindingsOptions {
     readonly budget: RunBudget;
     readonly cwd: string;
     readonly sessionFilePath: string;
-    readonly contextGraph?: ContextGraph;
+    readonly contextGraph?: ContextGraph | ContextGraphGetter;
     readonly lspInspectionProvider?: LspInspectionProvider;
 }
 
@@ -171,7 +172,9 @@ interface BinderCtx {
     readonly budget: RunBudget;
     readonly cwd: string;
     readonly sessionFilePath: string;
-    readonly contextGraph?: ContextGraph;
+    readonly graphSource?: ContextGraph | ContextGraphGetter;
+    cachedGraph?: ContextGraph;
+    graphPromise?: Promise<ContextGraph | undefined>;
     readonly lspInspectionProvider?: LspInspectionProvider;
 }
 
@@ -184,9 +187,25 @@ function canonicalHint(ctx: BinderCtx, target: string | undefined): string | nul
     }
 }
 
-function baseInput(ctx: BinderCtx, path: string, signal: AbortSignal): InspectV4Input {
+/** Resolve the graph source once and cache it; concurrent callers share one build. */
+async function resolveGraph(ctx: BinderCtx): Promise<ContextGraph | undefined> {
+    if (ctx.cachedGraph) return ctx.cachedGraph;
+    const src = ctx.graphSource;
+    if (!src) return undefined;
+    if (!ctx.graphPromise) {
+        ctx.graphPromise = (async () => {
+            const g = typeof src === "function" ? await src() : src;
+            ctx.cachedGraph = g;
+            return g;
+        })();
+    }
+    return ctx.graphPromise;
+}
+
+async function baseInput(ctx: BinderCtx, path: string, signal: AbortSignal, opts?: { needGraph?: boolean }): Promise<InspectV4Input> {
     const input: InspectV4Input = { path, cwd: ctx.cwd, sessionFilePath: ctx.sessionFilePath, signal };
-    if (ctx.contextGraph) input.contextGraph = ctx.contextGraph;
+    const graph = opts?.needGraph ? await resolveGraph(ctx) : ctx.cachedGraph;
+    if (graph) input.contextGraph = graph;
     if (ctx.lspInspectionProvider) input.lspInspectionProvider = ctx.lspInspectionProvider;
     return input;
 }
@@ -211,6 +230,13 @@ async function guarded(
     const done = (status: HostCallLogEntry["status"]): void => {
         budget.record({ op, argsSummary, canonicalPathOrResourceId, status, elapsedMs: Date.now() - t0 });
     };
+    // Tracks whether the try body already recorded an audit entry (serialization
+    // failure, byte-cap rejection, success) so the outer catch records exactly one.
+    let recorded = false;
+    const mark = (status: HostCallLogEntry["status"]): void => {
+        recorded = true;
+        done(status);
+    };
     if (!budget.tryEnter()) {
         done("quota-exceeded");
         throw new HostBudgetExceeded(`${op}: max concurrent host operations exceeded`);
@@ -226,18 +252,18 @@ async function guarded(
         try {
             bytes = Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
         } catch {
-            done("error");
+            mark("error");
             throw new Error(`${op}: result is not JSON-serializable`);
         }
         if (!budget.tryAccountBytes(bytes)) {
-            done("quota-exceeded");
+            mark("quota-exceeded");
             throw new HostBudgetExceeded(`${op}: result size cap exceeded (${bytes} bytes)`);
         }
-        done("ok");
+        mark("ok");
         return { value, evidence };
     } catch (err) {
         const aborted = budget.signal.aborted || (err as { name?: string } | null)?.name === "AbortError";
-        if (!(err instanceof HostBudgetExceeded)) done(aborted ? "aborted" : "error");
+        if (!recorded && !(err instanceof HostBudgetExceeded)) done(aborted ? "aborted" : "error");
         throw err;
     } finally {
         budget.releaseSlot();
@@ -339,6 +365,7 @@ async function grepBinding(ctx: BinderCtx, pattern: unknown, opts: unknown): Pro
             throw new Error("grep(pattern) requires a non-empty string");
         }
         const o = asRecord(opts);
+        const graph = asString(o.graphFilter) ? await resolveGraph(ctx) : ctx.cachedGraph;
         const { result, evidence } = await runGrepQueryWithEvidence(
             {
                 pattern,
@@ -351,7 +378,8 @@ async function grepBinding(ctx: BinderCtx, pattern: unknown, opts: unknown): Pro
                 ...(asString(o.graphFilter) ? { graphFilter: asString(o.graphFilter)! } : {}),
             },
             ctx.cwd,
-            ctx.contextGraph ? { contextGraph: ctx.contextGraph } : {},
+            // Resolve the graph lazily and only when a graphFilter actually needs it.
+            graph ? { contextGraph: graph } : {},
             signal,
             ctx.sessionFilePath,
         );
@@ -405,7 +433,11 @@ async function inspectFileBinding(ctx: BinderCtx, path: unknown, opts: unknown):
         if (typeof path !== "string" || path.length === 0) {
             throw new Error("inspectFile(path) requires a non-empty string");
         }
-        const result = await executeInspectV4({ ...baseInput(ctx, path, signal), ...pickInspectOpts(ctx, opts) });
+        const needGraph = asRecord(opts).impact === true || asRecord(opts).graphSchema === true;
+        const result = await executeInspectV4({
+            ...(await baseInput(ctx, path, signal, { needGraph })),
+            ...pickInspectOpts(ctx, opts),
+        });
         return { value: projectInspectResult(result), evidence: result.workspaceEvidence };
     });
 }
@@ -415,7 +447,11 @@ async function inspectDirBinding(ctx: BinderCtx, path: unknown, opts: unknown): 
         if (typeof path !== "string" || path.length === 0) {
             throw new Error("inspectDir(path) requires a non-empty string");
         }
-        const result = await executeInspectV4({ ...baseInput(ctx, path, signal), ...pickInspectOpts(ctx, opts) });
+        const needGraph = asRecord(opts).impact === true || asRecord(opts).graphSchema === true;
+        const result = await executeInspectV4({
+            ...(await baseInput(ctx, path, signal, { needGraph })),
+            ...pickInspectOpts(ctx, opts),
+        });
         return { value: projectInspectResult(result), evidence: result.workspaceEvidence };
     });
 }
@@ -435,7 +471,7 @@ function makeFileLspOp(ctx: BinderCtx, operation: string): HostFn {
                 ...(asNumber(p.character) !== undefined ? { character: asNumber(p.character)! } : {}),
                 ...(asNumber(p.maxResults) !== undefined ? { maxResults: asNumber(p.maxResults)! } : {}),
             };
-            const result = await executeInspectV4({ ...baseInput(ctx, target, signal), navigation });
+            const result = await executeInspectV4({ ...(await baseInput(ctx, target, signal)), navigation });
             return {
                 value: result.navigation ?? { status: "degraded", operation, items: [], truncated: false },
                 evidence: result.workspaceEvidence,
@@ -455,7 +491,7 @@ async function lspWorkspaceSymbols(ctx: BinderCtx, params: unknown): Promise<Hos
             throw new Error(`Error: inspect navigation operation "workspaceSymbols" requires a directory target`);
         }
         const result = await executeInspectV4({
-            ...baseInput(ctx, target, signal),
+            ...(await baseInput(ctx, target, signal)),
             navigation: {
                 operation: "workspaceSymbols",
                 query,
@@ -488,7 +524,7 @@ function makeGraphOp(
             if (opts?.fileOnly && kind !== "file") {
                 throw new Error(`Error: inspect graph.${op} requires a file target`);
             }
-            const input = baseInput(ctx, target, signal);
+            const input = await baseInput(ctx, target, signal, { needGraph: true });
             apply(p, input);
             const result = await executeInspectV4(input);
             return { value: projectInspectResult(result), evidence: result.workspaceEvidence };
@@ -532,7 +568,7 @@ export function buildHostBindings(opts: HostBindingsOptions): ScriptHostApi {
         budget: opts.budget,
         cwd: opts.cwd,
         sessionFilePath: opts.sessionFilePath,
-        ...(opts.contextGraph ? { contextGraph: opts.contextGraph } : {}),
+        ...(opts.contextGraph ? { graphSource: opts.contextGraph } : {}),
         ...(opts.lspInspectionProvider
             ? { lspInspectionProvider: clampProviderTimeouts(opts.lspInspectionProvider, opts.budget) }
             : {}),

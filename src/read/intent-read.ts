@@ -53,6 +53,9 @@ import {
   type ConfidenceClass,
   type RelevanceClass,
 } from "../ranking/classifiers.js";
+import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import { aggregateBatchEvidence } from "../evidence/read-many-evidence.js";
+import { sessionFileFromContext } from "../inspect/inspect-tool.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -166,6 +169,19 @@ interface IntentReadFileDetail {
   adrBoost?: number;
 }
 
+/**
+ * Options for {@link createIntentReadTool}. Mirrors the read_files
+ * publish hook so a single callback can collect batch evidence from
+ * intent reads.
+ */
+export interface IntentReadToolOptions {
+  readonly publishInspection?: (
+    envelope: WorkspaceEvidenceEnvelope,
+    sessionFilePath: string,
+    workspaceRoot: string,
+  ) => void;
+}
+
 interface WorkingIntentReadFileDetail extends IntentReadFileDetail {
   semanticScore?: number;
   keywordScore?: number;
@@ -207,6 +223,14 @@ interface IntentReadDetails {
   };
   probing?: ProbeResult;
   hyde?: HydeResult;
+  /**
+   * Batch envelope aggregating per-file evidence for fully-included
+   * files only (mirrors the read_files contract). Partially-included
+   * files are excluded: their packed window is derived after the
+   * original read, so no authority is safer than overstated authority.
+   * Absent when no per-file read produced a usable envelope.
+   */
+  workspaceEvidence?: WorkspaceEvidenceEnvelope;
   reranking?: {
     status: "off" | "ok" | "failed_fallback";
     changedOrder: boolean;
@@ -228,6 +252,7 @@ interface IntentReadDetails {
 export function createIntentReadTool(
   readToolFactory: typeof createReadTool = createReadTool,
   fetchEmbeddingsImpl: (req: EmbedRequest) => Promise<EmbedResult> = defaultFetchEmbeddings,
+  opts: IntentReadToolOptions = {},
 ): ToolDefinition {
   const embeddingLruCache = new LruCache<EmbedResult>(INTENT_READ_CACHE_SIZE);
   // Persistent cache is lazy-initialized per cwd (disk path depends on cwd).
@@ -518,6 +543,7 @@ export function createIntentReadTool(
         startLine?: number;
         anchorBody?: boolean;
         error?: string;
+        evidence?: WorkspaceEvidenceEnvelope;
       }
       const fileResults: FileReadResult[] = [];
 
@@ -552,6 +578,9 @@ export function createIntentReadTool(
                   details as { displayContent?: { text?: string; startLine?: number } } | undefined
                 )?.displayContent;
 
+                const evidence = (
+                  result.details as { workspaceEvidence?: WorkspaceEvidenceEnvelope } | undefined
+                )?.workspaceEvidence;
                 const renderedBody = displayContent?.text ?? result.content
                   .filter((item): item is { type: "text"; text: string } => item.type === "text")
                   .map((item) => item.text)
@@ -574,6 +603,7 @@ export function createIntentReadTool(
                   renderedBody: body,
                   startLine,
                   anchorBody: rawMode ? false : !alreadyAnchored,
+                  ...(evidence && { evidence }),
                 };
               } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
@@ -797,6 +827,24 @@ export function createIntentReadTool(
           omittedPaths: plan.omittedIndexes.map((i: number) => packCandidates[i]!.path),
         },
       };
+
+      const perFileByPackIndex = new Map<number, WorkspaceEvidenceEnvelope>();
+      for (let i = 0; i < packCandidates.length; i++) {
+        const evidence = fileResults.find((f) => f.path === packCandidates[i]!.path)?.evidence;
+        if (evidence) perFileByPackIndex.set(i, evidence);
+      }
+      const batchEvidence = aggregateBatchEvidence({
+        cwd: ctx.cwd,
+        sessionFilePath: sessionFileFromContext(ctx),
+        perFile: perFileByPackIndex,
+        fullIncluded: plan.fullIncluded,
+        summarizedIndexes: new Set<number>(),
+        outputTruncated: false,
+        publishInspection: opts.publishInspection,
+      });
+      if (batchEvidence) {
+        details.workspaceEvidence = batchEvidence;
+      }
 
       return {
         content: [{ type: "text", text: outputText }],

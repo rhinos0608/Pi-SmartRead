@@ -119,13 +119,22 @@ describe("createInspectV4Tool (schema)", () => {
         expect(tool.name).toBe("inspect");
     });
 
-    it("exposes path param and not query/symbol/action", () => {
+    it("exposes discriminated union branches and not query/symbol/action", () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         const schema = tool.parameters as Record<string, any>;
-        const props = schema.properties ?? schema;
-        expect(props.path).toBeDefined();
-        for (const k of ["query", "symbol", "action"]) {
-            expect(props[k]).toBeUndefined();
+        const branches: any[] = schema.anyOf ?? schema.oneOf;
+        expect(Array.isArray(branches)).toBe(true);
+        expect(branches).toHaveLength(4);
+        const byMode = Object.fromEntries(branches.map((b) => [b.properties?.mode?.const, b]));
+        expect(Object.keys(byMode).sort()).toEqual(["directory", "file", "navigate", "script"]);
+        expect(byMode.file.properties.path).toBeDefined();
+        expect(byMode.directory.properties.path).toBeDefined();
+        expect(byMode.file.properties.analysis).toBeDefined();
+        expect(byMode.directory.properties.architecture).toBeDefined();
+        for (const b of branches) {
+            for (const k of ["query", "symbol", "action"]) {
+                expect(b.properties?.[k]).toBeUndefined();
+            }
         }
     });
 
@@ -138,7 +147,7 @@ describe("createInspectV4Tool (schema)", () => {
     it("execute() rejects when no session file is available", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         await expect(
-            tool.execute("c1", { path: "." }, undefined, undefined, makeCtx()),
+            tool.execute("c1", { mode: "directory", path: "." }, undefined, undefined, makeCtx()),
         ).rejects.toThrow(/session/i);
     });
 
@@ -152,7 +161,7 @@ describe("createInspectV4Tool (schema)", () => {
                 },
             },
         });
-        const result = await tool.execute("c1", { path: "." }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c1", { mode: "directory", path: "." }, undefined, undefined, makeCtx());
         const details = (result as any).details;
         expect(details.mode).toBe("directory");
         expect(details.workspaceEvidence.resources).toEqual([]);
@@ -164,7 +173,7 @@ describe("createInspectV4Tool (schema)", () => {
         const tool = createInspectV4Tool({
             getSessionFilePath: () => "/sessions/abc.jsonl",
         });
-        const result = await tool.execute("c1", { path: "hello.ts" }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c1", { mode: "file", path: "hello.ts" }, undefined, undefined, makeCtx());
         const details = (result as any).details;
         expect(details.mode).toBe("file");
         expect(details.workspaceEvidence.mode).toBe("symbol");

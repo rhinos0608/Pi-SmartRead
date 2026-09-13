@@ -7,6 +7,7 @@
  */
 import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import type { ContextGraph } from "../context-graph.js";
+import type { ContextGraphGetter } from "../inspect/inspect-types.js";
 import type { LspInspectionProvider } from "../lsp/lsp-inspection.js";
 
 /** Per-host-call audit entry. Carried on the outer script result (§5). */
@@ -58,8 +59,8 @@ export interface ScriptModeInput {
     readonly sessionFilePath: string;
     /** Outer abort (linked into the run budget). */
     readonly signal?: AbortSignal;
-    /** Threaded into grep/inspect compute calls when present. */
-    readonly contextGraph?: ContextGraph;
+    /** Threaded into grep/inspect compute calls when present; a lazy getter resolves on first graph use. */
+    readonly contextGraph?: ContextGraph | ContextGraphGetter;
     /** Threaded into inspect LSP sections when present. */
     readonly lspInspectionProvider?: LspInspectionProvider;
     /** Budget overrides (deadline + quotas). */

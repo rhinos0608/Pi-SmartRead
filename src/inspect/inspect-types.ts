@@ -3,6 +3,9 @@ import type { ContextGraph } from "../context-graph.js";
 
 export type InspectV4Mode = "directory" | "file";
 
+/** Result-mode contract: path dispatch plus the script branch's merged query evidence. */
+export type InspectV4ResultMode = InspectV4Mode | "query";
+
 export type CallDirection = "callers" | "callees" | "both";
 export type DiffTarget = "unstaged" | "staged" | "HEAD";
 
@@ -44,7 +47,7 @@ export interface InspectV4Input {
   navigation?: NavigationParams;
   diagnostics?: DiagnosticsParams;
 
-  // ── Script mode (inspect { script }) ──────────────────────────────
+  // ── Script mode (inspect { mode: "script", script }) ────────────────
   // Own dispatch branch, NOT a third InspectV4Mode value (the union stays
   // "directory" | "file" by contract). The tool layer defaults an omitted
   // path to "." before populating `path`, so `path` stays required here.
@@ -52,6 +55,8 @@ export interface InspectV4Input {
 
   // ── ContextGraph injection (WP-4 owns the type; WP-5 populates at runtime) ──
   contextGraph?: ContextGraph;
+  /** Script-branch-only lazy graph source; the engine resolves/caches it on first graph use. */
+  contextGraphGetter?: ContextGraphGetter;
   // ── WP-SR5: shared LSP inspection provider (lazy; only used when navigation/diagnostics requested) ──
   lspInspectionProvider?: import("../lsp/lsp-inspection.js").LspInspectionProvider;
 }
@@ -88,8 +93,47 @@ export interface InspectDiagnosticsDetails {
   truncated: boolean;
 }
 
+export type ContextGraphGetter = () => ContextGraph | Promise<ContextGraph>;
+
+// ── Tool-layer discriminated branches (one operation each, no cross-matrix) ──
+/** File artifact inspection: structural facts + quality signals. */
+export interface FileAnalysisOptions {
+  signals?: string[];
+  compact?: boolean;
+  callDepth?: number;
+  callDirection?: CallDirection;
+  deadCode?: boolean;
+  impact?: boolean;
+  diff?: DiffTarget;
+  graphSchema?: boolean;
+  hotspots?: boolean;
+  routes?: boolean;
+}
+/** Directory/project inspection: repo map + architecture. */
+export interface DirectoryArchitectureOptions {
+  mapTokens?: number;
+  focus?: string[];
+  compact?: boolean;
+  signals?: string[];
+  deadCode?: boolean;
+  impact?: boolean;
+  diff?: DiffTarget;
+  graphSchema?: boolean;
+  hotspots?: boolean;
+  routes?: boolean;
+  clusters?: boolean;
+  layers?: boolean;
+  boundaries?: boolean;
+}
+/** Tool-layer params: four operations sharing one entry point. */
+export type InspectParams =
+  | { mode: "file"; path: string; analysis?: FileAnalysisOptions }
+  | { mode: "directory"; path: string; architecture?: DirectoryArchitectureOptions }
+  | { mode: "navigate"; path: string; navigation?: NavigationParams; diagnostics?: DiagnosticsParams }
+  | { mode: "script"; path?: string; script: string };
+
 export interface InspectV4Result {
-  mode: InspectV4Mode;
+  mode: InspectV4ResultMode;
   contentText: string;
   workspaceEvidence: WorkspaceEvidenceEnvelope;
   lineCount: number;

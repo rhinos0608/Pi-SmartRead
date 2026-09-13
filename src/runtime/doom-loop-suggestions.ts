@@ -30,9 +30,9 @@ function str(text: string): DoomLoopSuggestion {
 export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
   read: [
     str("if file is large, try offset + limit"),
-    { text: "if this is a multi-hop chase (grep → read → grep → inspect following a lead), consider inspect { script } to compose the chase in one call", toolHint: "inspect" },
+    { text: "if this is a multi-hop chase (grep → read → grep → inspect following a lead), consider inspect { mode: \"script\", script: \"...\" } to compose the chase in one call", toolHint: "inspect" },
     str("if file keeps being read identically, the content may already be what you expect"),
-    { text: 'if searching for a symbol, use inspect { path: "path/to/file.ts" } for structural facts', toolHint: "inspect" },
+    { text: 'if searching for a symbol, use inspect { mode: \"file\", path: \"path/to/file.ts\" } for structural facts', toolHint: "inspect" },
     { text: 'use read { query: "your intent" } to rank and read relevant files', toolHint: "read", toolInput: { query: "<describe what you are looking for>" } },
     { text: "use inspect to discover related files and repo structure", toolHint: "inspect" },
   ],
@@ -42,14 +42,14 @@ export const SUGGESTIONS: Record<string, readonly Suggestion[]> = {
     { text: 'use read { query: "your intent" } to rank and read relevant files', toolHint: "read", toolInput: { query: "<describe what you are looking for>" } },
     str("use inspect on a different file to check callers or children"),
     { text: "use grep { pattern, path } to search across files for a name or concept", toolHint: "grep" },
-    { text: "if this is a multi-hop chase (grep → read → grep → inspect following a lead), consider inspect { script } to compose the chase in one call", toolHint: "inspect" },
+    { text: "if this is a multi-hop chase (grep → read → grep → inspect following a lead), consider inspect { mode: \"script\", script: \"...\" } to compose the chase in one call", toolHint: "inspect" },
   ],
   grep: [
     str("try a more specific pattern or narrower path"),
     str("try literal: true for exact substring match"),
     str("try ignoreCase: true if casing is uncertain"),
     { text: "use read { query: \"your intent\" } for semantic multi-channel search", toolHint: "read", toolInput: { query: "<describe what you are looking for>" } },
-    { text: "if this is a multi-hop chase (grep → read → grep → inspect following a lead), consider inspect { script } to compose the chase in one call", toolHint: "inspect" },
+    { text: "if this is a multi-hop chase (grep → read → grep → inspect following a lead), consider inspect { mode: \"script\", script: \"...\" } to compose the chase in one call", toolHint: "inspect" },
   ],
   graph_mutate: [
     str("verify the from/to paths exist"),

@@ -12,7 +12,7 @@ import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
 import { executeInspectV4 } from "../../../src/inspect/inspect.js";
 import { computePathEvidence } from "../../../src/evidence/path-evidence.js";
-import type { InspectV4Mode } from "../../../src/inspect/inspect-types.js";
+import type { InspectV4Mode, InspectV4Result } from "../../../src/inspect/inspect-types.js";
 
 let dir: string;
 let sessionFile: string;
@@ -47,13 +47,19 @@ function makeCtx(cwd: string = dir): any {
 
 async function runScript(script: string, params: Record<string, unknown> = {}, tool?: any) {
     const t = tool ?? makeTool();
-    return (await t.execute("c1", { script, ...params }, undefined, undefined, makeCtx())) as any;
+    return (await t.execute("c1", { mode: "script", script, ...params }, undefined, undefined, makeCtx())) as any;
 }
 
 describe("script schema", () => {
     it("exposes an optional script param with ADR-0002 WHEN/WHEN NOT/RETURNS/EXAMPLE description", () => {
         const tool = makeTool();
-        const props = (tool.parameters as any).properties;
+        const branches = (tool.parameters as any).anyOf ?? (tool.parameters as any).oneOf;
+        expect(branches).toBeDefined();
+        const scriptBranch = branches.find((b: any) => b.properties?.mode?.const === "script");
+        expect(scriptBranch).toBeDefined();
+        // Script branch rejects foreign keys at the schema level too.
+        expect(scriptBranch.additionalProperties).toBe(false);
+        const props = scriptBranch.properties;
         expect(props.script).toBeDefined();
         const desc: string = props.script.description;
         expect(desc).toContain("WHEN:");
@@ -69,16 +75,37 @@ describe("script schema", () => {
         }
     });
 
-    it("makes path optional (omitted anchors at cwd)", () => {
+    it("makes path optional in script mode but required in file/directory/navigate", () => {
         const tool = makeTool();
-        const schema = tool.parameters as any;
-        const required: string[] = schema.required ?? [];
-        expect(required).not.toContain("path");
-        expect(schema.properties.path).toBeDefined();
+        const branches = (tool.parameters as any).anyOf ?? (tool.parameters as any).oneOf;
+        const byMode = Object.fromEntries(branches.map((b: any) => [b.properties.mode.const, b]));
+        expect(byMode.script.required ?? []).not.toContain("path");
+        expect(byMode.script.properties.path).toBeDefined();
+        for (const mode of ["file", "directory", "navigate"]) {
+            expect(byMode[mode].required).toContain("path");
+            expect(byMode[mode].additionalProperties).toBe(false);
+        }
     });
 
-    it("leaves the InspectV4Mode union untouched", () => {
+    it("leaves the InspectV4Mode union untouched and exposes query on the result mode", () => {
         expectTypeOf<InspectV4Mode>().toEqualTypeOf<"directory" | "file">();
+        expectTypeOf<InspectV4Result["mode"]>().toEqualTypeOf<"directory" | "file" | "query">();
+    });
+
+    it("rejects foreign branch keys at the tool boundary", async () => {
+        const tool = makeTool();
+        const ctx = makeCtx();
+        const cases: Array<Record<string, unknown>> = [
+            { mode: "file", path: "f.ts", architecture: {} },
+            { mode: "directory", path: ".", analysis: {} },
+            { mode: "navigate", path: "f.ts", analysis: {} },
+            { mode: "script", script: "return 1;", navigation: {} },
+        ];
+        for (const params of cases) {
+            await expect(tool.execute("x", params as any, undefined, undefined, ctx)).rejects.toThrow(
+                /cannot be combined with mode/,
+            );
+        }
     });
 });
 
@@ -99,32 +126,19 @@ describe("script dispatch validation", () => {
         expect(result.details.upstreamDetails.script.anchorPath).toBe(".");
     }, 20_000);
 
-    it("rejects every mode-specific param combined with script", async () => {
+    it("rejects other branches' keys combined with script", async () => {
         const tool = makeTool();
         const ctx = makeCtx();
         const cases: Record<string, unknown> = {
-            signals: ["complexity"],
-            mapTokens: 100,
-            focus: ["f.ts"],
-            compact: true,
-            callDepth: 2,
-            callDirection: "callers",
-            deadCode: true,
-            impact: true,
-            diff: "HEAD",
-            clusters: true,
-            graphSchema: true,
-            hotspots: true,
-            boundaries: true,
-            routes: true,
-            layers: true,
+            analysis: { deadCode: true },
+            architecture: { clusters: true },
             navigation: { operation: "documentSymbols" },
             diagnostics: { waitMs: 10 },
         };
         for (const [key, value] of Object.entries(cases)) {
             await expect(
-                tool.execute("x", { script: "return 1;", [key]: value }, undefined, undefined, ctx),
-            ).rejects.toThrow(`Error: inspect param "${key}"`);
+                tool.execute("x", { mode: "script", script: "return 1;", [key]: value }, undefined, undefined, ctx),
+            ).rejects.toThrow(`Error: inspect param "${key}" cannot be combined with mode "script"`);
         }
     }, 30_000);
 
@@ -132,25 +146,28 @@ describe("script dispatch validation", () => {
         const tool = makeTool();
         const ctx = makeCtx();
         await expect(
-            tool.execute("x", { script: "return 1;", query: "old" } as any, undefined, undefined, ctx),
+            tool.execute("x", { mode: "script", script: "return 1;", query: "old" } as any, undefined, undefined, ctx),
         ).rejects.toThrow(/grep/);
         await expect(
-            tool.execute("x", { script: "return 1;", symbol: "old" } as any, undefined, undefined, ctx),
+            tool.execute("x", { mode: "script", script: "return 1;", symbol: "old" } as any, undefined, undefined, ctx),
         ).rejects.toThrow(/symbol/i);
         await expect(
-            tool.execute("x", { script: "return 1;", action: "map" } as any, undefined, undefined, ctx),
+            tool.execute("x", { mode: "script", script: "return 1;", action: "map" } as any, undefined, undefined, ctx),
         ).rejects.toThrow(/action/);
     });
 
-    it("rejects empty script and missing path without script", async () => {
+    it("rejects empty script, missing mode, and missing branch path", async () => {
         const tool = makeTool();
         const ctx = makeCtx();
         await expect(
-            tool.execute("x", { script: "" }, undefined, undefined, ctx),
-        ).rejects.toThrow('Error: inspect param "script"');
+            tool.execute("x", { mode: "script", script: "" }, undefined, undefined, ctx),
+        ).rejects.toThrow('Error: inspect param "script" must be a non-empty string');
         await expect(
             tool.execute("x", {} as any, undefined, undefined, ctx),
-        ).rejects.toThrow('Error: inspect param "path" is required without script');
+        ).rejects.toThrow('Error: inspect requires "mode"');
+        await expect(
+            tool.execute("x", { mode: "file" } as any, undefined, undefined, ctx),
+        ).rejects.toThrow('Error: inspect mode "file" requires "path"');
     });
 
     it("script never reaches stat dispatch (nonexistent anchor still runs)", async () => {
@@ -210,54 +227,44 @@ describe("script end-to-end (real compute)", () => {
     }, 20_000);
 
     it("stale-SHA last-wins through the full script path (real fs writes)", async () => {
-        // Direct executeScriptMode call per contract ("through the full
-        // executeScriptMode path"), with a generous budget so full-suite
-        // contention slows the run instead of degrading it. The gap between
-        // the reads is a real grep scan: guest-side busy-waiting cannot work
-        // (the interpreter blocks the Node loop while spinning, so an
-        // external timer would fire only after both reads), while host-side
-        // async fs I/O yields macrotask turns and lets the timer land mid-run
-        // (probed: a mid-grep timer fires on schedule).
+        // Explicit host-call barrier instead of a timer: the lazy contextGraph
+        // getter runs after the first read completes (program order) and before
+        // the second read begins, performing the file update synchronously.
+        // It then throws so no graph is needed in this fixture; the guest
+        // catches the failed graph call and continues to the second read.
         const { executeScriptMode } = await import("../../../src/script-mode/index.js");
-        await executeScriptMode({ script: `return 1;`, cwd: dir, sessionFilePath: sessionFile });
         const f = join(dir, "f.ts");
         writeFileSync(f, "v1\n");
-        for (let i = 0; i < 250; i++) {
-            writeFileSync(join(dir, `bulk-${i}.ts`), `export const bulk${i} = ${i};\n`);
-        }
-        // +1000ms: wide enough that read1 (ms-scale, engine already warm)
-        // lands before it even under full-suite contention, narrow enough
-        // that the multi-second grep scan still follows it (solo ~3s, longer
-        // loaded). Either side failing fails loudly via the markers below.
-        const timer = setTimeout(() => writeFileSync(f, "v2\n"), 1000);
-        try {
-            const result = await executeScriptMode({
-                script: `const a = await read("f.ts"); await grep("scriptWiringToken", { literal: true, limit: 50 }); const b = await read("f.ts"); return { a: a.contentText, b: b.contentText };`,
-                cwd: dir,
-                sessionFilePath: sessionFile,
-                budget: { deadlineMs: 30_000 },
-            });
-            // Status first: a degraded run has no returnValue, so asserting
-            // markers directly would TypeError instead of showing errorKind.
-            expect(result.status).toBe("ok");
-            const rv = result.returnValue as { a: string; b: string };
-            // The mutation provably landed between the two reads (contentText
-            // is line-numbered, so match on the version markers).
-            expect(rv.a).toContain("v1");
-            expect(rv.a).not.toContain("v2");
-            expect(rv.b).toContain("v2");
-            // Two full-file reads share one resourceId: last-wins leaves a
-            // single full-file entry carrying the later observation.
-            const evidence = result.workspaceEvidence!;
-            const full = evidence.resources.filter((r: any) => r.fullFileSha256 !== undefined);
-            expect(full).toHaveLength(1);
-            const fresh = computePathEvidence({ path: "f.ts", cwd: dir, sessionFilePath: sessionFile });
-            expect(full[0]!.fullFileSha256).toBe(fresh.workspaceEvidence.resources[0]!.fullFileSha256);
-            expect(validateInspectionEnvelope(evidence).ok).toBe(true);
-        } finally {
-            clearTimeout(timer);
-        }
-    }, 40_000);
+        let barrierCalls = 0;
+        const result = await executeScriptMode({
+            script: `const a = await read("f.ts"); try { await graph.clusters({ path: "." }); } catch (e) {} const b = await read("f.ts"); return { a: a.contentText, b: b.contentText };`,
+            cwd: dir,
+            sessionFilePath: sessionFile,
+            contextGraph: () => {
+                barrierCalls++;
+                writeFileSync(f, "v2\n");
+                throw new Error("barrier: no graph in this fixture");
+            },
+        });
+        // Status first: a degraded run has no returnValue, so asserting
+        // markers directly would TypeError instead of showing errorKind.
+        expect(result.status).toBe("ok");
+        expect(barrierCalls).toBe(1);
+        const rv = result.returnValue as { a: string; b: string };
+        // The mutation provably landed between the two reads (contentText
+        // is line-numbered, so match on the version markers).
+        expect(rv.a).toContain("v1");
+        expect(rv.a).not.toContain("v2");
+        expect(rv.b).toContain("v2");
+        // Two full-file reads share one resourceId: last-wins leaves a
+        // single full-file entry carrying the later observation.
+        const evidence = result.workspaceEvidence!;
+        const full = evidence.resources.filter((r: any) => r.fullFileSha256 !== undefined);
+        expect(full).toHaveLength(1);
+        const fresh = computePathEvidence({ path: "f.ts", cwd: dir, sessionFilePath: sessionFile });
+        expect(full[0]!.fullFileSha256).toBe(fresh.workspaceEvidence.resources[0]!.fullFileSha256);
+        expect(validateInspectionEnvelope(evidence).ok).toBe(true);
+    }, 20_000);
 
     it("oversized host result degrades (quota-exceeded) instead of throwing", async () => {
         writeFileSync(join(dir, "big.txt"), "x".repeat(300_000));
@@ -317,7 +324,7 @@ describe("script evidence visibility", () => {
     it("publishes the merged envelope exactly once per outer tool call", async () => {
         const publish = vi.fn();
         const tool = makeTool({ resolver: { publishInspection: publish } });
-        await tool.execute("c1", { script: `const r = await read("f.ts"); return r.totalLines;` }, undefined, undefined, makeCtx());
+        await tool.execute("c1", { mode: "script", script: `const r = await read("f.ts"); return r.totalLines;` }, undefined, undefined, makeCtx());
         expect(publish).toHaveBeenCalledTimes(1);
         const [envelope, session, root] = publish.mock.calls[0]!;
         expect((envelope as any).mode).toBe("query");
@@ -326,7 +333,7 @@ describe("script evidence visibility", () => {
         // A degraded run with zero successful calls still publishes exactly
         // once (empty query envelope), never zero times, never twice.
         publish.mockClear();
-        await tool.execute("c2", { script: `return await read("nope-missing-xyz.ts");` }, undefined, undefined, makeCtx());
+        await tool.execute("c2", { mode: "script", script: `return await read("nope-missing-xyz.ts");` }, undefined, undefined, makeCtx());
         expect(publish).toHaveBeenCalledTimes(1);
         expect((publish.mock.calls[0]![0] as any).mode).toBe("query");
         expect((publish.mock.calls[0]![0] as any).resources).toEqual([]);
@@ -352,7 +359,7 @@ describe("script cross-root behavior", () => {
             const ctx = { cwd: root } as any;
             const result = (await tool.execute(
                 "cx",
-                { script: `const r = await read("outside/outside.ts"); return r.contentText;` },
+                { mode: "script", script: `const r = await read("outside/outside.ts"); return r.contentText;` },
                 undefined,
                 undefined,
                 ctx,

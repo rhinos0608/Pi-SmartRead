@@ -78,16 +78,26 @@ export async function executeScriptMode(input: ScriptModeInput): Promise<ScriptM
         // Final-return-value size cap: truncate + flag (InspectV4Result convention).
         const maxReturnBytes = budget.options.maxReturnBytes;
         let serialized = "";
+        let returnValue: unknown = outcome.returnValue;
         try {
             serialized = JSON.stringify(outcome.returnValue) ?? "";
         } catch {
             serialized = "(unserializable return value)";
+            returnValue = { __unserializable: true, note: "(unserializable return value)" };
         }
-        let returnValue: unknown = outcome.returnValue;
         let truncated = false;
         if (Buffer.byteLength(serialized, "utf8") > maxReturnBytes) {
             truncated = true;
-            const preview = serialized.slice(0, Math.min(serialized.length, maxReturnBytes));
+            // Enforce the cap in UTF-8 bytes (not UTF-16 code units): walk by
+            // code point and stop before the code point that would overflow.
+            let preview = "";
+            let used = 0;
+            for (const point of serialized) {
+                const pointBytes = Buffer.byteLength(point, "utf8");
+                if (used + pointBytes > maxReturnBytes) break;
+                preview += point;
+                used += pointBytes;
+            }
             returnValue = { __truncated: true, preview, note: "return value exceeded size cap; preview truncated" };
         }
         const returnPreview = truncated ? JSON.stringify(returnValue) : serialized;

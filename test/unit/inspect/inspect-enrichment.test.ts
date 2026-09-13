@@ -68,7 +68,7 @@ describe("read tool enrichment (replaces inspect path mode enrichment)", () => {
     };
     const { createInspectV4Tool: mkTool } = await import("../../../src/inspect/inspect-tool.js");
     const tool2 = mkTool({ getSessionFilePath: () => session, lspInspectionProvider: navProvider } as any);
-    const r2: any = await tool2.execute("enrich-doc-sym", { path: "a.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, { cwd: wd, sessionManager: { getSessionFile: () => session } } as any);
+    const r2: any = await tool2.execute("enrich-doc-sym", { mode: "navigate", path: "a.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, { cwd: wd, sessionManager: { getSessionFile: () => session } } as any);
     const res2 = (r2.details as any).workspaceEvidence.resources.find((x: any) => x.canonicalPath.includes("a.ts"));
     expect(res2.allowedRanges).toEqual(expect.arrayContaining([{ startLine: 1, endLine: 3 }, { startLine: 6, endLine: 8 }]));
     expect(res2.allowedRanges.length).toBe(2);

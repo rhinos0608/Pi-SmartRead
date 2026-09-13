@@ -261,7 +261,7 @@ describe("MCP advanced capabilities", () => {
     expect(msg.content.type).toBe("text");
     expect(msg.content.text).toContain("find all usages of Authenticator");
     expect(msg.content.text).toContain("BM25+embedding RRF");
-    expect(msg.content.text).toContain("inspect { path }:");
+    expect(msg.content.text).toContain("inspect { mode, path, ... }");
     expect(msg.content.text).toContain('grep { pattern }:');
   }, 60_000);
 

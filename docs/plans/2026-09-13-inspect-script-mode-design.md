@@ -1,7 +1,7 @@
 # inspect script-mode design
 
 **Date:** 2026-09-13
-**Status:** Draft — reviewer hardening pass incorporated; pending QuickJS spike
+**Status:** Implemented — QuickJS spike complete and results recorded (see Risks section); script mode shipped
 **Owner:** Pi
 
 ## Goal

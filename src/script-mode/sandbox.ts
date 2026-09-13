@@ -285,7 +285,7 @@ type PreparedGuest =
 /** Inject + evaluate. Spike pattern: async IIFE, resolve via `vm.resolvePromise`. */
 function prepareGuest(ctx: InjectCtx, host: ScriptHostApi, script: string): PreparedGuest {
     injectHostApi(ctx, host);
-    const r = ctx.vm.evalCode(`(async () => { ${script} })()`, "script.js");
+    const r = ctx.vm.evalCode(`(async () => {\n${script}\n})()`, "script.js");
     if (r.error) {
         const errorText = readErrorText(ctx.vm, r.error);
         r.error.dispose();

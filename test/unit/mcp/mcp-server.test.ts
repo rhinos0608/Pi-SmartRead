@@ -37,7 +37,7 @@ describe("MCP stdio server (smoke)", () => {
           method: "tools/call",
           params: {
             name: "inspect",
-            arguments: { path: "src" },
+            arguments: { mode: "directory", path: "src" },
           },
         },
       ],

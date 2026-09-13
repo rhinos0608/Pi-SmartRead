@@ -389,14 +389,20 @@ describe("createInspectV4Tool (schema and execute)", () => {
         expect(tool.name).toBe("inspect");
     });
 
-    it("has path param and no query/symbol/action", () => {
+    it("exposes a discriminated mode union and no query/symbol/action", () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         const schema = tool.parameters as Record<string, any>;
-        const props = schema.properties ?? schema;
-        expect(props.path).toBeDefined();
-        expect(props.query).toBeUndefined();
-        expect(props.symbol).toBeUndefined();
-        expect(props.action).toBeUndefined();
+        const branches = schema.anyOf ?? schema.oneOf;
+        expect(Array.isArray(branches)).toBe(true);
+        expect(branches.length).toBe(4);
+        const consts = branches.map((b: any) => b?.properties?.mode?.const).sort();
+        expect(consts).toEqual(["directory", "file", "navigate", "script"]);
+        for (const b of branches as any[]) {
+            const props = (b as any)?.properties ?? {};
+            expect(props.query).toBeUndefined();
+            expect(props.symbol).toBeUndefined();
+            expect(props.action).toBeUndefined();
+        }
     });
 
     it("description mentions file and directory modes", () => {
@@ -408,7 +414,7 @@ describe("createInspectV4Tool (schema and execute)", () => {
 
     it("executes directory mode through the tool factory", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const result = await tool.execute("c1", { path: "mysrc" }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c1", { mode: "directory", path: "mysrc" }, undefined, undefined, makeCtx());
         const details = (result as any).details;
         expect(details.mode).toBe("directory");
         expect(details.workspaceEvidence.mode).toBe("map");
@@ -416,7 +422,7 @@ describe("createInspectV4Tool (schema and execute)", () => {
 
     it("executes file mode through the tool factory", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const result = await tool.execute("c2", { path: "hello.ts" }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c2", { mode: "file", path: "hello.ts" }, undefined, undefined, makeCtx());
         const details = (result as any).details;
         expect(details.mode).toBe("file");
         expect(details.workspaceEvidence.mode).toBe("symbol");
@@ -453,7 +459,7 @@ describe("createInspectV4Tool (schema and execute)", () => {
                 },
             },
         });
-        await tool.execute("c6", { path: "mysrc" }, undefined, undefined, makeCtx());
+        await tool.execute("c6", { mode: "directory", path: "mysrc" }, undefined, undefined, makeCtx());
         expect(published).toHaveLength(1);
         expect(published[0].envelope.resources).toEqual([]);
     });
@@ -472,7 +478,7 @@ describe("createInspectV4Tool (schema and execute)", () => {
         });
         const result = await tool.execute(
             "c-graph",
-            { path: "hello.ts", graphSchema: true },
+            { mode: "file", path: "hello.ts", analysis: { graphSchema: true } },
             undefined,
             undefined,
             makeCtx(),
@@ -515,44 +521,44 @@ describe("inspect lazy ContextGraph getter", () => {
 
     it("does not invoke getter for ordinary file inspect", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "hello.ts" });
+        await run(tool, { mode: "file", path: "hello.ts" });
         expect(getter).not.toHaveBeenCalled();
     });
 
     it("does not invoke getter for ordinary package.json inspect", async () => {
         writeFileSync(join(workdir, "package.json"), "{\"name\":\"fixture\"}\n", "utf8");
         const { tool, getter } = makeTool();
-        await run(tool, { path: "package.json" });
+        await run(tool, { mode: "file", path: "package.json" });
         expect(getter).not.toHaveBeenCalled();
     });
 
     it("does not invoke getter for ordinary directory inspect", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "mysrc" });
+        await run(tool, { mode: "directory", path: "mysrc" });
         expect(getter).not.toHaveBeenCalled();
     });
 
     it("does not invoke getter for signals including reuse", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "hello.ts", signals: ["reuse", "tests"] });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { signals: ["reuse", "tests"] } });
         expect(getter).not.toHaveBeenCalled();
     });
 
     it("does not invoke getter for call traversal, deadCode, hotspots, diff, routes, boundaries", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "hello.ts", callDepth: 2, callDirection: "callers" });
-        await run(tool, { path: "hello.ts", deadCode: true });
-        await run(tool, { path: "hello.ts", hotspots: true });
-        await run(tool, { path: "hello.ts", diff: "HEAD" });
-        await run(tool, { path: "hello.ts", routes: true });
-        await run(tool, { path: "mysrc", boundaries: true });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { callDepth: 2, callDirection: "callers" } });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { deadCode: true } });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { hotspots: true } });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { diff: "HEAD" } });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { routes: true } });
+        await run(tool, { mode: "directory", path: "mysrc", architecture: { boundaries: true } });
         expect(getter).not.toHaveBeenCalled();
     });
 
     it("invalid file-mode param (clusters) rejects without invoking getter", async () => {
         const { tool, getter } = makeTool();
         await expect(
-            tool.execute("x", { path: "hello.ts", clusters: true }, undefined, undefined, makeCtx()),
+            tool.execute("x", { mode: "file", path: "hello.ts", analysis: { clusters: true } }, undefined, undefined, makeCtx()),
         ).rejects.toThrow(/clusters/);
         expect(getter).not.toHaveBeenCalled();
     });
@@ -560,47 +566,47 @@ describe("inspect lazy ContextGraph getter", () => {
     it("nonexistent path rejects without invoking getter", async () => {
         const { tool, getter } = makeTool();
         await expect(
-            tool.execute("x", { path: "does-not-exist.ts" }, undefined, undefined, makeCtx()),
+            tool.execute("x", { mode: "file", path: "does-not-exist.ts" }, undefined, undefined, makeCtx()),
         ).rejects.toThrow();
         expect(getter).not.toHaveBeenCalled();
     });
 
     it("directory clusters invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "mysrc", clusters: true });
+        await run(tool, { mode: "directory", path: "mysrc", architecture: { clusters: true } });
         expect(getter).toHaveBeenCalledTimes(1);
         expect(getter).toHaveBeenCalledWith(workdir);
     });
 
     it("directory layers invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "mysrc", layers: true });
+        await run(tool, { mode: "directory", path: "mysrc", architecture: { layers: true } });
         expect(getter).toHaveBeenCalledTimes(1);
     });
 
     it("directory graphSchema invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "mysrc", graphSchema: true });
+        await run(tool, { mode: "directory", path: "mysrc", architecture: { graphSchema: true } });
         expect(getter).toHaveBeenCalledTimes(1);
     });
 
     it("file graphSchema invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "hello.ts", graphSchema: true });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { graphSchema: true } });
         expect(getter).toHaveBeenCalledTimes(1);
         expect(getter).toHaveBeenCalledWith(workdir);
     });
 
     it("file impact invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { path: "hello.ts", impact: true });
+        await run(tool, { mode: "file", path: "hello.ts", analysis: { impact: true } });
         expect(getter).toHaveBeenCalledTimes(1);
     });
 
     it("file clusters is rejected (dir-only) without invoking getter", async () => {
         const { tool, getter } = makeTool();
         await expect(
-            tool.execute("x", { path: "hello.ts", clusters: true }, undefined, undefined, makeCtx()),
+            tool.execute("x", { mode: "file", path: "hello.ts", analysis: { clusters: true } }, undefined, undefined, makeCtx()),
         ).rejects.toThrow();
         expect(getter).not.toHaveBeenCalled();
     });
@@ -609,7 +615,7 @@ describe("inspect lazy ContextGraph getter", () => {
 describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", () => {
     it("directory workspaceSymbols keeps mode map zero resources and renders navigation section", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const result = await tool.execute("c-nav-dir", { path: "mysrc", navigation: { operation: "workspaceSymbols", query: "a" } }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c-nav-dir", { mode: "navigate", path: "mysrc", navigation: { operation: "workspaceSymbols", query: "a" } }, undefined, undefined, makeCtx());
         const details: any = (result as any).details;
         expect(details.mode).toBe("directory");
         expect(details.workspaceEvidence.mode).toBe("map");
@@ -634,10 +640,10 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
 
     it("call hierarchy operations require line/character and forbid query, respect maxResults bounding", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        await expect(tool.execute("c-ch1", { path: "hello.ts", navigation: { operation: "prepareCallHierarchy" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
-        await expect(tool.execute("c-ch2", { path: "hello.ts", navigation: { operation: "incomingCalls", line: 1, character: 1, query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids query/);
-        await expect(tool.execute("c-ch3", { path: "mysrc", navigation: { operation: "prepareCallHierarchy", line: 1, character: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a file/);
-        await expect(tool.execute("c-ch-bounds", { path: "hello.ts", navigation: { operation: "outgoingCalls", line: 1, character: 1, maxResults: 101 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/maxResults/);
+        await expect(tool.execute("c-ch1", { mode: "navigate", path: "hello.ts", navigation: { operation: "prepareCallHierarchy" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
+        await expect(tool.execute("c-ch2", { mode: "navigate", path: "hello.ts", navigation: { operation: "incomingCalls", line: 1, character: 1, query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids query/);
+        await expect(tool.execute("c-ch3", { mode: "navigate", path: "mysrc", navigation: { operation: "prepareCallHierarchy", line: 1, character: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a file/);
+        await expect(tool.execute("c-ch-bounds", { mode: "navigate", path: "hello.ts", navigation: { operation: "outgoingCalls", line: 1, character: 1, maxResults: 101 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/maxResults/);
         const fileAbs = realpathSync(join(workdir, "hello.ts"));
         const item = { name: "fn", kind: 12, uri: "file://" + fileAbs, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } } };
         const inc = { from: item, fromRanges: [{ start: { line: 1, character: 0 }, end: { line: 1, character: 2 } }] };
@@ -650,12 +656,12 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
         };
         const tool2 = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
-        const r = await tool2.execute("c-ch-ok", { path: "hello.ts", navigation: { operation: "prepareCallHierarchy", line: 1, character: 1 } }, undefined, undefined, makeCtx());
+        const r = await tool2.execute("c-ch-ok", { mode: "navigate", path: "hello.ts", navigation: { operation: "prepareCallHierarchy", line: 1, character: 1 } }, undefined, undefined, makeCtx());
         const details: any = (r as any).details;
         expect(details.navigation.status).toBe("ok");
         expect(details.navigation.operation).toBe("prepareCallHierarchy");
         for (const res of details.workspaceEvidence.resources as any[]) expect(res.coverage).toBe("search-match");
-        const r2 = await tool2.execute("c-ch-inc", { path: "hello.ts", navigation: { operation: "incomingCalls", line: 1, character: 1 } }, undefined, undefined, makeCtx());
+        const r2 = await tool2.execute("c-ch-inc", { mode: "navigate", path: "hello.ts", navigation: { operation: "incomingCalls", line: 1, character: 1 } }, undefined, undefined, makeCtx());
         const d2: any = (r2 as any).details;
         expect(d2.navigation.status).toBe("ok");
         expect((r2.content[0] as any).text).toContain("incoming from");
@@ -663,21 +669,21 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
 
     it("file definition requires line/character forbids query", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        await expect(tool.execute("c1", { path: "hello.ts", navigation: { operation: "definition" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
-        await expect(tool.execute("c2", { path: "hello.ts", navigation: { operation: "definition", line: 1, character: 1, query: "x" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids query/);
+        await expect(tool.execute("c1", { mode: "navigate", path: "hello.ts", navigation: { operation: "definition" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
+        await expect(tool.execute("c2", { mode: "navigate", path: "hello.ts", navigation: { operation: "definition", line: 1, character: 1, query: "x" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids query/);
         // documentSymbols forbids line/character/query
-        await expect(tool.execute("c3", { path: "hello.ts", navigation: { operation: "documentSymbols", line: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids/);
-        await expect(tool.execute("c4", { path: "hello.ts", navigation: { operation: "documentSymbols", query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids/);
+        await expect(tool.execute("c3", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols", line: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids/);
+        await expect(tool.execute("c4", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols", query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids/);
         // workspaceSymbols requires directory
-        await expect(tool.execute("c5", { path: "hello.ts", navigation: { operation: "workspaceSymbols", query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a directory/);
-        await expect(tool.execute("c6", { path: "mysrc", navigation: { operation: "workspaceSymbols" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires query/);
+        await expect(tool.execute("c5", { mode: "navigate", path: "hello.ts", navigation: { operation: "workspaceSymbols", query: "q" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a directory/);
+        await expect(tool.execute("c6", { mode: "navigate", path: "mysrc", navigation: { operation: "workspaceSymbols" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires query/);
         // workspaceSymbols forbids line/character
-        await expect(tool.execute("c7", { path: "mysrc", navigation: { operation: "workspaceSymbols", query: "q", line: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids line/);
+        await expect(tool.execute("c7", { mode: "navigate", path: "mysrc", navigation: { operation: "workspaceSymbols", query: "q", line: 1 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/forbids line/);
     });
 
     it("file navigation keeps coverage search-match and renders section", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const result = await tool.execute("c-nav-file", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c-nav-file", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
         const details: any = (result as any).details;
         expect(details.mode).toBe("file");
         // file-mode results stay coverage:"search-match" when resources present
@@ -694,7 +700,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
 
     it("diagnostics directory keeps mode map zero resources, file diagnostics renders section", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const dirResult = await tool.execute("c-diag-dir", { path: "mysrc", diagnostics: { waitMs: 10, maxPerFile: 2, maxFiles: 1 } }, undefined, undefined, makeCtx());
+        const dirResult = await tool.execute("c-diag-dir", { mode: "navigate", path: "mysrc", diagnostics: { waitMs: 10, maxPerFile: 2, maxFiles: 1 } }, undefined, undefined, makeCtx());
         const dirDetails: any = (dirResult as any).details;
         expect(dirDetails.mode).toBe("directory");
         expect(dirDetails.workspaceEvidence.mode).toBe("map");
@@ -710,7 +716,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
         const dirText = (dirResult.content[0] as any).text as string;
         expect(dirText).toContain("## LSP Diagnostics");
 
-        const fileResult = await tool.execute("c-diag-file", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
+        const fileResult = await tool.execute("c-diag-file", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
         const fileDetails: any = (fileResult as any).details;
         expect(fileDetails.diagnostics).toBeDefined();
         expect(fileDetails.diagnostics.schemaVersion).toBe(1);
@@ -720,17 +726,17 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
 
     it("diagnostics maxFiles requires directory", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        await expect(tool.execute("c-diag", { path: "hello.ts", diagnostics: { maxFiles: 5 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a directory/);
+        await expect(tool.execute("c-diag", { mode: "navigate", path: "hello.ts", diagnostics: { maxFiles: 5 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires a directory/);
     });
 
     it("navigation maxResults bounds", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        await expect(tool.execute("c-bounds", { path: "mysrc", navigation: { operation: "workspaceSymbols", query: "q", maxResults: 101 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/maxResults/);
+        await expect(tool.execute("c-bounds", { mode: "navigate", path: "mysrc", navigation: { operation: "workspaceSymbols", query: "q", maxResults: 101 } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/maxResults/);
     });
 
     it("file navigation envelope validates via protocol and has valid search-match resources (no fullFileSha256)", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const result = await tool.execute("c-nav-validate", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c-nav-validate", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
         const details: any = (result as any).details;
         const v = validateInspectionEnvelope(details.workspaceEvidence);
         expect(v.ok, v.ok ? "" : (v as any).error).toBe(true);
@@ -747,7 +753,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
 
     it("file diagnostics envelope validates via protocol and has valid search-match resources", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
-        const result = await tool.execute("c-diag-validate", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c-diag-validate", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
         const details: any = (result as any).details;
         const v = validateInspectionEnvelope(details.workspaceEvidence);
         expect(v.ok, v.ok ? "" : (v as any).error).toBe(true);
@@ -775,7 +781,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
         };
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
-        const result = await tool.execute("c-multi-nav", { path: "hello.ts", navigation: { operation: "references", line: 2, character: 1 } }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c-multi-nav", { mode: "navigate", path: "hello.ts", navigation: { operation: "references", line: 2, character: 1 } }, undefined, undefined, makeCtx());
         const details: any = (result as any).details;
         // single resource for hello.ts should contain both ranges (2-3 and 10-12 after +1 conversion)
         const res = details.workspaceEvidence.resources.find((r: any) => r.canonicalPath.includes("hello.ts"));
@@ -800,7 +806,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
         };
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
-        const result = await tool.execute("c-doc-sym", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c-doc-sym", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
         const details: any = (result as any).details;
         const res = details.workspaceEvidence.resources.find((r: any) => r.canonicalPath.includes("hello.ts"));
         expect(res).toBeDefined();
@@ -817,7 +823,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
         };
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
-        const result: any = await tool.execute("c-empty-sym", { path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
+        const result: any = await tool.execute("c-empty-sym", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
         const details: any = result.details;
         // If srNav empty, there may be zero nav resources or resource from structural facts only.
         // Navigation empty should not fabricate line-1 search-match; check nav-origin resource not present or if present not fake [1,1] alone.
@@ -853,7 +859,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
         };
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
-        const result: any = await tool.execute("c-empty-diag", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 5 } }, undefined, undefined, makeCtx());
+        const result: any = await tool.execute("c-empty-diag", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 5 } }, undefined, undefined, makeCtx());
         const details: any = result.details;
         const { executeFileInspect: exec } = await import("../../../src/inspect/inspect.js");
         const direct = await exec({ path: "hello.ts", cwd: workdir, sessionFilePath: "/sessions/abc.jsonl", diagnostics: { waitMs: 10, maxPerFile: 5 } as any, lspInspectionProvider: provider } as any);
@@ -935,7 +941,7 @@ describe("WP-SR3 inspect.navigation + inspect.diagnostics (decision §1 §2)", (
             }),
         };
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl", lspInspectionProvider: provider });
-        const result = await tool.execute("c-diag-range", { path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 5 } }, undefined, undefined, makeCtx());
+        const result = await tool.execute("c-diag-range", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 5 } }, undefined, undefined, makeCtx());
         const details: any = (result as any).details;
         const res = details.workspaceEvidence.resources.find((r: any) => r.canonicalPath.includes("hello.ts"));
         expect(res).toBeDefined();
