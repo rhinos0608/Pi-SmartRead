@@ -105,6 +105,39 @@ function scoreNodeForTerms(label: string, sourceFile: string, terms: string[]): 
   return score;
 }
 
+/** Highest confidence_score edge wins. */
+function pickBestEdge(edges: GraphEdge[]): GraphEdge {
+  let best = edges[0]!;
+  for (const e of edges) {
+    if ((e.confidence_score ?? 0) > (best.confidence_score ?? 0)) best = e;
+  }
+  return best;
+}
+
+function sumValues(m: Map<string, number>): number {
+  let total = 0;
+  for (const v of m.values()) total += v;
+  return total;
+}
+
+function isSkippedGodNode(label: string, sourceFile: string): boolean {
+  if (sourceFile) {
+    const fname = sourceFile.split("/").pop()?.toLowerCase();
+    if (fname && label === fname) return true;
+  }
+  return label.startsWith(".") && label.endsWith("()");
+}
+
+/** Split query into normalized search terms (length > 2). */
+function parseQueryTerms(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 2)
+    .map((t) => t.replace(/[^a-z0-9_]/g, ""))
+    .filter(Boolean);
+}
+
 // ── Module-level cache (LRU-style, max 10 instances) ──
 
 const MAX_ENRICHER_INSTANCES = 10;
@@ -218,52 +251,59 @@ export class GraphifyEnricher {
    *
    * Returns deduplicated by target file path, sorted by confidenceScore.
    */
+  private collectNodeNeighbors(
+    nodeId: string,
+    sourceLabel: string,
+    normalized: string,
+    seen: Set<string>,
+  ): RelatedFileInfo[] {
+    const neighbors = this.adjacency!.get(nodeId);
+    if (!neighbors) return [];
+    const out: RelatedFileInfo[] = [];
+    for (const [targetId, edges] of neighbors) {
+      const info = this.buildNeighbourInfo(targetId, edges, sourceLabel, normalized, seen);
+      if (info) out.push(info);
+    }
+    return out;
+  }
+
+  private buildNeighbourInfo(
+    targetId: string,
+    edges: GraphEdge[],
+    sourceLabel: string,
+    normalized: string,
+    seen: Set<string>,
+  ): RelatedFileInfo | undefined {
+    const targetAttrs = this.nodeAttrs!.get(targetId);
+    const targetFile = targetAttrs?.source_file;
+    if (!targetFile) return undefined;
+    const targetAbs = resolve(this.cwd, targetFile);
+    if (seen.has(targetAbs)) return undefined;
+    if (targetAbs === normalized) return undefined;
+    const bestEdge = pickBestEdge(edges);
+    seen.add(targetAbs);
+    return {
+      path: targetAbs,
+      relation: bestEdge.relation ?? "related",
+      confidence: bestEdge.confidence ?? "EXTRACTED",
+      confidenceScore: bestEdge.confidence_score ?? 1,
+      sourceLabel,
+      targetLabel: targetAttrs?.label ?? targetId,
+    };
+  }
+
   getRelatedFilesForPath(filePath: string): RelatedFileInfo[] {
     if (!this.isAvailable) return [];
     this.ensureLoaded();
-
     const normalized = this.normalizePath(filePath);
     const nodeIds = this.fileToNodes!.get(normalized);
     if (!nodeIds || nodeIds.length === 0) return [];
-
     const seen = new Set<string>();
     const results: RelatedFileInfo[] = [];
-
     for (const nodeId of nodeIds) {
-      const sourceAttrs = this.nodeAttrs!.get(nodeId);
-      const sourceLabel = sourceAttrs?.label ?? nodeId;
-      const neighbors = this.adjacency!.get(nodeId);
-      if (!neighbors) continue;
-
-      for (const [targetId, edges] of neighbors) {
-        const targetAttrs = this.nodeAttrs!.get(targetId);
-        const targetFile = targetAttrs?.source_file;
-        if (!targetFile) continue;
-
-        const targetAbs = resolve(this.cwd, targetFile);
-        if (seen.has(targetAbs)) continue;
-
-        // Pick the best edge (highest confidence_score)
-        const bestEdge = edges.reduce((best, e) =>
-          (e.confidence_score ?? 0) > (best.confidence_score ?? 0) ? e : best,
-        );
-
-        seen.add(targetAbs);
-        // Only include edges to different files
-        if (targetAbs === normalized) continue;
-
-        results.push({
-          path: targetAbs,
-          relation: bestEdge.relation ?? "related",
-          confidence: bestEdge.confidence ?? "EXTRACTED",
-          confidenceScore: bestEdge.confidence_score ?? 1,
-          sourceLabel,
-          targetLabel: targetAttrs?.label ?? targetId,
-        });
-      }
+      const sourceLabel = this.nodeAttrs!.get(nodeId)?.label ?? nodeId;
+      results.push(...this.collectNodeNeighbors(nodeId, sourceLabel, normalized, seen));
     }
-
-    // Sort by confidenceScore descending
     results.sort((a, b) => b.confidenceScore - a.confidenceScore);
     return results;
   }
@@ -275,78 +315,78 @@ export class GraphifyEnricher {
    * top-matching seed nodes, then BFS-traverses to collect all
    * reachable files within maxDepth steps.
    */
+  private scoreNodesForTerms(terms: string[]): Array<[number, string]> {
+    const scored: Array<[number, string]> = [];
+    for (const [nodeId, attrs] of this.nodeAttrs!) {
+      const label = (attrs.label ?? "").toLowerCase();
+      const sourceFile = (attrs.source_file ?? "").toLowerCase();
+      const score = scoreNodeForTerms(label, sourceFile, terms);
+      if (score > 0) scored.push([score, nodeId]);
+    }
+    scored.sort((a, b) => b[0] - a[0]);
+    return scored;
+  }
+
+  private expandQueryFrontier(
+    frontier: Set<string>,
+    visited: Set<string>,
+    resultFiles: Map<string, RelatedFileInfo>,
+  ): Set<string> {
+    const nextFrontier = new Set<string>();
+    for (const nodeId of frontier) {
+      const neighbors = this.adjacency!.get(nodeId);
+      if (!neighbors) continue;
+      for (const [targetId, edges] of neighbors) {
+        this.visitQueryNeighbour(nodeId, targetId, edges, visited, nextFrontier, resultFiles);
+      }
+    }
+    return nextFrontier;
+  }
+
+  private visitQueryNeighbour(
+    nodeId: string,
+    targetId: string,
+    edges: GraphEdge[],
+    visited: Set<string>,
+    nextFrontier: Set<string>,
+    resultFiles: Map<string, RelatedFileInfo>,
+  ): void {
+    if (visited.has(targetId)) return;
+    visited.add(targetId);
+    nextFrontier.add(targetId);
+    const targetAttrs = this.nodeAttrs!.get(targetId);
+    const targetFile = targetAttrs?.source_file;
+    if (!targetFile) return;
+    const bestEdge = edges[0]!;
+    const absPath = resolve(this.cwd, targetFile);
+    if (resultFiles.has(absPath)) return;
+    resultFiles.set(absPath, {
+      path: absPath,
+      relation: bestEdge.relation ?? "related",
+      confidence: bestEdge.confidence ?? "EXTRACTED",
+      confidenceScore: bestEdge.confidence_score ?? 1,
+      sourceLabel: this.nodeAttrs!.get(nodeId)?.label ?? nodeId,
+      targetLabel: targetAttrs?.label ?? targetId,
+    });
+  }
+
   getRelatedFilesForQuery(
     query: string,
     maxDepth: number = 1,
   ): RelatedFileInfo[] {
     if (!this.isAvailable || !query.trim()) return [];
     this.ensureLoaded();
-
-    const terms = query
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((t) => t.length > 2)
-      .map((t) => t.replace(/[^a-z0-9_]/g, ""))
-      .filter(Boolean);
-
+    const terms = parseQueryTerms(query);
     if (terms.length === 0) return [];
-
-    // Score nodes by label match
-    const scoredNodes: Array<[number, string]> = [];
-    for (const [nodeId, attrs] of this.nodeAttrs!) {
-      const label = (attrs.label ?? "").toLowerCase();
-      const sourceFile = (attrs.source_file ?? "").toLowerCase();
-      const score = scoreNodeForTerms(label, sourceFile, terms);
-      if (score > 0) scoredNodes.push([score, nodeId]);
-    }
-
-    if (scoredNodes.length === 0) return [];
-
-    scoredNodes.sort((a, b) => b[0] - a[0]);
-    const seeds = scoredNodes.slice(0, 3).map(([_, id]) => id);
-
-    // BFS to collect reachable files
+    const scored = this.scoreNodesForTerms(terms);
+    if (scored.length === 0) return [];
+    const seeds = scored.slice(0, 3).map(([_, id]) => id);
     const visited = new Set<string>(seeds);
-    const frontier = new Set(seeds);
+    let frontier = new Set(seeds);
     const resultFiles = new Map<string, RelatedFileInfo>();
     const depth = Math.min(maxDepth, 3);
-
-    for (let d = 0; d < depth; d++) {
-      const nextFrontier = new Set<string>();
-      for (const nodeId of frontier) {
-        const neighbors = this.adjacency!.get(nodeId);
-        if (!neighbors) continue;
-
-        for (const [targetId, edges] of neighbors) {
-          if (visited.has(targetId)) continue;
-          visited.add(targetId);
-          nextFrontier.add(targetId);
-
-          const targetAttrs = this.nodeAttrs!.get(targetId);
-          const targetFile = targetAttrs?.source_file;
-          if (!targetFile) continue;
-
-          const bestEdge = edges[0]!;
-          const absPath = resolve(this.cwd, targetFile);
-          if (!resultFiles.has(absPath)) {
-            resultFiles.set(absPath, {
-              path: absPath,
-              relation: bestEdge.relation ?? "related",
-              confidence: bestEdge.confidence ?? "EXTRACTED",
-              confidenceScore: bestEdge.confidence_score ?? 1,
-              sourceLabel: this.nodeAttrs!.get(nodeId)?.label ?? nodeId,
-              targetLabel: targetAttrs?.label ?? targetId,
-            });
-          }
-        }
-      }
-      frontier.clear();
-      for (const n of nextFrontier) frontier.add(n);
-    }
-
-    return [...resultFiles.values()].sort(
-      (a, b) => b.confidenceScore - a.confidenceScore,
-    );
+    for (let d = 0; d < depth; d++) frontier = this.expandQueryFrontier(frontier, visited, resultFiles);
+    return [...resultFiles.values()].sort((a, b) => b.confidenceScore - a.confidenceScore);
   }
 
   // ── File importance ────────────────────────────────────────────
@@ -400,42 +440,43 @@ export class GraphifyEnricher {
    * Falls back to auto-detected communities when graph.json lacks
    * pre-computed community data.
    */
+  private countNodeCommunities(nodeIds: string[]): Map<number, number> | undefined {
+    const communities = new Map<number, number>();
+    for (const nodeId of nodeIds) {
+      const comm = this.nodeAttrs!.get(nodeId)?.community;
+      if (comm !== undefined && comm !== null) communities.set(comm, (communities.get(comm) ?? 0) + 1);
+    }
+    return communities.size > 0 ? communities : undefined;
+  }
+
+  private countDetectedCommunities(nodeIds: string[]): Map<number, number> | undefined {
+    if (!this._detectedCommunities) return undefined;
+    const counts = new Map<number, number>();
+    for (const nodeId of nodeIds) {
+      const comm = this._detectedCommunities.get(nodeId);
+      if (comm !== undefined) counts.set(comm, (counts.get(comm) ?? 0) + 1);
+    }
+    return counts.size > 0 ? counts : undefined;
+  }
+
+  private resolveFileNodeIds(filePath: string): string[] | undefined {
+    const normalized = this.normalizePath(filePath);
+    const nodeIds = this.fileToNodes!.get(normalized);
+    return nodeIds && nodeIds.length > 0 ? nodeIds : undefined;
+  }
+
   getFileCommunity(filePath: string): number | undefined {
     if (!this.isAvailable) return undefined;
     this.ensureLoaded();
-
-    const normalized = this.normalizePath(filePath);
-    const nodeIds = this.fileToNodes!.get(normalized);
-    if (!nodeIds || nodeIds.length === 0) return undefined;
-
-    // Try pre-computed communities from graph.json first
+    const nodeIds = this.resolveFileNodeIds(filePath);
+    if (!nodeIds) return undefined;
     if (this._stats && this._stats.communityCount > 0) {
-      const communities = new Map<number, number>();
-      for (const nodeId of nodeIds) {
-        const attrs = this.nodeAttrs!.get(nodeId);
-        const comm = attrs?.community;
-        if (comm !== undefined && comm !== null) {
-          communities.set(comm, (communities.get(comm) ?? 0) + 1);
-        }
-      }
-      if (communities.size > 0) {
-        return mostCommonCount(communities);
-      }
+      const precomputed = this.countNodeCommunities(nodeIds);
+      if (precomputed) return mostCommonCount(precomputed);
     }
-
-    // Fall back to detected communities
     this.ensureDetectedCommunities();
     if (!this._detectedCommunities) return undefined;
-
-    const commCounts = new Map<number, number>();
-    for (const nodeId of nodeIds) {
-      const comm = this._detectedCommunities.get(nodeId);
-      if (comm !== undefined) {
-        commCounts.set(comm, (commCounts.get(comm) ?? 0) + 1);
-      }
-    }
-    if (commCounts.size === 0) return undefined;
-    return mostCommonCount(commCounts);
+    return mostCommonCount(this.countDetectedCommunities(nodeIds) ?? new Map());
   }
 
   /**
@@ -444,37 +485,28 @@ export class GraphifyEnricher {
    * Falls back to auto-detected communities when graph.json lacks
    * pre-computed community data.
    */
+  private collectPrecomputedCommunityFiles(communityId: number, fileSet: Set<string>): void {
+    for (const [, attrs] of this.nodeAttrs!) {
+      if (attrs.community === communityId && attrs.source_file) fileSet.add(resolve(this.cwd, attrs.source_file));
+    }
+  }
+
+  private collectDetectedCommunityFiles(communityId: number, fileSet: Set<string>): void {
+    this.ensureDetectedCommunities();
+    if (!this._detectedCommunities) return;
+    for (const [nodeId, comm] of this._detectedCommunities) {
+      if (comm !== communityId) continue;
+      const sourceFile = this.nodeAttrs!.get(nodeId)?.source_file;
+      if (sourceFile) fileSet.add(resolve(this.cwd, sourceFile));
+    }
+  }
+
   getCommunityFiles(communityId: number): string[] {
     if (!this.isAvailable) return [];
     this.ensureLoaded();
-
     const fileSet = new Set<string>();
-
-    // Try pre-computed communities from graph.json first
-    if (this._stats && this._stats.communityCount > 0) {
-      for (const [, attrs] of this.nodeAttrs!) {
-        if (
-          attrs.community === communityId &&
-          attrs.source_file
-        ) {
-          fileSet.add(resolve(this.cwd, attrs.source_file));
-        }
-      }
-    } else {
-      // Fall back to detected communities
-      this.ensureDetectedCommunities();
-      if (this._detectedCommunities) {
-        for (const [nodeId, comm] of this._detectedCommunities) {
-          if (comm === communityId) {
-            const attrs = this.nodeAttrs!.get(nodeId);
-            if (attrs?.source_file) {
-              fileSet.add(resolve(this.cwd, attrs.source_file));
-            }
-          }
-        }
-      }
-    }
-
+    if (this._stats && this._stats.communityCount > 0) this.collectPrecomputedCommunityFiles(communityId, fileSet);
+    else this.collectDetectedCommunityFiles(communityId, fileSet);
     return [...fileSet].sort();
   }
 
@@ -550,91 +582,84 @@ export class GraphifyEnricher {
    * - modularity: This community's contribution to the total modularity
    *   Q_c = Σ_in/2m - γ * (Σ_tot/2m)²
    */
-  getCommunityStats(): Array<{ id: number; size: number; modularity: number }> {
-    if (!this.isAvailable) return [];
-    this.ensureLoaded();
-    if (!this.nodeAttrs || !this.adjacency) return [];
+  private resolveStatsCommunities(): { communities: Map<string, number>; resolution: number } {
+    if (this._stats && this._stats.communityCount > 0) return { communities: this.collectPrecomputedMap(), resolution: 1.0 };
+    this.ensureDetectedCommunities();
+    return { communities: this._detectedCommunities ?? new Map(), resolution: this._detectedResolution };
+  }
 
-    // Determine which communities to use
-    let communities: Map<string, number>;
-    let resolution: number;
-
-    if (this._stats && this._stats.communityCount > 0) {
-      communities = new Map();
-      for (const [nodeId, attrs] of this.nodeAttrs) {
-        if (attrs.community !== undefined && attrs.community !== null) {
-          communities.set(nodeId, attrs.community);
-        }
-      }
-      resolution = 1.0;
-    } else {
-      this.ensureDetectedCommunities();
-      communities = this._detectedCommunities ?? new Map();
-      resolution = this._detectedResolution;
+  private collectPrecomputedMap(): Map<string, number> {
+    const communities = new Map<string, number>();
+    for (const [nodeId, attrs] of this.nodeAttrs!) {
+      if (attrs.community !== undefined && attrs.community !== null) communities.set(nodeId, attrs.community);
     }
+    return communities;
+  }
 
-    if (communities.size === 0) return [];
-
-    // Compute per-community aggregates
-    const mMap = new Map<number, number>();
-    const totMap = new Map<number, number>();
-    const sizeMap = new Map<number, number>();
+  private computeDegreeMap(): Map<string, number> {
     const degreeMap = new Map<string, number>();
-
-    // Node degrees from adjacency
-    for (const [nodeId, neighbors] of this.adjacency) {
+    for (const [nodeId, neighbors] of this.adjacency!) {
       let degree = 0;
-      for (const [, edges] of neighbors) {
-        degree += edges.length;
-      }
+      for (const [, edges] of neighbors) degree += edges.length;
       degreeMap.set(nodeId, degree);
     }
+    return degreeMap;
+  }
 
-    // Total edge weight
-    let totalWeight = 0;
-    for (const deg of degreeMap.values()) {
-      totalWeight += deg;
-    }
-    const twoM = totalWeight;
-    if (twoM <= 0) return [];
-
-    // Per-community degree total and size
+  private computeCommunityTotals(
+    communities: Map<string, number>,
+    degreeMap: Map<string, number>,
+  ): { totMap: Map<number, number>; sizeMap: Map<number, number> } {
+    const totMap = new Map<number, number>();
+    const sizeMap = new Map<number, number>();
     for (const [nodeId, comm] of communities) {
       totMap.set(comm, (totMap.get(comm) ?? 0) + (degreeMap.get(nodeId) ?? 0));
       sizeMap.set(comm, (sizeMap.get(comm) ?? 0) + 1);
     }
+    return { totMap, sizeMap };
+  }
 
-    // Internal edge weight per community
-    for (const [nodeId, neighbors] of this.adjacency) {
+  private computeInternalWeights(communities: Map<string, number>): Map<number, number> {
+    const mMap = new Map<number, number>();
+    for (const [nodeId, neighbors] of this.adjacency!) {
       const comm = communities.get(nodeId);
       if (comm === undefined) continue;
-
       for (const [neighborId, edges] of neighbors) {
-        const neighborComm = communities.get(neighborId);
-        if (neighborComm === comm) {
-          mMap.set(comm, (mMap.get(comm) ?? 0) + edges.length);
-        }
+        if (communities.get(neighborId) === comm) mMap.set(comm, (mMap.get(comm) ?? 0) + edges.length);
       }
     }
-    // Halve because each undirected edge counted twice
-    for (const [comm, internal] of mMap) {
-      mMap.set(comm, internal / 2);
-    }
+    for (const [comm, internal] of mMap) mMap.set(comm, internal / 2);
+    return mMap;
+  }
 
-    const communityIds = [...new Set(communities.values())].sort((a, b) => a - b);
-    const results: Array<{ id: number; size: number; modularity: number }> = [];
+  private buildModularityResults(
+    communities: Map<string, number>,
+    resolution: number,
+    twoM: number,
+    totMap: Map<number, number>,
+    sizeMap: Map<number, number>,
+    mMap: Map<number, number>,
+  ): Array<{ id: number; size: number; modularity: number }> {
+    const ids = [...new Set(communities.values())].sort((a, b) => a - b);
+    return ids.map((comm) => ({
+      id: comm,
+      size: sizeMap.get(comm) ?? 0,
+      modularity: ((2 * (mMap.get(comm) ?? 0)) / twoM) - resolution * ((totMap.get(comm) ?? 0) / twoM) ** 2,
+    }));
+  }
 
-    for (const comm of communityIds) {
-      const Σ_in = mMap.get(comm) ?? 0;
-      const Σ_tot = totMap.get(comm) ?? 0;
-      const size = sizeMap.get(comm) ?? 0;
-      // Q_c = Σ_in/2m - γ * (Σ_tot/2m)²
-      const modularity =
-        (2 * Σ_in) / twoM - resolution * (Σ_tot / twoM) * (Σ_tot / twoM);
-      results.push({ id: comm, size, modularity });
-    }
-
-    return results;
+  getCommunityStats(): Array<{ id: number; size: number; modularity: number }> {
+    if (!this.isAvailable) return [];
+    this.ensureLoaded();
+    if (!this.nodeAttrs || !this.adjacency) return [];
+    const { communities, resolution } = this.resolveStatsCommunities();
+    if (communities.size === 0) return [];
+    const degreeMap = this.computeDegreeMap();
+    const twoM = sumValues(degreeMap);
+    if (twoM <= 0) return [];
+    const { totMap, sizeMap } = this.computeCommunityTotals(communities, degreeMap);
+    const mMap = this.computeInternalWeights(communities);
+    return this.buildModularityResults(communities, resolution, twoM, totMap, sizeMap, mMap);
   }
 
   // ── God nodes (most important concepts) ────────────────────────
@@ -654,13 +679,8 @@ export class GraphifyEnricher {
     for (const [nodeId, attrs] of this.nodeAttrs!) {
       const label = (attrs.label ?? nodeId).toLowerCase();
       const sourceFile = attrs.source_file ?? "";
-      // Skip file-level hub nodes
-      if (sourceFile) {
-        const fname = sourceFile.split("/").pop()?.toLowerCase();
-        if (fname && label === fname) continue;
-      }
-      // Skip method stubs (anonymous)
-      if (label.startsWith(".") && label.endsWith("()")) continue;
+      if (isSkippedGodNode(label, sourceFile)) continue;
+      if (isSkippedGodNode(label, sourceFile)) continue;
 
       const neighbors = this.adjacency!.get(nodeId);
       if (neighbors && neighbors.size > 0) {
