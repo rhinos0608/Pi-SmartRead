@@ -75,7 +75,7 @@ export async function withServer<T>(
 ): Promise<T | null> {
   const mgr = cachedManager(root);
   if (opts?.timeoutMs === undefined) {
-    const server = await mgr.getServer(langId);
+    const server = await mgr.getServer(langId, opts?.purpose ? { purpose: opts.purpose } : undefined);
     if (!server) return null;
     return action(server, mgr);
   }
@@ -101,8 +101,7 @@ export async function withManager<T>(
  * Shared outcome skeleton: language check → request-scoped server → budgeted action
  * → empty/confirmed mapping, degraded on any throw. Status strings preserved.
  *
- * Takes a single param object. Legacy 9-arg positional calls still work via
- * rest-arg normalization (callers outside this file change untouched).
+ * Takes a single param object.
  */
 export interface RunOutcomeParams<Value, Outcome> {
   filePath: string;
@@ -114,31 +113,6 @@ export interface RunOutcomeParams<Value, Outcome> {
   makeDegraded: () => Outcome;
   isEmpty: (value: Value) => boolean;
   action: (server: LSPConnection) => Promise<Value>;
-}
-
-type RunOutcomePositional<Value, Outcome> = [
-  filePath: string,
-  root: string,
-  opts: LspOutcomeOptions | undefined,
-  makeUnavailable: () => Outcome,
-  makeEmpty: () => Outcome,
-  makeConfirmed: (value: Value) => Outcome,
-  makeDegraded: () => Outcome,
-  isEmpty: (value: Value) => boolean,
-  action: (server: LSPConnection) => Promise<Value>,
-];
-
-type RunOutcomeArgs<Value, Outcome> =
-  | [params: RunOutcomeParams<Value, Outcome>]
-  | RunOutcomePositional<Value, Outcome>;
-
-function normalizeRunOutcomeArgs<Value, Outcome>(
-  args: RunOutcomeArgs<Value, Outcome>,
-): RunOutcomeParams<Value, Outcome> {
-  if (args.length === 1) return args[0];
-  const [filePath, root, opts, makeUnavailable, makeEmpty, makeConfirmed, makeDegraded, isEmpty, action] =
-    args as RunOutcomePositional<Value, Outcome>;
-  return { filePath, root, opts, makeUnavailable, makeEmpty, makeConfirmed, makeDegraded, isEmpty, action };
 }
 
 async function executeOutcome<Value, Outcome>(p: RunOutcomeParams<Value, Outcome>): Promise<Outcome> {
@@ -160,7 +134,7 @@ async function executeOutcome<Value, Outcome>(p: RunOutcomeParams<Value, Outcome
 }
 
 export async function runOutcome<Value, Outcome>(
-  ...args: RunOutcomeArgs<Value, Outcome>
+  params: RunOutcomeParams<Value, Outcome>,
 ): Promise<Outcome> {
-  return executeOutcome(normalizeRunOutcomeArgs(args));
+  return executeOutcome(params);
 }

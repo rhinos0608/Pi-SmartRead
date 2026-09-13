@@ -141,55 +141,55 @@ export async function hover(
 export async function goToDefinitionOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeSingle> {
   const line0 = toZeroBased(line);
   const char0 = toZeroBased(character);
-  return runOutcome<LSPLocation | null, LspNavigationOutcomeSingle>(
+  return runOutcome<LSPLocation | null, LspNavigationOutcomeSingle>({
     filePath, root, opts,
-    () => ({ status: "unavailable", location: null }),
-    () => ({ status: "empty", location: null }),
-    (loc) => ({ status: "confirmed", location: loc }),
-    () => ({ status: "degraded", location: null }),
-    (loc) => loc === null,
-    (server) => serverGoToDefinition(server, filePath, line0, char0),
-  );
+    makeUnavailable: () => ({ status: "unavailable", location: null }),
+    makeEmpty: () => ({ status: "empty", location: null }),
+    makeConfirmed: (loc) => ({ status: "confirmed", location: loc }),
+    makeDegraded: () => ({ status: "degraded", location: null }),
+    isEmpty: (loc) => loc === null,
+    action: (server) => serverGoToDefinition(server, filePath, line0, char0),
+  });
 }
 
 export async function findReferencesOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeList> {
   const line0 = toZeroBased(line);
   const char0 = toZeroBased(character);
-  return runOutcome<LSPLocation[], LspNavigationOutcomeList>(
+  return runOutcome<LSPLocation[], LspNavigationOutcomeList>({
     filePath, root, opts,
-    () => ({ status: "unavailable", locations: [] }),
-    () => ({ status: "empty", locations: [] }),
-    (locs) => ({ status: "confirmed", locations: locs }),
-    () => ({ status: "degraded", locations: [] }),
-    (locs) => locs.length === 0,
-    (server) => serverFindReferences(server, filePath, line0, char0),
-  );
+    makeUnavailable: () => ({ status: "unavailable", locations: [] }),
+    makeEmpty: () => ({ status: "empty", locations: [] }),
+    makeConfirmed: (locs) => ({ status: "confirmed", locations: locs }),
+    makeDegraded: () => ({ status: "degraded", locations: [] }),
+    isEmpty: (locs) => locs.length === 0,
+    action: (server) => serverFindReferences(server, filePath, line0, char0),
+  });
 }
 
 export async function getDocumentSymbolsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDocumentSymbolsOutcome> {
-  return runOutcome<LSPDocumentSymbol[], LspDocumentSymbolsOutcome>(
+  return runOutcome<LSPDocumentSymbol[], LspDocumentSymbolsOutcome>({
     filePath, root, opts,
-    () => ({ status: "unavailable", symbols: [] }),
-    () => ({ status: "empty", symbols: [] }),
-    (symbols) => ({ status: "confirmed", symbols }),
-    () => ({ status: "degraded", symbols: [] }),
-    (symbols) => symbols.length === 0,
-    (server) => serverGetDocumentSymbols(server, filePath),
-  );
+    makeUnavailable: () => ({ status: "unavailable", symbols: [] }),
+    makeEmpty: () => ({ status: "empty", symbols: [] }),
+    makeConfirmed: (symbols) => ({ status: "confirmed", symbols }),
+    makeDegraded: () => ({ status: "degraded", symbols: [] }),
+    isEmpty: (symbols) => symbols.length === 0,
+    action: (server) => serverGetDocumentSymbols(server, filePath),
+  });
 }
 
 export async function goToImplementationOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspNavigationOutcomeList> {
   const line0 = toZeroBased(line);
   const char0 = toZeroBased(character);
-  return runOutcome<LSPLocation[], LspNavigationOutcomeList>(
+  return runOutcome<LSPLocation[], LspNavigationOutcomeList>({
     filePath, root, opts,
-    () => ({ status: "unavailable", locations: [] }),
-    () => ({ status: "empty", locations: [] }),
-    (locs) => ({ status: "confirmed", locations: locs }),
-    () => ({ status: "degraded", locations: [] }),
-    (locs) => locs.length === 0,
-    (server) => serverGoToImplementation(server, filePath, line0, char0),
-  );
+    makeUnavailable: () => ({ status: "unavailable", locations: [] }),
+    makeEmpty: () => ({ status: "empty", locations: [] }),
+    makeConfirmed: (locs) => ({ status: "confirmed", locations: locs }),
+    makeDegraded: () => ({ status: "degraded", locations: [] }),
+    isEmpty: (locs) => locs.length === 0,
+    action: (server) => serverGoToImplementation(server, filePath, line0, char0),
+  });
 }
 
 export async function workspaceSymbolOutcome(query: string, root: string, opts?: LspOutcomeOptions): Promise<LspWorkspaceSymbolsOutcome> {
@@ -210,16 +210,16 @@ export async function workspaceSymbolOutcome(query: string, root: string, opts?:
 export async function hoverOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspHoverOutcome> {
   const line0 = toZeroBased(line);
   const char0 = toZeroBased(character);
-  return runOutcome<LSPHoverResult | null, LspHoverOutcome>(
+  return runOutcome<LSPHoverResult | null, LspHoverOutcome>({
     filePath, root, opts,
-    () => ({ status: "unavailable", hover: null }),
-    () => ({ status: "empty", hover: null }),
-    (result) => ({ status: "confirmed", hover: result }),
-    () => ({ status: "degraded", hover: null }),
-    (result) => result === null,
-    (server) => (async () => {
+    makeUnavailable: () => ({ status: "unavailable", hover: null }),
+    makeEmpty: () => ({ status: "empty", hover: null }),
+    makeConfirmed: (result) => ({ status: "confirmed", hover: result }),
+    makeDegraded: () => ({ status: "degraded", hover: null }),
+    isEmpty: (result) => result === null,
+    action: (server) => (async () => {
       await server.openFile(filePath);
       return server.hover(filePath, line0, char0);
     })(),
-  );
+  });
 }

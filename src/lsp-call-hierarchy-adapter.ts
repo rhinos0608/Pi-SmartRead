@@ -17,6 +17,7 @@ import {
   type LspOutgoingCallsOutcome,
   type LspOutcomeOptions,
 } from "./lsp-types.js";
+import type { LSPConnection } from "./lsp-connection.js";
 import {
   lspUriToPath,
   runOutcome,
@@ -25,20 +26,25 @@ import {
   withServer,
 } from "./lsp-server-operation.js";
 
+async function serverPrepareCallHierarchy(
+  server: LSPConnection, filePath: string, line: number, character: number,
+): Promise<LSPCallHierarchyItem[]> {
+  await server.openFile(filePath);
+  const result = await server.request("textDocument/prepareCallHierarchy", {
+    textDocument: { uri: toFileUri(filePath) },
+    position: { line, character },
+  }) as LSPCallHierarchyItem[] | null;
+  return result ?? [];
+}
+
 export async function prepareCallHierarchy(
   filePath: string, line: number, character: number, root: string,
 ): Promise<LSPCallHierarchyItem[]> {
   const langId = detectLanguageFromExtension(filePath);
   if (!langId) return [];
   try {
-    const result = await withServer(root, langId, async (server) => {
-      await server.openFile(filePath);
-      const result = await server.request("textDocument/prepareCallHierarchy", {
-        textDocument: { uri: toFileUri(filePath) },
-        position: { line, character },
-      }) as LSPCallHierarchyItem[] | null;
-      return result ?? [];
-    });
+    const result = await withServer(root, langId, async (server) =>
+      serverPrepareCallHierarchy(server, filePath, line, character));
     return result ?? [];
   } catch { return []; }
 }
@@ -74,70 +80,55 @@ export async function outgoingCalls(
 export async function prepareCallHierarchyOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspCallHierarchyPrepareOutcome> {
   const line0 = toZeroBased(line);
   const char0 = toZeroBased(character);
-  return runOutcome<LSPCallHierarchyItem[], LspCallHierarchyPrepareOutcome>(
+  return runOutcome<LSPCallHierarchyItem[], LspCallHierarchyPrepareOutcome>({
     filePath, root, opts,
-    () => ({ status: "unavailable", items: [] }),
-    () => ({ status: "empty", items: [] }),
-    (items) => ({ status: "confirmed", items }),
-    () => ({ status: "degraded", items: [] }),
-    (items) => items.length === 0,
-    (server) => (async () => {
-      await server.openFile(filePath);
-      const result = await server.request("textDocument/prepareCallHierarchy", {
-        textDocument: { uri: toFileUri(filePath) },
-        position: { line: line0, character: char0 },
-      }) as LSPCallHierarchyItem[] | null;
-      return result ?? [];
-    })(),
-  );
+    makeUnavailable: () => ({ status: "unavailable", items: [] }),
+    makeEmpty: () => ({ status: "empty", items: [] }),
+    makeConfirmed: (items) => ({ status: "confirmed", items }),
+    makeDegraded: () => ({ status: "degraded", items: [] }),
+    isEmpty: (items) => items.length === 0,
+    action: (server) => serverPrepareCallHierarchy(server, filePath, line0, char0),
+  });
 }
 
 export async function incomingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspIncomingCallsOutcome> {
   const line0 = toZeroBased(line);
   const char0 = toZeroBased(character);
   // Empty prepare resolves to [] so runOutcome maps it to "empty" (was null → empty).
-  return runOutcome<LSPCallHierarchyIncomingCall[], LspIncomingCallsOutcome>(
+  return runOutcome<LSPCallHierarchyIncomingCall[], LspIncomingCallsOutcome>({
     filePath, root, opts,
-    () => ({ status: "unavailable", calls: [] }),
-    () => ({ status: "empty", calls: [] }),
-    (calls) => ({ status: "confirmed", calls }),
-    () => ({ status: "degraded", calls: [] }),
-    (calls) => calls.length === 0,
-    (server) => (async () => {
-      await server.openFile(filePath);
-      const items = await server.request("textDocument/prepareCallHierarchy", {
-        textDocument: { uri: toFileUri(filePath) },
-        position: { line: line0, character: char0 },
-      }) as LSPCallHierarchyItem[] | null;
-      if (!items || items.length === 0) return [];
+    makeUnavailable: () => ({ status: "unavailable", calls: [] }),
+    makeEmpty: () => ({ status: "empty", calls: [] }),
+    makeConfirmed: (calls) => ({ status: "confirmed", calls }),
+    makeDegraded: () => ({ status: "degraded", calls: [] }),
+    isEmpty: (calls) => calls.length === 0,
+    action: (server) => (async () => {
+      const items = await serverPrepareCallHierarchy(server, filePath, line0, char0);
+      if (items.length === 0) return [];
       const item = items[0]!;
       const result = await server.request("callHierarchy/incomingCalls", { item }) as LSPCallHierarchyIncomingCall[] | null;
       return result ?? [];
     })(),
-  );
+  });
 }
 
 export async function outgoingCallsOutcome(filePath: string, line: number, character: number, root: string, opts?: LspOutcomeOptions): Promise<LspOutgoingCallsOutcome> {
   const line0 = toZeroBased(line);
   const char0 = toZeroBased(character);
   // Empty prepare resolves to [] so runOutcome maps it to "empty" (was null → empty).
-  return runOutcome<LSPCallHierarchyOutgoingCall[], LspOutgoingCallsOutcome>(
+  return runOutcome<LSPCallHierarchyOutgoingCall[], LspOutgoingCallsOutcome>({
     filePath, root, opts,
-    () => ({ status: "unavailable", calls: [] }),
-    () => ({ status: "empty", calls: [] }),
-    (calls) => ({ status: "confirmed", calls }),
-    () => ({ status: "degraded", calls: [] }),
-    (calls) => calls.length === 0,
-    (server) => (async () => {
-      await server.openFile(filePath);
-      const items = await server.request("textDocument/prepareCallHierarchy", {
-        textDocument: { uri: toFileUri(filePath) },
-        position: { line: line0, character: char0 },
-      }) as LSPCallHierarchyItem[] | null;
-      if (!items || items.length === 0) return [];
+    makeUnavailable: () => ({ status: "unavailable", calls: [] }),
+    makeEmpty: () => ({ status: "empty", calls: [] }),
+    makeConfirmed: (calls) => ({ status: "confirmed", calls }),
+    makeDegraded: () => ({ status: "degraded", calls: [] }),
+    isEmpty: (calls) => calls.length === 0,
+    action: (server) => (async () => {
+      const items = await serverPrepareCallHierarchy(server, filePath, line0, char0);
+      if (items.length === 0) return [];
       const item = items[0]!;
       const result = await server.request("callHierarchy/outgoingCalls", { item }) as LSPCallHierarchyOutgoingCall[] | null;
       return result ?? [];
     })(),
-  );
+  });
 }
