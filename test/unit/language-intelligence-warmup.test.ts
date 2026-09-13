@@ -49,12 +49,14 @@ describe("language-intelligence warmup", () => {
 
   it("no install/prompt code in Phase 1 warmup path", async () => {
     const bridgeSrc = readFileSync("src/lsp-bridge.ts", "utf-8");
-    const indexSrc = readFileSync("src/index.ts", "utf-8");
+    // Warm hook moved from src/index.ts to ordered result pipeline (trackLspDocuments);
+    // src/index.ts wires it via handleToolResult. Assert the pipeline hook directly.
+    const warmSrc = readFileSync("src/extension-result-pipeline.ts", "utf-8");
     // Phase 1 must be degradation-only; no network install, no prompt strings
     expect(bridgeSrc.toLowerCase()).not.toMatch(/install.*language.*server/);
-    expect(indexSrc).toContain("getLSPBridge");
-    expect(indexSrc).toContain("openFile");
+    expect(warmSrc).toContain("getLSPBridge");
+    expect(warmSrc).toContain("openFile");
     // Warm hook is fire-and-forget .catch(()=>{}) — never blocks
-    expect(indexSrc).toMatch(/getLSPBridge\(\)[\s\S]*openFile[\s\S]*\.catch/);
+    expect(warmSrc).toMatch(/getLSPBridge\(\)[\s\S]*openFile[\s\S]*\.catch/);
   });
 });

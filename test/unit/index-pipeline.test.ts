@@ -1,80 +1,19 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { resetSessionState } from "../../src/hook.js";
 import { GUARD_HINT_DEEP_SEARCH } from "../../src/bash-context-guard.js";
+import { setupExtension, type IndexHarness } from "./index-fixture.js";
 
-// Import after resetting module state to avoid cross-test contamination
-let registerExtension: (pi: ExtensionAPI) => void;
+let harness: IndexHarness;
 
 beforeEach(async () => {
-  resetSessionState();
-  // Dynamic import to get fresh module reference
-  registerExtension = (await import("../../src/index.js")).default;
+  harness = await setupExtension();
 });
 
-describe("index extension wiring", () => {
-  it("registers all tools for the Pi extension path", () => {
-    const registered: { name: string; execute: unknown }[] = [];
-    const handlers: Record<string, (...args: unknown[]) => unknown> = {};
-
-    const api = {
-      registerTool: (definition: { name: string; execute: unknown }) => {
-        registered.push(definition);
-      },
-      on: (event: string, handler: (...args: unknown[]) => unknown) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-
-    registerExtension(api);
-
-    const names = registered.map((t) => t.name);
-    // v3: inspect + skill + read (re-registered for evidence + enrichment)
-    // are registered. read_files/search/repo_map/symbol remain consolidated
-    // into inspect modes.
-    expect(names).toContain("inspect");
-    expect(names).toContain("skill");
-    expect(names).toContain("read");
-    expect(names).not.toContain("read_files");
-    expect(names).not.toContain("search");
-    expect(names).not.toContain("repo_map");
-    expect(names).not.toContain("symbol");
-    expect(names).not.toContain("intent_read");
-    expect(names).not.toContain("find_symbol");
-    expect(names).not.toContain("symbol_info");
-    expect(names).not.toContain("deep_search");
-    expect(names.every((name) => !name.startsWith("smartread_"))).toBe(true);
-    // context_graph is not exposed as an agent-facing tool
-    expect(names).not.toContain("context_graph");
-    // graph_mutate and git_notes are experimental — disabled by default
-    expect(names).not.toContain("graph_mutate");
-    expect(names).not.toContain("git_notes_read");
-    expect(names).not.toContain("git_notes_write");
-    expect(registered.every((t) => typeof t.execute === "function")).toBe(true);
-
-    // Should also register session hooks
-    expect(handlers.session_start).toBeDefined();
-    expect(handlers.before_agent_start).toBeDefined();
-    expect(handlers.session_shutdown).toBeDefined();
-  });
-
+describe("index extension result pipeline", () => {
   it("guards large deep search tool results", async () => {
     // v3: deep search runs as inspect { query, depth: "deep" }.
     // The bash-context-guard should still cap oversized tool_result content for the
     // `inspect` tool name (which replaced `search` in v3).
-    const registered: { name: string; execute: unknown }[] = [];
-    const handlers: Record<string, (...args: any[]) => any> = {};
-
-    const api = {
-      registerTool: (definition: { name: string; execute: unknown }) => {
-        registered.push(definition);
-      },
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-
-    registerExtension(api);
+    const { handlers } = harness;
 
     const text = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
     const result = await handlers.tool_result!({
@@ -91,15 +30,7 @@ describe("index extension wiring", () => {
   });
 
   it("applies bash context guard AFTER doom-loop warning injection (ordering fix)", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-
-    registerExtension(api);
+    const { handlers } = harness;
 
     // Large output that triggers doom-loop identical-tail AND exceeds guard thresholds
     const largeText = Array.from({ length: 4000 }, (_, i) => `line ${i}`).join("\n");
@@ -149,15 +80,7 @@ describe("index extension wiring", () => {
   });
 
   it("marks read context stale after write results mutate the same file", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-
-    registerExtension(api);
+    const { handlers } = harness;
 
     await handlers.tool_result!({
       toolName: "read",
@@ -187,14 +110,7 @@ describe("index extension wiring", () => {
   });
 
   it("uses changedResources.canonicalPath as authoritative mutation paths for multi-file edit (raw input, no top-level path)", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-    registerExtension(api);
+    const { handlers } = harness;
 
     await handlers.tool_result!({ toolName: "read", toolCallId: "read-a", input: { path: "src/a.ts" }, content: [{ type: "text", text: "a" }] });
     await handlers.tool_result!({ toolName: "read", toolCallId: "read-b", input: { path: "src/b.ts" }, content: [{ type: "text", text: "b" }] });
@@ -220,14 +136,7 @@ describe("index extension wiring", () => {
   });
 
   it("does not mark read context stale for failed edits", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-    registerExtension(api);
+    const { handlers } = harness;
 
     await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
     await handlers.tool_result!({
@@ -246,14 +155,7 @@ describe("index extension wiring", () => {
   });
 
   it("does not mark read context stale for failed writes", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-    registerExtension(api);
+    const { handlers } = harness;
 
     await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
     await handlers.tool_result!({
@@ -271,14 +173,7 @@ describe("index extension wiring", () => {
   });
 
   it("does not mark read context stale for failed graph_mutate", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-    registerExtension(api);
+    const { handlers } = harness;
 
     await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
     await handlers.tool_result!({
@@ -296,14 +191,7 @@ describe("index extension wiring", () => {
   });
 
   it("ignores malformed changedResources and falls back to input path for edit", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-    registerExtension(api);
+    const { handlers } = harness;
 
     await handlers.tool_result!({ toolName: "read", toolCallId: "read-1", input: { path: "src/foo.ts" }, content: [{ type: "text", text: "export const value = 1;" }] });
 
@@ -326,14 +214,7 @@ describe("index extension wiring", () => {
   });
 
   it("post-edit impact wiring: does not throw and is additive for write (no graph data -> no-op)", async () => {
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-    registerExtension(api);
+    const { handlers } = harness;
 
     // No graph built -> impact summary should no-op without affecting result
     const result = await handlers.tool_result!({
@@ -349,19 +230,12 @@ describe("index extension wiring", () => {
   });
 
   it("post-edit impact wiring: appends impact block when graph data exists (mocked)", async () => {
+    const { handlers } = harness;
     // Mock post-edit-impact to return a block for this test via vi.mock-like override
     const impactMod = await import("../../src/post-edit-impact.js");
     const spy = vi.spyOn(impactMod, "runPostEditImpactSummary").mockResolvedValue({
       content: [{ type: "text", text: "wrote file" }, { type: "text", text: "[Possibly affected: src/b.ts — advisory, based on prior graph data]" }],
     });
-    const handlers: Record<string, (...args: any[]) => any> = {};
-    const api = {
-      registerTool: () => {},
-      on: (event: string, handler: (...args: any[]) => any) => {
-        handlers[event] = handler;
-      },
-    } as unknown as ExtensionAPI;
-    registerExtension(api);
     const result = await handlers.tool_result!({
       toolName: "write",
       toolCallId: "write-impact-mocked",
