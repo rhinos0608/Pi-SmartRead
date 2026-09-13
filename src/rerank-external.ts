@@ -194,9 +194,12 @@ export async function rerankWithExternal(
   const rest = candidates.slice(opts.maxCandidates);
   const indexToOriginal = new Map(extResult.rankedIndices.map((idx, rank) => [idx, rank]));
 
+  // Candidates omitted from the external ranking get unique ranks after all
+  // externally ranked candidates, in their existing order (never collide).
+  let nextOmittedRank = extResult.rankedIndices.length;
   const results: RerankerResult[] = [
     ...slice.map((c, i) => {
-      const newRank = indexToOriginal.get(i) ?? i;
+      const newRank = indexToOriginal.get(i) ?? nextOmittedRank++;
       const extScore = extResult.scores[extResult.rankedIndices.indexOf(i)] ?? c.rrfScore;
       return {
         path: c.path,

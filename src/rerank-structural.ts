@@ -82,7 +82,7 @@ function pageRankSignal(value: number | undefined): number | null {
 }
 
 function positiveSignal(value: number | undefined): number | null {
-  if (value === undefined || value <= 0) return null;
+  if (value === undefined || !Number.isFinite(value) || value < 0) return null;
   return value;
 }
 

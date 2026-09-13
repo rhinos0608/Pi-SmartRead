@@ -343,24 +343,33 @@ function assembleColbertResults(args: {
   const topKFinalIndices = new Set(
     args.topKCandidates.map((sc) => sc.index),
   );
-  // Candidates beyond top-K (within slice) get sequential ranks by pooled-cos
-  // order (their slice index preserves their position in the input order,
-  // which matches the pooled-cosine sort from F-13). F-6: their rerankScore
-  // is normalised pooled-cosine so it lives on the same [0,1] scale as the
-  // blended top-K scores.
-  const nonTopKScores = args.slice
-    .map((_c, i) => (!topKFinalIndices.has(i) ? args.pooledCosScores[i] ?? 0 : null))
-    .filter((s): s is number => s !== null);
+  // Candidates beyond top-K (within slice) get sequential ranks by sorted
+  // pooled-cosine order (score desc, slice index asc — same comparator as
+  // scoreByPooledCosine). F-6: their rerankScore is normalised pooled-cosine
+  // so it lives on the same [0,1] scale as the blended top-K scores.
+  const nonTopKIndices: number[] = [];
+  const nonTopKScores: number[] = [];
+  args.slice.forEach((_c, i) => {
+    if (!topKFinalIndices.has(i)) {
+      nonTopKIndices.push(i);
+      nonTopKScores.push(args.pooledCosScores[i] ?? 0);
+    }
+  });
   const normalizedNonTopK = normalize(nonTopKScores);
-  let nonTopKCursor = 0;
+  const normByIndex = new Map(nonTopKIndices.map((idx, k) => [idx, normalizedNonTopK[k] ?? 0]));
+  // Rank non-top-K by sorted pooled-cosine order (same comparator as
+  // scoreByPooledCosine: score desc, slice index asc), not input order.
+  const nonTopKOrder = [...nonTopKIndices].sort(
+    (a, b) => (args.pooledCosScores[b] ?? 0) - (args.pooledCosScores[a] ?? 0) || a - b,
+  );
+  const rankByIndex = new Map(nonTopKOrder.map((idx, pos) => [idx, args.blendedTopK.length + pos]));
   // Candidates beyond maxCandidates: keep original position, sentinel score
   return [
     ...args.slice.map((c, i) => {
       if (!topKFinalIndices.has(i)) {
         // F-3: sequential ranks instead of shared blendedTopK.length + 0
-        const newRank = args.blendedTopK.length + nonTopKCursor;
-        const normalizedScore = normalizedNonTopK[nonTopKCursor] ?? 0;
-        nonTopKCursor += 1;
+        const newRank = rankByIndex.get(i) ?? args.blendedTopK.length;
+        const normalizedScore = normByIndex.get(i) ?? 0;
         return {
           path: c.path,
           rerankScore: normalizedScore,
