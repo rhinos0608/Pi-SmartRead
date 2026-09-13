@@ -29,6 +29,7 @@ import {
   normalizeCandidatePath,
   rankCandidates,
   type EmbeddingStatus,
+  type RankCandidatesResult,
 } from "./intent-ranking.js";
 import {
   findDirectImportNeighbours,
@@ -48,6 +49,7 @@ import {
 import { probeQuery, type ProbeResult } from "../search/query-probe.js";
 import { type HydeResult } from "../search/hyde.js";
 import { getGraphifyEnricher } from "../graph/graphify-enricher.js";
+import type { ContextGraph } from "../context-graph.js";
 import {
   classifyConfidence,
   type ConfidenceClass,
@@ -115,6 +117,652 @@ function toPublicFileDetail(detail: Partial<WorkingIntentReadFileDetail>): Inten
     ...publicDetail
   } = detail;
   return publicDetail as IntentReadFileDetail;
+}
+
+/** Explicit file request with optional hashline selector window. */
+interface ResolvedFile { path: string; offset?: number; limit?: number; }
+
+/** Per-file read outcome (raw + rendered bodies plus evidence). */
+interface FileReadResult {
+  path: string;
+  displayPath: string;
+  ok: boolean;
+  body?: string;
+  renderedBody?: string;
+  startLine?: number;
+  anchorBody?: boolean;
+  error?: string;
+  evidence?: WorkspaceEvidenceEnvelope;
+}
+
+/** Directory-scan cap bookkeeping. */
+interface DirCap { countBeforeCap: number; countAfterCap: number; capped: boolean; }
+
+/** Mutable orchestration state shared by execute-phase helpers. */
+interface IntentExecuteState {
+  toolCallId: string;
+  signal: AbortSignal | undefined;
+  ctx: ExtensionContext;
+  query: string;
+  topK: number;
+  stopOnError: boolean;
+  resolvedFiles: ResolvedFile[];
+  candidateCountBeforeGraph: number;
+  hasProjectMarker: boolean;
+  embeddingConfig: ReturnType<typeof validateEmbeddingConfig>;
+  sharedGraph: ContextGraph | null;
+  probeAddedSet: Set<string>;
+  graphDistanceMap: Map<string, number>;
+  graphEdges: Array<{ from: string; to: string; type: string; confidence: number }>;
+  existingPaths: Set<string>;
+  probing?: ProbeResult;
+  probeAddedPaths: string[];
+  readToolFactory: typeof createReadTool;
+  fetchEmbeddingsImpl: (req: EmbedRequest) => Promise<EmbedResult>;
+  publishInspection?: IntentReadToolOptions["publishInspection"];
+  embeddingLruCache: LruCache<EmbedResult>;
+  persistentCaches: LruCache<PersistentEmbeddingCache>;
+}
+
+/** Lazily import the shared context graph (avoids a static import cycle). */
+async function importSharedGraph(): Promise<(root: string) => Promise<ContextGraph>> {
+  const { getSharedContextGraphAsync } = await import("../mcp-registry.js");
+  return getSharedContextGraphAsync;
+}
+
+/** Resolve which source supplies candidates; returns default dir instead of mutating params. */
+function resolveIntentSource(
+  params: IntentReadInput,
+  hasFiles: boolean,
+  hasDirectory: boolean,
+): { hasDirectory: boolean; directory?: string } {
+  if (hasFiles && hasDirectory) {
+    throw new Error("Provide either files or directory, not both");
+  }
+  if (hasFiles || hasDirectory) return { hasDirectory, directory: params.directory };
+  if (params.defaultToCwd) {
+    return { hasDirectory: true, directory: "." };
+  }
+  throw new Error("Provide either files or directory, or set defaultToCwd to scan current directory");
+}
+
+/** Validate intent input; throws on empty query or conflicting sources. */
+function validateIntentRequest(params: IntentReadInput): {
+  query: string;
+  hasFiles: boolean;
+  hasDirectory: boolean;
+  directory?: string;
+  topK: number;
+} {
+  const query = params.query.trim();
+  if (!query) throw new Error("query must not be empty or whitespace-only");
+  const hasFiles = Array.isArray(params.files) && params.files.length > 0;
+  const { hasDirectory, directory } = resolveIntentSource(
+    params,
+    hasFiles,
+    typeof params.directory === "string" && params.directory.length > 0,
+  );
+  return { query, hasFiles, hasDirectory, directory, topK: params.topK ?? 20 };
+}
+
+/** Resolve explicit files or a scanned directory into candidate paths. */
+function resolveIntentCandidates(
+  params: IntentReadInput,
+  query: string,
+  hasDirectory: boolean,
+  cwd: string,
+  directory?: string,
+): { resolvedFiles: ResolvedFile[]; dirCap: DirCap | undefined } {
+  if (!hasDirectory) return { resolvedFiles: dedupeFiles(params.files!), dirCap: undefined };
+  const resolution = resolveDirectory(normalizeCandidatePath(cwd, directory!));
+  const dirCap: DirCap | undefined = resolution.capped
+    ? {
+      countBeforeCap: resolution.countBeforeCap,
+      countAfterCap: resolution.paths.length,
+      capped: true,
+    }
+    : undefined;
+  const reordered = presortPathsByQuery(
+    resolution.paths.map((p) => p),
+    query,
+  );
+  return { resolvedFiles: reordered.map((p) => ({ path: p })), dirCap };
+}
+
+/** Remaining budget before hitting the file cap. */
+function intentSlots(state: IntentExecuteState): number {
+  return Math.max(0, MAX_INTENT_READ_FILES - state.resolvedFiles.length);
+}
+
+/** Arguments for recording a neighbour file (single-param helper shape). */
+interface NeighbourRecord {
+  seedPath: string;
+  neighbourPath: string;
+  edgeType: string;
+  confidence: number;
+  distance: number;
+}
+
+/** Record a newly discovered neighbour file with its provenance edge. */
+function addNeighbourFile(state: IntentExecuteState, record: NeighbourRecord): boolean {
+  const normalized = normalizeCandidatePath(state.ctx.cwd, record.neighbourPath);
+  if (state.existingPaths.has(normalized)) return false;
+  if (state.resolvedFiles.length >= MAX_INTENT_READ_FILES) return false;
+  state.existingPaths.add(normalized);
+  state.resolvedFiles.push({ path: record.neighbourPath });
+  state.graphEdges.push({
+    from: record.seedPath,
+    to: record.neighbourPath,
+    type: record.edgeType,
+    confidence: record.confidence,
+  });
+  state.graphDistanceMap.set(normalized, record.distance);
+  return true;
+}
+
+/** Merge successful probe definition files into the candidate list. */
+function applyProbeResults(state: IntentExecuteState): void {
+  if (state.probing?.status !== "ok" || state.probing.addedPaths.length === 0) return;
+  const seen = new Set(state.resolvedFiles.map((file) => normalizeCandidatePath(state.ctx.cwd, file.path)));
+  for (const probePath of state.probing.addedPaths) {
+    if (seen.has(probePath) || state.resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
+    seen.add(probePath);
+    state.resolvedFiles.push({ path: probePath });
+    state.probeAddedPaths.push(probePath);
+    state.probeAddedSet.add(normalizeCandidatePath(state.ctx.cwd, probePath));
+  }
+}
+
+/** Record a failed probe outcome without failing the read. */
+function markProbeFailed(state: IntentExecuteState, err: unknown): void {
+  state.probing = {
+    status: "failed",
+    strategy: "symbols",
+    inferredSymbols: [],
+    addedPaths: [],
+    warnings: [err instanceof Error ? err.message : String(err)],
+  };
+}
+
+/** Probe phase: extract symbols from the query, add definition files. */
+async function runIntentProbe(state: IntentExecuteState): Promise<void> {
+  if (state.embeddingConfig?.probeEnabled !== true) return;
+  if (intentSlots(state) <= 0) return;
+  try {
+    state.probing = await probeQuery(state.query, {
+      maxProbeAdded: Math.min(4, intentSlots(state)),
+      graph: state.sharedGraph!,
+    });
+    applyProbeResults(state);
+  } catch (err) {
+    markProbeFailed(state, err);
+  }
+}
+
+/** Snapshot per-seed import lists to attribute neighbours without rescans. */
+function snapshotSeedImports(state: IntentExecuteState): Map<string, string[]> {
+  const seedFileToImports = new Map<string, string[]>();
+  for (const file of state.resolvedFiles) {
+    try {
+      seedFileToImports.set(
+        file.path,
+        findDirectImportNeighbours(state.ctx.cwd, [file.path], MAX_INTENT_READ_FILES),
+      );
+    } catch {
+      seedFileToImports.set(file.path, []);
+    }
+  }
+  return seedFileToImports;
+}
+
+/** Attribute one import neighbour to its seed file and record it. */
+function recordImportNeighbour(
+  state: IntentExecuteState,
+  seedFileToImports: Map<string, string[]>,
+  graphPath: string,
+): void {
+  const seedFile = state.resolvedFiles.find((f) => seedFileToImports.get(f.path)?.includes(graphPath));
+  addNeighbourFile(state, {
+    seedPath: seedFile ? seedFile.path : state.ctx.cwd,
+    neighbourPath: graphPath,
+    edgeType: "imports",
+    confidence: 1.0,
+    distance: 1,
+  });
+}
+
+/** Import-neighbour expansion (fast regex-based batch scan). */
+function expandImportNeighbours(state: IntentExecuteState): void {
+  const seedFileToImports = snapshotSeedImports(state);
+  const neighbours = findDirectImportNeighbours(
+    state.ctx.cwd,
+    state.resolvedFiles.map((file) => file.path),
+    intentSlots(state),
+  );
+  for (const graphPath of neighbours) recordImportNeighbour(state, seedFileToImports, graphPath);
+}
+
+/** Record one batch of index neighbours for a seed file. */
+function recordIndexNeighbours(
+  state: IntentExecuteState,
+  seedPath: string,
+  neighbours: Array<{ path: string; provenance: { type: string; confidence: number } }>,
+): void {
+  for (const n of neighbours) {
+    if (state.resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+    addNeighbourFile(state, {
+      seedPath,
+      neighbourPath: n.path,
+      edgeType: n.provenance.type,
+      confidence: n.provenance.confidence,
+      distance: 2,
+    });
+  }
+}
+
+/** Index-neighbour expansion via the shared graph (symbols and/or calls). */
+async function expandIndexedNeighbours(
+  state: IntentExecuteState,
+  selector: { includeSymbols?: boolean; includeCalls?: boolean },
+): Promise<void> {
+  if (intentSlots(state) <= 0 || state.embeddingConfig?.probeEnabled !== true) return;
+  for (const seedFile of state.resolvedFiles.slice(0, state.candidateCountBeforeGraph)) {
+    if (state.resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+    try {
+      recordIndexNeighbours(state, seedFile.path, await state.sharedGraph!.getFileNeighbours(seedFile.path, selector));
+    } catch { /* skip individual failures */ }
+  }
+}
+
+/** Symbol-neighbour expansion via the shared graph index. */
+async function expandSymbolNeighbours(state: IntentExecuteState): Promise<void> {
+  await expandIndexedNeighbours(state, { includeSymbols: true });
+}
+
+/** Call-graph neighbour expansion for high-confidence function symbols. */
+async function expandCallNeighbours(state: IntentExecuteState): Promise<void> {
+  await expandIndexedNeighbours(state, { includeCalls: true });
+}
+
+/** Graphify neighbour expansion (all edge types from graphify-out/graph.json). */
+function expandGraphifyNeighbours(state: IntentExecuteState): void {
+  if (intentSlots(state) <= 0) return;
+  try {
+    const enricher = getGraphifyEnricher(state.ctx.cwd);
+    if (!enricher.isAvailable) return;
+    for (const seedFile of state.resolvedFiles.slice(0, state.candidateCountBeforeGraph)) {
+      if (state.resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+      try {
+        for (const rel of enricher.getRelatedFilesForPath(seedFile.path)) {
+          if (state.resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+          addNeighbourFile(state, {
+            seedPath: seedFile.path,
+            neighbourPath: rel.path,
+            edgeType: rel.relation,
+            confidence: rel.confidenceScore,
+            distance: 2,
+          });
+        }
+      } catch { /* skip individual failures */ }
+    }
+  } catch { /* graphify unavailable — skip silently */ }
+}
+
+/** Mutation-edge expansion (breakage + co-change from Smart-Edit feedback). */
+function expandMutationNeighbours(state: IntentExecuteState): void {
+  if (intentSlots(state) <= 0 || !state.hasProjectMarker) return;
+  for (const seedFile of state.resolvedFiles.slice(0, state.candidateCountBeforeGraph)) {
+    if (state.resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+    try {
+      for (const n of state.sharedGraph!.getMutationNeighbours(seedFile.path)) {
+        if (state.resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
+        addNeighbourFile(state, {
+          seedPath: seedFile.path,
+          neighbourPath: n.path,
+          edgeType: n.provenance.type,
+          confidence: n.provenance.confidence,
+          distance: 2,
+        });
+      }
+    } catch { /* skip individual failures */ }
+  }
+}
+
+/** Parsed read request for one candidate file. */
+interface ParsedIntentRequest {
+  targetPath: string;
+  input: ReadToolInput;
+  rawMode: boolean;
+  selectorOffset?: number;
+  reqOffset?: number;
+}
+
+/** Split path/selector and validate; throws on bad paths. */
+function parseIntentRequest(req: ResolvedFile): ParsedIntentRequest {
+  const { path: targetPath, selector } = splitPathAndSelector(req.path);
+  validatePath(targetPath);
+  const selectorArgs = selectorToOffsetLimit(selector);
+  return {
+    targetPath,
+    input: {
+      path: targetPath,
+      offset: selectorArgs.offset ?? req.offset,
+      limit: selectorArgs.limit ?? req.limit,
+    },
+    rawMode: selectorArgs.raw === true,
+    selectorOffset: selectorArgs.offset,
+    reqOffset: req.offset,
+  };
+}
+
+/** Rendered body parts extracted from a read result. */
+interface RenderedIntentBody {
+  body: string;
+  renderedBody: string;
+  startLine: number;
+  alreadyAnchored: boolean;
+  evidence?: WorkspaceEvidenceEnvelope;
+}
+
+/** Extract display body, anchor state, and evidence from a read result. */
+function extractIntentBody(
+  result: Awaited<ReturnType<ReturnType<typeof createReadTool>["execute"]>>,
+  parsed: ParsedIntentRequest,
+): RenderedIntentBody {
+  const details = result.details as ReadToolDetails | undefined;
+  const displayContent = (
+    details as { displayContent?: { text?: string; startLine?: number } } | undefined
+  )?.displayContent;
+  const evidence = (
+    result.details as { workspaceEvidence?: WorkspaceEvidenceEnvelope } | undefined
+  )?.workspaceEvidence;
+  const renderedBody = displayContent?.text ?? result.content
+    .filter((item): item is { type: "text"; text: string } => item.type === "text")
+    .map((item) => item.text)
+    .join("\n");
+  const firstFewLines = renderedBody.split("\n", 5).join("\n");
+  const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
+  const body = displayContent?.text ?? renderedBody;
+  return {
+    body: body || "[No text content]",
+    renderedBody: body || "[No text content]",
+    startLine: displayContent?.startLine ?? parsed.selectorOffset ?? parsed.reqOffset ?? 1,
+    alreadyAnchored,
+    ...(evidence && { evidence }),
+  };
+}
+
+/** Read one candidate file; returns an ordered result entry. */
+async function readIntentFile(
+  state: IntentExecuteState,
+  readTool: ReturnType<typeof createReadTool>,
+  index: number,
+): Promise<FileReadResult> {
+  const req = state.resolvedFiles[index]!;
+  try {
+    const parsed = parseIntentRequest(req);
+    const result = await readTool.execute(`${state.toolCallId}:${index}`, parsed.input, state.signal, undefined);
+    const extracted = extractIntentBody(result, parsed);
+    const rawBody = extracted.alreadyAnchored ? stripHashlineAnchors(extracted.body) : extracted.body;
+    return {
+      path: parsed.targetPath,
+      displayPath: req.path,
+      ok: true,
+      body: rawBody,
+      renderedBody: extracted.renderedBody,
+      startLine: extracted.startLine,
+      anchorBody: parsed.rawMode ? false : !extracted.alreadyAnchored,
+      ...(extracted.evidence && { evidence: extracted.evidence }),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { path: req.path, displayPath: req.path, ok: false, error: message };
+  }
+}
+
+/** Throw the first read error in a completed batch when stopOnError is set. */
+function throwOnBatchError(
+  ordered: (FileReadResult | undefined)[],
+  batchStart: number,
+  batchEnd: number,
+): void {
+  for (let j = batchStart; j < batchEnd; j++) {
+    const r = ordered[j];
+    if (r && !r.ok) throw new Error(r.error);
+  }
+}
+
+/** Read one batch window concurrently into the shared ordered slots. */
+async function readIntentBatch(
+  state: IntentExecuteState,
+  readTool: ReturnType<typeof createReadTool>,
+  ordered: (FileReadResult | undefined)[],
+  batchStart: number,
+  batchEnd: number,
+): Promise<void> {
+  const batch: Promise<void>[] = [];
+  for (let j = batchStart; j < batchEnd; j++) {
+    const i = j;
+    batch.push(
+      readIntentFile(state, readTool, i).then((r) => {
+        ordered[i] = r;
+      }),
+    );
+  }
+  await Promise.allSettled(batch);
+  if (state.stopOnError) throwOnBatchError(ordered, batchStart, batchEnd);
+}
+
+/** Read all candidates in bounded-concurrency batches, preserving order. */
+async function readIntentFiles(state: IntentExecuteState): Promise<FileReadResult[]> {
+  const readTool = state.readToolFactory(state.ctx.cwd);
+  const ordered: (FileReadResult | undefined)[] = new Array(state.resolvedFiles.length);
+  const CONCURRENCY = 6;
+  for (let batchStart = 0; batchStart < state.resolvedFiles.length; batchStart += CONCURRENCY) {
+    if (state.signal?.aborted) throw new Error("Operation aborted");
+    await readIntentBatch(
+      state,
+      readTool,
+      ordered,
+      batchStart,
+      Math.min(batchStart + CONCURRENCY, state.resolvedFiles.length),
+    );
+  }
+  return ordered.filter((r): r is FileReadResult => r !== undefined);
+}
+
+/** Mark selection status for files outside the packed top-K. */
+function markUnpackedFiles(
+  fileResults: FileReadResult[],
+  fileDetails: Map<string, Partial<WorkingIntentReadFileDetail>>,
+  topKPaths: Set<string>,
+  filteredBelowThresholdPaths: string[],
+): void {
+  for (const f of fileResults) {
+    const detail = fileDetails.get(f.path)!;
+    detail.selectedForPacking = f.ok && topKPaths.has(f.path);
+    if (!f.ok) {
+      detail.inclusion = "error";
+      detail.included = false;
+    } else if (filteredBelowThresholdPaths.includes(f.path)) {
+      detail.inclusion = "below_threshold";
+      detail.included = false;
+    } else if (!topKPaths.has(f.path)) {
+      detail.inclusion = "not_top_k";
+      detail.included = false;
+    }
+  }
+}
+
+/** Pack top-K candidates into output sections in rank order. */
+function packIntentSections(
+  packCandidates: FileCandidate[],
+  plan: ReturnType<typeof buildPlan>,
+  fileDetails: Map<string, Partial<WorkingIntentReadFileDetail>>,
+): string[] {
+  const sections: string[] = [];
+  for (let i = 0; i < packCandidates.length; i++) {
+    const path = packCandidates[i]!.path;
+    const d = fileDetails.get(path)!;
+    if (plan.fullIncluded.has(i)) {
+      sections.push(packCandidates[i]!.fullText);
+      d.inclusion = "full";
+      d.included = true;
+    } else if (plan.partialSection?.index === i) {
+      sections.push(plan.partialSection.text);
+      d.inclusion = "partial";
+      d.included = true;
+    } else {
+      d.inclusion = "omitted";
+      d.included = false;
+    }
+  }
+  return sections;
+}
+
+/** Build pack candidates in RRF rank order with formatted content blocks. */
+function buildPackCandidates(
+  rankedSuccessOrder: string[],
+  successfulFiles: FileReadResult[],
+): FileCandidate[] {
+  return rankedSuccessOrder.map((path, i) => {
+    const f = successfulFiles.find((x) => x.path === path)!;
+    const body = f.renderedBody ?? f.body!;
+    const fullText = formatContentBlock(f.displayPath, body, i + 1, {
+      anchorBody: f.anchorBody ?? true,
+      startLine: f.startLine ?? 1,
+    });
+    return { index: i, path, ok: true, fullText, fullMetrics: measureText(fullText), body };
+  });
+}
+
+/** Order public file details: ranked successes, filtered, then errors. */
+function buildIntentFileDetails(
+  rankedSuccessOrder: string[],
+  filteredBelowThresholdPaths: string[],
+  erroredFiles: FileReadResult[],
+  fileDetails: Map<string, Partial<WorkingIntentReadFileDetail>>,
+): IntentReadFileDetail[] {
+  return [
+    ...rankedSuccessOrder.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
+    ...filteredBelowThresholdPaths.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
+    ...erroredFiles.map((f: FileReadResult) => toPublicFileDetail(fileDetails.get(f.path)!)),
+  ];
+}
+
+/** Single-argument bundle for details assembly (avoids excess-arity flags). */
+interface IntentDetailsArgs {
+  query: string;
+  fileResults: FileReadResult[];
+  successfulFiles: FileReadResult[];
+  erroredFiles: FileReadResult[];
+  topK: number;
+  effectiveTopK: number;
+  dirCap: DirCap | undefined;
+  embeddingStatus: EmbeddingStatus;
+  embeddingError?: string;
+  embeddingCacheHit: boolean;
+  embeddingLruCache: LruCache<EmbedResult>;
+  persistentCaches: LruCache<PersistentEmbeddingCache>;
+  cwd: string;
+  filteredBelowThresholdPaths: string[];
+  addedGraphPaths: string[];
+  candidateCountBeforeGraph: number;
+  resolvedCount: number;
+  graphEdges: IntentExecuteState["graphEdges"];
+  probing?: ProbeResult;
+  hydeResult: HydeResult;
+  rerankingResult?: RankCandidatesResult["rerankingResult"];
+  totalChunks: number;
+  filesChunked: number;
+  bestChunkByFile: RankCandidatesResult["bestChunkByFile"];
+  astChunkingUsed: boolean;
+  astChunkingStats: { usedAst: boolean; wasmAvailable: boolean; parseTimeMs: number; symbolCount: number };
+  allFileDetails: IntentReadFileDetail[];
+  adrBoosts: number[];
+  plan: ReturnType<typeof buildPlan>;
+  switchedForCoverage: boolean;
+  packCandidates: FileCandidate[];
+}
+
+/** Assemble the IntentReadDetails object from ranked/packed outcomes. */
+function assembleIntentDetails(args: IntentDetailsArgs): IntentReadDetails {
+  const partialIncludedPath = args.plan.partialSection !== undefined
+    ? args.packCandidates[args.plan.partialSection.index]?.path
+    : undefined;
+  return {
+    query: args.query,
+    processedCount: args.fileResults.length,
+    successCount: args.successfulFiles.length,
+    errorCount: args.erroredFiles.length,
+    requestedTopK: args.topK,
+    effectiveTopK: args.effectiveTopK,
+    ...(args.dirCap && {
+      candidateCountBeforeCap: args.dirCap.countBeforeCap,
+      candidateCountAfterCap: args.dirCap.countAfterCap,
+      capped: true,
+    }),
+    embeddingStatus: args.embeddingStatus,
+    ...(args.embeddingError && { embeddingError: args.embeddingError }),
+    rankingSignals: {
+      bm25: true,
+      embeddings: args.embeddingStatus === "ok",
+    },
+    chunkingEnabled: args.embeddingStatus === "ok",
+    astChunking: args.astChunkingUsed ? args.astChunkingStats : undefined,
+    embeddingCache: {
+      hit: args.embeddingCacheHit,
+      size: args.embeddingLruCache.size,
+      maxSize: args.embeddingLruCache.maxSize,
+      persistent: args.persistentCaches.get(args.cwd)?.hasPersistence ?? false,
+      diskEntries: args.persistentCaches.get(args.cwd)?.diskEntries ?? 0,
+    },
+    filteredBelowThresholdPaths: args.filteredBelowThresholdPaths,
+    graphAugmentation: {
+      addedPaths: args.addedGraphPaths,
+      candidateCountBefore: args.candidateCountBeforeGraph,
+      candidateCountAfter: args.resolvedCount,
+      ...(args.graphEdges.length > 0 && {
+        edgesUsed: args.graphEdges.map((edge) => ({
+          ...edge,
+          confidence: classifyConfidence(edge.confidence),
+        })),
+      }),
+    },
+    ...(args.probing && { probing: args.probing }),
+    ...(args.hydeResult.applied && { hyde: args.hydeResult }),
+    ...(args.rerankingResult && { reranking: args.rerankingResult }),
+    ...(args.embeddingStatus === "ok" && args.filesChunked > 0 && {
+      chunkInfo: {
+        totalChunks: args.totalChunks,
+        filesChunked: args.filesChunked,
+        bestChunkByFile: args.bestChunkByFile,
+      },
+    }),
+    files: args.allFileDetails,
+    adrBoostedCount: args.adrBoosts.filter((b) => b > 0).length,
+    packing: {
+      strategy: args.plan.strategy,
+      switchedForCoverage: args.switchedForCoverage,
+      fullIncludedCount: args.plan.fullCount,
+      fullIncludedSuccessCount: args.plan.fullSuccessCount,
+      partialIncludedPath,
+      omittedPaths: args.plan.omittedIndexes.map((i: number) => args.packCandidates[i]!.path),
+    },
+  };
+}
+
+/** Collect per-file evidence envelopes for packed indexes. */
+function collectPackEvidence(
+  packCandidates: FileCandidate[],
+  fileResults: FileReadResult[],
+): Map<number, WorkspaceEvidenceEnvelope> {
+  const perFileByPackIndex = new Map<number, WorkspaceEvidenceEnvelope>();
+  for (let i = 0; i < packCandidates.length; i++) {
+    const evidence = fileResults.find((f) => f.path === packCandidates[i]!.path)?.evidence;
+    if (evidence) perFileByPackIndex.set(i, evidence);
+  }
+  return perFileByPackIndex;
 }
 
 /** Pick the packing plan covering the most files; tie-break prefers #1 ranked file. */
@@ -286,58 +934,11 @@ export function createIntentReadTool(
         );
       }
 
-      // Embedding API tracking (updated after embed call; may degrade to fallback)
-      let embeddingStatus: EmbeddingStatus = "ok";
-      let embeddingCacheHit = false;
-
-
       // 2. Validate input
-      const query = params.query.trim();
-      if (!query) throw new Error("query must not be empty or whitespace-only");
-
-      const hasFiles = Array.isArray(params.files) && params.files.length > 0;
-      let hasDirectory = typeof params.directory === "string" && params.directory.length > 0;
-
-      if (hasFiles && hasDirectory) {
-        throw new Error("Provide either files or directory, not both");
-      }
-
-      // Default to cwd when neither files nor directory is provided (defaultToCwd option)
-      if (!hasFiles && !hasDirectory) {
-        if (params.defaultToCwd) {
-          params.directory = ".";
-          hasDirectory = true;
-        } else {
-          throw new Error("Provide either files or directory, or set defaultToCwd to scan current directory");
-        }
-      }
-
-      const topK = params.topK ?? 20;
+      const { query, hasDirectory, directory, topK } = validateIntentRequest(params);
 
       // 3. Resolve candidates
-      interface ResolvedFile { path: string; offset?: number; limit?: number; }
-      let resolvedFiles: ResolvedFile[];
-      let dirCap: { countBeforeCap: number; countAfterCap: number; capped: boolean } | undefined;
-
-      if (hasDirectory) {
-        const resolution = resolveDirectory(normalizeCandidatePath(ctx.cwd, params.directory!));
-        if (resolution.capped) {
-          dirCap = {
-            countBeforeCap: resolution.countBeforeCap,
-            countAfterCap: resolution.paths.length,
-            capped: true,
-          };
-        }
-        resolvedFiles = resolution.paths.map((p) => ({ path: p }));
-        // Phase 4: reorder by filename/path token overlap within capped results
-        const pathStrings = resolvedFiles.map((r) => r.path);
-        const reordered = presortPathsByQuery(pathStrings, query);
-        resolvedFiles = reordered.map((p) => ({ path: p }));
-      } else {
-        // Deduplicate by path to prevent silent overwrites in detail map
-        resolvedFiles = dedupeFiles(params.files!);
-      }
-
+      const { resolvedFiles, dirCap } = resolveIntentCandidates(params, query, hasDirectory, ctx.cwd, directory);
       const candidateCountBeforeGraph = resolvedFiles.length;
 
       // Project marker detection — gates graph-heavy expansion phases
@@ -352,285 +953,63 @@ export function createIntentReadTool(
       // Unconditionally building for e.g. cwd="/" triggers a full filesystem scan
       // + tree-sitter parse of every source file, which crashes on adversarial files.
       const needsGraph = hasProjectMarker || embeddingConfig?.probeEnabled === true;
-      const { getSharedContextGraphAsync } = await import("../mcp-registry.js");
+      const getSharedContextGraphAsync = await importSharedGraph();
       const sharedGraph = needsGraph
         ? await getSharedContextGraphAsync(ctx.cwd)
         : null;
 
-      // Tracking sets for structural signals (populated during expansion)
-      const probeAddedSet = new Set<string>();
-      const graphDistanceMap = new Map<string, number>();
+      const state: IntentExecuteState = {
+        toolCallId,
+        signal,
+        ctx,
+        query,
+        topK,
+        stopOnError: params.stopOnError ?? false,
+        resolvedFiles,
+        candidateCountBeforeGraph,
+        hasProjectMarker,
+        embeddingConfig,
+        sharedGraph,
+        probeAddedSet: new Set<string>(),
+        graphDistanceMap: new Map<string, number>(),
+        graphEdges: [],
+        existingPaths: new Set(
+          resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)),
+        ),
+        probing: undefined,
+        probeAddedPaths: [],
+        readToolFactory,
+        fetchEmbeddingsImpl,
+        publishInspection: opts.publishInspection,
+        embeddingLruCache,
+        persistentCaches,
+      };
 
       // Phase 3: Probe phase — extract symbols from query, find definition files.
-      // Gated behind config (probeEnabled: true, default off) because probe uses
-      // tree-sitter which is expensive and not needed for simple file-scoped queries.
-      let probing: ProbeResult | undefined;
-      const probeAddedPaths: string[] = [];
-      if (embeddingConfig?.probeEnabled === true) {
-        const probeSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-        if (probeSlots > 0) {
-          try {
-            probing = await probeQuery(query, {
-              maxProbeAdded: Math.min(4, probeSlots),
-              graph: sharedGraph!,
-            });
-            if (probing.status === "ok" && probing.addedPaths.length > 0) {
-              const probeExisting = new Set(resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)));
-              for (const probePath of probing.addedPaths) {
-                if (probeExisting.has(probePath) || resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
-                probeExisting.add(probePath);
-                resolvedFiles.push({ path: probePath });
-                probeAddedPaths.push(probePath);
-                probeAddedSet.add(normalizeCandidatePath(ctx.cwd, probePath));
-              }
-            }
-          } catch (err) {
-            probing = {
-              status: "failed",
-              strategy: "symbols",
-              inferredSymbols: [],
-              addedPaths: [],
-              warnings: [err instanceof Error ? err.message : String(err)],
-            };
-          }
-        }
-      }
+      await runIntentProbe(state);
 
       // Phase 2: Graph neighbour expansion (imports + symbols)
-      const graphEdges: Array<{ from: string; to: string; type: string; confidence: number }> = [];
-      const existingPaths = new Set(resolvedFiles.map((file) => normalizeCandidatePath(ctx.cwd, file.path)));
-
       // 2a: Import neighbours (fast, regex-based batch scan)
-      const importSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      
-      // Pre-compute import neighbours for initial seed files to avoid O(n^2) rescans
-      const seedFileToImports = new Map<string, string[]>();
-      for (const file of resolvedFiles) {
-        try {
-          seedFileToImports.set(file.path, findDirectImportNeighbours(ctx.cwd, [file.path], MAX_INTENT_READ_FILES));
-        } catch {
-          seedFileToImports.set(file.path, []);
-        }
-      }
-
-      const importNeighbourPaths = findDirectImportNeighbours(ctx.cwd, resolvedFiles.map((file) => file.path), importSlots);
-      for (const graphPath of importNeighbourPaths) {
-        if (existingPaths.has(graphPath) || resolvedFiles.length >= MAX_INTENT_READ_FILES) continue;
-        existingPaths.add(graphPath);
-        resolvedFiles.push({ path: graphPath });
-        
-        // Find which seed file imported this path (fallback to cwd if not found)
-        const seedFile = resolvedFiles.find(f => {
-          const neighbours = seedFileToImports.get(f.path);
-          return neighbours ? neighbours.includes(graphPath) : false;
-        });
-        
-        graphEdges.push({ 
-          from: seedFile ? seedFile.path : ctx.cwd, 
-          to: graphPath, 
-          type: "imports", 
-          confidence: 1.0 
-        });
-        graphDistanceMap.set(normalizeCandidatePath(ctx.cwd, graphPath), 1);
-      }
+      expandImportNeighbours(state);
 
       // 2b: Symbol neighbours (uses pre-built symbol index from shared graph)
-      const symbolSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      if (symbolSlots > 0 && embeddingConfig?.probeEnabled === true) {
-        const seedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
-        for (const seedFile of seedFiles) {
-          if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-          try {
-            const neighbours = await sharedGraph!.getFileNeighbours(seedFile.path, { includeSymbols: true });
-            for (const n of neighbours) {
-              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-              const normalized = normalizeCandidatePath(ctx.cwd, n.path);
-              if (existingPaths.has(normalized)) continue;
-              existingPaths.add(normalized);
-              resolvedFiles.push({ path: n.path });
-              graphEdges.push({ from: seedFile.path, to: n.path, type: n.provenance.type, confidence: n.provenance.confidence });
-              graphDistanceMap.set(normalized, 2);
-            }
-          } catch { /* skip individual failures */ }
-        }
-      }
+      await expandSymbolNeighbours(state);
       // 2c: Call graph neighbours (caller/callee expansion for high-confidence function symbols)
-      const callSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      if (callSlots > 0 && embeddingConfig?.probeEnabled === true) {
-        const callSeedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
-        for (const seedFile of callSeedFiles) {
-          if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-          try {
-            const neighbours = await sharedGraph!.getFileNeighbours(seedFile.path, { includeCalls: true });
-            for (const n of neighbours) {
-              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-              const normalized = normalizeCandidatePath(ctx.cwd, n.path);
-              if (existingPaths.has(normalized)) continue;
-              existingPaths.add(normalized);
-              resolvedFiles.push({ path: n.path });
-              graphEdges.push({ from: seedFile.path, to: n.path, type: n.provenance.type, confidence: n.provenance.confidence });
-              graphDistanceMap.set(normalized, 2);
-            }
-          } catch { /* skip individual failures */ }
-        }
-      }
+      await expandCallNeighbours(state);
       // 2d: Graphify neighbor expansion (uses graphify-out/graph.json when available)
       // Finds related files through all edge types (calls, imports, references,
       // conceptually_related_to, etc.) — much richer than regex import scanning alone.
-      const graphifySlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      if (graphifySlots > 0) {
-        try {
-          const enricher = getGraphifyEnricher(ctx.cwd);
-          if (enricher.isAvailable) {
-            const graphifySeedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
-            for (const seedFile of graphifySeedFiles) {
-              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-              try {
-                const related = enricher.getRelatedFilesForPath(seedFile.path);
-                for (const rel of related) {
-                  if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-                  const normalized = normalizeCandidatePath(ctx.cwd, rel.path);
-                  if (existingPaths.has(normalized)) continue;
-                  existingPaths.add(normalized);
-                  resolvedFiles.push({ path: rel.path });
-                  graphEdges.push({ from: seedFile.path, to: rel.path, type: rel.relation, confidence: rel.confidenceScore });
-                  graphDistanceMap.set(normalized, 2);
-                }
-              } catch { /* skip individual failures */ }
-            }
-          }
-        } catch { /* graphify unavailable — skip silently */ }
-      }
-      const addedGraphPaths = resolvedFiles.slice(candidateCountBeforeGraph).map((file) => file.path);
+      expandGraphifyNeighbours(state);
+      const addedGraphPaths = state.resolvedFiles.slice(candidateCountBeforeGraph).map((file) => file.path);
 
       // 2e: Mutation edge expansion (breakage + co-change from Smart-Edit feedback loop)
       // These edges are observed from post-edit diagnostic cascades and git history co-change
       // analysis — empirical coupling signals not captured by static analysis.
-      const mutationSlots = Math.max(0, MAX_INTENT_READ_FILES - resolvedFiles.length);
-      if (mutationSlots > 0 && hasProjectMarker) {
-        // Use sharedGraph's getMutationNeighbours which reads from EdgeStore
-        const mutationSeedFiles = resolvedFiles.slice(0, candidateCountBeforeGraph);
-        for (const seedFile of mutationSeedFiles) {
-          if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-          try {
-            const neighbours = sharedGraph!.getMutationNeighbours(seedFile.path);
-            for (const n of neighbours) {
-              if (resolvedFiles.length >= MAX_INTENT_READ_FILES) break;
-              const normalized = normalizeCandidatePath(ctx.cwd, n.path);
-              if (existingPaths.has(normalized)) continue;
-              existingPaths.add(normalized);
-              resolvedFiles.push({ path: n.path });
-              graphEdges.push({
-                from: seedFile.path,
-                to: n.path,
-                type: n.provenance.type,
-                confidence: n.provenance.confidence,
-              });
-              graphDistanceMap.set(normalized, 2);
-            }
-          } catch { /* skip individual failures */ }
-        }
-      }
+      // Uses sharedGraph's getMutationNeighbours which reads from EdgeStore.
+      expandMutationNeighbours(state);
 
       // 4. Read files
-      const readTool = readToolFactory(ctx.cwd);
-      interface FileReadResult {
-        path: string;
-        displayPath: string;
-        ok: boolean;
-        body?: string;
-        renderedBody?: string;
-        startLine?: number;
-        anchorBody?: boolean;
-        error?: string;
-        evidence?: WorkspaceEvidenceEnvelope;
-      }
-      const fileResults: FileReadResult[] = [];
-
-      const CONCURRENCY = 6;
-      // Pre-allocate to maintain insertion order across parallel batches
-      const orderedResults: (FileReadResult | undefined)[] = new Array(resolvedFiles.length);
-
-      for (let batchStart = 0; batchStart < resolvedFiles.length; batchStart += CONCURRENCY) {
-        if (signal?.aborted) throw new Error("Operation aborted");
-
-        const batchEnd = Math.min(batchStart + CONCURRENCY, resolvedFiles.length);
-        const batchPromises: Promise<void>[] = [];
-
-        for (let j = batchStart; j < batchEnd; j++) {
-          const i = j;
-          const req = resolvedFiles[i]!;
-          batchPromises.push(
-            (async () => {
-              try {
-                const { path: targetPath, selector } = splitPathAndSelector(req.path);
-                validatePath(targetPath);
-                const selectorArgs = selectorToOffsetLimit(selector);
-                const rawMode = selectorArgs.raw === true;
-                const input: ReadToolInput = {
-                  path: targetPath,
-                  offset: selectorArgs.offset ?? req.offset,
-                  limit: selectorArgs.limit ?? req.limit,
-                };
-                const result = await readTool.execute(`${toolCallId}:${i}`, input, signal, undefined);
-                const details = result.details as ReadToolDetails | undefined;
-                const displayContent = (
-                  details as { displayContent?: { text?: string; startLine?: number } } | undefined
-                )?.displayContent;
-
-                const evidence = (
-                  result.details as { workspaceEvidence?: WorkspaceEvidenceEnvelope } | undefined
-                )?.workspaceEvidence;
-                const renderedBody = displayContent?.text ?? result.content
-                  .filter((item): item is { type: "text"; text: string } => item.type === "text")
-                  .map((item) => item.text)
-                  .join("\n");
-                const firstFewLines = renderedBody.split("\n", 5).join("\n");
-                const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
-                let body = displayContent?.text ?? renderedBody;
-                const startLine = displayContent?.startLine ?? selectorArgs.offset ?? req.offset ?? 1;
-                if (!body) {
-                  body = "[No text content]";
-                }
-                const rawBody = alreadyAnchored ? stripHashlineAnchors(body) : body;
-                const displayPath = req.path;
-
-                orderedResults[i] = {
-                  path: targetPath,
-                  displayPath,
-                  ok: true,
-                  body: rawBody,
-                  renderedBody: body,
-                  startLine,
-                  anchorBody: rawMode ? false : !alreadyAnchored,
-                  ...(evidence && { evidence }),
-                };
-              } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                orderedResults[i] = { path: req.path, displayPath: req.path, ok: false, error: message };
-              }
-            })(),
-          );
-        }
-
-        await Promise.allSettled(batchPromises);
-
-        // stopOnError: throw first error after batch completes
-        if (params.stopOnError) {
-          for (let j = batchStart; j < batchEnd; j++) {
-            const r = orderedResults[j];
-            if (r && !r.ok) {
-              throw new Error(r.error);
-            }
-          }
-        }
-      }
-
-      // Collect results in original order
-      for (const r of orderedResults) {
-        if (r) fileResults.push(r);
-      }
-
+      const fileResults = await readIntentFiles(state);
       const successfulFiles = fileResults.filter((f) => f.ok);
       const erroredFiles = fileResults.filter((f) => !f.ok);
 
@@ -640,203 +1019,80 @@ export function createIntentReadTool(
         fileDetails.set(f.path, { path: f.path, ok: f.ok, error: f.error, rankedBy: "bm25" });
       }
 
-      let rankedSuccessOrder: string[] = []; // paths in RRF rank order (rank 1 first)
-      let filteredBelowThresholdPaths: string[] = [];
-
-      // Track chunking observability (may stay at defaults if no files to process)
-      let totalChunks = 0;
-      let filesChunked = 0;
-      const bestChunkByFile: {
-        path: string;
-        chunkIndex: number;
-        relevance: RelevanceClass;
-        startChar: number;
-        endChar: number;
-        preview: string;
-      }[] = [];
-
-      // AST chunking tracking (populated inside the if-block)
-      let astChunkingUsed = false;
-      let astChunkingStats = { usedAst: false, wasmAvailable: false, parseTimeMs: 0, symbolCount: 0 };
-
-      // HyDE tracking (populated inside the if-block)
-      let hydeResult: HydeResult = { document: query, applied: false, pattern: "none", identifiers: [] };
-
-      // WP-8: ADR boost tracking (populated inside the if-block)
-      let adrBoosts: number[] = [];
-
       const rankResult = await rankCandidates({
-        query,
+        query: state.query,
         files: successfulFiles,
-        embeddingConfig,
+        embeddingConfig: state.embeddingConfig,
         cwd: ctx.cwd,
-        embeddingLruCache,
-        persistentCaches,
-        fetchEmbeddingsImpl,
-        probeAddedSet,
-        graphDistanceMap,
+        embeddingLruCache: state.embeddingLruCache,
+        persistentCaches: state.persistentCaches,
+        fetchEmbeddingsImpl: state.fetchEmbeddingsImpl,
+        probeAddedSet: state.probeAddedSet,
+        graphDistanceMap: state.graphDistanceMap,
         fileDetails,
       });
-      embeddingStatus = rankResult.embeddingStatus;
-      const embeddingError = rankResult.embeddingError;
-      embeddingCacheHit = rankResult.embeddingCacheHit;
-      rankedSuccessOrder = rankResult.rankedSuccessOrder;
-      filteredBelowThresholdPaths = rankResult.filteredBelowThresholdPaths;
-      totalChunks = rankResult.totalChunks;
-      filesChunked = rankResult.filesChunked;
-      bestChunkByFile.push(...rankResult.bestChunkByFile);
-      astChunkingUsed = rankResult.astChunkingUsed;
-      astChunkingStats = rankResult.astChunkingStats;
-      hydeResult = rankResult.hydeResult;
-      adrBoosts = rankResult.adrBoosts;
-      const rerankingResult = rankResult.rerankingResult;
-      const effectiveTopK = Math.min(topK, rankedSuccessOrder.length);
+      const rankedSuccessOrder = rankResult.rankedSuccessOrder;
+      const filteredBelowThresholdPaths = rankResult.filteredBelowThresholdPaths;
+      const effectiveTopK = Math.min(state.topK, rankedSuccessOrder.length);
       const topKPaths = new Set(rankedSuccessOrder.slice(0, effectiveTopK));
 
-      // Mark each file's selection status
-      for (const f of fileResults) {
-        const detail = fileDetails.get(f.path)!;
-        detail.selectedForPacking = f.ok && topKPaths.has(f.path);
-        if (!f.ok) {
-          detail.inclusion = "error";
-          detail.included = false;
-        } else if (filteredBelowThresholdPaths.includes(f.path)) {
-          detail.inclusion = "below_threshold";
-          detail.included = false;
-        } else if (!topKPaths.has(f.path)) {
-          detail.inclusion = "not_top_k";
-          detail.included = false;
-        }
-        // included/inclusion for top-K files is set after packing
-      }
+      // Mark each file's selection status; top-K inclusion is set after packing.
+      markUnpackedFiles(fileResults, fileDetails, topKPaths, filteredBelowThresholdPaths);
 
       // 6. Pack top-K files using buildPlan (in RRF rank order)
-      const topKOrdered = rankedSuccessOrder.slice(0, effectiveTopK);
-      const packCandidates: FileCandidate[] = topKOrdered.map((path, i) => {
-        const f = successfulFiles.find((x) => x.path === path)!;
-        const body = f.renderedBody ?? f.body!;
-        const displayPath = f.displayPath;
-        const fullText = formatContentBlock(displayPath, body, i + 1, {
-          anchorBody: f.anchorBody ?? true,
-          startLine: f.startLine ?? 1,
-        });
-        return {
-          index: i,
-          path,
-          ok: true,
-          fullText,
-          fullMetrics: measureText(fullText),
-          body,
-        };
-      });
-
+      const packCandidates = buildPackCandidates(rankedSuccessOrder.slice(0, effectiveTopK), successfulFiles);
       const { plan, switchedForCoverage } = choosePackingPlan(packCandidates);
 
       // Build output sections in RRF rank order
-      const sections: string[] = [];
-      for (let i = 0; i < packCandidates.length; i++) {
-        const path = packCandidates[i]!.path;
-        if (plan.fullIncluded.has(i)) {
-          sections.push(packCandidates[i]!.fullText);
-          const d = fileDetails.get(path)!;
-          d.inclusion = "full";
-          d.included = true;
-        } else if (plan.partialSection?.index === i) {
-          sections.push(plan.partialSection.text);
-          const d = fileDetails.get(path)!;
-          d.inclusion = "partial";
-          d.included = true;
-        } else {
-          const d = fileDetails.get(path)!;
-          d.inclusion = "omitted";
-          d.included = false;
-        }
-      }
-
+      const sections = packIntentSections(packCandidates, plan, fileDetails);
       const outputText = sections.join("\n\n");
 
       // 7. Build details.files: successful files in RRF order, then errored files in input order.
-      const allFileDetails: IntentReadFileDetail[] = [
-        ...rankedSuccessOrder.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
-        ...filteredBelowThresholdPaths.map((path: string) => toPublicFileDetail(fileDetails.get(path)!)),
-        ...erroredFiles.map((f: FileReadResult) => toPublicFileDetail(fileDetails.get(f.path)!)),
-      ];
-
-      const partialIncludedPath =
-        plan.partialSection !== undefined
-          ? packCandidates[plan.partialSection.index]?.path
-          : undefined;
-
-      const details: IntentReadDetails = {
-        query,
-        processedCount: fileResults.length,
-        successCount: successfulFiles.length,
-        errorCount: erroredFiles.length,
-        requestedTopK: topK,
-        effectiveTopK,
-        ...(dirCap && {
-          candidateCountBeforeCap: dirCap.countBeforeCap,
-          candidateCountAfterCap: dirCap.countAfterCap,
-          capped: true,
-        }),
-        embeddingStatus,
-        ...(embeddingError && { embeddingError }),
-        rankingSignals: {
-          bm25: true,
-          embeddings: embeddingStatus === "ok",
-        },
-        chunkingEnabled: embeddingStatus === "ok",
-        astChunking: astChunkingUsed ? astChunkingStats : undefined,
-        embeddingCache: {
-          hit: embeddingCacheHit,
-          size: embeddingLruCache.size,
-          maxSize: embeddingLruCache.maxSize,
-          persistent: persistentCaches.get(ctx.cwd)?.hasPersistence ?? false,
-          diskEntries: persistentCaches.get(ctx.cwd)?.diskEntries ?? 0,
-        },
+      const allFileDetails = buildIntentFileDetails(
+        rankedSuccessOrder,
         filteredBelowThresholdPaths,
-        graphAugmentation: {
-          addedPaths: addedGraphPaths,
-          candidateCountBefore: candidateCountBeforeGraph,
-          candidateCountAfter: resolvedFiles.length,
-          ...(graphEdges.length > 0 && {
-            edgesUsed: graphEdges.map((edge) => ({
-              ...edge,
-              confidence: classifyConfidence(edge.confidence),
-            })),
-          }),
-        },
-        ...(probing && { probing }),
-        ...(hydeResult.applied && { hyde: hydeResult }),
-        ...(rerankingResult && { reranking: rerankingResult }),
-        ...(embeddingStatus === "ok" && filesChunked > 0 && {
-          chunkInfo: {
-            totalChunks,
-            filesChunked,
-            bestChunkByFile,
-          },
-        }),
-        files: allFileDetails,
-        adrBoostedCount: adrBoosts.filter((b) => b > 0).length,
-        packing: {
-          strategy: plan.strategy,
-          switchedForCoverage,
-          fullIncludedCount: plan.fullCount,
-          fullIncludedSuccessCount: plan.fullSuccessCount,
-          partialIncludedPath,
-          omittedPaths: plan.omittedIndexes.map((i: number) => packCandidates[i]!.path),
-        },
-      };
+        erroredFiles,
+        fileDetails,
+      );
 
-      const perFileByPackIndex = new Map<number, WorkspaceEvidenceEnvelope>();
-      for (let i = 0; i < packCandidates.length; i++) {
-        const evidence = fileResults.find((f) => f.path === packCandidates[i]!.path)?.evidence;
-        if (evidence) perFileByPackIndex.set(i, evidence);
-      }
+      const details = assembleIntentDetails({
+        query: state.query,
+        fileResults,
+        successfulFiles,
+        erroredFiles,
+        topK: state.topK,
+        effectiveTopK,
+        dirCap,
+        embeddingStatus: rankResult.embeddingStatus,
+        embeddingError: rankResult.embeddingError,
+        embeddingCacheHit: rankResult.embeddingCacheHit,
+        embeddingLruCache: state.embeddingLruCache,
+        persistentCaches: state.persistentCaches,
+        cwd: ctx.cwd,
+        filteredBelowThresholdPaths,
+        addedGraphPaths,
+        candidateCountBeforeGraph,
+        resolvedCount: state.resolvedFiles.length,
+        graphEdges: state.graphEdges,
+        probing: state.probing,
+        hydeResult: rankResult.hydeResult,
+        rerankingResult: rankResult.rerankingResult,
+        totalChunks: rankResult.totalChunks,
+        filesChunked: rankResult.filesChunked,
+        bestChunkByFile: rankResult.bestChunkByFile,
+        astChunkingUsed: rankResult.astChunkingUsed,
+        astChunkingStats: rankResult.astChunkingStats,
+        allFileDetails,
+        adrBoosts: rankResult.adrBoosts,
+        plan,
+        switchedForCoverage,
+        packCandidates,
+      });
+
       const batchEvidence = aggregateBatchEvidence({
         cwd: ctx.cwd,
         sessionFilePath: sessionFileFromContext(ctx),
-        perFile: perFileByPackIndex,
+        perFile: collectPackEvidence(packCandidates, fileResults),
         fullIncluded: plan.fullIncluded,
         summarizedIndexes: new Set<number>(),
         outputTruncated: false,
