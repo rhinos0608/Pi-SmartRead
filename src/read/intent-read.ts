@@ -20,10 +20,10 @@ import type {
   ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import { createReadTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@mariozechner/pi-coding-agent";
-import { validateEmbeddingConfig } from "./config.js";
-import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings } from "./embedding.js";
-import { PersistentEmbeddingCache } from "./persistent-embedding-cache.js";
-import { resolveDirectory, presortPathsByQuery } from "./resolver.js";
+import { validateEmbeddingConfig } from "../config.js";
+import { type EmbedRequest, type EmbedResult, fetchEmbeddings as defaultFetchEmbeddings } from "../indexing/embedding.js";
+import { PersistentEmbeddingCache } from "../indexing/persistent-embedding-cache.js";
+import { resolveDirectory, presortPathsByQuery } from "../search/resolver.js";
 import {
   INTENT_READ_CACHE_SIZE,
   normalizeCandidatePath,
@@ -32,7 +32,7 @@ import {
 } from "./intent-ranking.js";
 import {
   findDirectImportNeighbours,
-} from "./context-graph.js";
+} from "../context-graph.js";
 import {
   type FileCandidate,
   buildPlan,
@@ -44,15 +44,15 @@ import {
   splitPathAndSelector,
   validatePath,
   LruCache,
-} from "./utils.js";
-import { probeQuery, type ProbeResult } from "./query-probe.js";
-import { type HydeResult } from "./hyde.js";
-import { getGraphifyEnricher } from "./graphify-enricher.js";
+} from "../utils.js";
+import { probeQuery, type ProbeResult } from "../search/query-probe.js";
+import { type HydeResult } from "../search/hyde.js";
+import { getGraphifyEnricher } from "../graph/graphify-enricher.js";
 import {
   classifyConfidence,
   type ConfidenceClass,
   type RelevanceClass,
-} from "./classifiers.js";
+} from "../ranking/classifiers.js";
 
 const IntentReadSchema = Type.Object({
   query: Type.String({ description: "The search intent" }),
@@ -263,11 +263,8 @@ export function createIntentReadTool(
 
       // Embedding API tracking (updated after embed call; may degrade to fallback)
       let embeddingStatus: EmbeddingStatus = "ok";
-      let embeddingError: string | undefined;
       let embeddingCacheHit = false;
 
-      // Phase 5: reranking metadata (populated after RRF, gated behind config)
-      let rerankingResult: { status: "off" | "ok" | "failed_fallback"; changedOrder: boolean; candidateCount: number; strategy: string } | undefined;
 
       // 2. Validate input
       const query = params.query.trim();
@@ -330,7 +327,7 @@ export function createIntentReadTool(
       // Unconditionally building for e.g. cwd="/" triggers a full filesystem scan
       // + tree-sitter parse of every source file, which crashes on adversarial files.
       const needsGraph = hasProjectMarker || embeddingConfig?.probeEnabled === true;
-      const { getSharedContextGraphAsync } = await import("./mcp-registry.js");
+      const { getSharedContextGraphAsync } = await import("../mcp-registry.js");
       const sharedGraph = needsGraph
         ? await getSharedContextGraphAsync(ctx.cwd)
         : null;
@@ -651,7 +648,7 @@ export function createIntentReadTool(
         fileDetails,
       });
       embeddingStatus = rankResult.embeddingStatus;
-      embeddingError = rankResult.embeddingError;
+      const embeddingError = rankResult.embeddingError;
       embeddingCacheHit = rankResult.embeddingCacheHit;
       rankedSuccessOrder = rankResult.rankedSuccessOrder;
       filteredBelowThresholdPaths = rankResult.filteredBelowThresholdPaths;
@@ -662,7 +659,7 @@ export function createIntentReadTool(
       astChunkingStats = rankResult.astChunkingStats;
       hydeResult = rankResult.hydeResult;
       adrBoosts = rankResult.adrBoosts;
-      rerankingResult = rankResult.rerankingResult;
+      const rerankingResult = rankResult.rerankingResult;
       const effectiveTopK = Math.min(topK, rankedSuccessOrder.length);
       const topKPaths = new Set(rankedSuccessOrder.slice(0, effectiveTopK));
 

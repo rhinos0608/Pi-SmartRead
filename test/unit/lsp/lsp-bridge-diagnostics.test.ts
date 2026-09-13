@@ -69,7 +69,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 const { spawn } = await import("node:child_process");
-const { LSPConnection, getLSPBridge, resetLSPBridge, shutdownAllManagers, invalidateResolvedServerCacheForRoot } = await import("../../src/lsp-bridge.js");
+const { LSPConnection, getLSPBridge, resetLSPBridge, shutdownAllManagers, invalidateResolvedServerCacheForRoot } = await import("../../../src/lsp/lsp-bridge.js");
 
 async function makeConnection(root: string): Promise<{ conn: InstanceType<typeof LSPConnection>; proc: FakeProc }> {
   const conn = new LSPConnection();
@@ -473,7 +473,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
   });
 
   it("timeout yields degraded and respects AbortSignal", async () => {
-    const { getLSPBridge } = await import("../../src/lsp-bridge.js");
+    const { getLSPBridge } = await import("../../../src/lsp/lsp-bridge.js");
     const bridge = await getLSPBridge();
     const ac = new AbortController();
     ac.abort();
@@ -485,7 +485,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     // Simulate LSP connection already closed: request("textDocument/diagnostic") returns null synchronously.
     // Before fix this set pullSucceeded=true and returned empty; after fix it stays degraded.
     // Also verify a non-null empty pull still returns empty.
-    const { LSPConnection: LSPConn } = await import("../../src/lsp-bridge.js");
+    const { LSPConnection: LSPConn } = await import("../../../src/lsp/lsp-bridge.js");
     const origRequest = (LSPConn.prototype as any).request;
     const spy = (vi as any).spyOn(LSPConn.prototype as any, "request").mockImplementation(function (this: any, method: string, params: unknown) {
       if (method === "textDocument/diagnostic") return Promise.resolve(null);
@@ -504,7 +504,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     expect(degraded.diagnostics).toEqual([]);
     spy.mockRestore();
     // Now verify successful empty pull (non-null) still yields empty, not degraded
-    const { LSPConnection: LSPConn2 } = await import("../../src/lsp-bridge.js");
+    const { LSPConnection: LSPConn2 } = await import("../../../src/lsp/lsp-bridge.js");
     const orig2 = (LSPConn2.prototype as any).request;
     const spy2 = (vi as any).spyOn(LSPConn2.prototype as any, "request").mockImplementation(function (this: any, method: string, params: unknown) {
       if (method === "textDocument/diagnostic") return Promise.resolve({ items: [] });
@@ -532,6 +532,163 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     }
     expect(classify("needs-triage")).toBe("future:needs-triage");
     expect(classify("empty")).toBe("zero");
+  });
+});
+
+describe("convertWorkspaceEdit characterization (via rename)", () => {
+  let root: string;
+  beforeEach(() => { installFakeServerBin(); root = mkdtempSync(join(tmpdir(), "lsp-wsedit-char-")); });
+  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
+
+  function enableRename(conn: InstanceType<typeof LSPConnection>): void {
+    (conn as unknown as Record<string, unknown>).serverCapabilities = { renameProvider: true };
+  }
+
+  function stubRenameResult(conn: InstanceType<typeof LSPConnection>, canned: unknown): void {
+    vi.spyOn(conn, "request").mockImplementation(async (method: string) => {
+      if (method === "textDocument/rename") return canned;
+      throw new Error(`unexpected LSP request in characterization test: ${method}`);
+    });
+  }
+
+  function goodEdit(newText = "x"): Record<string, unknown> {
+    return { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText };
+  }
+
+  it("WS-FAIL-CLOSED: one malformed edit entry rejects the whole edit (no partial apply)", async () => {
+    const { conn } = await makeConnection(root);
+    enableRename(conn);
+    const filePath = join(root, "a.ts");
+    const uri = pathToFileURL(resolve(filePath)).href;
+    stubRenameResult(conn, {
+      documentChanges: [{ textDocument: { uri }, edits: [goodEdit("ok"), { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }] }],
+    });
+    await expect(conn.rename(filePath, 0, 0, "newName")).resolves.toBeNull();
+  });
+
+  it("WS-RESOURCE-OPS: create/rename/delete resource operations are rejected", async () => {
+    const { conn } = await makeConnection(root);
+    enableRename(conn);
+    const filePath = join(root, "a.ts");
+    const uri = pathToFileURL(resolve(filePath)).href;
+    for (const kind of ["create", "rename", "delete"]) {
+      vi.restoreAllMocks();
+      stubRenameResult(conn, { documentChanges: [{ kind, uri, ...(kind === "create" ? { newUri: uri } : {}) }] });
+      await expect(conn.rename(filePath, 0, 0, "newName")).resolves.toBeNull();
+    }
+  });
+
+  it("WS-PRECEDENCE: documentChanges and changes present together are merged (union)", async () => {
+    const { conn } = await makeConnection(root);
+    enableRename(conn);
+    const fileA = join(root, "a.ts");
+    const fileB = join(root, "b.ts");
+    const uriA = pathToFileURL(resolve(fileA)).href;
+    const uriB = pathToFileURL(resolve(fileB)).href;
+    stubRenameResult(conn, {
+      documentChanges: [{ textDocument: { uri: uriA }, edits: [goodEdit("a")] }],
+      changes: { [uriB]: [goodEdit("b")] },
+    });
+    const result = (await conn.rename(fileA, 0, 0, "newName")) as unknown as { fileEdits: Array<{ filePath: string }> } | null;
+    expect(result).not.toBeNull();
+    expect(result!.fileEdits).toHaveLength(2);
+    expect(result!.fileEdits.map((fe) => fe.filePath).sort()).toEqual([resolve(fileA), resolve(fileB)].sort());
+  });
+
+  it("WS-URI-PATH: file URI converts to filesystem path", async () => {
+    const { conn } = await makeConnection(root);
+    enableRename(conn);
+    const filePath = join(root, "a.ts");
+    const uri = pathToFileURL(resolve(filePath)).href;
+    stubRenameResult(conn, { changes: { [uri]: [goodEdit("x")] } });
+    const result = (await conn.rename(filePath, 0, 0, "newName")) as unknown as { fileEdits: Array<{ filePath: string }> } | null;
+    expect(result).not.toBeNull();
+    expect(result!.fileEdits[0]!.filePath).toBe(resolve(filePath));
+  });
+
+  it("WS-INVALID-URI: a non-file URI rejects the whole edit", async () => {
+    const { conn } = await makeConnection(root);
+    enableRename(conn);
+    const filePath = join(root, "a.ts");
+    stubRenameResult(conn, { changes: { "::not a uri::": [goodEdit("x")] } });
+    await expect(conn.rename(filePath, 0, 0, "newName")).resolves.toBeNull();
+  });
+
+  it("WS-FILEPATH-DUP: each converted edit entry duplicates its filePath", async () => {
+    const { conn } = await makeConnection(root);
+    enableRename(conn);
+    const filePath = join(root, "a.ts");
+    const uri = pathToFileURL(resolve(filePath)).href;
+    stubRenameResult(conn, { changes: { [uri]: [goodEdit("one"), goodEdit("two")] } });
+    const result = (await conn.rename(filePath, 0, 0, "newName")) as unknown as {
+      fileEdits: Array<{ filePath: string; edits: Array<{ filePath: string; newText: string }> }>;
+    } | null;
+    expect(result).not.toBeNull();
+    expect(result!.fileEdits).toHaveLength(1);
+    expect(result!.fileEdits[0]!.edits).toHaveLength(2);
+    for (const ed of result!.fileEdits[0]!.edits) {
+      expect(ed.filePath).toBe(result!.fileEdits[0]!.filePath);
+    }
+    expect(result!.fileEdits[0]!.edits.map((e) => e.newText)).toEqual(["one", "two"]);
+  });
+});
+
+describe("LSPConnection framing robustness", () => {
+  let root: string;
+  beforeEach(() => { installFakeServerBin(); root = mkdtempSync(join(tmpdir(), "lsp-frame-char-")); });
+  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
+
+  it("FRAME-MALFORMED-JSON: malformed JSON frames are ignored and the connection keeps running", async () => {
+    const { conn, proc } = await makeConnection(root);
+    const pending = conn.request("workspace/symbol", { query: "x" });
+    const id = writtenMessages(proc).at(-1)!.id as number;
+    proc.stdout.emit("data", Buffer.from("Content-Length: 5\r\n\r\nnot-j", "utf-8"));
+    sendToStdout(proc, { jsonrpc: "2.0", id, result: ["ok"] });
+    await expect(pending).resolves.toEqual(["ok"]);
+  });
+
+  it("FRAME-BUFFERED: incomplete Content-Length framing is buffered until complete", async () => {
+    const { conn, proc } = await makeConnection(root);
+    const pending = conn.request("workspace/symbol", { query: "x" });
+    const done: unknown[] = [];
+    void pending.then((v) => done.push(v));
+    const id = writtenMessages(proc).at(-1)!.id as number;
+    const full = Buffer.from(encodeMessage({ jsonrpc: "2.0", id, result: ["ok"] }), "utf-8");
+    const splitAt = Math.floor(full.length / 2);
+    proc.stdout.emit("data", full.subarray(0, splitAt));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(done).toEqual([]);
+    expect((conn as unknown as { pending: Map<number, unknown> }).pending.size).toBe(1);
+    proc.stdout.emit("data", full.subarray(splitAt));
+    await expect(pending).resolves.toEqual(["ok"]);
+  });
+
+  it("FRAME-OVERFLOW: buffer overflow closes the process and rejects every pending request", async () => {
+    const { conn, proc } = await makeConnection(root);
+    const p1 = conn.request("workspace/symbol", { query: "a" });
+    const p2 = conn.request("workspace/symbol", { query: "b" });
+    // Pre-fill just under the 50MB cap so one more byte trips overflow without a 51MB loop.
+    (conn as unknown as Record<string, unknown>).buffer = Buffer.alloc(50 * 1024 * 1024);
+    proc.stdout.emit("data", Buffer.from("x", "utf-8"));
+    await expect(p1).rejects.toThrow("LSP connection buffer overflow");
+    await expect(p2).rejects.toThrow("LSP connection buffer overflow");
+    expect(proc.kill).toHaveBeenCalled();
+    await expect(conn.request("workspace/symbol", { query: "late" })).resolves.toBeNull();
+  });
+
+  it("FRAME-HANDLER-ISOLATION: exception in a notification handler does not break subsequent frames", async () => {
+    const { conn, proc } = await makeConnection(root);
+    const seen: unknown[] = [];
+    conn.onNotification("window/logMessage", () => { throw new Error("boom"); });
+    conn.onNotification("window/logMessage", (p) => seen.push(p));
+    expect(() => {
+      sendToStdout(proc, { jsonrpc: "2.0", method: "window/logMessage", params: { message: "one" } });
+    }).not.toThrow();
+    expect(seen).toEqual([{ message: "one" }]);
+    expect(() => {
+      sendToStdout(proc, { jsonrpc: "2.0", method: "window/logMessage", params: { message: "two" } });
+    }).not.toThrow();
+    expect(seen).toEqual([{ message: "one" }, { message: "two" }]);
   });
 });
 

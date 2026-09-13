@@ -9,28 +9,25 @@ import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
-import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import Parser, { Query } from "tree-sitter";
-import { resolveSymbol } from "./symbol-resolver.js";
-import { findCallers } from "./callgraph.js";
-import { loadLanguage, getQueryPath } from "./tags.js";
+import { resolveSymbol } from "../structural/symbol-resolver.js";
+import { findCallers } from "../structural/callgraph.js";
+import { loadLanguage, getQueryPath } from "../structural/tags.js";
 import {
   discoverFiles,
   type DiscoveryProfile,
   type FileDiscoveryDiagnostics,
   IGNORED_DETAILS_LIMIT,
-} from "./file-discovery.js";
-import { shouldShowLowResultHint } from "./hook.js";
-import { filenameToLang, isSupportedFile } from "./languages.js";
-import { loadSearchConfig } from "./config.js";
-import { bm25Scores, computeRrfScores, cosineSimilarity } from "./scoring.js";
-import { fetchEmbeddings } from "./embedding.js";
-import { getGraphifyEnricher } from "./graphify-enricher.js";
-import { classifyRelevanceByScore, classifySimilarity } from "./classifiers.js";
-import { expandToMonorepoRoots } from "./monorepo-detector.js";
-import { getLSPBridge } from "./lsp-bridge.js";
-import { recordSparse, resolveSessionKey } from "./file-read-cache.js";
-import { executeDeepSearch } from "./deep-search.js";
+} from "../file-discovery.js";
+import { shouldShowLowResultHint } from "../hook.js";
+import { filenameToLang } from "../languages.js";
+import { bm25Scores, computeRrfScores, cosineSimilarity } from "../scoring.js";
+import { fetchEmbeddings } from "../indexing/embedding.js";
+import { getGraphifyEnricher } from "../graph/graphify-enricher.js";
+import { classifyRelevanceByScore, classifySimilarity } from "../ranking/classifiers.js";
+import { expandToMonorepoRoots } from "../workspace/monorepo-detector.js";
+import { getLSPBridge } from "../lsp/lsp-bridge.js";
+import { recordSparse, resolveSessionKey } from "../read/file-read-cache.js";
 import {
   evaluateBooleanExpression,
   parseBooleanQuery,
@@ -45,6 +42,7 @@ export {
 import {
   matchAstNodesInFile,
   parseAstPattern,
+  type ParsedAstPattern,
 } from "./search-ast-pattern.js";
 // Facade re-exports: search-ast-pattern lives in its own module.
 // Re-exported here so existing `search-tool.js` import paths keep working.
@@ -231,7 +229,7 @@ async function scoreDefinitions(
   }
 
   try {
-    const { validateEmbeddingConfig } = await import("./config.js");
+    const { validateEmbeddingConfig } = await import("../config.js");
     const embeddingConfig = validateEmbeddingConfig(cwd);
 
     if (!embeddingConfig) {
@@ -316,11 +314,6 @@ function lspSymbolKindToString(kind: number): string {
     default:
       return "symbol";
   }
-}
-
-function resolveSearchRoot(params: SearchInput, defaultCwd: string): string {
-  const dir = params.directory?.trim();
-  return dir ? resolve(defaultCwd, dir) : resolve(defaultCwd);
 }
 
 function defaultCaseSensitive(query: string): boolean {
@@ -715,34 +708,16 @@ export async function handleGrep(
   };
 }
 
-export async function handleCode(
-  toolCallId: string,
-  params: SearchInput,
+/** Collect definitions across files without exceeding the char budget (~3,000,000). */
+async function collectDefinitionsWithinBudget(
+  allFiles: string[],
   cwd: string,
+  definitionCache: Map<string, CodeDefinition[]>,
   signal: AbortSignal | undefined,
-  enrich: boolean,
-  options?: { preDiscoveredFiles?: string[]; sharedDefinitionCache?: Map<string, CodeDefinition[]>; sharedSummary?: DiscoverySummary },
-) {
-  const maxResults = params.maxResults ?? 20;
-  const startTime = Date.now();
-  const query = params.query!.trim();
-
-  let allFiles: string[];
-  let summary: DiscoverySummary;
-  if (options?.preDiscoveredFiles && options.sharedSummary) {
-    allFiles = options.preDiscoveredFiles;
-    summary = options.sharedSummary;
-  } else {
-    const searchRoots = expandToMonorepoRoots(cwd);
-    const discovered = await discoverAcrossRoots(searchRoots, "code", signal);
-    allFiles = discovered.files;
-    summary = discovered.summary;
-  }
-  const maxChars = 3_000_000;
-
+  maxChars = 3_000_000,
+): Promise<CodeDefinition[]> {
   const allDefs: CodeDefinition[] = [];
   let totalChars = 0;
-  const definitionCache = options?.sharedDefinitionCache ?? new Map<string, CodeDefinition[]>();
 
   for (const filePath of allFiles) {
     if (signal?.aborted) throw new Error("Operation aborted");
@@ -756,6 +731,17 @@ export async function handleCode(
     }
   }
 
+  return allDefs;
+}
+
+/** BM25 pre-filter, embedding RRF rescore, graph centrality boost, global sort. */
+async function rankDefinitions(
+  allDefs: CodeDefinition[],
+  query: string,
+  cwd: string,
+  signal: AbortSignal | undefined,
+  maxResults: number,
+): Promise<CodeDefinition[]> {
   const preFilterN = Math.min(maxResults * 5, 200);
   const bm25All = bm25Scores(query, allDefs.map((d) => d.body));
   for (let i = 0; i < allDefs.length; i++) {
@@ -785,13 +771,21 @@ export async function handleCode(
     // best-effort only
   }
 
-  const allResults = [...scored, ...bm25Only].sort((a, b) => b.score - a.score);
+  return [...scored, ...bm25Only].sort((a, b) => b.score - a.score);
+}
 
+/** Append LSP workspace symbols not already present; returns count added. */
+async function mergeLspDefinitions(
+  allResults: CodeDefinition[],
+  query: string,
+  cwd: string,
+  searchDir: string | undefined,
+): Promise<number> {
   let lspResultsCount = 0;
   try {
     const bridge = await getLSPBridge();
     if (bridge?.isAvailable() && query.length > 2) {
-      const root = params.directory ? resolve(cwd, params.directory) : cwd;
+      const root = searchDir ? resolve(cwd, searchDir) : cwd;
       const wsSymbols = await bridge.workspaceSymbol(query, root);
       if (wsSymbols.length > 0) {
         const existingKeys = new Set(allResults.map((d) => `${d.relFile}:${d.name}`));
@@ -824,35 +818,79 @@ export async function handleCode(
   if (lspResultsCount > 0) {
     allResults.sort((a, b) => b.score - a.score);
   }
+  return lspResultsCount;
+}
 
-  const top = allResults.slice(0, maxResults);
+/** Best-effort symbol resolution + caller enrichment lines for top names. */
+async function enrichTopDefinitions(
+  top: CodeDefinition[],
+  allFiles: string[],
+  cwd: string,
+  signal: AbortSignal | undefined,
+): Promise<string[]> {
+  const resolvedLines: string[] = ["── Enriched ──", ""];
+  try {
+    const nameToEntry = new Map<string, (typeof top)[0]>();
+    for (const entry of top) {
+      if (!nameToEntry.has(entry.name)) {
+        nameToEntry.set(entry.name, entry);
+      }
+    }
+    const topNames = [...nameToEntry.keys()].slice(0, 5);
 
-  if (top.length === 0) {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `[No code definitions found matching "${query}" across ${allFiles.length} source files.]`,
-        },
-      ],
-      details: {
-        mode: "code",
-        total: 0,
-        query,
-        filesScanned: allFiles.length,
-        filesConsidered: summary.filesConsidered,
-        filesSkippedIgnored: summary.filesSkippedIgnored,
-        filesSkippedUnsupported: summary.filesSkippedUnsupported,
-        workspaceRootsSearched: summary.workspaceRootsSearched,
-        definitionsExtracted: allDefs.length,
-        timeMs: Date.now() - startTime,
-        lspResults: lspResultsCount,
-      },
-    };
+    for (const name of topNames) {
+      if (signal?.aborted) break;
+      try {
+        const entry = nameToEntry.get(name)!;
+        const resolution = await resolveSymbol(cwd, name, entry.relFile, entry.startLine, 3);
+        let defLine = `  ${name} -> `;
+        if (resolution.bestDefinition) {
+          defLine += `def: ${resolution.bestDefinition.file}:${resolution.bestDefinition.line}`;
+        } else {
+          defLine += "(no definition found)";
+        }
+        if (resolution.references.length > 0) {
+          defLine += ` (${resolution.references.length} refs)`;
+        }
+        resolvedLines.push(defLine);
+      } catch {
+        resolvedLines.push(`  ${name} -> (resolution failed)`);
+      }
+    }
+
+    if (topNames.length > 0 && !signal?.aborted) {
+      for (const name of topNames.slice(0, 3)) {
+        try {
+          const callers = await findCallers(allFiles, name, signal);
+          if (callers.length > 0) {
+            resolvedLines.push(
+              `  ${name} callers: ${callers.slice(0, 5).map((caller) => `${caller.callerFunction} in ${caller.file}`).join(", ")}` +
+                (callers.length > 5 ? ` (+${callers.length - 5} more)` : ""),
+            );
+          }
+        } catch {
+          // skip caller enrichment failures
+        }
+      }
+    }
+  } catch {
+    // enrichment is best-effort
   }
+  return resolvedLines;
+}
 
+/** Render code matches text, including the low-result deep-search hint. */
+function renderCodeMatches(
+  query: string,
+  top: CodeDefinition[],
+  definitionsTotal: number,
+  filesTotal: number,
+  lspResultsCount: number,
+  elapsedMs: number,
+  enrich: boolean,
+): string[] {
   const lines: string[] = [
-    `Found ${top.length} definition(s) matching "${query}" (${allDefs.length} definitions across ${allFiles.length} files${lspResultsCount > 0 ? `, ${lspResultsCount} from LSP` : ""}, ${Date.now() - startTime}ms):`,
+    `Found ${top.length} definition(s) matching "${query}" (${definitionsTotal} definitions across ${filesTotal} files${lspResultsCount > 0 ? `, ${lspResultsCount} from LSP` : ""}, ${elapsedMs}ms):`,
     "",
   ];
   const maxTopScore = Math.max(...top.map((d) => d.score), 0);
@@ -880,65 +918,107 @@ export async function handleCode(
 
   if (top.length < 3 && enrich !== false && shouldShowLowResultHint()) {
     lines.push(
-        `> 💡 Only ${top.length} result(s) found. Retry with ` +
-          `depth: "deep" to retain grep + AST and add semantic + symbol + graph + LSP channels.`,
-      );
+      `> 💡 Only ${top.length} result(s) found. Retry with ` +
+        `depth: "deep" to retain grep + AST and add semantic + symbol + graph + LSP channels.`,
+    );
     lines.push("");
   }
+  return lines;
+}
+
+/** Details payload for code matches (keys consumed by deep-search callers). */
+function buildCodeDetails(
+  top: CodeDefinition[],
+  allDefsTotal: number,
+  lspResultsCount: number,
+  allFiles: string[],
+  summary: DiscoverySummary,
+  startTime: number,
+) {
+  return {
+    mode: "code",
+    total: top.length,
+    totalScored: allDefsTotal,
+    lspResults: lspResultsCount,
+    matches: top.map((definition) => ({
+      file: definition.file,
+      relFile: definition.relFile,
+      line: definition.startLine,
+      endLine: definition.endLine,
+      name: definition.name,
+      kind: definition.kind,
+      snippet: definition.body,
+    })),
+    filesScanned: allFiles.length,
+    filesConsidered: summary.filesConsidered,
+    filesSkippedIgnored: summary.filesSkippedIgnored,
+    filesSkippedUnsupported: summary.filesSkippedUnsupported,
+    workspaceRootsSearched: summary.workspaceRootsSearched,
+    timeMs: Date.now() - startTime,
+  };
+}
+
+export async function handleCode(
+  toolCallId: string,
+  params: SearchInput,
+  cwd: string,
+  signal: AbortSignal | undefined,
+  enrich: boolean,
+  options?: { preDiscoveredFiles?: string[]; sharedDefinitionCache?: Map<string, CodeDefinition[]>; sharedSummary?: DiscoverySummary },
+) {
+  const maxResults = params.maxResults ?? 20;
+  const startTime = Date.now();
+  const query = params.query!.trim();
+
+  let allFiles: string[];
+  let summary: DiscoverySummary;
+  if (options?.preDiscoveredFiles && options.sharedSummary) {
+    allFiles = options.preDiscoveredFiles;
+    summary = options.sharedSummary;
+  } else {
+    const searchRoots = expandToMonorepoRoots(cwd);
+    const discovered = await discoverAcrossRoots(searchRoots, "code", signal);
+    allFiles = discovered.files;
+    summary = discovered.summary;
+  }
+  const definitionCache = options?.sharedDefinitionCache ?? new Map<string, CodeDefinition[]>();
+  const allDefs = await collectDefinitionsWithinBudget(allFiles, cwd, definitionCache, signal);
+  const allResults = await rankDefinitions(allDefs, query, cwd, signal, maxResults);
+  const lspResultsCount = await mergeLspDefinitions(allResults, query, cwd, params.directory);
+
+  const top = allResults.slice(0, maxResults);
+
+  if (top.length === 0) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `[No code definitions found matching "${query}" across ${allFiles.length} source files.]`,
+        },
+      ],
+      details: {
+        mode: "code",
+        total: 0,
+        query,
+        filesScanned: allFiles.length,
+        filesConsidered: summary.filesConsidered,
+        filesSkippedIgnored: summary.filesSkippedIgnored,
+        filesSkippedUnsupported: summary.filesSkippedUnsupported,
+        workspaceRootsSearched: summary.workspaceRootsSearched,
+        definitionsExtracted: allDefs.length,
+        timeMs: Date.now() - startTime,
+        lspResults: lspResultsCount,
+      },
+    };
+  }
+
+  const lines = renderCodeMatches(query, top, allDefs.length, allFiles.length, lspResultsCount, Date.now() - startTime, enrich);
 
   if (enrich !== false && top.length > 0) {
-    try {
-      const nameToEntry = new Map<string, typeof top[0]>();
-      for (const entry of top) {
-        if (!nameToEntry.has(entry.name)) {
-          nameToEntry.set(entry.name, entry);
-        }
-      }
-      const topNames = [...nameToEntry.keys()].slice(0, 5);
-      const resolvedLines: string[] = ["── Enriched ──", ""];
-
-      for (const name of topNames) {
-        if (signal?.aborted) break;
-        try {
-          const entry = nameToEntry.get(name)!;
-          const resolution = await resolveSymbol(cwd, name, entry.relFile, entry.startLine, 3);
-          let defLine = `  ${name} -> `;
-          if (resolution.bestDefinition) {
-            defLine += `def: ${resolution.bestDefinition.file}:${resolution.bestDefinition.line}`;
-          } else {
-            defLine += "(no definition found)";
-          }
-          if (resolution.references.length > 0) {
-            defLine += ` (${resolution.references.length} refs)`;
-          }
-          resolvedLines.push(defLine);
-        } catch {
-          resolvedLines.push(`  ${name} -> (resolution failed)`);
-        }
-      }
-
-      if (topNames.length > 0 && !signal?.aborted) {
-        for (const name of topNames.slice(0, 3)) {
-          try {
-            const callers = await findCallers(allFiles, name, signal);
-            if (callers.length > 0) {
-              resolvedLines.push(
-                `  ${name} callers: ${callers.slice(0, 5).map((caller) => `${caller.callerFunction} in ${caller.file}`).join(", ")}` +
-                  (callers.length > 5 ? ` (+${callers.length - 5} more)` : ""),
-              );
-            }
-          } catch {
-            // skip caller enrichment failures
-          }
-        }
-      }
-
-      if (resolvedLines.length > 1) {
-        lines.push(...resolvedLines);
-        lines.push("");
-      }
-    } catch {
-      // enrichment is best-effort
+    const resolvedLines = await enrichTopDefinitions(top, allFiles, cwd, signal);
+    if (resolvedLines.length > 1) {
+      lines.push(...resolvedLines);
+      lines.push("");
     }
   }
 
@@ -949,26 +1029,155 @@ export async function handleCode(
 
   return {
     content: [{ type: "text" as const, text: lines.join("\n") }],
-    details: {
-      mode: "code",
-      total: top.length,
-      totalScored: allDefs.length,
-      lspResults: lspResultsCount,
-      matches: top.map((definition) => ({
-        file: definition.file,
-        relFile: definition.relFile,
-        line: definition.startLine,
-        endLine: definition.endLine,
-        name: definition.name,
-        kind: definition.kind,
-        snippet: definition.body,
-      })),
-      filesScanned: allFiles.length,
-      filesConsidered: summary.filesConsidered,
-      filesSkippedIgnored: summary.filesSkippedIgnored,
-      filesSkippedUnsupported: summary.filesSkippedUnsupported,
-      workspaceRootsSearched: summary.workspaceRootsSearched,
-      timeMs: Date.now() - startTime,
+    details: buildCodeDetails(top, allDefs.length, lspResultsCount, allFiles, summary, startTime),
+  };
+}
+
+/** Tree-sitter AST match for one file; empty on unsupported lang or failure. */
+async function scanAstPatternFile(
+  filePath: string,
+  lang: string,
+  astQuery: ParsedAstPattern,
+): Promise<{ node: Parser.SyntaxNode; name: string }[]> {
+  try {
+    return await matchAstNodesInFile(filePath, lang, astQuery);
+  } catch {
+    // AST matching failed — fall through to regex fallback
+    return [];
+  }
+}
+
+/** Append AST hits, attributing each to its owning definition when known. */
+function appendAstHits(
+  matches: GrepSearchMatch[],
+  astHits: { node: Parser.SyntaxNode; name: string }[],
+  filePath: string,
+  relFile: string,
+  definitions: CodeDefinition[],
+  maxResults: number,
+): void {
+  for (const hit of astHits) {
+    if (matches.length >= maxResults) break;
+    const owner = findOwningDefinition(definitions, hit.node.startPosition.row + 1);
+    matches.push({
+      group: owner ? "definition" : "text",
+      file: filePath,
+      relFile,
+      line: hit.node.startPosition.row + 1,
+      endLine: hit.node.endPosition.row + 1,
+      kind: owner?.kind ?? "ast_pattern",
+      name: hit.name,
+      lineText: hit.node.text.split("\n")[0] ?? "",
+      snippet: hit.node.text,
+    });
+  }
+}
+
+/** Regex fallback for non-AST languages or partial matches; skips AST dupes. */
+function appendRegexFallbackHits(
+  matches: GrepSearchMatch[],
+  content: string,
+  filePath: string,
+  relFile: string,
+  astQuery: ParsedAstPattern,
+  definitions: CodeDefinition[],
+  maxResults: number,
+): void {
+  const lines = content.split(/\r?\n/g);
+  for (let index = 0; index < lines.length; index++) {
+    if (matches.length >= maxResults) break;
+    const line = lines[index] ?? "";
+    if (!astQuery.fallbackRegex || !astQuery.fallbackRegex.test(line)) continue;
+
+    const lineNumber = index + 1;
+
+    // Skip if already matched by AST (duplicate)
+    const alreadyMatched = matches.some(
+      (m) => m.file === filePath && m.line === lineNumber,
+    );
+    if (alreadyMatched) continue;
+
+    const owner = findOwningDefinition(definitions, lineNumber);
+    const snippet = formatSnippet(lines, lineNumber, 3);
+    matches.push({
+      group: owner ? "definition" : "text",
+      file: filePath,
+      relFile,
+      line: lineNumber,
+      endLine: snippet.endLine,
+      kind: owner?.kind ?? "ast_pattern",
+      name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
+      lineText: line,
+      snippet: snippet.snippet,
+    });
+  }
+}
+
+/** Render AST pattern matches text, including the low-result hint. */
+function renderAstPatternMatches(
+  query: string,
+  matches: GrepSearchMatch[],
+  filesMatched: number,
+  elapsedMs: number,
+): string {
+  const lines: string[] = [
+    `Found ${matches.length} AST pattern match(es) for "${query}" (${filesMatched} searchable files, ${elapsedMs}ms):`,
+    "",
+  ];
+
+  for (const match of matches) {
+    lines.push(
+      `  ${match.relFile}:${match.line}-${match.endLine} [${match.kind}] ${match.name}`,
+    );
+    lines.push(match.snippet);
+    lines.push("");
+  }
+
+  if (matches.length === 0) {
+    lines.push(
+      `[No AST pattern matches for "${query}" across ${filesMatched} searchable files.]`,
+    );
+  } else if (matches.length < 3 && shouldShowLowResultHint()) {
+    lines.push(
+      `> 💡 Only ${matches.length} result(s) found. Retry with ` +
+        `depth: "deep" to retain grep + AST and add semantic + symbol + graph + LSP channels.`,
+    );
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/** Details payload for AST pattern matches. */
+function buildAstPatternDetails(
+  matches: GrepSearchMatch[],
+  query: string,
+  allFiles: string[],
+  summary: DiscoverySummary,
+  astQuery: ParsedAstPattern,
+  startTime: number,
+) {
+  return {
+    mode: "ast_pattern",
+    total: matches.length,
+    query,
+    filesScanned: allFiles.length,
+    filesConsidered: summary.filesConsidered,
+    filesSkippedIgnored: summary.filesSkippedIgnored,
+    filesSkippedBinary: summary.filesSkippedBinary,
+    filesSkippedUnsupported: summary.filesSkippedUnsupported,
+    workspaceRootsSearched: summary.workspaceRootsSearched,
+    definitionHits: matches.filter((m) => m.group === "definition").length,
+    textHits: matches.filter((m) => m.group === "text").length,
+    timeMs: Date.now() - startTime,
+    matches,
+    pattern: {
+      nodeTypes: astQuery.nodeTypes,
+      isAsync: astQuery.isAsync,
+      namePattern: astQuery.namePattern,
+      returnTypePattern: astQuery.returnTypePattern,
+      extendsPattern: astQuery.extendsPattern,
+      forTypePattern: astQuery.forTypePattern,
+      bodyFieldPatterns: astQuery.bodyFieldPatterns,
     },
   };
 }
@@ -1029,66 +1238,14 @@ export async function handleAstPattern(
     const definitions = await getOrExtractDefinitions(definitionCache, filePath, relFile);
 
     const lang = filenameToLang(filePath);
-    let astHits: { node: Parser.SyntaxNode; name: string }[] = [];
-
-    // Try tree-sitter AST matching for supported languages
-    if (lang) {
-      try {
-        astHits = await matchAstNodesInFile(filePath, lang, astQuery);
-      } catch {
-        // AST matching failed \u2014 fall through to regex fallback
-      }
-    }
-
-    // Record AST matches
-    for (const hit of astHits) {
-      if (matches.length >= maxResults) break;
-      const owner = findOwningDefinition(definitions, hit.node.startPosition.row + 1);
-      matches.push({
-        group: owner ? "definition" : "text",
-        file: filePath,
-        relFile,
-        line: hit.node.startPosition.row + 1,
-        endLine: hit.node.endPosition.row + 1,
-        kind: owner?.kind ?? "ast_pattern",
-        name: hit.name,
-        lineText: hit.node.text.split("\n")[0] ?? "",
-        snippet: hit.node.text,
-      });
-    }
+    const astHits = lang ? await scanAstPatternFile(filePath, lang, astQuery) : [];
+    appendAstHits(matches, astHits, filePath, relFile, definitions, maxResults);
 
     // Run regex fallback for additional coverage (non-AST languages or partial matches)
     if (matches.length < maxResults) {
       const content = await readTextFileQuiet(filePath);
-      if (content === null) continue;
-
-      const lines = content.split(/\r?\n/g);
-      for (let index = 0; index < lines.length; index++) {
-        if (matches.length >= maxResults) break;
-        const line = lines[index] ?? "";
-        if (!astQuery.fallbackRegex || !astQuery.fallbackRegex.test(line)) continue;
-
-        const lineNumber = index + 1;
-
-        // Skip if already matched by AST (duplicate)
-        const alreadyMatched = matches.some(
-          (m) => m.file === filePath && m.line === lineNumber,
-        );
-        if (alreadyMatched) continue;
-
-        const owner = findOwningDefinition(definitions, lineNumber);
-        const snippet = formatSnippet(lines, lineNumber, 3);
-        matches.push({
-          group: owner ? "definition" : "text",
-          file: filePath,
-          relFile,
-          line: lineNumber,
-          endLine: snippet.endLine,
-          kind: owner?.kind ?? "ast_pattern",
-          name: owner?.name ?? (line.trim().slice(0, 80) || "(text match)"),
-          lineText: line,
-          snippet: snippet.snippet,
-        });
+      if (content !== null) {
+        appendRegexFallbackHits(matches, content, filePath, relFile, astQuery, definitions, maxResults);
       }
     }
   }
@@ -1096,230 +1253,8 @@ export async function handleAstPattern(
   sortGrepMatches(matches);
   recordGrepMatches(resolveSessionKey(toolCallId), matches);
 
-  // Format output
-  const lines: string[] = [
-    `Found ${matches.length} AST pattern match(es) for "${query}" (${summary.filesMatched} searchable files, ${Date.now() - startTime}ms):`,
-    "",
-  ];
-
-  for (const match of matches) {
-    lines.push(
-      `  ${match.relFile}:${match.line}-${match.endLine} [${match.kind}] ${match.name}`,
-    );
-    lines.push(match.snippet);
-    lines.push("");
-  }
-
-  if (matches.length === 0) {
-    lines.push(
-      `[No AST pattern matches for "${query}" across ${summary.filesMatched} searchable files.]`,
-    );
-  } else if (matches.length < 3 && shouldShowLowResultHint()) {
-    lines.push(
-      `> \uD83D\uDCA1 Only ${matches.length} result(s) found. Retry with ` +
-        `depth: "deep" to retain grep + AST and add semantic + symbol + graph + LSP channels.`,
-    );
-    lines.push("");
-  }
-
   return {
-    content: [{ type: "text" as const, text: lines.join("\n") }],
-    details: {
-      mode: "ast_pattern",
-      total: matches.length,
-      query,
-      filesScanned: allFiles.length,
-      filesConsidered: summary.filesConsidered,
-      filesSkippedIgnored: summary.filesSkippedIgnored,
-      filesSkippedBinary: summary.filesSkippedBinary,
-      filesSkippedUnsupported: summary.filesSkippedUnsupported,
-      workspaceRootsSearched: summary.workspaceRootsSearched,
-      definitionHits: matches.filter((m) => m.group === "definition").length,
-      textHits: matches.filter((m) => m.group === "text").length,
-      timeMs: Date.now() - startTime,
-      matches,
-      pattern: {
-        nodeTypes: astQuery.nodeTypes,
-        isAsync: astQuery.isAsync,
-        namePattern: astQuery.namePattern,
-        returnTypePattern: astQuery.returnTypePattern,
-        extendsPattern: astQuery.extendsPattern,
-        forTypePattern: astQuery.forTypePattern,
-        bodyFieldPatterns: astQuery.bodyFieldPatterns,
-      },
-    },
+    content: [{ type: "text" as const, text: renderAstPatternMatches(query, matches, summary.filesMatched, Date.now() - startTime) }],
+    details: buildAstPatternDetails(matches, query, allFiles, summary, astQuery, startTime),
   };
-}
-
-// ── Deep search (depth: "deep") ─────────────────────────────────
-
-async function runDeepSearch(
-  toolCallId: string,
-  params: SearchInput,
-  searchRoot: string,
-  signal: AbortSignal | undefined,
-  ctx: ExtensionContext,
-) {
-  const result = await executeDeepSearch(
-    {
-      query: params.query.trim(),
-      depth: "standard",
-      scope: params.scope ?? "all",
-      directory: searchRoot,
-      limit: Math.max(1, Math.min(50, params.maxResults ?? 15)),
-      maxSnippetChars: 400,
-      outputBudget: 4096,
-    },
-    signal,
-    ctx,
-  );
-
-  // Record matches in sparse cache for context hygiene
-  const sessionKey = resolveSessionKey(toolCallId);
-  let validMatches: Array<{ file: string; lines?: { start: number }; snippet: string }> | undefined;
-  const rawDetails = result.details;
-  if (rawDetails && typeof rawDetails === "object" && !Array.isArray(rawDetails)) {
-    const rawMatches = (rawDetails as Record<string, unknown>).matches;
-    if (Array.isArray(rawMatches)) {
-      validMatches = rawMatches.filter(
-        (match): match is { file: string; lines?: { start: number }; snippet: string } => {
-          if (!match || typeof match !== "object") return false;
-          const entry = match as Record<string, unknown>;
-          if (typeof entry.file !== "string") return false;
-          if (typeof entry.snippet !== "string") return false;
-          if (entry.lines !== undefined) {
-            if (typeof entry.lines !== "object" || entry.lines === null) return false;
-            const lines = entry.lines as Record<string, unknown>;
-            if (lines.start !== undefined && typeof lines.start !== "number") return false;
-          }
-          return true;
-        },
-      );
-      if (validMatches.length === 0) validMatches = undefined;
-    }
-  }
-
-  if (validMatches && validMatches.length > 0) {
-    const byFile = new Map<string, Array<{ line: number; text: string }>>();
-    for (const match of validMatches) {
-      const absPath = resolve(searchRoot, match.file);
-      const lineNum = match.lines?.start ?? 1;
-      const entries = byFile.get(absPath) ?? [];
-      entries.push({ line: lineNum, text: match.snippet });
-      byFile.set(absPath, entries);
-    }
-    for (const [absPath, entries] of byFile) {
-      recordSparse(sessionKey, absPath, entries);
-    }
-  }
-
-  return result;
-}
-
-// ── Tool definition ───────────────────────────────────────────────
-
-export default function createSearchTool(): ToolDefinition {
-  return {
-    name: "search",
-    label: "search",
-    description:
-        'Search repository text with grep and AST-aware code definitions by exact term, regex, boolean query, or structural ast_pattern. Use for precise lookups; use depth: "deep" for broad cross-file search that adds fused semantic, symbol, graph, and LSP evidence with provenance. For simple literal/regex code search use `grep`; prefer `symbol` when a symbol name is known and relationships matter; use read/read_files once target paths are known.',
-    parameters: SearchSchema,
-
-    async execute(
-      toolCallId: string,
-      params: SearchInput,
-      signal: AbortSignal | undefined,
-      _onUpdate: unknown,
-      ctx: ExtensionContext,
-    ) {
-      if (signal?.aborted) throw new Error("Operation aborted");
-
-      const cwd = resolveSearchRoot(params, ctx.cwd);
-
-      if (typeof params.query !== "string" || !params.query.trim()) {
-        throw new Error('search requires a non-empty "query"');
-      }
-
-      if (params.depth === "deep") {
-        return runDeepSearch(toolCallId, params, cwd, signal, ctx);
-      }
-
-      const config = loadSearchConfig(cwd);
-      const enrich =
-        config.enrich?.code?.symbols !== false || config.enrich?.code?.callers !== false;
-
-      // Run code and grep searches, combining results.
-      // Skip code search for ast_pattern/boolean modes — they are grep-only.
-      const skipCode = params.matchMode === "ast_pattern" || params.matchMode === "boolean";
-
-      // M1: Discover text files once and share across code+grep handlers to avoid
-      // duplicate directory walks and file reads in quick search mode.
-      let codeResult: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
-      let grepResult: { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
-
-      if (skipCode) {
-        codeResult = { content: [{ type: "text" as const, text: "" }], details: { total: 0, mode: "code" } };
-        grepResult = await handleGrep(toolCallId, params, cwd, signal);
-      } else {
-        const searchRoots = expandToMonorepoRoots(cwd);
-        const { files: textFiles, summary: textSummary } = await discoverAcrossRoots(searchRoots, "text", signal);
-        const codeFiles = textFiles.filter((f) => isSupportedFile(f));
-        const sharedDefinitionCache = new Map<string, CodeDefinition[]>();
-
-        // Build a code-profile summary from the text discovery
-        const codeSummary: DiscoverySummary = {
-          ...textSummary,
-          profile: "code",
-          filesMatched: codeFiles.length,
-        };
-
-        const sharedOpts = { sharedDefinitionCache };
-        [codeResult, grepResult] = await Promise.all([
-          handleCode(toolCallId, params, cwd, signal, enrich, { preDiscoveredFiles: codeFiles, ...sharedOpts, sharedSummary: codeSummary }),
-          handleGrep(toolCallId, params, cwd, signal, { preDiscoveredFiles: textFiles, ...sharedOpts, sharedSummary: textSummary }),
-        ]);
-      }
-
-      const codeText = codeResult.content[0]?.type === "text" ? codeResult.content[0].text : "";
-      const grepText = grepResult.content[0]?.type === "text" ? grepResult.content[0].text : "";
-
-      const codeDetails = codeResult.details as Record<string, unknown>;
-      const grepDetails = grepResult.details as Record<string, unknown>;
-
-      const parts: string[] = [];
-      if (codeText && (codeDetails?.total as number ?? 0) > 0) {
-        parts.push(codeText);
-      }
-      if (grepText && (grepDetails?.total as number ?? 0) > 0) {
-        parts.push(grepText);
-      }
-      if (parts.length === 0) {
-        const query = params.query.trim();
-        const files = (codeDetails?.filesScanned as number ?? 0) || (grepDetails?.filesScanned as number ?? 0);
-        parts.push(`[No matches for "${query}" across ${files} files.]`);
-        parts.push(`[hint] Retry with depth: "deep" to retain grep + AST and add semantic + symbol + graph + LSP channels, or symbol { query: "${query}" } if this is a known identifier.`);
-      }
-
-      return {
-        content: [{ type: "text" as const, text: parts.join("\n") }],
-        details: {
-          total: (codeDetails?.total as number ?? 0) + (grepDetails?.total as number ?? 0),
-          query: params.query.trim(),
-          codeDefinitions: codeDetails?.total ?? 0,
-          textMatches: grepDetails?.total ?? 0,
-          definitionHits: grepDetails?.definitionHits ?? 0,
-          textHits: grepDetails?.textHits ?? 0,
-          matches: grepDetails?.matches ?? [],
-          lspResults: codeDetails?.lspResults ?? 0,
-          filesScanned: codeDetails?.filesScanned ?? grepDetails?.filesScanned ?? 0,
-          filesConsidered: codeDetails?.filesConsidered ?? grepDetails?.filesConsidered ?? 0,
-          filesSkippedIgnored: grepDetails?.filesSkippedIgnored ?? 0,
-          filesSkippedBinary: grepDetails?.filesSkippedBinary ?? 0,
-          workspaceRootsSearched: grepDetails?.workspaceRootsSearched ?? codeDetails?.workspaceRootsSearched ?? [],
-          timeMs: Math.max(codeDetails?.timeMs as number ?? 0, grepDetails?.timeMs as number ?? 0),
-        },
-      };
-    },
-  } as unknown as ToolDefinition;
 }

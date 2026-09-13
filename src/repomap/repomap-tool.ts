@@ -7,13 +7,11 @@
  */
 import { Type, type Static } from "@sinclair/typebox";
 import type {
-  ExtensionAPI,
   ExtensionContext,
   ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
-import { RepoMap } from "./repomap.js";
-import createSearchTool from "./search-tool.js";
-import { getGraphifyEnricher } from "./graphify-enricher.js";
+import { RepoMap } from "../repomap.js";
+import { getGraphifyEnricher } from "../graph/graphify-enricher.js";
 import { resolve as pathResolve } from "node:path";
 
 // ── Tool: repo_map ────────────────────────────────────────────────
@@ -187,14 +185,4 @@ function resolveDirParam(cwd: string, directory: string | undefined): string {
   // Direct resolve — explicit directories are allowed outside cwd and
   // outside PI_SMARTREAD_ALLOWED_ROOT (external permission system).
   return pathResolve(cwd, directory ?? ".");
-}
-
-// ── Registration ──────────────────────────────────────────────────
-
-/**
- * Register repo-map and search tools with the Pi extension API.
- */
-export default function registerRepoTools(pi: ExtensionAPI): void {
-  pi.registerTool(createRepoTool());
-  pi.registerTool(createSearchTool());
 }

@@ -7,8 +7,8 @@ import { dirname, resolve, basename } from "node:path";
 import Parser from "tree-sitter";
 import { createRequire } from "node:module";
 import { initParser } from "./tags.js";
-import { filenameToLang, type SupportedLanguage } from "./languages.js";
-import type { ContextGraph } from "./context-graph.js";
+import { filenameToLang, type SupportedLanguage } from "../languages.js";
+import type { ContextGraph } from "../context-graph.js";
 import {
   extractDependencies,
   findImportDependents,
@@ -145,69 +145,68 @@ function walkClassBody(
 
 // ── Parent class / base classes / interfaces ──────────────────
 
-function extractHeritage(
+interface DeclarationCollection {
+  children: ChildSymbol[];
+  baseClasses: ParentInfo[];
+  interfaces: ParentInfo[];
+}
+
+function newDeclarationCollection(): DeclarationCollection {
+  return { children: [], baseClasses: [], interfaces: [] };
+}
+
+function findHeritageNode(classNode: Parser.SyntaxNode): Parser.SyntaxNode | null {
+  for (let i = 0; i < classNode.namedChildCount; i++) {
+    const child = classNode.namedChild(i);
+    if (child?.type === "class_heritage") return child;
+  }
+  return null;
+}
+
+function collectClauseNames(clause: Parser.SyntaxNode, kind: ParentInfo["kind"]): ParentInfo[] {
+  const out: ParentInfo[] = [];
+  for (let j = 0; j < clause.namedChildCount; j++) {
+    const entry = clause.namedChild(j);
+    if (entry) out.push({ kind, name: entry.text, line: entry.startPosition.row + 1 });
+  }
+  return out;
+}
+
+function extractTsHeritage(
+  classNode: Parser.SyntaxNode,
+): { baseClasses: ParentInfo[]; interfaces: ParentInfo[] } | null {
+  const heritage = findHeritageNode(classNode);
+  if (!heritage) return null;
+  const baseClasses: ParentInfo[] = [];
+  const interfaces: ParentInfo[] = [];
+  for (let i = 0; i < heritage.namedChildCount; i++) {
+    const clause = heritage.namedChild(i);
+    if (!clause) continue;
+    if (clause.type === "extends_clause") baseClasses.push(...collectClauseNames(clause, "class"));
+    else if (clause.type === "implements_clause") interfaces.push(...collectClauseNames(clause, "interface"));
+  }
+  return { baseClasses, interfaces };
+}
+
+function extractPythonBases(
   classNode: Parser.SyntaxNode,
 ): { baseClasses: ParentInfo[]; interfaces: ParentInfo[] } {
   const baseClasses: ParentInfo[] = [];
-  const interfaces: ParentInfo[] = [];
-
-  // TS/JS: class_heritage child (no field name)
-  let heritage: Parser.SyntaxNode | null = null;
-  for (let i = 0; i < classNode.namedChildCount; i++) {
-    const child = classNode.namedChild(i);
-    if (child && child.type === "class_heritage") {
-      heritage = child;
-      break;
-    }
-  }
-
-  if (heritage) {
-    for (let i = 0; i < heritage.namedChildCount; i++) {
-      const clause = heritage.namedChild(i);
-      if (!clause) continue;
-      if (clause.type === "extends_clause") {
-        for (let j = 0; j < clause.namedChildCount; j++) {
-          const base = clause.namedChild(j);
-          if (base) {
-            baseClasses.push({
-              kind: "class",
-              name: base.text,
-              line: base.startPosition.row + 1,
-            });
-          }
-        }
-      } else if (clause.type === "implements_clause") {
-        for (let j = 0; j < clause.namedChildCount; j++) {
-          const iface = clause.namedChild(j);
-          if (iface) {
-            interfaces.push({
-              kind: "interface",
-              name: iface.text,
-              line: iface.startPosition.row + 1,
-            });
-          }
-        }
-      }
-    }
-    return { baseClasses, interfaces };
-  }
-
-  // Python: superclasses field
   const superclasses = classNode.childForFieldName("superclasses");
   if (superclasses) {
     for (let i = 0; i < superclasses.namedChildCount; i++) {
       const sc = superclasses.namedChild(i);
-      if (sc) {
-        baseClasses.push({
-          kind: "class",
-          name: sc.text,
-          line: sc.startPosition.row + 1,
-        });
-      }
+      if (sc) baseClasses.push({ kind: "class", name: sc.text, line: sc.startPosition.row + 1 });
     }
   }
+  // Python never populates interfaces.
+  return { baseClasses, interfaces: [] };
+}
 
-  return { baseClasses, interfaces };
+function extractHeritage(
+  classNode: Parser.SyntaxNode,
+): { baseClasses: ParentInfo[]; interfaces: ParentInfo[] } {
+  return extractTsHeritage(classNode) ?? extractPythonBases(classNode);
 }
 
 // ── Override detection ────────────────────────────────────────
@@ -308,6 +307,44 @@ function extractDefinedNames(code: string, lang: SupportedLanguage): Set<string>
   return names;
 }
 
+function extractCalleeName(fnNode: Parser.SyntaxNode): string | null {
+  if (fnNode.type === "identifier") return fnNode.text;
+  if (fnNode.type === "member_expression") {
+    const prop = fnNode.childForFieldName("property");
+    return prop?.type === "property_identifier" ? prop.text : null;
+  }
+  if (fnNode.type === "attribute") {
+    return fnNode.childForFieldName("attribute")?.text ?? null;
+  }
+  return null;
+}
+
+function recordCallSite(
+  node: Parser.SyntaxNode,
+  code: string,
+  filePath: string,
+  targetNames: Set<string>,
+  seen: Set<string>,
+  callers: CallerInfo[],
+): void {
+  const fnNode = node.childForFieldName("function");
+  if (!fnNode) return;
+  const calleeName = extractCalleeName(fnNode);
+  if (!calleeName || !targetNames.has(calleeName)) return;
+  const caller = findEnclosingFunctionName(node) ?? "(top-level)";
+  const callLine = node.startPosition.row + 1;
+  const key = `${filePath}:${callLine}:${caller}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  callers.push({
+    file: filePath,
+    line: callLine,
+    symbolName: caller,
+    snippet: getLineText(code, callLine),
+    confidence: 1.0,
+  });
+}
+
 function findCallersInFile(
   code: string,
   filePath: string,
@@ -329,37 +366,8 @@ function findCallersInFile(
 
   function walk(node: Parser.SyntaxNode) {
     if (node.type === "call_expression" || node.type === "call") {
-      const fnNode = node.childForFieldName("function");
-      if (!fnNode) return;
-
-      let calleeName: string | null = null;
-      if (fnNode.type === "identifier") {
-        calleeName = fnNode.text;
-      } else if (fnNode.type === "member_expression") {
-        const prop = fnNode.childForFieldName("property");
-        if (prop?.type === "property_identifier") calleeName = prop.text;
-      } else if (fnNode.type === "attribute") {
-        const attr = fnNode.childForFieldName("attribute");
-        if (attr) calleeName = attr.text;
-      }
-
-      if (calleeName && targetNames.has(calleeName)) {
-        const caller = findEnclosingFunctionName(node) ?? "(top-level)";
-        const callLine = node.startPosition.row + 1;
-        const key = `${filePath}:${callLine}:${caller}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          callers.push({
-            file: filePath,
-            line: callLine,
-            symbolName: caller,
-            snippet: getLineText(code, callLine),
-            confidence: 1.0,
-          });
-        }
-      }
+      recordCallSite(node, code, filePath, targetNames, seen, callers);
     }
-
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
       if (child) walk(child);
@@ -471,6 +479,97 @@ function mergeCallers(callers: CallerInfo[]): CallerInfo[] {
 
 // ── TS/JS fact extraction ─────────────────────────────────────
 
+function unwrapTsExport(node: Parser.SyntaxNode): { decl: Parser.SyntaxNode; isExported: boolean } | null {
+  if (node.type !== "export_statement") return { decl: node, isExported: false };
+  const firstChild = node.namedChildCount > 0 ? node.namedChild(0) : null;
+  if (firstChild && isDeclarationType(firstChild.type)) return { decl: firstChild, isExported: true };
+  return null;
+}
+
+function pushChild(decl: Parser.SyntaxNode, isExported: boolean, acc: DeclarationCollection): void {
+  const child = extractChild(decl);
+  if (child) {
+    child.isExported = isExported;
+    acc.children.push(child);
+  }
+}
+
+function appendTsClassDecl(decl: Parser.SyntaxNode, isExported: boolean, acc: DeclarationCollection): void {
+  pushChild(decl, isExported, acc);
+  const heritage = extractHeritage(decl);
+  acc.baseClasses.push(...heritage.baseClasses);
+  acc.interfaces.push(...heritage.interfaces);
+  const body = findClassBody(decl);
+  if (!body) return;
+  for (const mc of walkClassBody(body)) {
+    mc.isExported = isExported;
+    acc.children.push(mc);
+  }
+}
+
+function appendTsLexicalChildren(decl: Parser.SyntaxNode, isExported: boolean, acc: DeclarationCollection): void {
+  for (let j = 0; j < decl.namedChildCount; j++) {
+    const vd = decl.namedChild(j);
+    if (vd?.type === "variable_declarator") pushChild(vd, isExported, acc);
+  }
+}
+
+function appendTsJsDecl(decl: Parser.SyntaxNode, isExported: boolean, acc: DeclarationCollection): void {
+  if (decl.type === "class_declaration" || decl.type === "abstract_class_declaration") {
+    appendTsClassDecl(decl, isExported, acc);
+  } else if (decl.type === "interface_declaration") {
+    pushChild(decl, isExported, acc);
+  } else if (decl.type === "function_declaration") {
+    pushChild(decl, isExported, acc);
+  } else if (decl.type === "lexical_declaration" || decl.type === "variable_declaration") {
+    appendTsLexicalChildren(decl, isExported, acc);
+  } else if (decl.type === "enum_declaration" || decl.type === "type_alias_declaration") {
+    pushChild(decl, isExported, acc);
+  }
+}
+
+function collectTsJsDeclarations(root: Parser.SyntaxNode): DeclarationCollection {
+  const acc = newDeclarationCollection();
+  for (let i = 0; i < root.namedChildCount; i++) {
+    const node = root.namedChild(i);
+    if (!node) continue;
+    const unwrapped = unwrapTsExport(node);
+    if (!unwrapped) continue;
+    appendTsJsDecl(unwrapped.decl, unwrapped.isExported, acc);
+  }
+  return acc;
+}
+
+function assembleStructuralFacts(
+  decls: DeclarationCollection,
+  code: string,
+  filePath: string,
+  lang: SupportedLanguage,
+  notices: string[],
+): StructuralFacts {
+  const parentModule = detectParentModule(filePath);
+  const overrides = detectOverrides(decls.children, decls.baseClasses, lang, code);
+  const reExportedBy = findBarrelReExports(filePath, lang, new Set<string>(), 0);
+  const definedNames = extractDefinedNames(code, lang);
+  const intras = findCallersInFile(code, filePath, definedNames);
+  const cross = scanCrossFileCallers(definedNames, filePath);
+  const allCallers = mergeCallers([...intras, ...cross]);
+  const parentClass = decls.baseClasses.length > 0 ? decls.baseClasses[0] : undefined;
+  return {
+    callers: allCallers,
+    dependencies: extractDependencies(code, filePath, lang),
+    internalCallSites: intras,
+    parentClass,
+    parentModule,
+    children: decls.children,
+    baseClasses: decls.baseClasses,
+    interfaces: decls.interfaces,
+    overrides,
+    reExportedBy,
+    notices,
+  };
+}
+
 function extractTSJSFacts(
   root: Parser.SyntaxNode,
   code: string,
@@ -479,129 +578,7 @@ function extractTSJSFacts(
   lang: SupportedLanguage,
   notices: string[],
 ): StructuralFacts {
-  let parentClass: ParentInfo | undefined;
-  let parentModule: string | undefined;
-  const baseClasses: ParentInfo[] = [];
-  const interfaces: ParentInfo[] = [];
-  const children: ChildSymbol[] = [];
-
-  for (let i = 0; i < root.namedChildCount; i++) {
-    const node = root.namedChild(i);
-    if (!node) continue;
-
-    // Determine if this is an exported declaration or a standalone statement
-    let decl = node;
-    let isExported = false;
-
-    if (node.type === "export_statement") {
-      // Get the first named child that is a declaration type
-      const firstChild = node.namedChildCount > 0 ? node.namedChild(0) : null;
-      if (firstChild && isDeclarationType(firstChild.type)) {
-        decl = firstChild;
-        isExported = true;
-      } else {
-        // Re-export or other non-declaration export — skip
-        continue;
-      }
-    }
-
-    if (
-      decl.type === "class_declaration" ||
-      decl.type === "abstract_class_declaration" ||
-      decl.type === "interface_declaration"
-    ) {
-      const child = extractChild(decl);
-      if (child) {
-        child.isExported = isExported;
-        children.push(child);
-      }
-
-      // Class heritage for class_declaration and abstract_class_declaration
-      if (
-        decl.type === "class_declaration" ||
-        decl.type === "abstract_class_declaration"
-      ) {
-        const heritage = extractHeritage(decl);
-        baseClasses.push(...heritage.baseClasses);
-        interfaces.push(...heritage.interfaces);
-
-        // Walk class body for methods
-        const body = findClassBody(decl);
-        if (body) {
-          const methodChildren = walkClassBody(body);
-          for (const mc of methodChildren) {
-            mc.isExported = isExported;
-            children.push(mc);
-          }
-        }
-      }
-    } else if (
-      decl.type === "function_declaration"
-    ) {
-      const child = extractChild(decl);
-      if (child) {
-        child.isExported = isExported;
-        children.push(child);
-      }
-    } else if (
-      decl.type === "lexical_declaration" ||
-      decl.type === "variable_declaration"
-    ) {
-      // lexical_declaration has no 'name' field — iterate variable_declarator children
-      for (let j = 0; j < decl.namedChildCount; j++) {
-        const vd = decl.namedChild(j);
-        if (vd && vd.type === "variable_declarator") {
-          const child = extractChild(vd);
-          if (child) {
-            child.isExported = isExported;
-            children.push(child);
-          }
-        }
-      }
-    } else if (
-      decl.type === "enum_declaration" ||
-      decl.type === "type_alias_declaration"
-    ) {
-      const child = extractChild(decl);
-      if (child) {
-        child.isExported = isExported;
-        children.push(child);
-      }
-    }
-  }
-
-  parentModule = detectParentModule(filePath);
-  const overrides = detectOverrides(children, baseClasses, lang, code);
-
-  const reExportedBy = findBarrelReExports(
-    filePath,
-    lang,
-    new Set<string>(),
-    0,
-  );
-
-  const definedNames = extractDefinedNames(code, lang);
-  const intras = findCallersInFile(code, filePath, definedNames);
-  const cross = scanCrossFileCallers(definedNames, filePath);
-  const allCallers = mergeCallers([...intras, ...cross]);
-
-  if (baseClasses.length > 0) {
-    parentClass = baseClasses[0];
-  }
-
-  return {
-    callers: allCallers,
-    dependencies: extractDependencies(code, filePath, lang),
-    internalCallSites: intras,
-    parentClass,
-    parentModule,
-    children,
-    baseClasses,
-    interfaces,
-    overrides,
-    reExportedBy,
-    notices,
-  };
+  return assembleStructuralFacts(collectTsJsDeclarations(root), code, filePath, lang, notices);
 }
 
 function findChildByType(node: Parser.SyntaxNode, type: string): Parser.SyntaxNode | null {
@@ -621,6 +598,46 @@ function findPythonClassBody(classNode: Parser.SyntaxNode): Parser.SyntaxNode | 
   return findChildByType(classNode, "block");
 }
 
+function appendPythonClassDecl(node: Parser.SyntaxNode, acc: DeclarationCollection): void {
+  const child = extractChild(node);
+  if (child) acc.children.push(child);
+  const heritage = extractHeritage(node);
+  acc.baseClasses.push(...heritage.baseClasses);
+  const body = findPythonClassBody(node);
+  if (body) acc.children.push(...walkClassBody(body));
+}
+
+function appendPythonDecorated(node: Parser.SyntaxNode, acc: DeclarationCollection): void {
+  const actualFn = node.namedChild(node.namedChildCount - 1);
+  if (actualFn?.type === "function_definition") {
+    const child = extractChild(actualFn);
+    if (child) acc.children.push(child);
+  } else if (actualFn?.type === "class_definition") {
+    appendPythonClassDecl(actualFn, acc);
+  }
+}
+
+function appendPythonNode(node: Parser.SyntaxNode, acc: DeclarationCollection): void {
+  if (node.type === "class_definition") {
+    appendPythonClassDecl(node, acc);
+  } else if (node.type === "function_definition") {
+    const child = extractChild(node);
+    if (child) acc.children.push(child);
+  } else if (node.type === "decorated_definition") {
+    appendPythonDecorated(node, acc);
+  }
+}
+
+function collectPythonDeclarations(root: Parser.SyntaxNode): DeclarationCollection {
+  const acc = newDeclarationCollection();
+  for (let i = 0; i < root.namedChildCount; i++) {
+    const node = root.namedChild(i);
+    if (!node) continue;
+    appendPythonNode(node, acc);
+  }
+  return acc;
+}
+
 function extractPythonFacts(
   root: Parser.SyntaxNode,
   code: string,
@@ -628,85 +645,9 @@ function extractPythonFacts(
   _cwd: string,
   notices: string[],
 ): StructuralFacts {
-  let parentClass: ParentInfo | undefined;
-  let parentModule: string | undefined;
-  const baseClasses: ParentInfo[] = [];
-  const interfaces: ParentInfo[] = [];
-  const children: ChildSymbol[] = [];
-
-  for (let i = 0; i < root.namedChildCount; i++) {
-    const node = root.namedChild(i);
-    if (!node) continue;
-
-    if (node.type === "class_definition") {
-      const child = extractChild(node);
-      if (child) children.push(child);
-
-      const heritage = extractHeritage(node);
-      baseClasses.push(...heritage.baseClasses);
-
-      // Python class body is a "block" child (no field name)
-      const body = findPythonClassBody(node);
-      if (body) {
-        const methodChildren = walkClassBody(body);
-        children.push(...methodChildren);
-      }
-    } else if (node.type === "function_definition") {
-      const child = extractChild(node);
-      if (child) children.push(child);
-    } else if (node.type === "decorated_definition") {
-      // Last named child is the actual definition
-      const actualFn = node.namedChild(node.namedChildCount - 1);
-      if (actualFn && actualFn.type === "function_definition") {
-        const child = extractChild(actualFn);
-        if (child) children.push(child);
-      } else if (actualFn && actualFn.type === "class_definition") {
-        const child = extractChild(actualFn);
-        if (child) children.push(child);
-        const heritage = extractHeritage(actualFn);
-        baseClasses.push(...heritage.baseClasses);
-        const body = findPythonClassBody(actualFn);
-        if (body) {
-          const methodChildren = walkClassBody(body);
-          children.push(...methodChildren);
-        }
-      }
-    }
-  }
-
-  parentModule = detectParentModule(filePath);
-  const overrides = detectOverrides(children, baseClasses, "python", code);
-
-  const reExportedBy = findBarrelReExports(
-    filePath,
-    "python",
-    new Set<string>(),
-    0,
-  );
-
-  const definedNames = extractDefinedNames(code, "python");
-  const intras = findCallersInFile(code, filePath, definedNames);
-  const cross = scanCrossFileCallers(definedNames, filePath);
-  const allCallers = mergeCallers([...intras, ...cross]);
-
-  if (baseClasses.length > 0) {
-    parentClass = baseClasses[0];
-  }
-
-  return {
-    callers: allCallers,
-    dependencies: extractDependencies(code, filePath, "python"),
-    internalCallSites: intras,
-    parentClass,
-    parentModule,
-    children,
-    baseClasses,
-    interfaces,
-    overrides,
-    reExportedBy,
-    notices,
-  };
+  return assembleStructuralFacts(collectPythonDeclarations(root), code, filePath, "python", notices);
 }
+
 
 function detectParentModule(filePath: string): string | undefined {
   const fileName = basename(filePath);

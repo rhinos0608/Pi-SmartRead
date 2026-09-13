@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import createSearchTool from "../../src/search-tool.js";
+import { handleGrep } from "../../../src/search/search-tool.js";
 
 function writeProjectFile(root: string, path: string, content: string | Buffer): void {
   mkdirSync(join(root, dirname(path)), { recursive: true });
@@ -37,13 +37,11 @@ describe("search tool combined search", () => {
 `,
     );
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "grep-body",
       { query: "body-only-literal" },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     const details = (result as any).details;
@@ -62,13 +60,11 @@ describe("search tool combined search", () => {
     writeProjectFile(root, "docs/guide.md", `# Guide\nSEARCH_TOKEN in docs\n`);
     writeProjectFile(root, "Procfile", `web: echo SEARCH_TOKEN\n`);
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "grep-text",
       { query: "SEARCH_TOKEN", maxResults: 10 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual([
@@ -100,13 +96,11 @@ describe("search tool combined search", () => {
     writeProjectFile(root, "hidden/drop.txt", "NEEDLE\n");
     writeProjectFile(root, "hidden/keep.txt", "NEEDLE\n");
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "grep-ignore",
       { query: "NEEDLE", maxResults: 20 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual([
@@ -134,13 +128,11 @@ describe("search tool combined search", () => {
     writeProjectFile(root, "ignored.txt", `EXACT_NEEDLE_123\n`);
     writeProjectFile(root, "binary.bin", Buffer.from([0, 159, 146, 150, 0]));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "grep-rg-parity",
       { query: "EXACT_NEEDLE_123", maxResults: 20 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     const searchMatches = getMatchLocations(result);

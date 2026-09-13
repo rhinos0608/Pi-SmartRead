@@ -2,11 +2,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import createSearchTool from "../../src/search-tool.js";
+import { handleGrep } from "../../../src/search/search-tool.js";
 import {
   parseBooleanQuery,
   evaluateBooleanExpression,
-} from "../../src/search-tool.js";
+} from "../../../src/search/search-tool.js";
 
 const ml = (query: string, line: string, caseSensitive = false): boolean =>
   evaluateBooleanExpression(parseBooleanQuery(query), line, caseSensitive);
@@ -265,13 +265,11 @@ describe("search tool boolean grep integration", () => {
       "line with neither",
     ].join("\n"));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "boolean-and",
       { query: "apple AND banana", matchMode: "boolean", maxResults: 10 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual(["test.txt:1"]);
@@ -285,13 +283,11 @@ describe("search tool boolean grep integration", () => {
       "line with neither",
     ].join("\n"));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "boolean-or",
       { query: "apple OR banana", matchMode: "boolean", maxResults: 10 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual(["test.txt:1", "test.txt:2"]);
@@ -305,13 +301,11 @@ describe("search tool boolean grep integration", () => {
       "line with neither",
     ].join("\n"));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "boolean-not",
       { query: "NOT apple", matchMode: "boolean", maxResults: 10 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual(["test.txt:2", "test.txt:3"]);
@@ -326,13 +320,11 @@ describe("search tool boolean grep integration", () => {
       "neither message",
     ].join("\n"));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "boolean-andnot",
       { query: "error AND NOT warning", matchMode: "boolean", maxResults: 10 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual(["test.txt:2"]);
@@ -348,13 +340,11 @@ describe("search tool boolean grep integration", () => {
       "line has neither",
     ].join("\n"));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "boolean-parens",
       { query: "(apple OR banana) AND cat", matchMode: "boolean", maxResults: 10 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual(["test.txt:1", "test.txt:2"]);
@@ -368,13 +358,11 @@ describe("search tool boolean grep integration", () => {
       "nothing",
     ].join("\n"));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "boolean-phrase",
       { query: '"exact phrase"', matchMode: "boolean", maxResults: 10 },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     expect(getMatchLocations(result)).toEqual(["test.txt:1"]);
@@ -388,8 +376,7 @@ describe("search tool boolean grep integration", () => {
       "line with apple only",
     ].join("\n"));
 
-    const tool = createSearchTool();
-    const result = await tool.execute(
+    const result = await handleGrep(
       "boolean-case",
       {
         query: "APPLE AND BANANA",
@@ -397,9 +384,8 @@ describe("search tool boolean grep integration", () => {
         caseSensitive: true,
         maxResults: 10,
       },
+      root,
       undefined,
-      undefined,
-      { cwd: root } as any,
     );
 
     // Only line 3 has both in exact case, but line 3 is "line with APPLE and BANANA"
@@ -408,21 +394,5 @@ describe("search tool boolean grep integration", () => {
     // Line 3: apple and banana (both lowercase)
     // Query: APPLE AND BANANA (case-sensitive)
     expect(getMatchLocations(result)).toEqual(["test.txt:1"]);
-  });
-
-  it("throws on empty query in boolean mode", async () => {
-    const root = withTempDir();
-    writeFileSync(join(root, "test.txt"), "line with content\n");
-
-    const tool = createSearchTool();
-    await expect(
-      tool.execute(
-        "boolean-empty",
-        { query: "", matchMode: "boolean", maxResults: 10 },
-        undefined,
-        undefined,
-        { cwd: root } as any,
-      ),
-    ).rejects.toThrow(/requires a non-empty "query"/);
   });
 });

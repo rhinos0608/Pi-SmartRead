@@ -19,6 +19,15 @@ interface PendingRequest {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/** A single decoded JSON-RPC message frame from the language server. */
+interface LspIncomingMessage {
+  id?: number | string | null;
+  method?: unknown;
+  params?: unknown;
+  result?: unknown;
+  error?: { message?: string };
+}
+
 const REQUEST_TIMEOUT_MS = 15_000;
 /** Fail-closed single-range validator: returns the range iff fully well-formed, else null. */
 function validateLspRange(range: unknown): LSPRange | null {
@@ -40,56 +49,124 @@ function parseLspEditEntry(er: unknown): { range: LSPRange; newText: string } | 
   return { range, newText };
 }
 
+type ParsedFileEdits = Array<{ filePath: string; edits: Array<{ range: LSPRange; newText: string }> }>;
+
+/** Fail-closed file URI → path: returns the path iff fileURLToPath succeeds, else null. */
+function workspaceUriToPath(uri: string): string | null {
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    return null;
+  }
+};
+
+/** Fail-closed edit list: null unless every entry parses (one malformed entry rejects the whole list). */
+function parseEditList(editsRaw: unknown): Array<{ range: LSPRange; newText: string }> | null {
+  if (!Array.isArray(editsRaw) || editsRaw.length === 0) return null;
+  const normEdits: Array<{ range: LSPRange; newText: string }> = [];
+  for (const er of editsRaw as unknown[]) {
+    const parsed = parseLspEditEntry(er);
+    if (!parsed) return null;
+    normEdits.push(parsed);
+  }
+  if (normEdits.length === 0) return null;
+  return normEdits;
+}
+
+function parseDocumentChanges(documentChanges: unknown): ParsedFileEdits | null {
+  if (!Array.isArray(documentChanges)) return null;
+  const out: ParsedFileEdits = [];
+  for (const dc of documentChanges as unknown[]) {
+    if (!dc || typeof dc !== "object") return null;
+    const entry = dc as Record<string, unknown>;
+    // Reject resource operations (CreateFile/RenameFile/DeleteFile) — return null for whole edit
+    if (typeof entry.kind === "string") return null;
+    const td = entry.textDocument as Record<string, unknown> | undefined;
+    const editsRaw = entry.edits as unknown[] | undefined;
+    if (!td || typeof td.uri !== "string" || !Array.isArray(editsRaw) || editsRaw.length === 0) return null;
+    const fp = workspaceUriToPath(td.uri as string);
+    if (!fp) return null;
+    const normEdits = parseEditList(editsRaw);
+    if (!normEdits) return null;
+    out.push({ filePath: fp, edits: normEdits });
+  }
+  return out;
+}
+
+function parseChangesMap(changes: unknown): ParsedFileEdits | null {
+  if (!changes || typeof changes !== "object") return null;
+  const out: ParsedFileEdits = [];
+  for (const [uriKey, editsRaw] of Object.entries(changes as Record<string, unknown>)) {
+    const fp = workspaceUriToPath(uriKey);
+    if (!fp) return null;
+    const normEdits = parseEditList(editsRaw);
+    if (!normEdits) return null;
+    out.push({ filePath: fp, edits: normEdits });
+  }
+  return out;
+}
+
+/** Duplicate filePath onto every edit entry (SmartEdit mutation RPC contract shape). */
+function withDuplicatedFilePath(fileEdits: ParsedFileEdits): LspWorkspaceEdit {
+  return { fileEdits: fileEdits.map((fe) => ({ filePath: fe.filePath, edits: fe.edits.map((ed) => ({ filePath: fe.filePath, range: ed.range, newText: ed.newText })) })) } as unknown as LspWorkspaceEdit;
+}
+
 function convertWorkspaceEdit(raw: unknown): LspWorkspaceEdit | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
-  const toPath = (u: string): string | null => {
-    try {
-      return fileURLToPath(u);
-    } catch {
-      return null;
-    }
-  };
-  const fileEdits: Array<{ filePath: string; edits: Array<{ range: LSPRange; newText: string }> }> = [];
+  const fileEdits: ParsedFileEdits = [];
   if ("documentChanges" in obj && obj.documentChanges !== undefined) {
-    if (!Array.isArray(obj.documentChanges)) return null;
-    for (const dc of obj.documentChanges as unknown[]) {
-      if (!dc || typeof dc !== "object") return null;
-      const entry = dc as Record<string, unknown>;
-      // Reject resource operations (CreateFile/RenameFile/DeleteFile) — return null for whole edit
-      if (typeof entry.kind === "string") return null;
-      const td = entry.textDocument as Record<string, unknown> | undefined;
-      const editsRaw = entry.edits as unknown[] | undefined;
-      if (!td || typeof td.uri !== "string" || !Array.isArray(editsRaw) || editsRaw.length === 0) return null;
-      const fp = toPath(td.uri as string);
-      if (!fp) return null;
-      const normEdits: Array<{ range: LSPRange; newText: string }> = [];
-      for (const er of editsRaw) {
-        const parsed = parseLspEditEntry(er);
-        if (!parsed) return null;
-        normEdits.push(parsed);
-      }
-      if (normEdits.length === 0) return null;
-      fileEdits.push({ filePath: fp, edits: normEdits });
-    }
+    const parsed = parseDocumentChanges(obj.documentChanges);
+    if (!parsed) return null;
+    fileEdits.push(...parsed);
   }
   if (obj.changes && typeof obj.changes === "object") {
-    for (const [uriKey, editsRaw] of Object.entries(obj.changes as Record<string, unknown>)) {
-      const fp = toPath(uriKey);
-      if (!fp) return null;
-      if (!Array.isArray(editsRaw) || (editsRaw as unknown[]).length === 0) return null;
-      const normEdits: Array<{ range: LSPRange; newText: string }> = [];
-      for (const er of editsRaw as unknown[]) {
-        const parsed = parseLspEditEntry(er);
-        if (!parsed) return null;
-        normEdits.push(parsed);
-      }
-      if (normEdits.length === 0) return null;
-      fileEdits.push({ filePath: fp, edits: normEdits });
-    }
+    const parsed = parseChangesMap(obj.changes);
+    if (!parsed) return null;
+    fileEdits.push(...parsed);
   }
   if (fileEdits.length === 0) return null;
-  return { fileEdits: fileEdits.map((fe) => ({ filePath: fe.filePath, edits: fe.edits.map((ed) => ({ filePath: fe.filePath, range: ed.range, newText: ed.newText })) })) } as unknown as LspWorkspaceEdit;
+  return withDuplicatedFilePath(fileEdits);
+}
+
+/** Fail-closed formatting edits: null unless every entry parses. */
+function parseFormattingEdits(editsRaw: unknown): Array<{ range: LSPRange; newText: string }> | null {
+  if (!Array.isArray(editsRaw) || editsRaw.length === 0) return null;
+  const edits: Array<{ range: LSPRange; newText: string }> = [];
+  for (const e of editsRaw as unknown[]) {
+    const parsed = parseLspEditEntry(e);
+    if (!parsed) return null;
+    edits.push(parsed);
+  }
+  if (edits.length === 0) return null;
+  return edits;
+}
+
+/**
+ * PrepareRename variant 1: server returned a bare Range.
+ * NOTE: deliberately looser than validateLspRange (numeric fields only, no
+ * ordering/non-negativity checks) — do not tighten without approval.
+ */
+function asDirectPrepareRenameRange(r: Record<string, unknown>): LSPRange | null {
+  if (!r.start || !r.end) return null;
+  const start = r.start as Record<string, unknown>;
+  const end = r.end as Record<string, unknown>;
+  if (typeof start.line === "number" && typeof start.character === "number" && typeof end.line === "number" && typeof end.character === "number") {
+    return r as unknown as LSPRange;
+  }
+  return null;
+}
+
+/**
+ * PrepareRename variant 2: server returned { range, placeholder? }.
+ * NOTE: deliberately looser than validateLspRange — do not tighten without approval.
+ */
+function asWrappedPrepareRenameRange(r: Record<string, unknown>): { range: LSPRange; placeholder?: string } | null {
+  if (!r.range || typeof r.range !== "object") return null;
+  const range = r.range as LSPRange;
+  const placeholder = typeof r.placeholder === "string" ? (r.placeholder as string) : undefined;
+  if (range.start && range.end) return { range, placeholder };
+  return null;
 }
 
 /**
@@ -331,20 +408,11 @@ export class LSPConnection {
     if (!result || typeof result !== "object") return null;
     // Server may return Range directly or { range, placeholder, defaultBehavior } etc
     const r = result as Record<string, unknown>;
-    if (r.start && r.end) {
-      // Is a Range itself
-      const start = r.start as Record<string, unknown>;
-      const end = r.end as Record<string, unknown>;
-      if (typeof start.line === "number" && typeof start.character === "number" && typeof end.line === "number" && typeof end.character === "number") {
-        return { range: r as unknown as LSPRange };
-      }
-    }
-    if (r.range && typeof r.range === "object") {
-      const range = r.range as LSPRange;
-      const placeholder = typeof r.placeholder === "string" ? (r.placeholder as string) : undefined;
-      if (range.start && range.end) return { range, placeholder };
-    }
-    return null;
+    // Some servers return a Range directly
+    const direct = asDirectPrepareRenameRange(r);
+    if (direct) return { range: direct };
+    // Others return { range, placeholder? }
+    return asWrappedPrepareRenameRange(r);
   }
 
   async organizeImports(filePath: string): Promise<LspWorkspaceEdit | null> {
@@ -387,22 +455,9 @@ export class LSPConnection {
     } catch {
       return null;
     }
-    if (!Array.isArray(result) || (result as unknown[]).length === 0) return null;
-    const editsRaw = result as Array<Record<string, unknown>>;
-    const fp = resolve(filePath);
-    const edits: Array<{ range: LSPRange; newText: string }> = [];
-    for (const e of editsRaw) {
-      if (!e || typeof e !== "object") return null;
-      const range = (e as Record<string, unknown>).range as Record<string, unknown> | undefined;
-      const newText = (e as Record<string, unknown>).newText as string | undefined;
-      if (!range || typeof newText !== "string") return null;
-      const s = (range as Record<string, unknown>).start as Record<string, unknown> | undefined;
-      const en = (range as Record<string, unknown>).end as Record<string, unknown> | undefined;
-      if (!s || !en || !Number.isInteger(s.line as unknown as number) || (s.line as unknown as number) < 0 || !Number.isInteger(s.character as unknown as number) || (s.character as unknown as number) < 0 || !Number.isInteger(en.line as unknown as number) || (en.line as unknown as number) < 0 || !Number.isInteger(en.character as unknown as number) || (en.character as unknown as number) < 0 || (en.line as unknown as number) < (s.line as unknown as number) || ((en.line as unknown as number) === (s.line as unknown as number) && (en.character as unknown as number) < (s.character as unknown as number))) return null;
-      edits.push({ range: range as unknown as LSPRange, newText });
-    }
-    if (edits.length === 0) return null;
-    return { fileEdits: [{ filePath: fp, edits: edits.map((ed) => ({ filePath: fp, range: ed.range, newText: ed.newText })) }] } as unknown as LspWorkspaceEdit;
+    const edits = parseFormattingEdits(result);
+    if (!edits) return null;
+    return withDuplicatedFilePath([{ filePath: resolve(filePath), edits }]);
   }
 
   async codeActions(
@@ -475,60 +530,88 @@ export class LSPConnection {
 
   private _onData(chunk: Buffer): void {
     this.buffer = Buffer.concat([this.buffer, chunk]);
+    if (this.checkFrameBufferOverflow()) return;
+    this.drainLspFrames();
+  }
 
-    if (this.buffer.length > LSPConnection.BUFFER_LIMIT_BYTES) {
-      console.error(
-        `[lsp-bridge] LSP connection stdout buffer exceeded ${LSPConnection.BUFFER_LIMIT_BYTES} bytes ` +
-        `without a complete message; forcibly closing the connection to prevent unbounded memory growth.`,
-      );
-      this.buffer = Buffer.alloc(0);
-      this.closed = true;
-      this._rejectAll(new Error("LSP connection buffer overflow"));
-      try { this.proc?.kill(); } catch { /* best effort */ }
-      return;
-    }
+  /** True when the frame buffer exceeded the cap; closes the connection and rejects all pending. */
+  private checkFrameBufferOverflow(): boolean {
+    if (this.buffer.length <= LSPConnection.BUFFER_LIMIT_BYTES) return false;
+    console.error(
+      `[lsp-bridge] LSP connection stdout buffer exceeded ${LSPConnection.BUFFER_LIMIT_BYTES} bytes ` +
+      `without a complete message; forcibly closing the connection to prevent unbounded memory growth.`,
+    );
+    this.buffer = Buffer.alloc(0);
+    this.closed = true;
+    this._rejectAll(new Error("LSP connection buffer overflow"));
+    try { this.proc?.kill(); } catch { /* best effort */ }
+    return true;
+  }
 
+  /** Extract the next complete frame body, or null when headers are incomplete/invalid or the body is partial. */
+  private extractNextFrameBody(): Buffer | null {
+    const headerEnd = this.buffer.indexOf("\r\n\r\n");
+    if (headerEnd === -1) return null;
+    const headerText = this.buffer.subarray(0, headerEnd).toString("utf-8");
+    const match = /^Content-Length: (\d+)/.exec(headerText);
+    if (!match) return null;
+    const contentLength = parseInt(match[1]!, 10);
+    const bodyStart = headerEnd + 4;
+    if (this.buffer.length < bodyStart + contentLength) return null;
+    const body = this.buffer.subarray(bodyStart, bodyStart + contentLength);
+    this.buffer = this.buffer.subarray(bodyStart + contentLength);
+    return body;
+  }
+
+  /** Drain all complete frames currently buffered; malformed JSON frames are skipped. */
+  private drainLspFrames(): void {
     while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) break;
-      const headerText = this.buffer.subarray(0, headerEnd).toString("utf-8");
-      const match = /^Content-Length: (\d+)/.exec(headerText);
-      if (!match) break;
-      const contentLength = parseInt(match[1]!, 10);
-      const bodyStart = headerEnd + 4;
-      if (this.buffer.length < bodyStart + contentLength) break;
-      const body = this.buffer.subarray(bodyStart, bodyStart + contentLength);
-      this.buffer = this.buffer.subarray(bodyStart + contentLength);
+      const body = this.extractNextFrameBody();
+      if (!body) break;
       try {
-        const msg = JSON.parse(body.toString("utf-8"));
-        if (msg.method === "textDocument/publishDiagnostics") {
-          const uri = msg.params?.uri as string | undefined;
-          if (typeof uri === "string" && uri.startsWith("file:")) {
-            try {
-              this.diagnostics.set(resolve(fileURLToPath(uri)), (msg.params?.diagnostics ?? []) as LSPDiagnostic[]);
-            } catch {
-              // Ignore malformed file URIs without updating the map.
-            }
-          }
-        }
-        if (msg.id !== undefined && msg.id !== null) {
-          const pending = this.pending.get(msg.id);
-          if (pending) {
-            clearTimeout(pending.timer);
-            this.pending.delete(msg.id);
-            if (msg.error) pending.reject(new Error(msg.error.message));
-            else pending.resolve(msg.result);
-          }
-        } else if (typeof msg.method === "string") {
-          // Server-initiated notification (no id) — dispatch to registered handlers.
-          const handlers = this.notificationHandlers.get(msg.method);
-          if (handlers && handlers.length > 0) {
-            for (const handler of [...handlers]) {
-              try { handler(msg.params); } catch { /* isolate handler errors from the read loop */ }
-            }
-          }
-        }
+        this.handleLspMessage(JSON.parse(body.toString("utf-8")) as LspIncomingMessage);
       } catch { /* ignore malformed messages */ }
+    }
+  }
+
+  private handleLspMessage(msg: LspIncomingMessage): void {
+    this.handleDiagnosticsNotification(msg);
+    if (msg.id !== undefined && msg.id !== null) {
+      this.settlePendingRequest(msg);
+    } else if (typeof msg.method === "string") {
+      this.dispatchNotification(msg);
+    }
+  }
+
+  private handleDiagnosticsNotification(msg: LspIncomingMessage): void {
+    if (msg.method !== "textDocument/publishDiagnostics") return;
+    const params = msg.params as { uri?: unknown; diagnostics?: unknown } | undefined;
+    const uri = params?.uri;
+    if (typeof uri === "string" && uri.startsWith("file:")) {
+      try {
+        this.diagnostics.set(resolve(fileURLToPath(uri)), (params?.diagnostics ?? []) as LSPDiagnostic[]);
+      } catch {
+        // Ignore malformed file URIs without updating the map.
+      }
+    }
+  }
+
+  private settlePendingRequest(msg: LspIncomingMessage): void {
+    const pending = this.pending.get(msg.id as number);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pending.delete(msg.id as number);
+    if (msg.error) pending.reject(new Error(msg.error.message));
+    else pending.resolve(msg.result);
+  }
+
+  private dispatchNotification(msg: LspIncomingMessage): void {
+    // Server-initiated notification (no id) — dispatch to registered handlers.
+    const handlers = this.notificationHandlers.get(msg.method as string);
+    if (handlers && handlers.length > 0) {
+      for (const handler of [...handlers]) {
+        try { handler(msg.params); } catch { /* isolate handler errors from the read loop */ }
+      }
     }
   }
 

@@ -409,6 +409,102 @@ function mergeAdjacentSmall(segments: CASTSegment[], text: string, maxNws: numbe
  *      recursively split oversized children.
  *   3. After initial pass, merge adjacent small siblings to avoid over-fragmentation.
  */
+interface CASTSplitHint {
+  startByte: number;
+  endByte: number;
+  children?: CASTNode[];
+}
+
+/**
+ * First pass of cAST split: cut parent range at child boundaries.
+ * Gaps between children become atomic segments; each child keeps its
+ * subtree as a split hint. Output covers parent range contiguously.
+ */
+function buildCastSplitHints(
+  parentStart: number,
+  parentEnd: number,
+  children: CASTNode[],
+): CASTSplitHint[] {
+  const segments: CASTSplitHint[] = [];
+  const sorted = [...children].sort((a, b) => a.startByte - b.startByte);
+  let cursor = parentStart;
+
+  for (const child of sorted) {
+    if (child.startByte > cursor) {
+      segments.push({ startByte: cursor, endByte: child.startByte });
+    }
+    segments.push({
+      startByte: child.startByte,
+      endByte: child.endByte,
+      children: child.children.length > 0 ? child.children : undefined,
+    });
+    cursor = child.endByte;
+  }
+
+  if (cursor < parentEnd) {
+    segments.push({ startByte: cursor, endByte: parentEnd });
+  }
+
+  return segments;
+}
+
+/**
+ * Resolve one split hint to concrete segments: recurse when the hint has
+ * internal structure and exceeds the limit, hard-split over-large atomic
+ * hints, otherwise keep as-is.
+ */
+function splitCastHint(seg: CASTSplitHint, text: string, maxNws: number): CASTSegment[] {
+  if (seg.children && seg.children.length > 0 && nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
+    return cASTSplitSegments(seg.startByte, seg.endByte, text, seg.children, maxNws);
+  }
+  if (nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
+    return cASTHardSplit(text, seg.startByte, seg.endByte, maxNws);
+  }
+  return [{ startByte: seg.startByte, endByte: seg.endByte }];
+}
+
+/**
+ * Second pass of cAST split: greedily pack hint segments into batches of
+ * at most maxNws. Adjacent subs in the same batch merge into one segment
+ * by extending the batch end (hints are contiguous, so no gaps result).
+ */
+function packCastSegments(hints: CASTSplitHint[], text: string, maxNws: number): CASTSegment[] {
+  const packed: CASTSegment[] = [];
+  let currentBatch: { startByte: number; endByte: number }[] = [];
+  let currentNws = 0;
+
+  const flushBatch = (): void => {
+    if (currentBatch.length > 0) {
+      packed.push({
+        startByte: currentBatch[0]!.startByte,
+        endByte: currentBatch[currentBatch.length - 1]!.endByte,
+      });
+    }
+  };
+
+  for (const hint of hints) {
+    const segSegments = splitCastHint(hint, text, maxNws);
+    for (const sub of segSegments) {
+      const subNws = nwsChars(text.slice(sub.startByte, sub.endByte));
+      if (currentNws + subNws <= maxNws) {
+        if (currentBatch.length === 0) {
+          currentBatch.push(sub);
+        } else {
+          currentBatch[currentBatch.length - 1]!.endByte = sub.endByte;
+        }
+        currentNws += subNws;
+      } else {
+        flushBatch();
+        currentBatch = [{ startByte: sub.startByte, endByte: sub.endByte }];
+        currentNws = subNws;
+      }
+    }
+  }
+
+  flushBatch();
+  return packed;
+}
+
 function cASTSplitSegments(
   parentStart: number,
   parentEnd: number,
@@ -425,86 +521,8 @@ function cASTSplitSegments(
     return cASTHardSplit(text, parentStart, parentEnd, maxNws);
   }
 
-  // ── First pass: split at child boundaries into contiguous segments ──
-  const segments: { startByte: number; endByte: number; children?: CASTNode[] }[] = [];
-
-  // Ensure children are sorted
-  const sorted = [...children].sort((a, b) => a.startByte - b.startByte);
-  let cursor = parentStart;
-
-  for (const child of sorted) {
-    // Gap before this child
-    if (child.startByte > cursor) {
-      segments.push({ startByte: cursor, endByte: child.startByte });
-    }
-    // The child itself
-    segments.push({
-      startByte: child.startByte,
-      endByte: child.endByte,
-      children: child.children.length > 0 ? child.children : undefined,
-    });
-    cursor = child.endByte;
-  }
-
-  // Trailing gap
-  if (cursor < parentEnd) {
-    segments.push({ startByte: cursor, endByte: parentEnd });
-  }
-
-  // ── Second pass: apply split-then-merge with greedy packing ──
-  const packed: CASTSegment[] = [];
-  let currentBatch: { startByte: number; endByte: number }[] = [];
-  let currentNws = 0;
-
-  for (const seg of segments) {
-    let segSegments: CASTSegment[];
-
-    if (seg.children && seg.children.length > 0 && nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
-      // Child has internal structure and exceeds limit — recursively split
-      segSegments = cASTSplitSegments(seg.startByte, seg.endByte, text, seg.children, maxNws);
-    } else if (nwsChars(text.slice(seg.startByte, seg.endByte)) > maxNws) {
-      // Over-large atomic segment with no internal structure — hard split
-      segSegments = cASTHardSplit(text, seg.startByte, seg.endByte, maxNws);
-    } else {
-      segSegments = [{ startByte: seg.startByte, endByte: seg.endByte }];
-    }
-
-    // Try to pack sub-segments into current batch
-    for (const sub of segSegments) {
-      const subNws = nwsChars(text.slice(sub.startByte, sub.endByte));
-
-      if (currentNws + subNws <= maxNws) {
-        // Add to current batch
-        if (currentBatch.length === 0) {
-          currentBatch.push(sub);
-        } else {
-          // Extend the end of the batch to include this sub
-          currentBatch[currentBatch.length - 1]!.endByte = sub.endByte;
-        }
-        currentNws += subNws;
-      } else {
-        // Flush current batch
-        if (currentBatch.length > 0) {
-          packed.push({
-            startByte: currentBatch[0]!.startByte,
-            endByte: currentBatch[currentBatch.length - 1]!.endByte,
-          });
-        }
-        currentBatch = [{ startByte: sub.startByte, endByte: sub.endByte }];
-        currentNws = subNws;
-      }
-    }
-  }
-
-  // Flush remaining batch
-  if (currentBatch.length > 0) {
-    packed.push({
-      startByte: currentBatch[0]!.startByte,
-      endByte: currentBatch[currentBatch.length - 1]!.endByte,
-    });
-  }
-
-  // ── Third pass: merge adjacent small segments ──
+  const hints = buildCastSplitHints(parentStart, parentEnd, children);
+  const packed = packCastSegments(hints, text, maxNws);
   return mergeAdjacentSmall(packed, text, maxNws);
 }
 
@@ -631,25 +649,27 @@ export function chunkText(
  *   3. Merge small adjacent chunks when possible
  *   4. Hard-split only for very large symbols
  */
-function chunkBySymbolBoundaries(
+interface SymbolDraftChunk {
+  text: string;
+  startChar: number;
+  endChar: number;
+  span?: SymbolSpan;
+}
+
+/**
+ * First pass of symbol chunking: preamble (trimmed, kept only when
+ * significant) plus one draft per symbol span. Very large symbols
+ * (>2x chunkSizeChars) sub-split via character chunking.
+ */
+function buildInitialSymbolChunks(
   text: string,
+  spans: SymbolSpan[],
+  minChunkChars: number,
+  chunkSizeChars: number,
   options?: ChunkOptions,
-): ChunkResult[] {
-  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
-  const minChunkChars = options?.minChunkChars ?? DEFAULT_MIN_CHUNK_CHARS;
-  const chunkSizeChars = options?.chunkSizeChars ?? DEFAULT_CHUNK_SIZE_CHARS;
+): SymbolDraftChunk[] {
+  const chunks: SymbolDraftChunk[] = [];
 
-  const spans = extractSymbolBoundaries(text);
-
-  if (spans.length === 0) {
-    // No symbols found — fall back to character-based
-    return chunkByCharacterSize(text, options);
-  }
-
-  // First pass: create initial chunks at symbol boundaries
-  const chunks: { text: string; startChar: number; endChar: number; span?: SymbolSpan }[] = [];
-
-  // Add text before first symbol if significant
   if (spans[0]!.startByte > 0) {
     const preamble = text.slice(0, spans[0]!.startByte).trim();
     if (preamble.length >= minChunkChars) {
@@ -663,7 +683,6 @@ function chunkBySymbolBoundaries(
 
     if (chunkText2.length === 0) continue;
 
-    // For very large symbols, sub-split at logical boundaries within the symbol
     if (chunkText2.length > chunkSizeChars * 2) {
       const subChunks = chunkByCharacterSize(chunkText2, {
         ...options,
@@ -688,12 +707,19 @@ function chunkBySymbolBoundaries(
     }
   }
 
-  // Merge small adjacent chunks
-  const merged: typeof chunks = [];
+  return chunks;
+}
+
+/**
+ * Merge adjacent drafts while the combined text stays under chunkSizeChars.
+ * Merged text joins with "\n"; endChar follows the absorbed chunk and the
+ * first defined span wins.
+ */
+function mergeSmallSymbolChunks(chunks: SymbolDraftChunk[], chunkSizeChars: number): SymbolDraftChunk[] {
+  const merged: SymbolDraftChunk[] = [];
   for (const chunk of chunks) {
     const prev = merged[merged.length - 1];
     if (prev && prev.text.length + chunk.text.length < chunkSizeChars) {
-      // Merge with previous
       prev.text += "\n" + chunk.text;
       prev.endChar = chunk.endChar;
       prev.span = prev.span ?? chunk.span;
@@ -701,8 +727,19 @@ function chunkBySymbolBoundaries(
       merged.push({ ...chunk });
     }
   }
+  return merged;
+}
 
-  // Build final ChunkResult array with line-aware metadata
+/**
+ * Attach line-range symbol metadata, cap at maxChunksPerFile, then reindex
+ * chunkIndex and enrich each chunk.
+ */
+function toSymbolChunkResults(
+  text: string,
+  merged: SymbolDraftChunk[],
+  maxChunksPerFile: number,
+  options?: ChunkOptions,
+): ChunkResult[] {
   const results: ChunkResult[] = [];
   for (let i = 0; i < Math.min(merged.length, maxChunksPerFile); i++) {
     const chunk = merged[i]!;
@@ -725,13 +762,31 @@ function chunkBySymbolBoundaries(
     });
   }
 
-  // Recompute indices and enrich
   for (let i = 0; i < results.length; i++) {
     results[i]!.chunkIndex = i;
     enrichChunk(results[i]!, options ?? {});
   }
 
   return results;
+}
+
+function chunkBySymbolBoundaries(
+  text: string,
+  options?: ChunkOptions,
+): ChunkResult[] {
+  const maxChunksPerFile = options?.maxChunksPerFile ?? DEFAULT_MAX_CHUNKS_PER_FILE;
+  const minChunkChars = options?.minChunkChars ?? DEFAULT_MIN_CHUNK_CHARS;
+  const chunkSizeChars = options?.chunkSizeChars ?? DEFAULT_CHUNK_SIZE_CHARS;
+
+  const spans = extractSymbolBoundaries(text);
+
+  if (spans.length === 0) {
+    return chunkByCharacterSize(text, options);
+  }
+
+  const chunks = buildInitialSymbolChunks(text, spans, minChunkChars, chunkSizeChars, options);
+  const merged = mergeSmallSymbolChunks(chunks, chunkSizeChars);
+  return toSymbolChunkResults(text, merged, maxChunksPerFile, options);
 }
 
 // ── AST-aware chunking (async, uses web-tree-sitter) ────────────
@@ -842,6 +897,53 @@ export async function chunkTextAst(
 }
 
 /**
+ * Pick a character split at or before targetEnd with fixed precedence:
+ * (1) double newline, (2) single newline, (3) whitespace, (4) hard split.
+ * Each stage scans backward from targetEnd-1 to offset+1 and takes the
+ * first (nearest-to-target) match, returning the position just after it.
+ */
+function findPreferredCharacterSplit(
+  text: string,
+  offset: number,
+  targetEnd: number,
+): { splitPos: number; wasHardSplit: boolean } {
+  let bestPos = -1;
+  for (let i = targetEnd - 1; i >= offset + 1; i--) {
+    if (text[i] === '\n' && text[i - 1] === '\n') {
+      bestPos = i + 1;
+      break;
+    }
+  }
+  if (bestPos >= 0) {
+    return { splitPos: bestPos, wasHardSplit: false };
+  }
+
+  bestPos = -1;
+  for (let i = targetEnd - 1; i >= offset + 1; i--) {
+    if (text[i] === '\n') {
+      bestPos = i + 1;
+      break;
+    }
+  }
+  if (bestPos >= 0) {
+    return { splitPos: bestPos, wasHardSplit: false };
+  }
+
+  bestPos = -1;
+  for (let i = targetEnd - 1; i >= offset + 1; i--) {
+    if (/\s/.test(text[i]!)) {
+      bestPos = i + 1;
+      break;
+    }
+  }
+  if (bestPos >= 0) {
+    return { splitPos: bestPos, wasHardSplit: false };
+  }
+
+  return { splitPos: targetEnd, wasHardSplit: true };
+}
+
+/**
  * Character-size-based chunking (existing behavior).
  */
 function chunkByCharacterSize(
@@ -875,44 +977,7 @@ function chunkByCharacterSize(
       break;
     }
 
-    let splitPos: number | undefined = targetEnd;
-    let wasHardSplit = true;
-
-    let bestPos = -1;
-    for (let i = targetEnd - 1; i >= offset + 1; i--) {
-      if (text[i] === '\n' && text[i - 1] === '\n') {
-        bestPos = i + 1;
-        break;
-      }
-    }
-    if (bestPos >= 0) {
-      splitPos = bestPos;
-      wasHardSplit = false;
-    } else {
-      bestPos = -1;
-      for (let i = targetEnd - 1; i >= offset + 1; i--) {
-        if (text[i] === '\n') {
-          bestPos = i + 1;
-          break;
-        }
-      }
-      if (bestPos >= 0) {
-        splitPos = bestPos;
-        wasHardSplit = false;
-      } else {
-        bestPos = -1;
-        for (let i = targetEnd - 1; i >= offset + 1; i--) {
-          if (/\s/.test(text[i]!)) {
-            bestPos = i + 1;
-            break;
-          }
-        }
-        if (bestPos >= 0) {
-          splitPos = bestPos;
-          wasHardSplit = false;
-        }
-      }
-    }
+    const { splitPos, wasHardSplit } = findPreferredCharacterSplit(text, offset, targetEnd);
 
     const chunk = text.slice(offset, splitPos!);
     const endChar = splitPos;
