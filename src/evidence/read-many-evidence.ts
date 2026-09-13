@@ -4,6 +4,7 @@ import {
 	inspectionIdFor,
 	PROTOCOL_SCHEMA_VERSION,
 	type InspectedResource,
+	type InspectMode,
 	type WorkspaceEvidenceEnvelope,
 } from "@rhinos0608/pi-workspace-protocol";
 
@@ -20,17 +21,38 @@ export function buildBatchWorkspaceEvidence(args: {
 	readonly cwd: string;
 	readonly sessionFilePath: string;
 	readonly perFile: ReadonlyMap<number, WorkspaceEvidenceEnvelope>;
+	/**
+	 * Envelope mode. Defaults to `"path"` — existing `read`-paths call
+	 * sites omit this and keep byte-identical behavior. Script mode passes
+	 * `"query"` (contract.ts's already-permitted may-have-zero-resources bucket).
+	 */
+	readonly mode?: InspectMode;
+	/**
+	 * Dedupe policy for entries sharing a `resourceId`. Default
+	 * `"first-wins"` (existing, tested `read` behavior). Script mode
+	 * passes `"last-wins"`: the chronologically later envelope in
+	 * iteration order overwrites the earlier one, so the merged envelope
+	 * reflects the most recent observation of each resource (§6).
+	 * Callers must insert envelopes in call-log completion order for
+	 * `"last-wins"` to mean last-completed-wins.
+	 */
+	readonly dedupe?: "first-wins" | "last-wins";
 }): WorkspaceEvidenceEnvelope | null {
 	if (args.perFile.size === 0) return null;
 	const sessionId = hashSessionFilePath(args.sessionFilePath);
 	const canonicalWorkspaceRoot = canonicalizeWorkspaceRoot(args.cwd);
-	const seenResourceIds = new Set<string>();
+	const lastWins = args.dedupe === "last-wins";
+	const indexByResourceId = new Map<string, number>();
 	const mergedResources: InspectedResource[] = [];
 	for (const env of args.perFile.values()) {
 		for (const r of env.resources) {
-			if (seenResourceIds.has(r.resourceId)) continue;
-			seenResourceIds.add(r.resourceId);
-			mergedResources.push(r);
+			const existing = indexByResourceId.get(r.resourceId);
+			if (existing === undefined) {
+				indexByResourceId.set(r.resourceId, mergedResources.length);
+				mergedResources.push(r);
+			} else if (lastWins) {
+				mergedResources[existing] = r;
+			}
 		}
 	}
 	if (mergedResources.length === 0) return null;
@@ -55,7 +77,7 @@ export function buildBatchWorkspaceEvidence(args: {
 		canonicalWorkspaceRoot,
 		createdAt: new Date().toISOString(),
 		resources: mergedResources,
-		mode: "path",
+		mode: args.mode ?? "path",
 	};
 }
 

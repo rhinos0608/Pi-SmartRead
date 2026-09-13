@@ -84,9 +84,9 @@ const GrepSchema = Type.Object({
 });
 
 type GrepInput = Static<typeof GrepSchema>;
-type GrepQueryInput = Static<typeof GrepQuerySchema>;
+export type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available.`;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available. Chasing a multi-hop investigation (see \`inspect\`) across dependent calls (grep, then read, then grep again following the lead)? Compose the chase in one call with \`inspect({ script })\``;
 
 // ── Factory ─────────────────────────────────────────────────────────
 
@@ -138,6 +138,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             }
 
             const cwd = ctx.cwd;
+            const sessionFilePath = opts.getSessionFilePath?.() ?? sessionFileFromContext(ctx);
             // Only spread keys explicitly set at top level — per-query schema defaults must not be overridden.
             const shared: Record<string, unknown> = {};
             if (params.path !== undefined) shared.path = params.path;
@@ -170,14 +171,19 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             const queries: GrepQueryInput[] = hasQueries
                 ? params.queries!.map((query) => mergeQueryWithShared(shared, query as unknown as Record<string, unknown>))
                 : [{ ...shared, pattern: params.pattern! }] as unknown as GrepQueryInput[];
-            const queryResults: GrepExecutionResult[] = [];
+            const queryPairs: Array<{ result: GrepExecutionResult; evidence: WorkspaceEvidenceEnvelope }> = [];
             for (const query of queries) {
-                queryResults.push(await executeGrepQuery(query, cwd, opts, signal));
+                queryPairs.push(await runGrepQueryWithEvidence(query, cwd, opts, signal, sessionFilePath));
             }
-
+            const queryResults: GrepExecutionResult[] = queryPairs.map((pair) => pair.result);
+            // Single-query evidence comes straight from the per-call helper (identical
+            // to building from the combined hits when there is one query). Batch
+            // evidence is rebuilt from the combined hits so multi-query range merging
+            // and inspectionId stay exactly as before.
             const shownHits = queryResults.flatMap((result) => result.shown);
-            const sessionFilePath = opts.getSessionFilePath?.() ?? sessionFileFromContext(ctx);
-            const evidence = buildEvidence(shownHits, cwd, sessionFilePath);
+            const evidence = !hasQueries
+                ? queryPairs[0]!.evidence
+                : buildEvidence(shownHits, cwd, sessionFilePath);
             publishEvidence(evidence, opts, sessionFilePath);
 
             if (!hasQueries) {
@@ -222,6 +228,25 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             };
         },
     };
+}
+
+/**
+ * Run one grep query and build its per-call evidence envelope.
+ *
+ * Pure compute layer: no resolver publish, no tool-protocol formatting.
+ * Publish stays owned by the registered `grep` tool's `execute()` wrapper,
+ * which must publish once per real tool_result event.
+ */
+export async function runGrepQueryWithEvidence(
+    params: GrepQueryInput,
+    cwd: string,
+    opts: GrepToolOptions,
+    signal: AbortSignal | undefined,
+    sessionFilePath: string | null | undefined,
+): Promise<{ result: GrepExecutionResult; evidence: WorkspaceEvidenceEnvelope }> {
+    const result = await executeGrepQuery(params, cwd, opts, signal);
+    const evidence = buildEvidence(result.shown, cwd, sessionFilePath);
+    return { result, evidence };
 }
 
 async function executeGrepQuery(

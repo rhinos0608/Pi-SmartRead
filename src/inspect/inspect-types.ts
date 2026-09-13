@@ -44,6 +44,12 @@ export interface InspectV4Input {
   navigation?: NavigationParams;
   diagnostics?: DiagnosticsParams;
 
+  // ── Script mode (inspect { script }) ──────────────────────────────
+  // Own dispatch branch, NOT a third InspectV4Mode value (the union stays
+  // "directory" | "file" by contract). The tool layer defaults an omitted
+  // path to "." before populating `path`, so `path` stays required here.
+  script?: string;
+
   // ── ContextGraph injection (WP-4 owns the type; WP-5 populates at runtime) ──
   contextGraph?: ContextGraph;
   // ── WP-SR5: shared LSP inspection provider (lazy; only used when navigation/diagnostics requested) ──

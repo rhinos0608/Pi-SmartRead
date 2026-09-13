@@ -11,7 +11,20 @@ import type { InspectV4Input } from "./inspect-types.js";
 import type { ContextGraph } from "../context-graph.js";
 
 const InspectV4Schema = Type.Object({
-    path: Type.String({ description: "File or directory path. Directory → repo map. File → structural facts + signals." }),
+    path: Type.Optional(Type.String({ description: "File or directory path. Directory → repo map. File → structural facts + signals. Optional with script (omitted anchors at cwd)." })),
+    script: Type.Optional(Type.String({
+        minLength: 1,
+        description: `WHEN:
+- running a multi-hop investigation where each call's arguments depend on the previous call's result (grep a symbol, then LSP references on the hit, then graph impact on those files) that would otherwise cost 3+ sequential round trips
+
+WHEN NOT:
+- answering a single lookup that one grep, read, or inspect call already covers
+- reading full file prose directly (use plain read; script mode returns a synthesized JSON result, not raw file text)
+
+RETURNS: the script's JSON return value plus a bounded per-call audit log naming each op, its args, the path or resource touched, and its status.
+
+EXAMPLE: { script: "const g = await grep(\\"handleAuth\\", { literal: true }); const r = await read(\\"src/auth.ts\\"); return { hits: g.totalHits, lines: r.totalLines };" }`,
+    }) ) ,
     signals: Type.Optional(Type.Array(
         Type.Union([Type.Literal("complexity"), Type.Literal("public-api"), Type.Literal("reuse"), Type.Literal("recency"), Type.Literal("tests"), Type.Literal("deprecation")]),
         { description: "Signals to compute (default: all)." },
@@ -100,7 +113,7 @@ export interface InspectToolOptions {
     readonly lspInspectionProvider?: import("../lsp/lsp-inspection.js").LspInspectionProvider;
 }
 
-const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality. Pass a directory for a ranked repository map with key symbols and architecture; pass a file for structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) and quality signals. Analysis modes are set via schema params.`;
+const INSPECT_V4_DESCRIPTION = `Inspect a file or directory to understand code structure and quality. Pass a directory for a ranked repository map with key symbols and architecture; pass a file for structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) and quality signals. Analysis modes are set via schema params. For a multi-hop investigation where each call's arguments depend on the previous result, use the script param to compose the chain in one call.`;
 
 function legacyParamError(params: Record<string, unknown>): string | undefined {
     if (params.query !== undefined) return "inspect no longer supports query mode. Use grep('pattern').";
@@ -144,6 +157,40 @@ function validateDirOnlyParams(
 function validateCrossParams(params: InspectV4ToolInput): string | undefined {
     if (params.callDirection !== undefined && params.callDepth === undefined) {
         return "Error: inspect callDirection requires callDepth to be set";
+    }
+    return undefined;
+}
+
+/**
+ * Script mode composes its own host calls inside the script, so every
+ * mode-specific param is rejected when `script` is present — same
+ * "Error: inspect param X ..." style as the dir-only validators.
+ */
+const SCRIPT_FORBIDDEN_PARAMS = [
+    "signals",
+    "mapTokens",
+    "focus",
+    "compact",
+    "callDepth",
+    "callDirection",
+    "deadCode",
+    "impact",
+    "diff",
+    "clusters",
+    "graphSchema",
+    "hotspots",
+    "boundaries",
+    "routes",
+    "layers",
+    "navigation",
+    "diagnostics",
+] as const;
+
+function validateScriptParams(params: InspectV4ToolInput): string | undefined {
+    for (const p of SCRIPT_FORBIDDEN_PARAMS) {
+        if ((params as Record<string, unknown>)[p] !== undefined) {
+            return `Error: inspect param "${p}" cannot be combined with script (compose that call inside the script instead)`;
+        }
     }
     return undefined;
 }
@@ -235,6 +282,88 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                 throw new Error("inspect: no real session file (in-memory/ephemeral identity rejected)");
             }
 
+            // Single best-effort publish path shared by all branches: the
+            // merged envelope is published EXACTLY once per outer tool call.
+            // The engine itself never publishes (publish stays exclusively
+            // in this wrapper per repo convention).
+            const publish = (details: { workspaceEvidence: { canonicalWorkspaceRoot: string } }): void => {
+                if (opts.resolver) {
+                    try {
+                        opts.resolver.publishInspection(
+                            details.workspaceEvidence as unknown,
+                            sessionFilePath,
+                            details.workspaceEvidence.canonicalWorkspaceRoot,
+                        );
+                    } catch {
+                        // best-effort; swallow
+                    }
+                }
+            };
+
+            // Script mode: own branch checked BEFORE mode resolution — it
+            // never touches the file/dir machinery.
+            if (params.script !== undefined) {
+                if (typeof params.script !== "string" || params.script.length === 0) {
+                    throw new Error('Error: inspect param "script" must be a non-empty string');
+                }
+                const scriptErr = validateScriptParams(params);
+                if (scriptErr) throw new Error(scriptErr);
+                // `path` is optional in script mode: omitted anchors at cwd.
+                // It acts only as the cwd/default-path anchor for host calls
+                // (reserved slot for a future engine default-dir channel).
+                // Per-call relative paths resolve against cwd exactly as
+                // direct calls do (host bindings use ctx.cwd), so the anchor
+                // is recorded on upstreamDetails.script.anchorPath and never
+                // stat()'d: a script anchored at a nonexistent path still runs.
+                const anchorPath = params.path ?? ".";
+                const scriptInput: InspectV4Input = {
+                    path: anchorPath,
+                    cwd: ctx.cwd,
+                    sessionFilePath,
+                    signal,
+                    script: params.script,
+                };
+                // Script mode may call any binding (grep/read/inspect/lsp.*/
+                // graph.*), so its needs are unknowable upfront: resolve the
+                // shared graph getter and LSP provider whenever present in
+                // opts (same await-getter mechanism as the lazy path below).
+                // Nothing is built when opts carry no graph/provider.
+                if (typeof opts.contextGraph === "function") {
+                    scriptInput.contextGraph = await opts.contextGraph(ctx.cwd);
+                } else if (opts.contextGraph !== undefined) {
+                    scriptInput.contextGraph = opts.contextGraph;
+                }
+                if (opts.lspInspectionProvider) {
+                    scriptInput.lspInspectionProvider = opts.lspInspectionProvider;
+                }
+                const scriptDetails = await executeInspectV4(scriptInput);
+                publish(scriptDetails);
+                // The engine's contentText already renders the return value
+                // plus a compact call-log summary; the bounded call log rides
+                // along under upstreamDetails.script so one script call never
+                // hides what it inspected.
+                const scriptUpstream = ((scriptDetails.upstreamDetails ?? {}) as Record<string, unknown>).script ?? {};
+                return {
+                    content: [{ type: "text" as const, text: scriptDetails.contentText }],
+                    details: {
+                        workspaceEvidence: scriptDetails.workspaceEvidence,
+                        mode: "query",
+                        lineCount: scriptDetails.lineCount,
+                        byteLength: scriptDetails.byteLength,
+                        truncated: scriptDetails.truncated,
+                        toolCallId,
+                        upstreamDetails: { script: scriptUpstream },
+                    },
+                };
+            }
+
+            // Path is required without script (schema keeps it optional only
+            // so script mode may omit it).
+            const targetPath = params.path;
+            if (typeof targetPath !== "string" || targetPath.length === 0) {
+                throw new Error('Error: inspect param "path" is required without script');
+            }
+
             // Cross-param validation (spec §4)
             const crossErr = validateCrossParams(params);
             if (crossErr) throw new Error(crossErr);
@@ -242,7 +371,7 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             // Build input WITHOUT resolving the async contextGraph getter yet —
             // only graph-dependent params pay for the shared graph build.
             const inspectInput: InspectV4Input = {
-                path: params.path,
+                path: targetPath,
                 signals: params.signals,
                 mapTokens: params.mapTokens,
                 focus: params.focus,
@@ -272,7 +401,7 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             // return their existing error without invoking the graph getter.
             const { resolveInspectV4Mode } = await import("./inspect.js");
             const resolvedMode = resolveInspectV4Mode(inspectInput);
-            const modeErr = validateDirOnlyParams(params, resolvedMode, params.path);
+            const modeErr = validateDirOnlyParams(params, resolvedMode, targetPath);
             if (modeErr) throw new Error(modeErr);
             const navErr = validateNavigation(params as Record<string, unknown>, resolvedMode);
             if (navErr) throw new Error(navErr);
@@ -303,17 +432,7 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             // the model from seeing the inspect content (the durable evidence
             // is the returned `details.workspaceEvidence`, not the resolver
             // cache — patch's auto-inspect fallback works even if this fails).
-            if (opts.resolver) {
-                try {
-                    opts.resolver.publishInspection(
-                        details.workspaceEvidence,
-                        sessionFilePath,
-                        details.workspaceEvidence.canonicalWorkspaceRoot,
-                    );
-                } catch {
-                    // best-effort; swallow
-                }
-            }
+            publish(details);
 
             // expose WP-SR3 structured details additively (do not close off future status values)
             const navDetails = (details as any).navigation;

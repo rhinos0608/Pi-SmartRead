@@ -87,24 +87,26 @@ describe("MCP stateless protocol (single batched process)", () => {
       expect(result.content[0].text).toContain("Unknown tool");
     }
 
-    // invalid arguments: missing required 'path' (id 7)
+    // invalid arguments: missing 'path' without script (id 7). Script mode
+    // made path schema-optional, so this is a runtime rejection with the
+    // same isError posture — never silently accepted.
     {
       const response = byId.get(7)!;
       expect(response.jsonrpc).toBe("2.0");
       expect(response.id).toBe(7);
       const result = response.result as any;
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Invalid params");
+      expect(result.content[0].text).toContain('inspect param "path" is required without script');
     }
 
-    // omitted arguments key (id 9) — normalized to {} and rejected (missing path)
+    // omitted arguments key (id 9) — normalized to {} and rejected the same way
     {
       const response = byId.get(9)!;
       expect(response.jsonrpc).toBe("2.0");
       expect(response.id).toBe(9);
       const result = response.result as any;
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Invalid params");
+      expect(result.content[0].text).toContain('inspect param "path" is required without script');
     }
 
     // null arguments (id 10) — MCP SDK rejects at protocol boundary,
