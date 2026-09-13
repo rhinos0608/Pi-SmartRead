@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, unlinkSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, unlinkSync } from "node:fs";
+import { canonicalPathOrFallback } from "./canonical-path.js";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -70,11 +71,7 @@ export function isLanguageDisabled(languageId: string, home = homedir()): boolea
 // ── Trust store ────────────────────────────────────────────────────
 
 function tryCanonical(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    return p;
-  }
+  return canonicalPathOrFallback(p);
 }
 
 let trustCache: string[] | null = null;

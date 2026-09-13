@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { canonicalPathOrNull } from "./canonical-path.js";
 import { isAbsolute } from "node:path";
 
 export interface ValidatedWorkspaceEdit {
@@ -22,11 +22,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 function tryCanonical(p: string): string | null {
-    try {
-        return realpathSync(p);
-    } catch {
-        return null;
-    }
+    return canonicalPathOrNull(p);
 }
 
 function isNonNegInt(n: unknown): boolean {

@@ -3,7 +3,8 @@
  * WP-SR2: engine only, no grep-tool wiring.
  */
 
-import { realpathSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
+import { canonicalPathOrFallback } from "./canonical-path.js";
 import { resolve, relative, join } from "node:path";
 import { readFile } from "node:fs/promises";
 
@@ -177,11 +178,7 @@ export function getUnavailableReason(): string | null {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function tryCanonical(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    return p;
-  }
+  return canonicalPathOrFallback(p);
 }
 
 export function resolveStructuralLang(languageId: string): string | null {

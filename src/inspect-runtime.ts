@@ -6,8 +6,8 @@
  * import-edge / cluster-label / section-name utilities shared by
  * file + directory inspect pipelines. No envelopes, no dispatch.
  */
-import { realpathSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
+import { canonicalPathOrFallback, canonicalPathOrNull } from "./canonical-path.js";
 import { resourceIdFor, type InspectedResource } from "@rhinos0608/pi-workspace-protocol";
 import { uriToFsPath } from "./inspect-sections.js";
 import type { InspectV4Input } from "./inspect-types.js";
@@ -22,7 +22,7 @@ export function joinSectionLines(lines: string[]): string {
 }
 
 export function tryCanonical(filePath: string): string {
-    try { return realpathSync(filePath); } catch { return filePath; }
+    return canonicalPathOrFallback(filePath);
 }
 
 export function estimateTokens(text: string): number {
@@ -176,7 +176,8 @@ export async function ensureCallGraph(
 ): Promise<CallGraphResult | null> {
     if (existing) return existing;
     try {
-        const cwd = realpathSync(input.cwd);
+        const cwd = canonicalPathOrNull(input.cwd);
+        if (!cwd) return null;
         const files = await findSrcFiles(cwd);
         return await buildCallGraph(files);
     } catch {
