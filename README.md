@@ -329,7 +329,7 @@ Path: semantic-index-available         → BM25 + AST → RRF → (embedding fal
 | `ignoreCase` | boolean | Case-insensitive search (default: false) |
 | `literal` | boolean | Exact substring match — skip BM25/semantic (default: false) |
 | `limit` | number | Max results (1-100, default: 20) |
-| `contextLines` | number | Lines of context per match (0-10, default: 2) |
+| `contextLines` | number | Lines of context per match (0-20, default: 2) |
 | `graphFilter` | string | Graph edge filter, e.g. `"CALLS->auth.login"` or `"IMPORTED_BY->src/core"`. Filters results to files/symbols reachable via the specified relationship. Requires context graph to be built. |
 
 ### Evidence semantics

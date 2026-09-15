@@ -108,6 +108,22 @@ export default async function (pi: ExtensionAPI) {
   // 3.5 Read: override the builtin read with the enriched wrapper.
   registerReadTool(pi, state);
 
+  // 3.6 Grep and inspect cover workspace discovery; shell remains available for exceptional cases.
+  // Deferred to session_start: the host loader invokes the extension factory
+  // before getActiveTools/setActiveTools bind, so factory-time filtering
+  // crashes startup. Compatibility: hosts before active-tool controls lack
+  // these methods — no-op. Throwing pre-bind stubs must also no-op without
+  // failing session-start.
+  pi.on("session_start", () => {
+    try {
+      if (typeof pi.getActiveTools === "function" && typeof pi.setActiveTools === "function") {
+        pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "find" && name !== "ls"));
+      }
+    } catch {
+      // Host APIs unavailable or throwing pre-bind — leave tools unchanged.
+    }
+  });
+
   // 3.8 RepositoryIntelligenceService singleton (best-effort).
   registerRepositoryIntelligenceBestEffort();
 

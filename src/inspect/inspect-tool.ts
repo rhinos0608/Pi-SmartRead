@@ -58,7 +58,7 @@ const FileAnalysisSchema = Type.Object(
     { additionalProperties: false },
 );
 
-const DirectoryArchitectureSchema = Type.Object(
+const DirectoryAnalysisSchema = Type.Object(
     {
         mapTokens: Type.Optional(
             Type.Number({ description: "Token budget for directory mode (256-32768, default 4096)." }),
@@ -127,7 +127,7 @@ const DirectoryBranch = Type.Object(
     {
         mode: Type.Literal("directory"),
         path: Type.String({ description: "Directory path to map." }),
-        architecture: Type.Optional(DirectoryArchitectureSchema),
+        analysis: Type.Optional(DirectoryAnalysisSchema),
     },
     { additionalProperties: false },
 );
@@ -183,7 +183,7 @@ export interface InspectToolOptions {
     readonly lspInspectionProvider?: import("../lsp/lsp-inspection.js").LspInspectionProvider;
 }
 
-const INSPECT_V4_DESCRIPTION = `Inspect code via explicit modes. { mode: "file", path, analysis? }: structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) + quality signals. { mode: "directory", path, architecture? }: ranked repository map + architecture. { mode: "navigate", path, navigation?, diagnostics? }: LSP symbol navigation + diagnostics. { mode: "script", script, path? }: compose a multi-hop investigation where each call's arguments depend on the previous result in one bounded read-only call.`;
+const INSPECT_V4_DESCRIPTION = `Inspect code via explicit modes. { mode: "file", path, analysis? }: structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) + quality signals. { mode: "directory", path, analysis? }: ranked repository map + architecture. { mode: "navigate", path, navigation?, diagnostics? }: LSP symbol navigation + diagnostics. { mode: "script", script, path? }: compose a multi-hop investigation where each call's arguments depend on the previous result in one bounded read-only call.`;
 
 function legacyParamError(params: Record<string, unknown>): string | undefined {
     if (params.query !== undefined) return "inspect no longer supports query mode. Use grep('pattern').";
@@ -223,7 +223,7 @@ function rejectUnknownOptions(
 }
 
 const FILE_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "analysis"]);
-const DIRECTORY_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "architecture"]);
+const DIRECTORY_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "analysis"]);
 const NAVIGATE_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "navigation", "diagnostics"]);
 const SCRIPT_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "script"]);
 
@@ -240,7 +240,7 @@ const FILE_ANALYSIS_KEYS: ReadonlySet<string> = new Set([
     "routes",
 ]);
 
-const DIRECTORY_ARCHITECTURE_KEYS: ReadonlySet<string> = new Set([
+const DIRECTORY_ANALYSIS_KEYS: ReadonlySet<string> = new Set([
     "mapTokens",
     "focus",
     "compact",
@@ -464,6 +464,11 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                 case "file":
                 case "directory": {
                     const kind = raw.mode as "file" | "directory";
+                    if (kind === "directory" && raw.architecture !== undefined) {
+                        throw new Error(
+                            'Error: inspect directory option "architecture" removed. Use "analysis" instead: { mode: "directory", path, analysis: { ... } }',
+                        );
+                    }
                     const foreignErr = rejectForeignKeys(
                         raw,
                         kind,
@@ -473,7 +478,7 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                     if (typeof raw.path !== "string" || raw.path.length === 0) {
                         throw new Error(`Error: inspect mode "${kind}" requires "path"`);
                     }
-                    const bagKey = kind === "file" ? "analysis" : "architecture";
+                    const bagKey = "analysis";
                     const bagRaw = raw[bagKey] ?? {};
                     const bag = asObject(bagRaw);
                     if (!bag) {
@@ -481,7 +486,7 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                     }
                     const unknownErr = rejectUnknownOptions(
                         bag,
-                        kind === "file" ? FILE_ANALYSIS_KEYS : DIRECTORY_ARCHITECTURE_KEYS,
+                        kind === "file" ? FILE_ANALYSIS_KEYS : DIRECTORY_ANALYSIS_KEYS,
                         `mode "${kind}" ${bagKey}`,
                     );
                     if (unknownErr) throw new Error(unknownErr);

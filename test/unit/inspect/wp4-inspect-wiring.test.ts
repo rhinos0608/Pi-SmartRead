@@ -127,10 +127,10 @@ describe("inspect tool schema has new params", () => {
     const dirBranch = branchByMode(schema, "directory");
     for (const param of ["deadCode", "impact", "diff", "graphSchema", "hotspots", "routes"]) {
       expect(fileBranch.properties.analysis.properties[param]).toBeDefined();
-      expect(dirBranch.properties.architecture.properties[param]).toBeDefined();
+      expect(dirBranch.properties.analysis.properties[param]).toBeDefined();
     }
     for (const param of ["clusters", "boundaries", "routes", "layers"]) {
-      expect(dirBranch.properties.architecture.properties[param]).toBeDefined();
+      expect(dirBranch.properties.analysis.properties[param]).toBeDefined();
     }
   });
 });
@@ -161,7 +161,7 @@ describe("dir-only param validation", () => {
 
   it("clusters on directory → ok", async () => {
     const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/test.jsonl" });
-    const result = await tool.execute("t4", { mode: "directory", path: "src", architecture: { clusters: true } } as any, undefined, undefined, makeCtx());
+    const result = await tool.execute("t4", { mode: "directory", path: "src", analysis: { clusters: true } } as any, undefined, undefined, makeCtx());
     expect((result as any).details.mode).toBe("directory");
   });
 });
@@ -183,14 +183,14 @@ describe("callDepth requires file target", () => {
   it("callDepth on directory → error", async () => {
     const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/test.jsonl" });
     await expect(
-      tool.execute("t6", { mode: "directory", path: "src", architecture: { callDepth: 3 } } as any, undefined, undefined, makeCtx()),
+      tool.execute("t6", { mode: "directory", path: "src", analysis: { callDepth: 3 } } as any, undefined, undefined, makeCtx()),
     ).rejects.toThrow(/has no option "callDepth"/);
   });
 
   it("callDirection on directory → error (not a directory option)", async () => {
     const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/test.jsonl" });
     await expect(
-      tool.execute("t7", { mode: "directory", path: "src", architecture: { callDirection: "callees" } } as any, undefined, undefined, makeCtx()),
+      tool.execute("t7", { mode: "directory", path: "src", analysis: { callDirection: "callees" } } as any, undefined, undefined, makeCtx()),
     ).rejects.toThrow(/has no option "callDirection"/);
   });
 });

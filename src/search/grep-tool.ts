@@ -55,7 +55,7 @@ const GrepOptionProperties = {
     ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)." })),
     literal: Type.Optional(Type.Boolean({ description: "Force exact substring. Disables regex auto-detect, BM25, and semantic (default: false)." })),
     limit: Type.Optional(Type.Number({ description: "Max results (default: 20, max: 100).", default: 20, minimum: 1, maximum: 100 })),
-    contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 10).", default: 2, minimum: 0, maximum: 10 })),
+    contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 20).", default: 2, minimum: 0, maximum: 20 })),
     graphFilter: Type.Optional(Type.String({ description: 'Filter results by graph relationship. Format: "EDGE_TYPE->target" e.g. "CALLS->auth.login" or "IMPORTED_BY->src/core".' })),
     structural: Type.Optional(StructuralSchema),
 };
@@ -266,7 +266,7 @@ async function executeGrepQuery(
     }
     const { searchDir, scopedFile } = resolveSearchScope(cwd, params.path);
     const topK = clamp(params.limit ?? 20, 1, 100);
-    const contextLines = clamp(params.contextLines ?? 2, 0, 10);
+    const contextLines = clamp(params.contextLines ?? 2, 0, 20);
     const caseSensitive = !(params.ignoreCase ?? false);
     const startTime = Date.now();
 

@@ -328,6 +328,42 @@ describe("grep tool — contextLines", () => {
         );
         expect((content[0] as { text: string }).text).toContain("connectDatabase");
     });
+
+    it("exposes contextLines maximum 20 in schema", async () => {
+        const schema = createGrepTool(makeOpts()).parameters as any;
+        expect(schema.properties.contextLines.maximum).toBe(20);
+        expect(schema.properties.queries.items.properties.contextLines.maximum).toBe(20);
+    });
+
+    it("contextLines 20 yields wider snippets than 10", async () => {
+        const lines = Array.from({ length: 50 }, (_, i) => `filler line ${String(i + 1).padStart(2, "0")} abcdef`);
+        lines[24] = "const zephyrcodeword = 1;";
+        writeFileSync(join(workdir, "src", "big-context.ts"), lines.join("\n"), "utf8");
+        const tool = createGrepTool(makeOpts());
+        const pattern = "zephyrcodeword quasar nonexistent tokens xyz";
+        const r10 = await tool.execute("t-ctx10", { pattern, path: "src/big-context.ts", contextLines: 10 }, undefined, undefined, makeCtx(workdir));
+        const r20 = await tool.execute("t-ctx20", { pattern, path: "src/big-context.ts", contextLines: 20 }, undefined, undefined, makeCtx(workdir));
+        const t10 = (r10.content[0] as { text: string }).text;
+        const t20 = (r20.content[0] as { text: string }).text;
+        expect(t20).toContain("filler line 05");
+        expect(t10).not.toContain("filler line 05");
+    });
+
+    it("clamps contextLines above 20 down to 20", async () => {
+        const lines = Array.from({ length: 50 }, (_, i) => `filler line ${String(i + 1).padStart(2, "0")} abcdef`);
+        lines[24] = "const zephyrcodeword = 1;";
+        writeFileSync(join(workdir, "src", "big-context.ts"), lines.join("\n"), "utf8");
+        const tool = createGrepTool(makeOpts());
+        const pattern = "zephyrcodeword quasar nonexistent tokens xyz";
+        const r20 = await tool.execute("t-ctx20c", { pattern, path: "src/big-context.ts", contextLines: 20 }, undefined, undefined, makeCtx(workdir));
+        const rBig = await tool.execute("t-ctx999", { pattern, path: "src/big-context.ts", contextLines: 999 }, undefined, undefined, makeCtx(workdir));
+        const t20 = (r20.content[0] as { text: string }).text;
+        const tBig = (rBig.content[0] as { text: string }).text;
+        const stripHeader = (t: string) => t.split("\n").slice(1).join("\n");
+        expect(stripHeader(tBig)).toBe(stripHeader(t20));
+        expect(tBig).toContain("filler line 05");
+        expect(tBig).not.toContain("filler line 01");
+    });
 });
 // ── Evidence envelope (zero hits) ───────────────────────────────────
 

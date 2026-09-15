@@ -428,6 +428,33 @@ describe("createInspectV4Tool (schema and execute)", () => {
         expect(details.workspaceEvidence.mode).toBe("symbol");
     });
 
+    it("directory mode accepts analysis bag (schema + execute)", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => null });
+        const schema = tool.parameters as Record<string, any>;
+        const branches = schema.anyOf ?? schema.oneOf;
+        const dirBranch = (branches as any[]).find((b: any) => b?.properties?.mode?.const === "directory");
+        expect(dirBranch.properties.analysis).toBeDefined();
+        expect(dirBranch.properties.architecture).toBeUndefined();
+        const tool2 = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        const result = await tool2.execute(
+            "c-dir-analysis",
+            { mode: "directory", path: "mysrc", analysis: { focus: ["a.ts"] } },
+            undefined,
+            undefined,
+            makeCtx(),
+        );
+        const details = (result as any).details;
+        expect(details.mode).toBe("directory");
+        expect(details.workspaceEvidence.mode).toBe("map");
+    });
+
+    it("directory mode rejects removed architecture param with migration error", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(
+            tool.execute("c-dir-arch", { mode: "directory", path: "mysrc", architecture: {} } as any, undefined, undefined, makeCtx()),
+        ).rejects.toThrow(/removed.*Use "analysis"/);
+    });
+
     it("rejects legacy query param with migration error", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
         await expect(
@@ -551,7 +578,7 @@ describe("inspect lazy ContextGraph getter", () => {
         await run(tool, { mode: "file", path: "hello.ts", analysis: { hotspots: true } });
         await run(tool, { mode: "file", path: "hello.ts", analysis: { diff: "HEAD" } });
         await run(tool, { mode: "file", path: "hello.ts", analysis: { routes: true } });
-        await run(tool, { mode: "directory", path: "mysrc", architecture: { boundaries: true } });
+        await run(tool, { mode: "directory", path: "mysrc", analysis: { boundaries: true } });
         expect(getter).not.toHaveBeenCalled();
     });
 
@@ -573,20 +600,20 @@ describe("inspect lazy ContextGraph getter", () => {
 
     it("directory clusters invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { mode: "directory", path: "mysrc", architecture: { clusters: true } });
+        await run(tool, { mode: "directory", path: "mysrc", analysis: { clusters: true } });
         expect(getter).toHaveBeenCalledTimes(1);
         expect(getter).toHaveBeenCalledWith(workdir);
     });
 
     it("directory layers invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { mode: "directory", path: "mysrc", architecture: { layers: true } });
+        await run(tool, { mode: "directory", path: "mysrc", analysis: { layers: true } });
         expect(getter).toHaveBeenCalledTimes(1);
     });
 
     it("directory graphSchema invokes getter once", async () => {
         const { tool, getter } = makeTool();
-        await run(tool, { mode: "directory", path: "mysrc", architecture: { graphSchema: true } });
+        await run(tool, { mode: "directory", path: "mysrc", analysis: { graphSchema: true } });
         expect(getter).toHaveBeenCalledTimes(1);
     });
 

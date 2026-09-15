@@ -109,8 +109,8 @@ export interface FileAnalysisOptions {
   hotspots?: boolean;
   routes?: boolean;
 }
-/** Directory/project inspection: repo map + architecture. */
-export interface DirectoryArchitectureOptions {
+/** Directory/project inspection: repo map + analysis. */
+export interface DirectoryAnalysisOptions {
   mapTokens?: number;
   focus?: string[];
   compact?: boolean;
@@ -128,7 +128,7 @@ export interface DirectoryArchitectureOptions {
 /** Tool-layer params: four operations sharing one entry point. */
 export type InspectParams =
   | { mode: "file"; path: string; analysis?: FileAnalysisOptions }
-  | { mode: "directory"; path: string; architecture?: DirectoryArchitectureOptions }
+  | { mode: "directory"; path: string; analysis?: DirectoryAnalysisOptions }
   | { mode: "navigate"; path: string; navigation?: NavigationParams; diagnostics?: DiagnosticsParams }
   | { mode: "script"; path?: string; script: string };
 

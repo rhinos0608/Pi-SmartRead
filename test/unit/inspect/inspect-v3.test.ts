@@ -130,7 +130,7 @@ describe("createInspectV4Tool (schema)", () => {
         expect(byMode.file.properties.path).toBeDefined();
         expect(byMode.directory.properties.path).toBeDefined();
         expect(byMode.file.properties.analysis).toBeDefined();
-        expect(byMode.directory.properties.architecture).toBeDefined();
+        expect(byMode.directory.properties.analysis).toBeDefined();
         for (const b of branches) {
             for (const k of ["query", "symbol", "action"]) {
                 expect(b.properties?.[k]).toBeUndefined();

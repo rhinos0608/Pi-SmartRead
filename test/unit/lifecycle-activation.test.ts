@@ -84,12 +84,17 @@ afterEach(() => {
 function makeApi(overrides?: Partial<ExtensionAPI>): { api: ExtensionAPI; registered: Array<{ name: string; execute: any }>; handlers: Record<string, any> } {
   const registered: Array<{ name: string; execute: any }> = [];
   const handlers: Record<string, any> = {};
+  let activeTools = ["bash", "read", "edit", "write", "grep", "find", "ls", "custom"];
   const api = {
     registerTool: (def: { name: string; execute: unknown }) => {
       registered.push(def as any);
     },
     on: (event: string, handler: any) => {
       handlers[event] = handler;
+    },
+    getActiveTools: () => activeTools,
+    setActiveTools: (toolNames: string[]) => {
+      activeTools = toolNames;
     },
     ...overrides,
   } as unknown as ExtensionAPI;
@@ -110,6 +115,58 @@ describe("lifecycle activation (confirmed defects)", () => {
     const inspectDef = registered.find((t) => t.name === "inspect")!;
     expect(grepDef.execute).toBeTypeOf("function");
     expect(inspectDef.execute).toBeTypeOf("function");
+  });
+
+  it("removes redundant ls and find tools on session_start, not at factory time", async () => {
+    const { api, handlers } = makeApi();
+    await registerExtension(api);
+
+    // Factory-time filtering crashes startup: the host loader invokes the
+    // factory before getActiveTools/setActiveTools bind, so the tool list
+    // must be untouched until session_start fires.
+    expect(api.getActiveTools()).toContain("ls");
+    expect(api.getActiveTools()).toContain("find");
+
+    await handlers.session_start!({}, { cwd: workdir } as any);
+
+    expect(api.getActiveTools()).not.toContain("ls");
+    expect(api.getActiveTools()).not.toContain("find");
+    expect(api.getActiveTools()).toContain("custom");
+  });
+
+  it("tolerates throwing pre-bind host APIs: factory resolves, late-bound filter applies safely", async () => {
+    const { api, handlers } = makeApi({
+      getActiveTools: () => { throw new Error("active tools not bound yet"); },
+      setActiveTools: () => { throw new Error("active tools not bound yet"); },
+    } as unknown as Partial<ExtensionAPI>);
+
+    // Factory must resolve even though the host APIs throw pre-bind.
+    await expect(registerExtension(api)).resolves.toBeUndefined();
+
+    // Invoking the captured session_start handler while APIs still throw
+    // must no-op without failing session-start.
+    expect(() => handlers.session_start!({}, { cwd: workdir } as any)).not.toThrow();
+
+    // Host binds working APIs late; the same handler then filters safely.
+    let activeTools = ["bash", "read", "edit", "write", "grep", "find", "ls", "custom"];
+    (api as any).getActiveTools = () => activeTools;
+    (api as any).setActiveTools = (toolNames: string[]) => { activeTools = toolNames; };
+    await handlers.session_start!({}, { cwd: workdir } as any);
+
+    expect(activeTools).not.toContain("ls");
+    expect(activeTools).not.toContain("find");
+    expect(activeTools).toContain("custom");
+  });
+
+  it("keeps startup compatible with hosts without active-tool controls", async () => {
+    const { api, handlers } = makeApi({
+      getActiveTools: undefined,
+      setActiveTools: undefined,
+    } as unknown as Partial<ExtensionAPI>);
+
+    await expect(registerExtension(api)).resolves.toBeUndefined();
+    // Missing host APIs must no-op without failing session-start.
+    expect(() => handlers.session_start!({}, { cwd: workdir } as any)).not.toThrow();
   });
 
   it("fires the low-result hint for upstream grep once grepRegistered is true", async () => {

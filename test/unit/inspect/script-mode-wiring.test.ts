@@ -97,7 +97,7 @@ describe("script schema", () => {
         const ctx = makeCtx();
         const cases: Array<Record<string, unknown>> = [
             { mode: "file", path: "f.ts", architecture: {} },
-            { mode: "directory", path: ".", analysis: {} },
+            { mode: "directory", path: ".", navigation: {} },
             { mode: "navigate", path: "f.ts", analysis: {} },
             { mode: "script", script: "return 1;", navigation: {} },
         ];
