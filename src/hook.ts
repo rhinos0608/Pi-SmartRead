@@ -15,7 +15,7 @@
  */
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { createReadToolDefinition } from "@mariozechner/pi-coding-agent";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { RepoMap } from "./repomap.js";
@@ -546,9 +546,10 @@ async function interceptContextualRead(
 }
 
 // ── Extended Read Schema ────────────────────────────────────────────
-// Four-branch discriminated union: the required selector key (path | paths
-// | query | symbol) discriminates. additionalProperties:false makes the XOR
-// schema-level; the runtime rejectForeignKeys below mirrors it for good errors.
+// Four read modes share one flattened schema: the required selector key
+// (path | paths | query | symbol) discriminates. The mode XOR and
+// per-branch foreign-key rejection are enforced at runtime by the
+// selectedModes check and rejectForeignKeys below.
 
 const PathEntrySchema = Type.Object({
   path: Type.String({ description: "Path to the file (relative or absolute)" }),
@@ -556,34 +557,25 @@ const PathEntrySchema = Type.Object({
   limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
 }, { additionalProperties: false });
 
-const SingleFileBranch = Type.Object({
-  path: Type.String({ description: "Path to a single file (relative or absolute). Use with optional offset/limit." }),
-  offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line. Single file mode only." })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read. Single file mode only." })),
-}, { additionalProperties: false });
-
-const MultiFileBranch = Type.Object({
-  paths: Type.Array(PathEntrySchema, { minItems: 1, maxItems: 100, description: "Multiple files to read in the exact order listed (max 100)." }),
-  stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)." })),
-}, { additionalProperties: false });
-
-const QueryBranch = Type.Object({
-  query: Type.String({ description: "Natural-language intent. Ranks and reads most relevant files in cwd/directory. Falls back to grep+AST when semantic search unavailable." }),
+// Flattened schema — providers (e.g. Console Go upstream) require a root
+// JSON Schema of type "object" and reject anyOf unions at the top level.
+// The four-mode XOR is enforced at runtime in execute() + rejectForeignKeys.
+const ReadSchema = Type.Object({
+  path: Type.Optional(Type.String({ description: "Path to a single file (relative or absolute). Use with optional offset/limit." })),
+  paths: Type.Optional(Type.Array(PathEntrySchema, { minItems: 1, maxItems: 100, description: "Multiple files to read in the exact order listed (max 100)." })),
+  stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (paths mode; default false)." })),
+  query: Type.Optional(Type.String({ description: "Natural-language intent. Ranks and reads most relevant files in cwd/directory. Falls back to grep+AST when semantic search unavailable." })),
   directory: Type.Optional(Type.String({ description: "Directory to scan (only with query; default: cwd)." })),
   topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to return when query is set (default: 20)." })),
-}, { additionalProperties: false });
-
-const SymbolBranch = Type.Object({
-  symbol: Type.String({ description: "Resolve qualified name (e.g. 'AuthService.login') to file+line via LSP, then read surrounding code." }),
-  offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line. Overrides the symbol-line window." })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read." })),
-}, { additionalProperties: false });
-
-const ReadSchema = Type.Union([SingleFileBranch, MultiFileBranch, QueryBranch, SymbolBranch], {
+  symbol: Type.Optional(Type.String({ description: "Resolve qualified name (e.g. 'AuthService.login') to file+line via LSP, then read surrounding code." })),
+  offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line. Single-file and symbol modes only." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines. Single-file and symbol modes only." })),
+}, {
+  additionalProperties: false,
   description: "Read modes: { path, offset?, limit? } single file; { paths, stopOnError? } batch; { query, directory?, topK? } intent; { symbol, offset?, limit? } symbol. Exactly one selector per call.",
 });
 
-type ReadInput = Static<typeof ReadSchema>;
+type ReadInput = ReadParams;
 
 export interface SingleFileReadParams { path: string; offset?: number; limit?: number; }
 export interface MultiFileReadParams { paths: { path: string; offset?: number; limit?: number; }[]; stopOnError?: boolean; }

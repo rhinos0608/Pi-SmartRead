@@ -458,3 +458,28 @@ describe("shownMatchesAttested", () => {
     })).toBe(false);
   });
 });
+
+describe("read tool schema (Console Go / provider compatibility)", () => {
+  it("exposes a root type: 'object' schema without top-level anyOf/oneOf", () => {
+    const tool = createReadTool();
+    const schema = tool.parameters as Record<string, unknown>;
+
+    expect(schema).toBeDefined();
+    expect(schema.type).toBe("object");
+    expect(schema.anyOf).toBeUndefined();
+    expect(schema.oneOf).toBeUndefined();
+
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    expect(properties).toBeDefined();
+    expect(properties.path?.type).toBe("string");
+    expect(properties.paths?.type).toBe("array");
+    expect(properties.query?.type).toBe("string");
+    expect(properties.symbol?.type).toBe("string");
+    expect(properties.offset?.type).toBe("integer");
+    expect(properties.limit?.type).toBe("integer");
+    expect(properties.directory?.type).toBe("string");
+    expect(properties.topK?.type).toBe("integer");
+    expect(properties.stopOnError?.type).toBe("boolean");
+  });
+});
+
