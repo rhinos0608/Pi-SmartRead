@@ -65,7 +65,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@orama/orama": "^3.1.18",
-    "@rhinos0608/pi-workspace-protocol": "github:rhinos0608/Pi-Workspace-Protocol#v0.4.0",
+    "@rhinos0608/pi-workspace-protocol": "github:rhinos0608/Pi-Workspace-Protocol#v0.5.0",
     "@sinclair/typebox": "^0.34.13",
     "ignore": "^7.0.5",
     "quickjs-emscripten": "0.32.0",

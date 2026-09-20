@@ -9,7 +9,7 @@ import {
 } from "@rhinos0608/pi-workspace-protocol";
 
 /**
- * Merge per-file workspace evidence envelopes into a single schemaVersion-3
+ * Merge per-file workspace evidence envelopes into a single schemaVersion-PROTOCOL_SCHEMA_VERSION
  * batch envelope. The merged `inspectionId` is recomputed across the combined
  * resource set so downstream patch calls can address the batch with one
  * reference instead of N.
