@@ -10,6 +10,8 @@
  *   incremental → graph; failed results never mutate state
  * - all advisory fallbacks are best-effort and never block the result
  */
+import { resolve as pathResolve } from "node:path";
+import { canonicalPathOrFallback } from "./canonical-path.js";
 import { coerceText } from "./utils.js";
 import {
   buildContextHygieneMetadata,
@@ -33,7 +35,11 @@ import {
   suggestShellCommands,
 } from "./runtime/bash-context-guard.js";
 import { invalidateFsScanCache } from "./workspace/fs-scan-cache.js";
-import { canonicalizeWorkspaceRoot } from "@rhinos0608/pi-workspace-protocol";
+import {
+  canonicalizeWorkspaceRoot,
+  validateMutationDetails,
+  type MutationDetails,
+} from "@rhinos0608/pi-workspace-protocol";
 import { getLSPBridge } from "./lsp/lsp-bridge.js";
 import { invalidateSharedGraph } from "./mcp-registry.js";
 import { getSemanticIndex } from "./indexing/semantic-index-registry.js";
@@ -47,14 +53,20 @@ const SMARTREAD_GUARD_TOOLS = new Set(["inspect", "git_notes_read"]);
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+function canonicalResourcePath(rawPath: string, workspaceRoot = process.cwd()): string {
+  const root = canonicalizeWorkspaceRoot(workspaceRoot);
+  return canonicalPathOrFallback(pathResolve(root, rawPath));
+}
+
 export function resourcesForTool(
   _toolName: string,
   input: Record<string, unknown>,
+  workspaceRoot = process.cwd(),
 ): ContextHygieneResource[] {
   const path = typeof input.path === "string" ? input.path : undefined;
-  if (path) return [buildFileResource(path)];
-  if (typeof input.filePath === "string") return [buildFileResource(input.filePath)];
-  if (typeof input.relative_path === "string") return [buildFileResource(input.relative_path)];
+  if (path) return [buildFileResource(canonicalResourcePath(path, workspaceRoot))];
+  if (typeof input.filePath === "string") return [buildFileResource(canonicalResourcePath(input.filePath, workspaceRoot))];
+  if (typeof input.relative_path === "string") return [buildFileResource(canonicalResourcePath(input.relative_path, workspaceRoot))];
   return [];
 }
 
@@ -63,40 +75,60 @@ export function resourcesForTool(
  * `details.changedResources[*].canonicalPath`. Untrusted runtime data, so
  * shape and string-ness are validated; malformed entries are dropped.
  */
+function mutationDetailsFromDetails(details: unknown): MutationDetails | undefined {
+  if (!details || typeof details !== "object") return undefined;
+  const value = validateMutationDetails(details);
+  return value.ok ? value.value : undefined;
+}
+
+/** Extract paths only from protocol-valid, applied mutation details. */
 export function changedPathsFromDetails(details: unknown): string[] {
-  if (!details || typeof details !== "object") return [];
-  const changedResources = (details as Record<string, unknown>).changedResources;
-  if (!Array.isArray(changedResources)) return [];
-  const paths: string[] = [];
-  for (const res of changedResources) {
-    if (!res || typeof res !== "object") continue;
-    const cp = (res as Record<string, unknown>).canonicalPath;
-    if (typeof cp === "string" && cp.length > 0) paths.push(cp);
+  const mutation = mutationDetailsFromDetails(details);
+  if (mutation) {
+    return mutation.status.kind === "applied"
+      ? mutation.changedResources.map((resource) => resource.canonicalPath)
+      : [];
   }
-  return paths;
+  // Native write/edit results do not carry MutationDetails. Keep their
+  // existing changedResources contract; malformed lifecycle-shaped details
+  // fail closed above rather than being treated as an applied mutation.
+  if (details && typeof details === "object" && ("tool" in details || "status" in details)) return [];
+  const changedResources = (details as Record<string, unknown> | null)?.changedResources;
+  if (!Array.isArray(changedResources)) return [];
+  return changedResources.flatMap((resource) => {
+    if (!resource || typeof resource !== "object") return [];
+    const path = (resource as Record<string, unknown>).canonicalPath;
+    return typeof path === "string" && path.length > 0 ? [path] : [];
+  });
+}
+
+function mutationApplied(details: unknown): boolean | undefined {
+  const mutation = mutationDetailsFromDetails(details);
+  return mutation ? mutation.status.kind === "applied" : undefined;
 }
 
 export function mutationResourcesForTool(
   toolName: string,
   input: Record<string, unknown>,
   changedPaths: string[],
+  workspaceRoot = process.cwd(),
 ): ContextHygieneResource[] {
   if (toolName === "graph_mutate") {
     const resources: ContextHygieneResource[] = [];
-    if (typeof input.from === "string") resources.push(buildFileResource(input.from));
-    if (typeof input.to === "string") resources.push(buildFileResource(input.to));
+    if (typeof input.from === "string") resources.push(buildFileResource(canonicalResourcePath(input.from, workspaceRoot)));
+    if (typeof input.to === "string") resources.push(buildFileResource(canonicalResourcePath(input.to, workspaceRoot)));
     return resources;
   }
-  if (toolName === "write" || toolName === "edit") {
-    // changedResources.canonicalPath is authoritative for edit results when present.
-    if (changedPaths.length > 0) return changedPaths.map((p) => buildFileResource(p));
-    return resourcesForTool(toolName, input);
+  if (toolName === "write" || toolName === "edit" || toolName === "transfer") {
+    // changedResources.canonicalPath is authoritative for edit/transfer results when present.
+    if (changedPaths.length > 0) return changedPaths.map((p) => buildFileResource(canonicalResourcePath(p, workspaceRoot)));
+    return resourcesForTool(toolName, input, workspaceRoot);
   }
   return [];
 }
 
 export function classificationForTool(toolName: string): ContextHygieneMetadata["classification"] {
-  if (toolName === "graph_mutate" || toolName === "write" || toolName === "edit") return "mutation";
+  if (toolName === "graph_mutate" || toolName === "write" || toolName === "edit" || toolName === "transfer") return "mutation";
   if (toolName === "bash") return "command-output";
   return "read-context";
 }
@@ -117,11 +149,13 @@ interface PipelineState {
 
 function recordMutationOrRead(state: ActivationState, s: PipelineState): void {
   const event = s.outputEvent;
+  const lifecycleApplied = mutationApplied(s.details);
   const failedMutation =
-    event.isError && (s.toolName === "write" || s.toolName === "edit" || s.toolName === "graph_mutate");
+    (lifecycleApplied !== undefined ? !lifecycleApplied : event.isError) &&
+    (s.toolName === "write" || s.toolName === "edit" || s.toolName === "transfer" || s.toolName === "graph_mutate");
   const mutationResources = failedMutation
     ? []
-    : mutationResourcesForTool(s.toolName, s.input, s.changedPaths);
+    : mutationResourcesForTool(s.toolName, s.input, s.changedPaths, process.cwd());
   if (mutationResources.length > 0) {
     state.hygieneTracker.recordMutation(mutationResources, { resultId: s.toolCallId, tool: s.toolName });
     return;
@@ -129,7 +163,7 @@ function recordMutationOrRead(state: ActivationState, s: PipelineState): void {
   const metadata = buildContextHygieneMetadata({
     tool: s.toolName,
     classification: failedMutation ? "read-context" : classificationForTool(s.toolName),
-    resources: failedMutation ? [] : resourcesForTool(s.toolName, s.input),
+    resources: failedMutation ? [] : resourcesForTool(s.toolName, s.input, process.cwd()),
   });
   state.hygieneTracker.record(metadata, { resultId: s.toolCallId });
 }
@@ -212,6 +246,7 @@ function trackGraphMutateClose(lspInput: Record<string, unknown>): Promise<void>
 
 function trackMutationClose(s: PipelineState, lspInput: Record<string, unknown>): Promise<void> {
   if (s.outputEvent.isError) return Promise.resolve();
+  if (mutationApplied(s.details) === false) return Promise.resolve();
   const editPaths =
     s.changedPaths.length > 0 ? s.changedPaths : stringField(lspInput, "path") ? [lspInput.path as string] : [];
   return closeLspFiles(editPaths, process.cwd());
@@ -228,25 +263,25 @@ export async function trackLspDocuments(s: PipelineState): Promise<void> {
     await trackGraphMutateClose(lspInput);
     return;
   }
-  if (s.toolName === "write" || s.toolName === "edit") await trackMutationClose(s, lspInput);
+  if (s.toolName === "write" || s.toolName === "edit" || s.toolName === "transfer") await trackMutationClose(s, lspInput);
 }
 
 /**
  * Centralized successful mutation invalidation. Only successful
- * write/edit/graph_mutate results invalidate caches. Failed tool results
+ * write/edit/transfer/graph_mutate results invalidate caches. Failed tool results
  * must NOT mutate state. Order per target: fs-scan → semantic, then
  * incremental once, then graph. graph_mutate invalidates the graph only.
  */
 export function invalidateCachesOnMutation(s: PipelineState): void {
-  if (s.toolName !== "write" && s.toolName !== "edit" && s.toolName !== "graph_mutate") return;
-  if (s.outputEvent.isError) return;
+  if (s.toolName !== "write" && s.toolName !== "edit" && s.toolName !== "transfer" && s.toolName !== "graph_mutate") return;
+  if (mutationApplied(s.details) === false || (mutationApplied(s.details) === undefined && s.outputEvent.isError)) return;
   if (s.toolName === "graph_mutate") {
     // Graph mutation must cause a graph rebuild on next use.
     invalidateSharedGraph();
     return;
   }
   const targets =
-    s.toolName === "edit" && s.changedPaths.length > 0
+    (s.toolName === "edit" || s.toolName === "transfer") && s.changedPaths.length > 0
       ? s.changedPaths
       : [s.input.path, s.input.filePath, s.input.relative_path].filter(
           (p): p is string => typeof p === "string",
@@ -523,15 +558,16 @@ export function handleToolCall(state: ActivationState, event: any): undefined {
  * skipping later transforms — matching the original handler.
  */
 export async function handleToolResult(state: ActivationState, event: any): Promise<any> {
+  const workspaceRoot = canonicalizeWorkspaceRoot(process.cwd());
   const s: PipelineState = {
     toolName: event.toolName as string,
     toolCallId: event.toolCallId as string,
     input: (event.input ?? {}) as Record<string, unknown>,
     details: (event.details ?? {}) as Record<string, unknown>,
-    // changedResources.canonicalPath is authoritative for edit results when present.
+    // changedResources.canonicalPath is authoritative for edit/transfer results when present.
     changedPaths:
-      (event.toolName as string) === "edit" && !event.isError
-        ? changedPathsFromDetails(event.details ?? {})
+      ((event.toolName as string) === "edit" || (event.toolName as string) === "transfer") && !event.isError
+        ? changedPathsFromDetails(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot))
         : [],
     outputEvent: event,
     outputChanged: false,
