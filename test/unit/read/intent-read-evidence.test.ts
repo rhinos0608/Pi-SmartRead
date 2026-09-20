@@ -7,7 +7,7 @@ setupIntentReadEnv();
 
 function makeEnvelopeFor(path: string, resourceId: string) {
 	return {
-		schemaVersion: 3,
+		schemaVersion: 4,
 		inspectionId: "0".repeat(64),
 		sessionId: "deadbeef".repeat(8),
 		workspaceRoot: "/",
@@ -77,7 +77,7 @@ describe("intent_read: batch workspace evidence", () => {
 		expect(details.packing.fullIncludedCount).toBeGreaterThan(0);
 		const batch = details.workspaceEvidence;
 		expect(batch).toBeDefined();
-		expect(batch.schemaVersion).toBe(3);
+		expect(batch.schemaVersion).toBe(4);
 		const ids = batch.resources.map((r: any) => r.canonicalPath).sort();
 		expect(ids).toEqual(["/alpha", "/b"]);
 		expect(batch.inspectionId).toMatch(/^[0-9a-f]{64}$/);

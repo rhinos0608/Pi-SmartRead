@@ -131,7 +131,7 @@ describe("grep tool — non-literal cascade", () => {
         const env = (result.details as any).workspaceEvidence;
         expect(env).toBeDefined();
         expect(env.mode).toBe("query");
-        expect(env.schemaVersion).toBe(3);
+        expect(env.schemaVersion).toBe(4);
         const v = validateInspectionEnvelope(env);
         expect(v.ok).toBe(true);
     });

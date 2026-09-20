@@ -73,7 +73,7 @@ describe("executeInspectV4 (modes)", () => {
         });
         expect(details.mode).toBe("file");
         expect(details.workspaceEvidence.mode).toBe("symbol");
-        expect(details.workspaceEvidence.schemaVersion).toBe(3);
+        expect(details.workspaceEvidence.schemaVersion).toBe(4);
         expect(details.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
     });
 

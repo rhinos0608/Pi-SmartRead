@@ -409,7 +409,7 @@ describe("evidence envelope for new params", () => {
       impact: true,
     });
     expect(result.workspaceEvidence.mode).toBe("symbol");
-    expect(result.workspaceEvidence.schemaVersion).toBe(3);
+    expect(result.workspaceEvidence.schemaVersion).toBe(4);
   });
 
   it("file mode with deadCode + callDepth produces non-empty resources with search-match coverage", async () => {

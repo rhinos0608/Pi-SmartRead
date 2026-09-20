@@ -482,7 +482,7 @@ describe("read_files: execute behavior", () => {
 describe("read_files: batch workspace evidence", () => {
 	function makeEnvelopeFor(path: string, inspectionId: string, resourceId: string) {
 		return {
-			schemaVersion: 3,
+			schemaVersion: 4,
 			inspectionId,
 			sessionId: "deadbeef".repeat(8),
 			workspaceRoot: "/",
@@ -503,7 +503,7 @@ describe("read_files: batch workspace evidence", () => {
 		};
 	}
 
-	it("attaches a merged schema-3 envelope and publishes it when reads emit per-file evidence", async () => {
+	it("attaches a merged schema-4 envelope and publishes it when reads emit per-file evidence", async () => {
 		const publish = vi.fn((_envelope: unknown, _sessionFilePath: string, _workspaceRoot: string) => {});
 		const envA = makeEnvelopeFor("/alpha", "1".repeat(64), "a".repeat(64));
 		const envB = makeEnvelopeFor("/b", "2".repeat(64), "b".repeat(64));
@@ -544,7 +544,7 @@ describe("read_files: batch workspace evidence", () => {
 		);
 		const batch = (result.details as any).workspaceEvidence;
 		expect(batch).toBeDefined();
-		expect(batch.schemaVersion).toBe(3);
+		expect(batch.schemaVersion).toBe(4);
 		expect(batch.mode).toBe("path");
 		// Two per-file resources merged into one envelope.
 		expect(batch.resources).toHaveLength(2);
