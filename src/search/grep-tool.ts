@@ -17,8 +17,8 @@ import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-a
 import {
     PROTOCOL_SCHEMA_VERSION,
     hashSessionFilePath,
-    inspectionIdFor,
     resourceIdFor,
+    sha256OfString,
     canonicalizeWorkspaceRoot,
     type WorkspaceEvidenceEnvelope,
     type InspectedResource,
@@ -54,8 +54,9 @@ const GrepOptionProperties = {
     glob: Type.Optional(Type.String({ description: "File filter, e.g. '*.ts' or 'src/**/*.py'." })),
     ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)." })),
     literal: Type.Optional(Type.Boolean({ description: "Force exact substring. Disables regex auto-detect, BM25, and semantic (default: false)." })),
-    limit: Type.Optional(Type.Number({ description: "Max results (default: 20, max: 100).", default: 20, minimum: 1, maximum: 100 })),
-    contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 20).", default: 2, minimum: 0, maximum: 20 })),
+    limit: Type.Optional(Type.Number({ description: "Deprecated alias for per-query limit (default: 20, max: 100). Use perQueryLimit instead; perQueryLimit wins when both are given.", default: 20, minimum: 1, maximum: 100 })),
+    perQueryLimit: Type.Optional(Type.Number({ description: "Max results per query (default: 20, max: 50). Wins over deprecated limit when both are given.", minimum: 1, maximum: 50 })),
+    contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 20). Applies after the global output cap.", default: 2, minimum: 0, maximum: 20 })),
     graphFilter: Type.Optional(Type.String({ description: 'Filter results by graph relationship. Format: "EDGE_TYPE->target" e.g. "CALLS->auth.login" or "IMPORTED_BY->src/core".' })),
     structural: Type.Optional(StructuralSchema),
 };
@@ -79,6 +80,7 @@ const GrepSchema = Type.Object({
         minItems: 1,
         maxItems: 10,
     })),
+    maxResults: Type.Optional(Type.Number({ description: "Global max rendered hits across all queries after cross-query dedup (default: 100, max: 200).", minimum: 1, maximum: 200 })),
     ...GrepOptionProperties,
     ...TopLevelSkipProperty,
 });
@@ -86,7 +88,7 @@ const GrepSchema = Type.Object({
 type GrepInput = Static<typeof GrepSchema>;
 export type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ mode: 'file', path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available. Chasing a multi-hop investigation (see \`inspect\`) across dependent calls (grep, then read, then grep again following the lead)? Compose the chase in one call with \`inspect({ mode: 'script', script })\``;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Per-query hits are capped by perQueryLimit (default 20, max 50; deprecated limit still works as an alias); batch calls dedup overlapping hits across queries and cap the merged render at maxResults (default 100, max 200); maxResults also caps single-query renders Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ mode: 'file', path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available. Chasing a multi-hop investigation (see \`inspect\`) across dependent calls (grep, then read, then grep again following the lead)? Compose the chase in one call with \`inspect({ mode: 'script', script })\``;
 
 // ── Factory ─────────────────────────────────────────────────────────
 
@@ -146,6 +148,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             if (params.ignoreCase !== undefined) shared.ignoreCase = params.ignoreCase;
             if (params.literal !== undefined) shared.literal = params.literal;
             if (params.limit !== undefined) shared.limit = params.limit;
+            if (params.perQueryLimit !== undefined) shared.perQueryLimit = (params as any).perQueryLimit;
             if (params.contextLines !== undefined) shared.contextLines = params.contextLines;
             if (params.graphFilter !== undefined) shared.graphFilter = params.graphFilter;
             if ((params as any).structural !== undefined) (shared as any).structural = (params as any).structural;
@@ -178,15 +181,47 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             // and inspectionId stay exactly as before.
             const queryResults: GrepExecutionResult[] = [];
             let evidence: WorkspaceEvidenceEnvelope;
+            // maxResults is a global merged-render cap: it applies to the
+            // single-query path too (slice before evidence/render).
+            const globalCap = resolveMaxResults(params as { maxResults?: number });
             if (!hasQueries) {
                 const single = await runGrepQueryWithEvidence(queries[0]!, cwd, opts, signal, sessionFilePath);
-                queryResults.push(single.result);
+                let result = single.result;
                 evidence = single.evidence;
+                if (result.shown.length > globalCap) {
+                    const cappedShown = result.shown.slice(0, globalCap);
+                    const cappedStructural = result.structuralSearch?.status === "ok"
+                        ? { ...result.structuralSearch, matches: result.structuralSearch.matches.slice(0, globalCap), shownMatches: cappedShown.length, truncated: true }
+                        : result.structuralSearch;
+                    result = { ...result, shown: cappedShown, truncated: true, ...(cappedStructural ? { structuralSearch: cappedStructural } : {}) };
+                    evidence = buildEvidence(cappedShown, cwd, sessionFilePath);
+                }
+                queryResults.push(result);
             } else {
                 for (const query of queries) {
                     queryResults.push(await executeGrepQuery(query, cwd, opts, signal));
                 }
-                const shownHits = queryResults.flatMap((result) => result.shown);
+                // Batch cardinality: tag per-query provenance, dedup overlapping
+                // file+range hits across queries, then apply the global cap.
+                // NOTE: per-query gather runs before the global merge (pre-render
+                // work is not budgeted); the cap bounds render + evidence only.
+                const candidates: GrepHit[] = [];
+                for (const result of queryResults) {
+                    for (const hit of result.shown) {
+                        candidates.push({ ...hit, matchedQueries: [result.pattern] } as GrepHit);
+                    }
+                }
+                const deduped = dedupGrepHits(candidates);
+                const perQueryTruncated = queryResults.some((r) => r.truncated);
+                const globalTruncated = perQueryTruncated || deduped.length > globalCap;
+                const shownHits = deduped.slice(0, globalCap);
+                (queryResults as any).globalShown = shownHits;
+                (queryResults as any).globalTotal = deduped.length;
+                // globalTotal counts only already-sliced per-query hits: when any
+                // per-query result truncated, the true total is unknown and the
+                // reported total is a lower bound (rendered with a "+" suffix).
+                (queryResults as any).globalTotalIsLowerBound = perQueryTruncated;
+                (queryResults as any).globalTruncated = globalTruncated;
                 evidence = buildEvidence(shownHits, cwd, sessionFilePath);
             }
             publishEvidence(evidence, opts, sessionFilePath);
@@ -194,7 +229,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             if (!hasQueries) {
                 const result = queryResults[0]!;
                 return {
-                    content: [{ type: "text" as const, text: formatExecutionOutput(result) }],
+                    content: [{ type: "text" as const, text: applyOutputGuard(formatExecutionOutput(result)).text }],
                     details: {
                         workspaceEvidence: evidence,
                         mode: "query",
@@ -202,6 +237,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         totalHits: result.totalHits,
                         shownHits: result.shown.length,
                         truncated: result.truncated,
+                        maxResults: globalCap,
                         engines: result.engines,
                         ...(result.degradation ? { degradation: result.degradation } : {}),
                         ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
@@ -210,14 +246,16 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             }
 
             return {
-                content: [{ type: "text" as const, text: formatBatchOutput(queryResults) }],
+                content: [{ type: "text" as const, text: applyOutputGuard(formatBatchOutput(queryResults)).text }],
                 details: {
                     workspaceEvidence: evidence,
                     mode: "query",
                     toolCallId,
-                    totalHits: queryResults.reduce((sum, result) => sum + result.totalHits, 0),
-                    shownHits: queryResults.reduce((sum, result) => sum + result.shown.length, 0),
-                    truncated: queryResults.some((result) => result.truncated),
+                    totalHits: (queryResults as any).globalTotal as number,
+                    totalHitsIsLowerBound: (queryResults as any).globalTotalIsLowerBound as boolean,
+                    shownHits: ((queryResults as any).globalShown as GrepHit[]).length,
+                    truncated: (queryResults as any).globalTruncated as boolean,
+                    maxResults: resolveMaxResults(params as { maxResults?: number }),
                     engines: unique(queryResults.flatMap((result) => result.engines)),
                     queryResults: queryResults.map((result) => ({
                         pattern: result.pattern,
@@ -265,7 +303,7 @@ async function executeGrepQuery(
         return executeStructuralQuery(params as any, cwd, opts);
     }
     const { searchDir, scopedFile } = resolveSearchScope(cwd, params.path);
-    const topK = clamp(params.limit ?? 20, 1, 100);
+    const topK = resolvePerQueryLimit(params);
     const contextLines = clamp(params.contextLines ?? 2, 0, 20);
     const caseSensitive = !(params.ignoreCase ?? false);
     const startTime = Date.now();
@@ -391,6 +429,33 @@ function detectRegexPattern(pattern: string): string | null {
     }
 }
 
+/**
+ * Multi-range resource identity: resourceId and inspectionId hash the FULL
+ * sorted range set per file, so [10-12,80-82] vs [10-12,300-302] never
+ * collide. Single-range resources keep the protocol resourceIdFor digest.
+ */
+export function resourceIdForRanges(canonicalPath: string, ranges: Array<{ startLine: number; endLine: number }>): string {
+    const sorted = [...ranges].sort((a, b) => a.startLine - b.startLine || a.endLine - b.endLine);
+    if (sorted.length === 1) {
+        return resourceIdFor({ canonicalPath, kind: "range", range: sorted[0] });
+    }
+    const rangePart = sorted.map((r) => `${r.startLine}-${r.endLine}`).join(",");
+    return sha256OfString(`resource|range|${canonicalPath}|${rangePart}`);
+}
+
+export function inspectionIdForRanges(
+    sessionId: string,
+    workspaceRoot: string,
+    entries: Array<{ canonicalPath: string; ranges: Array<{ startLine: number; endLine: number }> }>,
+): string {
+    const resourceKey = entries.map((e) => {
+        const sorted = [...e.ranges].sort((a, b) => a.startLine - b.startLine || a.endLine - b.endLine);
+        const rangePart = sorted.map((r) => `:${r.startLine}-${r.endLine}`).join(",");
+        return `${e.canonicalPath}${rangePart}`;
+    }).sort().join("\n");
+    return sha256OfString(`inspection|${sessionId}|${workspaceRoot}\n${resourceKey}`);
+}
+
 // ── Evidence envelope ───────────────────────────────────────────────
 
 function buildEvidence(
@@ -413,7 +478,7 @@ function buildEvidence(
             resourcesByPath.set(canonical, { ...existing, allowedRanges: merged });
         } else {
             resourcesByPath.set(canonical, {
-                resourceId: resourceIdFor({ canonicalPath: canonical, kind: "range", range }),
+                resourceId: "pending",
                 canonicalPath: canonical,
                 kind: "range",
                 coverage: "search-match",
@@ -422,16 +487,20 @@ function buildEvidence(
             });
         }
     }
+    // Identity fix: resourceId + inspectionId hash the FULL sorted range set
+    // per file, so [10-12,80-82] vs [10-12,300-302] never collide.
+    for (const resource of resourcesByPath.values()) {
+        (resource as { resourceId: string }).resourceId = resourceIdForRanges(
+            resource.canonicalPath,
+            [...(resource.allowedRanges ?? [])].sort((a, b) => a.startLine - b.startLine || a.endLine - b.endLine),
+        );
+    }
 
     const resources = [...resourcesByPath.values()];
-    const inspectionId = inspectionIdFor({
-        sessionId,
-        workspaceRoot: canonicalRoot,
-        resources: resources.map((r) => ({
-            canonicalPath: r.canonicalPath,
-            ...(r.allowedRanges[0] ? { range: r.allowedRanges[0] } : {}),
-        })),
-    });
+    const inspectionId = inspectionIdForRanges(sessionId, canonicalRoot, resources.map((r) => ({
+        canonicalPath: r.canonicalPath,
+        ranges: [...(r.allowedRanges ?? [])],
+    })));
 
     return {
         schemaVersion: PROTOCOL_SCHEMA_VERSION,
@@ -487,11 +556,40 @@ function formatStructuralOutput(result: GrepExecutionResult): string {
     return lines.join("\n");
 }
 
+/** Render guard alias used by the execute paths. */
+function applyOutputGuard(text: string): { text: string; outputTruncated: boolean } {
+    return enforceGrepOutputGuard(text);
+}
+
 function formatBatchOutput(results: GrepExecutionResult[]): string {
-    return results.map((result, index) => [
-        `Query ${index + 1}: "${result.pattern}"`,
-        formatExecutionOutput(result),
-    ].join("\n")).join("\n\n");
+    const header: string[] = [];
+    for (let i = 0; i < results.length; i++) {
+        const result = results[i]!;
+        header.push(`Query ${i + 1}: "${result.pattern}" (${result.totalHits} hits, ${result.elapsedMs}ms)`);
+    }
+    header.push("");
+    // Merged global view: duplicates render once with matched-query provenance.
+    const shown: GrepHit[] = (results as any).globalShown
+        ?? dedupGrepHits(results.flatMap((r) => r.shown.map((h) => ({ ...h, matchedQueries: [r.pattern] }) as GrepHit)));
+    const total: number = (results as any).globalTotal ?? shown.length;
+    const totalIsLowerBound: boolean = (results as any).globalTotalIsLowerBound
+        ?? results.some((r) => r.truncated);
+    const truncated: boolean = (results as any).globalTruncated
+        ?? results.some((r) => r.truncated);
+    if (shown.length === 0) header.push("(no matches for any query)");
+    else {
+        for (const hit of shown) {
+            const matched = (hit as { matchedQueries?: string[] }).matchedQueries;
+            const range = hit.endLine > hit.line ? `L${hit.line}-${hit.endLine}` : `L${hit.line}`;
+            const suffix = matched && matched.length > 0
+                ? `  matched queries: ${matched.map((q) => `"${q}"`).join(", ")}`
+                : "";
+            header.push(`${hit.relFile}  ${range}  ${hit.name}${suffix}`);
+            if (hit.snippet) header.push(hit.snippet);
+        }
+    }
+    if (truncated) header.push(`(truncated: showing ${shown.length} of ${total}${totalIsLowerBound ? "+" : ""} deduplicated hits; reduce maxResults, contextLines, or queries for more)`);
+    return header.join("\n");
 }
 
 function enginesKey(engines: string[]): string {
@@ -571,8 +669,79 @@ function mergeRanges(ranges: Array<{ startLine: number; endLine: number }>): Arr
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+export const GREP_DEFAULT_PER_QUERY_LIMIT = 20;
+export const GREP_MAX_PER_QUERY_LIMIT = 50;
+export const GREP_DEFAULT_MAX_RESULTS = 100;
+export const GREP_MAX_MAX_RESULTS = 200;
+/** Max rendered grep output: byte + line guard applied after the global cap. */
+export const GREP_MAX_OUTPUT_BYTES = 200 * 1024;
+export const GREP_MAX_OUTPUT_LINES = 2000;
+
+/** Resolve per-query cap: perQueryLimit wins over the deprecated limit alias. */
+export function resolvePerQueryLimit(params: { limit?: number; perQueryLimit?: number }): number {
+    if (params.perQueryLimit !== undefined) return clamp(Math.floor(params.perQueryLimit), 1, GREP_MAX_PER_QUERY_LIMIT);
+    if (params.limit !== undefined) return clamp(Math.floor(params.limit), 1, 100);
+    return GREP_DEFAULT_PER_QUERY_LIMIT;
+}
+
+/** Resolve global merged-render cap for batch calls. */
+export function resolveMaxResults(params: { maxResults?: number }): number {
+    if (params.maxResults !== undefined) return clamp(Math.floor(params.maxResults), 1, GREP_MAX_MAX_RESULTS);
+    return GREP_DEFAULT_MAX_RESULTS;
+}
+
+/** Byte + line guard on formatted grep text; appends a recovery hint on cut. */
+export function enforceGrepOutputGuard(text: string): { text: string; outputTruncated: boolean } {
+    const lines = text.split("\n");
+    let lineCut = lines.length;
+    let bytes = 0;
+    for (let i = 0; i < lines.length; i++) {
+        bytes += Buffer.byteLength(lines[i]!, "utf-8") + 1;
+        if (bytes > GREP_MAX_OUTPUT_BYTES) { lineCut = i; break; }
+    }
+    const cut = Math.min(lineCut, GREP_MAX_OUTPUT_LINES);
+    if (cut >= lines.length) return { text, outputTruncated: false };
+    const hint = `\n...output truncated by size guard (showing ${cut} of ${lines.length} lines). Reduce maxResults, contextLines, or queries to recover full results.`;
+    return { text: lines.slice(0, cut).join("\n") + hint, outputTruncated: true };
+}
+
+/** Canonical cross-query hit identity: canonical file + full line range. */
+export function grepHitKey(hit: GrepHit): string {
+    return `${tryCanonical(hit.file)}:${hit.line}-${hit.endLine}`;
+}
+
+/** Cross-query dedup: same file+range renders once, merging engines + matched queries. */
+export function dedupGrepHits(hits: GrepHit[]): GrepHit[] {
+    const merged = new Map<string, GrepHit>();
+    for (const hit of hits) {
+        const key = grepHitKey(hit);
+        const existing = merged.get(key);
+        if (existing) {
+            for (const e of hit.engines) if (!existing.engines.includes(e)) existing.engines.push(e);
+            const prior = (existing as { matchedQueries?: string[] }).matchedQueries ?? [];
+            const next = (hit as { matchedQueries?: string[] }).matchedQueries ?? [];
+            const set = new Set([...prior, ...next]);
+            (existing as { matchedQueries?: string[] }).matchedQueries = [...set];
+            if (hit.score > existing.score) existing.score = hit.score;
+        } else {
+            merged.set(key, { ...hit, engines: [...hit.engines] });
+        }
+    }
+    const out = [...merged.values()];
+    out.sort((a, b) => b.score - a.score);
+    return out;
+}
+
 function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+export function _dedupGrepHitsForTests(hits: GrepHit[]): GrepHit[] {
+    return dedupGrepHits(hits);
+}
+
+export function _enforceGrepOutputGuardForTests(text: string): { text: string; outputTruncated: boolean } {
+    return enforceGrepOutputGuard(text);
 }
 
 export function _shouldShowPerHitEnginesForTests(shown: GrepHit[]): boolean {
