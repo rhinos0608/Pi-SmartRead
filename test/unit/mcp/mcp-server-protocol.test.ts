@@ -126,17 +126,13 @@ describe("MCP stateless protocol (single batched process)", () => {
       for (const tool of tools) {
         const schema = tool.inputSchema;
         expect(schema).toBeDefined();
-        // Type.Union produces oneOf with discriminants
-        const hasValidSchema =
-          schema.type === "object" || Array.isArray(schema.oneOf) || Array.isArray(schema.anyOf);
-        expect(hasValidSchema).toBe(true);
-        // Should have properties, required, oneOf, or anyOf at minimum
-        const hasContent =
-          schema.properties !== undefined ||
-          schema.required !== undefined ||
-          Array.isArray(schema.oneOf) ||
-          Array.isArray(schema.anyOf);
-        expect(hasContent).toBe(true);
+        // Upstream function-calling requires parameters schema type "object";
+        // top-level unions (anyOf/oneOf) are rejected with invalid_request_error.
+        expect(schema.type).toBe("object");
+        expect(schema.anyOf).toBeUndefined();
+        expect(schema.oneOf).toBeUndefined();
+        // Should have properties at minimum
+        expect(schema.properties).toBeDefined();
       }
     }
   }, 60_000);

@@ -97,40 +97,46 @@ describe("WP-4 InspectV4Input type extensions", () => {
 
 // ── 2. Schema extension tests ────────────────────────────────────
 
-function branchByMode(schema: Record<string, any>, mode: string): any {
-  const branches: any[] = schema.anyOf ?? schema.oneOf;
-  return branches.find((b) => b.properties?.mode?.const === mode);
+// Flattened schema: mode is an enum on the root object; analysis is a
+// file|directory union under properties.analysis. Find the union branch
+// carrying a given analysis key.
+function analysisWith(schema: Record<string, any>, key: string): any {
+  const union = schema.properties?.analysis?.anyOf ?? schema.properties?.analysis?.oneOf ?? [];
+  return (union as any[]).find((b) => b.properties?.[key] !== undefined);
 }
 
 describe("inspect tool schema has new params", () => {
   it("schema includes callDepth", () => {
     const tool = createInspectV4Tool({ getSessionFilePath: () => "/s.jsonl" });
     const schema = tool.parameters as Record<string, any>;
-    const fileBranch = branchByMode(schema, "file");
-    expect(fileBranch).toBeDefined();
-    expect(fileBranch.properties.analysis.properties.callDepth).toBeDefined();
-    expect(fileBranch.properties.analysis.properties.callDepth.minimum).toBe(1);
-    expect(fileBranch.properties.analysis.properties.callDepth.maximum).toBe(5);
+    expect(schema.type).toBe("object");
+    expect(schema.anyOf).toBeUndefined();
+    expect(schema.oneOf).toBeUndefined();
+    const fileAnalysis = analysisWith(schema, "callDepth");
+    expect(fileAnalysis).toBeDefined();
+    expect(fileAnalysis.properties.callDepth).toBeDefined();
+    expect(fileAnalysis.properties.callDepth.minimum).toBe(1);
+    expect(fileAnalysis.properties.callDepth.maximum).toBe(5);
   });
 
   it("schema includes callDirection", () => {
     const tool = createInspectV4Tool({ getSessionFilePath: () => "/s.jsonl" });
     const schema = tool.parameters as Record<string, any>;
-    const fileBranch = branchByMode(schema, "file");
-    expect(fileBranch.properties.analysis.properties.callDirection).toBeDefined();
+    const fileAnalysis = analysisWith(schema, "callDirection");
+    expect(fileAnalysis.properties.callDirection).toBeDefined();
   });
 
   it("schema includes deadCode, impact, diff, clusters, graphSchema, hotspots, boundaries, routes, layers", () => {
     const tool = createInspectV4Tool({ getSessionFilePath: () => "/s.jsonl" });
     const schema = tool.parameters as Record<string, any>;
-    const fileBranch = branchByMode(schema, "file");
-    const dirBranch = branchByMode(schema, "directory");
+    const fileAnalysis = analysisWith(schema, "callDepth");
+    const dirAnalysis = analysisWith(schema, "clusters");
     for (const param of ["deadCode", "impact", "diff", "graphSchema", "hotspots", "routes"]) {
-      expect(fileBranch.properties.analysis.properties[param]).toBeDefined();
-      expect(dirBranch.properties.analysis.properties[param]).toBeDefined();
+      expect(fileAnalysis.properties[param]).toBeDefined();
+      expect(dirAnalysis.properties[param]).toBeDefined();
     }
     for (const param of ["clusters", "boundaries", "routes", "layers"]) {
-      expect(dirBranch.properties.analysis.properties[param]).toBeDefined();
+      expect(dirAnalysis.properties[param]).toBeDefined();
     }
   });
 });

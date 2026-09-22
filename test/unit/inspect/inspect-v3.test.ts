@@ -119,22 +119,20 @@ describe("createInspectV4Tool (schema)", () => {
         expect(tool.name).toBe("inspect");
     });
 
-    it("exposes discriminated union branches and not query/symbol/action", () => {
+    it("exposes flattened object schema and not query/symbol/action", () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         const schema = tool.parameters as Record<string, any>;
-        const branches: any[] = schema.anyOf ?? schema.oneOf;
-        expect(Array.isArray(branches)).toBe(true);
-        expect(branches).toHaveLength(4);
-        const byMode = Object.fromEntries(branches.map((b) => [b.properties?.mode?.const, b]));
-        expect(Object.keys(byMode).sort()).toEqual(["directory", "file", "navigate", "script"]);
-        expect(byMode.file.properties.path).toBeDefined();
-        expect(byMode.directory.properties.path).toBeDefined();
-        expect(byMode.file.properties.analysis).toBeDefined();
-        expect(byMode.directory.properties.analysis).toBeDefined();
-        for (const b of branches) {
-            for (const k of ["query", "symbol", "action"]) {
-                expect(b.properties?.[k]).toBeUndefined();
-            }
+        // Upstream providers require a root type-object schema (no top-level union).
+        expect(schema.type).toBe("object");
+        expect(schema.anyOf).toBeUndefined();
+        expect(schema.oneOf).toBeUndefined();
+        const modes: any[] = schema.properties?.mode?.anyOf ?? schema.properties?.mode?.oneOf ?? [];
+        expect(modes.map((b) => b.const).sort()).toEqual(["directory", "file", "navigate", "script"]);
+        for (const k of ["path", "analysis", "navigation", "diagnostics", "script"]) {
+            expect(schema.properties?.[k]).toBeDefined();
+        }
+        for (const k of ["query", "symbol", "action"]) {
+            expect(schema.properties?.[k]).toBeUndefined();
         }
     });
 
