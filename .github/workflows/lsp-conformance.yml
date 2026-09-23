@@ -12,13 +12,21 @@ on:
   push:
     branches: [main]
     paths:
+      - "src/lsp/**"
+      - "src/language-intelligence/**"
       - "test/integration/lsp/**"
       - "scripts/check-lsp-conformance-binaries.mjs"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/lsp-conformance.yml"
   pull_request:
     paths:
+      - "src/lsp/**"
+      - "src/language-intelligence/**"
       - "test/integration/lsp/**"
       - "scripts/check-lsp-conformance-binaries.mjs"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/lsp-conformance.yml"
   workflow_dispatch:
 
@@ -51,7 +59,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      - run: npm ci --fetch-retries=5 --fetch-timeout=600000
 
       - name: Install pyright 1.1.399 (RS2)
         if: matrix.server == 'pyright'

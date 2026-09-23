@@ -165,6 +165,34 @@ function loadBashMisuseHintDetector(): BashMisuseHintDetector | null {
 
 const BASH_MISUSE_HINT_MARKER = "[SmartRead hint]";
 
+function hasBashMisuseHint(content: any[]): boolean {
+  return content.some(
+    (c: any) => c?.type === "text" && typeof c.text === "string" && c.text.includes(BASH_MISUSE_HINT_MARKER),
+  );
+}
+
+function detectBashMisuseHintSafely(
+  detector: BashMisuseHintDetector,
+  input: Record<string, unknown>,
+): string | null {
+  const command = typeof input.command === "string" ? input.command : "";
+  const exitCode = typeof input.exitCode === "number" ? input.exitCode : undefined;
+  try {
+    return detector(command, exitCode);
+  } catch {
+    return null;
+  }
+}
+
+function adoptHintedEvent(s: PipelineState, event: any, content: any[], baseEvent?: any): void {
+  if (baseEvent) {
+    baseEvent.content = content;
+    s.outputEvent = baseEvent;
+    return;
+  }
+  s.outputEvent = { ...event, content };
+}
+
 /**
  * Append the bash-misuse hint footer. Additive-only: preserves
  * details/isError, appends one fresh text item at content end, sets
@@ -173,38 +201,23 @@ const BASH_MISUSE_HINT_MARKER = "[SmartRead hint]";
  */
 export function appendBashMisuseHint(state: ActivationState, s: PipelineState, baseEvent?: any): void {
   if (s.toolName !== "bash") return;
-  const enabled = state.bashMisuseHintsEnabled ?? true;
-  if (!enabled) return;
+  if (!(state.bashMisuseHintsEnabled ?? true)) return;
   const event = baseEvent ?? s.outputEvent;
   if (!event || !Array.isArray(event.content)) return;
+
   const content = [...event.content];
-  if (
-    content.some(
-      (c: any) => c?.type === "text" && typeof c.text === "string" && c.text.includes(BASH_MISUSE_HINT_MARKER),
-    )
-  )
-    return;
-  const input = (event.input ?? s.input ?? {}) as Record<string, unknown>;
-  const command = typeof input.command === "string" ? input.command : undefined;
-  const exitCode = typeof input.exitCode === "number" ? input.exitCode : undefined;
+  if (hasBashMisuseHint(content)) return;
+
   const detector = loadBashMisuseHintDetector();
   if (!detector) return;
-  let hint: string | null;
-  try {
-    hint = detector(command ?? "", exitCode);
-  } catch {
-    return;
-  }
+  const input = (event.input ?? s.input ?? {}) as Record<string, unknown>;
+  const hint = detectBashMisuseHintSafely(detector, input);
   if (!hint) return;
+
   // Detector returns the fully formatted "\n\n[SmartRead hint] …" footer;
   // append verbatim as the final content item.
   content.push({ type: "text", text: hint });
-  if (baseEvent) {
-    baseEvent.content = content;
-    s.outputEvent = baseEvent;
-  } else {
-    s.outputEvent = { ...event, content };
-  }
+  adoptHintedEvent(s, event, content, baseEvent);
   s.outputChanged = true;
 }
 
