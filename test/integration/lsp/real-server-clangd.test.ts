@@ -22,7 +22,7 @@ const binary = resolveBinary(BIN_CANDIDATES);
 function binaryUsable(): string | null {
   if (!binary) return null;
   try {
-    execFileSync(binary, ["--version"], { encoding: "utf-8", timeout: 15_000 });
+    execFileSync(binary, ["--version"], { encoding: "utf-8", timeout: 45_000 });
     return binary;
   } catch (err) {
     return `unusable:${err instanceof Error ? err.message.split("\n")[0] : String(err)}`;

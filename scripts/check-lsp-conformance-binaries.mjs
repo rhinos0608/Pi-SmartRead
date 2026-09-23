@@ -80,7 +80,9 @@ function checkOne(name) {
   }
   let version = null;
   try {
-    version = execFileSync(binary, pin.versionArgs, { encoding: "utf-8", timeout: 15_000 }).trim().split("\n")[0];
+    // Freshly installed native servers can cold-start slowly on busy hosted runners.
+    // This is a usability/version check, not a latency assertion.
+    version = execFileSync(binary, pin.versionArgs, { encoding: "utf-8", timeout: 45_000 }).trim().split("\n")[0];
   } catch (err) {
     return { server: name, rs: pin.rs, ok: false, binary, version: null,
       error: `unusable: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` };
