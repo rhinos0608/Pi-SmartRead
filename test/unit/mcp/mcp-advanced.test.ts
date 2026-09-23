@@ -391,6 +391,10 @@ describe("MCP advanced capabilities", () => {
     ]);
 
     const result = response.result as any;
+    expect(response.id).toBe(23);
+    expect(response.error).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(result.contents).toBeDefined();
     const content = result.contents[0]!;
     expect(content.uri).toBe("smartread://repo-map");
     expect(typeof content.text).toBe("string");

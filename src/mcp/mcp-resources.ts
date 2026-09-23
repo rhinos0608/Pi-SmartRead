@@ -216,19 +216,31 @@ export async function resolveResource(uri: string): Promise<{ uri: string; mimeT
   }
 
   if (uri === "smartread://repo-map") {
-    const repoMap = new RepoMap(process.cwd());
-    const result = await repoMap.getRepoMap({
-      mapTokens: 4096,
-      compact: true,
-      useImportBased: true,
-      autoFallback: true,
-      verbose: false,
-    });
-    return {
-      uri,
-      mimeType: "text/plain",
-      text: result.map || "[No source files found to map.]",
-    };
+    try {
+      const repoMap = new RepoMap(process.cwd());
+      const result = await repoMap.getRepoMap({
+        mapTokens: 4096,
+        compact: true,
+        useImportBased: true,
+        autoFallback: true,
+        verbose: false,
+      });
+      return {
+        uri,
+        mimeType: "text/plain",
+        text: result.map || "[No source files found to map.]",
+      };
+    } catch (err) {
+      // Never throw: a JSON-RPC error envelope has no `result.contents`,
+      // which surfaces downstream as `Cannot read properties of undefined
+      // (reading '0')`. Guarantee the contents shape on all platforms.
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        uri,
+        mimeType: "text/plain",
+        text: `[Repo map unavailable: ${message}]`,
+      };
+    }
   }
 
   if (uri === "smartread://status") {
