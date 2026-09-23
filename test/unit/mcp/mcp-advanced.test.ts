@@ -80,6 +80,9 @@ function callMcpServer(
       settled = true;
       clearTimeout(timeout);
       clearInterval(pollStartup);
+      // Signal EOF only now: ending stdin at send time lets the server
+      // exit before a slow handler (repo-map) answers, stranding id 1.
+      try { child.stdin.end(); } catch { /* already closed */ }
       child.kill();
       resolve(response);
     }
@@ -129,7 +132,8 @@ function callMcpServer(
         for (const message of messages) {
           child.stdin.write(JSON.stringify(message) + "\n");
         }
-        child.stdin.end();
+        // stdin stays open until settleOk: early EOF can exit the server
+        // before a slow handler answers (macos-only flakes).
       }
     }, 100);
   });
