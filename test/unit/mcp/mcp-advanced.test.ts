@@ -35,7 +35,8 @@ function mcpInitialized(): Record<string, unknown> {
 }
 
 /**
- * Send JSON-RPC messages to the MCP server and return the last response.
+ * Send JSON-RPC messages to the MCP server and resolve with the response
+ * matching the last id-bearing request (last-on-close fallback).
  *
  * Parses stdout line-by-line; collects all responses and returns the last one
  * when the process closes. This avoids a race where the `close` event fires
@@ -68,7 +69,22 @@ function callMcpServer(
       stderr += data.toString();
     });
 
-    // Collect all JSON-RPC responses; return the last one when close fires.
+    // Resolve on the response matching the last id-bearing request.
+    // Last-on-close is racy: stdin EOF can exit the server before a slow
+    // handler (repo-map) answers, stranding an earlier response.
+    const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
+    const expectedId = [...messages].reverse().find((m) => "id" in m)?.id;
+    let settled = false;
+    function settleOk(response: Record<string, unknown>): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearInterval(pollStartup);
+      child.kill();
+      resolve(response);
+    }
+
+    // Collect all JSON-RPC responses; fall back to the last one on close.
     const responses: Array<Record<string, unknown>> = [];
 
     child.stdout.on("data", (data: Buffer) => {
@@ -76,7 +92,9 @@ function callMcpServer(
         const line = raw.trim();
         if (!line) continue;
         try {
-          responses.push(JSON.parse(line) as Record<string, unknown>);
+          const parsed = JSON.parse(line) as Record<string, unknown>;
+          responses.push(parsed);
+          if (expectedId !== undefined && parsed.id === expectedId) settleOk(parsed);
         } catch {
           // Skip non-JSON lines (e.g. debug output)
         }
@@ -90,10 +108,10 @@ function callMcpServer(
     });
 
     // `close` fires after stdin closes AND the process exits.
-    // Collect responses as they arrive; return the last one on close.
-    // This avoids the race where close fires before the promise is settled —
-    // Node.js delivers the callback even to already-resolved/rejected promises.
+    // Preferred path already resolved on id match; this is fallback only.
     child.on("close", () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       clearInterval(pollStartup);
       if (responses.length === 0) {
@@ -102,8 +120,6 @@ function callMcpServer(
       }
       resolve(responses[responses.length - 1]!);
     });
-
-    const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
 
     // Wait for server startup signal before sending.
     // tsx cold-boots esbuild; the server signals readiness via stderr.
