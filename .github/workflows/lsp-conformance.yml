@@ -59,15 +59,21 @@ jobs:
 
       - name: Install gopls v0.19.1 (RS3)
         if: matrix.server == 'gopls'
-        run: go install golang.org/x/tools/gopls@v0.19.1
+        run: |
+          go install golang.org/x/tools/gopls@v0.19.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Install rust-analyzer via toolchain 1.83.0 (RS4)
         if: matrix.server == 'rust-analyzer'
-        run: rustup toolchain install 1.83.0 --component rust-analyzer
+        run: |
+          rustup toolchain install 1.83.0 --component rust-analyzer
+          rustup default 1.83.0
 
       - name: Install clangd 19 (RS5)
         if: matrix.server == 'clangd'
-        run: sudo apt-get update && sudo apt-get install -y clangd-19
+        run: |
+          sudo apt-get update && sudo apt-get install -y clangd-19
+          sudo ln -sf /usr/bin/clangd-19 /usr/bin/clangd
 
       - name: Preflight binary check + version evidence (${{ matrix.rs }}/${{ matrix.server }})
         run: node scripts/check-lsp-conformance-binaries.mjs --server ${{ matrix.server }}

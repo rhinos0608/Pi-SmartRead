@@ -25,7 +25,7 @@ import { delimiter, join } from "node:path";
 const PINS = {
   pyright: {
     rs: "RS2",
-    candidates: ["pyright-langserver", "pyright", "basedpyright-langserver"],
+    candidates: ["pyright", "pyright-langserver", "basedpyright-langserver"],
     versionArgs: ["--version"],
     pinned: "1.1.399",
     install: "npm install -g pyright@1.1.399",
@@ -49,7 +49,7 @@ const PINS = {
   },
   clangd: {
     rs: "RS5",
-    candidates: ["clangd"],
+    candidates: ["clangd", "clangd-19"],
     versionArgs: ["--version"],
     pinned: "19.1.1",
     install: "sudo apt-get install -y clangd-19 (pin 19.1.1)",
