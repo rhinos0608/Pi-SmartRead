@@ -10,6 +10,7 @@
 import { resetContextHygieneTracker } from "./runtime/context-hygiene.js";
 import { createDoomLoopState } from "./runtime/doom-loop.js";
 import { resolveBashContextGuardConfig } from "./runtime/bash-context-guard.js";
+import { loadExperimentalConfig, resolveBashMisuseHintsEnabled } from "./config.js";
 import { invalidateFsScanCache } from "./workspace/fs-scan-cache.js";
 import { startWatching } from "./runtime/file-watcher.js";
 import type { ContextGraph } from "./context-graph.js";
@@ -28,6 +29,7 @@ export interface ActivationState {
   hygieneTracker: ReturnType<typeof resetContextHygieneTracker>;
   doomLoopState: ReturnType<typeof createDoomLoopState>;
   bashContextGuardConfig: ReturnType<typeof resolveBashContextGuardConfig>;
+  bashMisuseHintsEnabled: boolean;
   watchState: { stop: (() => void) | undefined };
   freshGraphGetter: (root?: string) => Promise<ContextGraph>;
   languageIntelligenceDispose: (() => void) | null;
@@ -40,6 +42,7 @@ export function createActivationState(): ActivationState {
     hygieneTracker: resetContextHygieneTracker(),
     doomLoopState: createDoomLoopState(),
     bashContextGuardConfig: resolveBashContextGuardConfig(),
+    bashMisuseHintsEnabled: resolveBashMisuseHintsEnabled(loadExperimentalConfig()),
     watchState: { stop: undefined },
     // WP-5: single lazy ContextGraph getter so a graph-dependent call never
     // receives an unbuilt graph. Invalidation is revision-based inside

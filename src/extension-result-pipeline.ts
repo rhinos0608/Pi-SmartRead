@@ -11,6 +11,7 @@
  * - all advisory fallbacks are best-effort and never block the result
  */
 import { resolve as pathResolve } from "node:path";
+import { detectBashMisuseHint } from "./runtime/bash-misuse-hint.js";
 import { canonicalPathOrFallback } from "./canonical-path.js";
 import { coerceText } from "./utils.js";
 import {
@@ -133,9 +134,97 @@ export function classificationForTool(toolName: string): ContextHygieneMetadata[
   return "read-context";
 }
 
+// ── Bash misuse hint footer (oracle design) ──────────────────────────
+//
+// Detection is owned by src/runtime/bash-misuse-hint.ts:
+// detectBashMisuseHint(command, exitCode) => string | null, where a
+// non-null return is already fully formatted as a "\n\n[SmartRead hint] …"
+// footer. This module only routes it through a common finalize so the
+// footer survives guard-trimmed and failure-suggestion early returns.
+// Enabled flag lives on ActivationState.bashMisuseHintsEnabled (resolved
+// once in createActivationState). ?? true only for backward-compat with
+// test-constructed states lacking the flag.
+
+/** Detector contract owned by src/runtime/bash-misuse-hint.ts (oracle). */
+type BashMisuseHintDetector = (command: string | undefined, exitCode: number | undefined) => string | null;
+
+let testDetector: BashMisuseHintDetector | null | undefined;
+
+/** Test-only injection hook; production resolution stays in loadBashMisuseHintDetector. */
+export function __setBashMisuseHintDetectorForTests(fn: BashMisuseHintDetector | null): void {
+  testDetector = fn;
+}
+
+function loadBashMisuseHintDetector(): BashMisuseHintDetector | null {
+  if (typeof testDetector === "function") return testDetector;
+  if (testDetector === null) return null;
+  if (typeof detectBashMisuseHint === "function")
+    return detectBashMisuseHint as unknown as BashMisuseHintDetector;
+  return null;
+}
+
+const BASH_MISUSE_HINT_MARKER = "[SmartRead hint]";
+
+/**
+ * Append the bash-misuse hint footer. Additive-only: preserves
+ * details/isError, appends one fresh text item at content end, sets
+ * outputChanged. No match (non-bash, disabled, no detector, no hint,
+ * already present) leaves the event untouched.
+ */
+export function appendBashMisuseHint(state: ActivationState, s: PipelineState, baseEvent?: any): void {
+  if (s.toolName !== "bash") return;
+  const enabled = state.bashMisuseHintsEnabled ?? true;
+  if (!enabled) return;
+  const event = baseEvent ?? s.outputEvent;
+  if (!event || !Array.isArray(event.content)) return;
+  const content = [...event.content];
+  if (
+    content.some(
+      (c: any) => c?.type === "text" && typeof c.text === "string" && c.text.includes(BASH_MISUSE_HINT_MARKER),
+    )
+  )
+    return;
+  const input = (event.input ?? s.input ?? {}) as Record<string, unknown>;
+  const command = typeof input.command === "string" ? input.command : undefined;
+  const exitCode = typeof input.exitCode === "number" ? input.exitCode : undefined;
+  const detector = loadBashMisuseHintDetector();
+  if (!detector) return;
+  let hint: string | null;
+  try {
+    hint = detector(command ?? "", exitCode);
+  } catch {
+    return;
+  }
+  if (!hint) return;
+  // Detector returns the fully formatted "\n\n[SmartRead hint] …" footer;
+  // append verbatim as the final content item.
+  content.push({ type: "text", text: hint });
+  if (baseEvent) {
+    baseEvent.content = content;
+    s.outputEvent = baseEvent;
+  } else {
+    s.outputEvent = { ...event, content };
+  }
+  s.outputChanged = true;
+}
+
+/**
+ * Common finalize for guard/suggestion early returns: adopts the
+ * rewritten event, then appends the hint footer AFTER the guard so the
+ * hint is never truncated. details/isError/guard preview preserved via spread.
+ */
+export function finalizeGuardedResult(state: ActivationState, s: PipelineState, guarded: any): any {
+  appendBashMisuseHint(state, s, guarded);
+  // Always return the guarded rewrite itself: append mutates it in place
+  // when the footer fires, but s.outputEvent may otherwise still hold a
+  // pre-guard mutation (e.g. doom-loop warning) — never return that
+  // in place of the guard result.
+  return guarded;
+}
+
 // ── Pipeline state ───────────────────────────────────────────────────
 
-interface PipelineState {
+export interface PipelineState {
   toolName: string;
   toolCallId: string;
   input: Record<string, unknown>;
@@ -583,18 +672,20 @@ export async function handleToolResult(state: ActivationState, event: any): Prom
   injectDoomLoopWarning(state, s);
 
   const smartReadGuarded = applySmartReadOutputGuard(state, s);
-  if (smartReadGuarded) return smartReadGuarded;
+  if (smartReadGuarded) return finalizeGuardedResult(state, s, smartReadGuarded);
 
   const bashGuarded = applyBashOutputGuard(state, s);
-  if (bashGuarded) return bashGuarded;
+  if (bashGuarded) return finalizeGuardedResult(state, s, bashGuarded);
 
   const withSuggestions = appendBashFailureSuggestions(s);
-  if (withSuggestions) return withSuggestions;
+  if (withSuggestions) return finalizeGuardedResult(state, s, withSuggestions);
 
   appendGrepLowResultHint(state, s);
   await runDiagnosticsFallbackStep(s);
   await runImpactSummaryStep(s);
 
+  // Hint footer runs last: guard already trimmed above, so footer never truncated.
+  appendBashMisuseHint(state, s);
   return s.outputChanged ? s.outputEvent : undefined;
 }
 

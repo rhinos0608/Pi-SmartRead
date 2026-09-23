@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach as _afterEach, beforeEach, describe, expect, it } from "vitest";
-import { validateEmbeddingConfig } from "../../src/config.js";
+import { resolveBashMisuseHintsEnabled, validateEmbeddingConfig } from "../../src/config.js";
 
 /** A cwd that has no pi-smartread.config.json in any ancestor directory. */
 const SAFE_CWD = "/tmp";
@@ -145,5 +145,20 @@ describe("config: validateEmbeddingConfig", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resolveBashMisuseHintsEnabled", () => {
+  it("defaults to true", () => {
+    expect(resolveBashMisuseHintsEnabled(undefined, {})).toBe(true);
+  });
+
+  it("respects config false", () => {
+    expect(resolveBashMisuseHintsEnabled({ bashMisuseHints: false }, {})).toBe(false);
+  });
+
+  it("env 0/1 overrides config", () => {
+    expect(resolveBashMisuseHintsEnabled({ bashMisuseHints: true }, { PI_SMARTREAD_BASH_MISUSE_HINTS: "0" })).toBe(false);
+    expect(resolveBashMisuseHintsEnabled({ bashMisuseHints: false }, { PI_SMARTREAD_BASH_MISUSE_HINTS: "1" })).toBe(true);
   });
 });

@@ -68,6 +68,8 @@ export interface ExperimentalFeaturesConfig {
   gitNotes?: boolean;
   /** Enable graph mutation tool (breakage/co-change edge recording). Default: false. */
   graphMutate?: boolean;
+  /** Show hint-only bash-misuse advisories. Default: true. */
+  bashMisuseHints?: boolean;
 }
 
 export interface ResolvedGitContextConfig {
@@ -138,6 +140,20 @@ export function loadGitContextConfig(cwd?: string): ResolvedGitContextConfig {
     showTrailerKeys: raw.showTrailerKeys ?? DEFAULT_GIT_CONTEXT_CONFIG.showTrailerKeys,
     notesRefs: raw.notesRefs ?? DEFAULT_GIT_CONTEXT_CONFIG.notesRefs,
   };
+}
+
+/**
+ * Resolve bash-misuse hints flag. Default on; explicit env 0/1 overrides config.
+ * Follows PI_SMARTREAD_* env pattern (env wins over repo config).
+ */
+export function resolveBashMisuseHintsEnabled(
+  experimental?: ExperimentalFeaturesConfig,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const raw = env.PI_SMARTREAD_BASH_MISUSE_HINTS;
+  if (raw === "0") return false;
+  if (raw === "1") return true;
+  return experimental?.bashMisuseHints ?? true;
 }
 
 export function loadExperimentalConfig(cwd?: string): ExperimentalFeaturesConfig {

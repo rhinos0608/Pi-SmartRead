@@ -1,9 +1,9 @@
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { GUARD_HINT_DEEP_SEARCH } from "../../src/runtime/bash-context-guard.js";
 import { setupExtension, type IndexHarness } from "./index-fixture.js";
-import { changedPathsFromDetails } from "../../src/extension-result-pipeline.js";
+import { changedPathsFromDetails, __setBashMisuseHintDetectorForTests } from "../../src/extension-result-pipeline.js";
 
 let harness: IndexHarness;
 
@@ -417,5 +417,132 @@ describe("index extension result pipeline", () => {
       messages: [{ role: "toolResult", toolCallId: "read-t2", toolName: "read", content: [{ type: "text", text: "old" }] }],
     });
     expect(result).toBeUndefined();
+  });
+});
+
+describe("bash misuse hint footer", () => {
+  // Contract mirror: the real detector returns the fully formatted footer verbatim.
+  const STUB_HINT = "\n\n[SmartRead hint] prefer the read tool over cat for file reads.";
+
+  beforeEach(() => {
+    __setBashMisuseHintDetectorForTests(() => STUB_HINT);
+  });
+
+  afterEach(() => {
+    __setBashMisuseHintDetectorForTests(null);
+  });
+
+  function hintItems(result: any): any[] {
+    return (result?.content ?? []).filter(
+      (c: any) => c?.type === "text" && typeof c.text === "string" && c.text.includes("[SmartRead hint]"),
+    );
+  }
+
+  function markerCount(result: any): number {
+    return (result?.content ?? [])
+      .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+      .map((c: any) => c.text.split("[SmartRead hint]").length - 1)
+      .reduce((a: number, b: number) => a + b, 0);
+  }
+
+  it("appends footer on normal bash return, original text intact", async () => {
+    const { handlers } = await setupExtension();
+    const result = await handlers.tool_result!({
+      toolName: "bash",
+      toolCallId: "bash-normal",
+      input: { command: "cat src/foo.ts" },
+      content: [{ type: "text", text: "file contents here" }],
+    });
+    expect(result).toBeDefined();
+    expect(result.content[0].text).toContain("file contents here");
+    expect(hintItems(result)).toHaveLength(1);
+    expect(markerCount(result)).toBe(1);
+    expect(result.content[result.content.length - 1].text).toBe(STUB_HINT);
+  });
+
+  it("appends footer after guard-trimmed bash return, guard preview + details intact", async () => {
+    const { handlers } = await setupExtension();
+    const big = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
+    const result = await handlers.tool_result!({
+      toolName: "bash",
+      toolCallId: "bash-big",
+      input: { command: "cat big.log" },
+      content: [{ type: "text", text: big }],
+    });
+    expect(result).toBeDefined();
+    expect(result.content[0].text).toContain("[Bash context guard: preview]");
+    expect(result.content[0].text).not.toContain("[SmartRead hint]");
+    expect(result.details?.bashContextGuard?.trimmed).toBe(true);
+    expect(hintItems(result)).toHaveLength(1);
+    expect(markerCount(result)).toBe(1);
+    expect(result.content[result.content.length - 1]).toBe(hintItems(result)[0]);
+  });
+
+  it("appends footer after failure-suggestion bash return, isError + suggestions intact", async () => {
+    const { handlers } = await setupExtension();
+    const result = await handlers.tool_result!({
+      toolName: "bash",
+      toolCallId: "bash-fail",
+      input: { command: "bogus-cmd", exitCode: 127 },
+      isError: true,
+      content: [{ type: "text", text: "bogus-cmd: command not found" }],
+    });
+    expect(result).toBeDefined();
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Command suggestions:");
+    expect(hintItems(result)).toHaveLength(1);
+    expect(markerCount(result)).toBe(1);
+    expect(result.content[result.content.length - 1]).toBe(hintItems(result)[0]);
+  });
+
+  it("no detector match leaves return behavior unchanged (undefined when otherwise untouched)", async () => {
+    __setBashMisuseHintDetectorForTests(() => null);
+    const { handlers } = await setupExtension();
+    const result = await handlers.tool_result!({
+      toolName: "bash",
+      toolCallId: "bash-nomatch",
+      input: { command: "echo hi" },
+      content: [{ type: "text", text: "hi" }],
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("non-bash tools unchanged: read untouched, inspect guard has no footer", async () => {
+    const { handlers } = await setupExtension();
+    const readResult = await handlers.tool_result!({
+      toolName: "read",
+      toolCallId: "read-nohint",
+      input: { path: "src/foo.ts" },
+      content: [{ type: "text", text: "export const value = 1;" }],
+    });
+    expect(readResult).toBeUndefined();
+    const big = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
+    const inspectResult = await handlers.tool_result!({
+      toolName: "inspect",
+      toolCallId: "inspect-nohint",
+      input: { mode: "query" },
+      details: { mode: "query" },
+      content: [{ type: "text", text: big }],
+    });
+    expect(inspectResult.content[0].text).toContain("[Bash context guard: preview]");
+    expect(markerCount(inspectResult)).toBe(0);
+  });
+
+  it("flag false suppresses footer (opt-out)", async () => {
+    const prev = process.env.PI_SMARTREAD_BASH_MISUSE_HINTS;
+    process.env.PI_SMARTREAD_BASH_MISUSE_HINTS = "0";
+    try {
+      const { handlers } = await setupExtension();
+      const result = await handlers.tool_result!({
+        toolName: "bash",
+        toolCallId: "bash-optout",
+        input: { command: "cat src/foo.ts" },
+        content: [{ type: "text", text: "file contents here" }],
+      });
+      expect(result).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.PI_SMARTREAD_BASH_MISUSE_HINTS;
+      else process.env.PI_SMARTREAD_BASH_MISUSE_HINTS = prev;
+    }
   });
 });

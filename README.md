@@ -741,6 +741,10 @@ Repeated identical retrieval calls are detected and surfaced with tool-specific 
 
 Oversized shell output is bounded to a useful preview; full output can be redirected to temporary storage rather than consuming the model context window.
 
+### Bash misuse hints
+
+Bash misuse hints are on by default. They are hint-only advisories and never block bash. Opt out via `"experimental":{"bashMisuseHints":false}` in `pi-smartread.config.json` or `PI_SMARTREAD_BASH_MISUSE_HINTS=0` (explicit `0`/`1` overrides config).
+
 ### Startup context
 
 The extension starts asynchronous repository/index work and can inject a compact repo map plus tool-selection guidance at the beginning of a session.
