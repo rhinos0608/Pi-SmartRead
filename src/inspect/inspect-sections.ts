@@ -27,11 +27,19 @@ export async function runSectionAsync(label: string, fn: () => Promise<string>, 
     }
 }
 
-export function uriToFsPath(uri: string): string {
-    if (uri.startsWith("file://")) {
-        try { return fileURLToPath(uri); } catch { return uri.slice(7); }
+export function uriToFsPath(uri: string): string | null {
+    if (!uri.startsWith("file://")) return null;
+    try {
+        return fileURLToPath(uri);
+    } catch {
+        try {
+            const parsed = new URL(uri);
+            if (parsed.protocol !== "file:") return null;
+            return decodeURIComponent(parsed.pathname);
+        } catch {
+            return null;
+        }
     }
-    return uri;
 }
 
 export function renderNavigationSection(details: { operation: string; status: string; items: unknown[]; truncated: boolean }, _cwd: string): string {
@@ -50,19 +58,22 @@ export function renderNavigationSection(details: { operation: string; status: st
         lines.push(`Results (${details.items.length}${details.truncated ? ", truncated" : ""}):`);
         for (const it of details.items as any[]) {
             if (it?.from?.uri) {
-                const p = uriToFsPath(it.from.uri);
+                const p = typeof it.from.uri === "string" ? uriToFsPath(it.from.uri) : null;
+                if (p === null) continue;
                 const range = it.from.range ?? it.fromRanges?.[0];
                 const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
                 const fromRanges = it.fromRanges ? ` (${it.fromRanges.length} range(s))` : "";
                 lines.push(`- incoming from ${it.from.name} (kind ${it.from.kind}) — ${p}${pos}${fromRanges}`);
             } else if (it?.to?.uri) {
-                const p = uriToFsPath(it.to.uri);
+                const p = typeof it.to.uri === "string" ? uriToFsPath(it.to.uri) : null;
+                if (p === null) continue;
                 const range = it.to.range ?? it.fromRanges?.[0];
                 const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
                 const fromRanges = it.fromRanges ? ` (${it.fromRanges.length} range(s))` : "";
                 lines.push(`- outgoing to ${it.to.name} (kind ${it.to.kind}) — ${p}${pos}${fromRanges}`);
             } else if (it?.name) {
-                const loc = it.location?.uri ? uriToFsPath(it.location.uri) : it.uri ? uriToFsPath(it.uri) : "";
+                const rawLoc = typeof it.location?.uri === "string" ? it.location.uri : typeof it.uri === "string" ? it.uri : null;
+                const loc = rawLoc === null ? null : uriToFsPath(rawLoc);
                 const range = it.location?.range ?? it.range;
                 const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
                 lines.push(`- ${it.name} (kind ${it.kind})${loc ? ` — ${loc}${pos}` : ""}`);
@@ -71,12 +82,14 @@ export function renderNavigationSection(details: { operation: string; status: st
                 const preview = String(text).slice(0, 200).replace(/\n/g, " ");
                 lines.push(`- hover: ${preview}`);
             } else if (it?.uri) {
-                const p = uriToFsPath(it.uri);
+                const p = typeof it.uri === "string" ? uriToFsPath(it.uri) : null;
+                if (p === null) continue;
                 const range = it.range;
                 const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
                 lines.push(`- ${p}${pos}`);
             } else if (it?.location?.uri) {
-                const p = uriToFsPath(it.location.uri);
+                const p = typeof it.location.uri === "string" ? uriToFsPath(it.location.uri) : null;
+                if (p === null) continue;
                 const range = it.location.range;
                 const pos = range ? `:${range.start.line + 1}:${range.start.character + 1}` : "";
                 lines.push(`- ${p}${pos}`);

@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
-import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import { validateInspectionEnvelope, PROTOCOL_SCHEMA_VERSION } from "@rhinos0608/pi-workspace-protocol";
 import {
     _bm25CacheBenchmark,
     _bm25CorpusCacheForTests,
@@ -131,7 +131,7 @@ describe("grep tool — non-literal cascade", () => {
         const env = (result.details as any).workspaceEvidence;
         expect(env).toBeDefined();
         expect(env.mode).toBe("query");
-        expect(env.schemaVersion).toBe(4);
+        expect(env.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         const v = validateInspectionEnvelope(env);
         expect(v.ok).toBe(true);
     });

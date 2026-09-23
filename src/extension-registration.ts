@@ -24,6 +24,7 @@ import {
 import type { ContextGraph } from "./context-graph.js";
 import { getSharedLspInspectionProvider } from "./lsp/lsp-inspection.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./search/grep-tool.js";
+import { createLspTool } from "./lsp/lsp-tool.js";
 import { createReadTool } from "./read/unified-read.js";
 import { getLSPBridge } from "./lsp/lsp-bridge.js";
 import { registerRepositoryIntelligence } from "./repository/repository-intelligence-registry.js";
@@ -41,6 +42,21 @@ import { lspUriToPath } from "./lsp/lsp-server-operation.js";
 export { lspUriToPath };
 
 /**
+ * Fail-closed URI handling for LSP symbol hits: null/empty paths rejected.
+ */
+function symbolPathFromLspBest(
+  best:
+    | { location: { uri: string; range: { start: { line: number } } } }
+    | undefined,
+): { path: string; line: number } | null {
+  if (!best) return null;
+  const { uri, range } = best.location;
+  const symbolPath = lspUriToPath(uri);
+  if (!symbolPath) return null;
+  return { path: symbolPath, line: range.start.line + 1 };
+}
+
+/**
  * Resolve a qualified symbol name to a file path and optional line number.
  * Resolution order: LSP workspace/symbol first, then ContextGraph.findSymbolFiles() fallback.
  */
@@ -56,10 +72,8 @@ async function resolveSymbolForReadTool(
       const syms = await bridge.workspaceSymbol(symbol, root);
       if (syms.length > 0) {
         const best = syms.find((s) => s.name === symbol) ?? syms[0];
-        if (best) {
-          const { uri, range } = best.location;
-          return { path: lspUriToPath(uri), line: range.start.line + 1 };
-        }
+        const resolved = symbolPathFromLspBest(best);
+        if (resolved) return resolved;
       }
     }
   } catch {
@@ -132,6 +146,18 @@ export function registerGrepTool(state: ActivationState): void {
     category: ToolCategory.READ,
   });
   state.grepRegisteredRef.current = true;
+}
+
+export function registerLspTool(state: ActivationState): void {
+  void state;
+  const lspDef = createLspTool();
+  ToolRegistry.getInstance().registerOrReplace({
+    name: "LSP",
+    description: lspDef.description,
+    inputSchema: lspDef.parameters as Record<string, unknown>,
+    execute: lspDef.execute,
+    category: ToolCategory.READ,
+  });
 }
 
 export function registerCoreTools(pi: ExtensionAPI): void {

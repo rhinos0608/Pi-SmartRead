@@ -29,6 +29,7 @@ import {
 } from "../../../src/inspect/inspect.js";
 import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
 import type { InspectV4Input } from "../../../src/inspect/inspect-types.js";
+import { PROTOCOL_SCHEMA_VERSION } from "@rhinos0608/pi-workspace-protocol";
 
 let workdir: string;
 let file: string;
@@ -415,7 +416,7 @@ describe("evidence envelope for new params", () => {
       impact: true,
     });
     expect(result.workspaceEvidence.mode).toBe("symbol");
-    expect(result.workspaceEvidence.schemaVersion).toBe(4);
+    expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
   });
 
   it("file mode with deadCode + callDepth produces non-empty resources with search-match coverage", async () => {

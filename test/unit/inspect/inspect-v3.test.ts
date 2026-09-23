@@ -17,6 +17,7 @@ import {
 import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
 import {
     validateInspectionEnvelope,
+    PROTOCOL_SCHEMA_VERSION,
 } from "@rhinos0608/pi-workspace-protocol";
 
 let workdir: string;
@@ -73,7 +74,7 @@ describe("executeInspectV4 (modes)", () => {
         });
         expect(details.mode).toBe("file");
         expect(details.workspaceEvidence.mode).toBe("symbol");
-        expect(details.workspaceEvidence.schemaVersion).toBe(4);
+        expect(details.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(details.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
     });
 

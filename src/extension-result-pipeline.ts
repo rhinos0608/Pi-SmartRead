@@ -266,6 +266,8 @@ export async function trackLspDocuments(s: PipelineState): Promise<void> {
   if (s.toolName === "write" || s.toolName === "edit" || s.toolName === "transfer") await trackMutationClose(s, lspInput);
 }
 
+const CACHE_INVALIDATING_MUTATION_TOOLS = new Set(["write", "edit", "transfer", "graph_mutate"]);
+
 /**
  * Centralized successful mutation invalidation. Only successful
  * write/edit/transfer/graph_mutate results invalidate caches. Failed tool results
@@ -273,8 +275,9 @@ export async function trackLspDocuments(s: PipelineState): Promise<void> {
  * incremental once, then graph. graph_mutate invalidates the graph only.
  */
 export function invalidateCachesOnMutation(s: PipelineState): void {
-  if (s.toolName !== "write" && s.toolName !== "edit" && s.toolName !== "transfer" && s.toolName !== "graph_mutate") return;
-  if (mutationApplied(s.details) === false || (mutationApplied(s.details) === undefined && s.outputEvent.isError)) return;
+  if (!CACHE_INVALIDATING_MUTATION_TOOLS.has(s.toolName)) return;
+  const applied = mutationApplied(s.details);
+  if (applied === false || (applied === undefined && s.outputEvent.isError)) return;
   if (s.toolName === "graph_mutate") {
     // Graph mutation must cause a graph rebuild on next use.
     invalidateSharedGraph();

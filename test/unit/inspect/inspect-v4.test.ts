@@ -15,7 +15,7 @@ import {
     executeDirectoryInspect,
     executeFileInspect,
 } from "../../../src/inspect/inspect.js";
-import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import { validateInspectionEnvelope, PROTOCOL_SCHEMA_VERSION } from "@rhinos0608/pi-workspace-protocol";
 import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
 
 let workdir: string;
@@ -72,7 +72,7 @@ describe("executeInspectV4", () => {
         expect(result.contentText).toContain("a.ts");
         expect(result.contentText).toContain("b.ts");
         // Protocol validator accepts mode 'symbol' (not 'file').
-        expect(result.workspaceEvidence.schemaVersion).toBe(4);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
         expect(result.workspaceEvidence.sessionId).toMatch(/^[0-9a-f]{64}$/);
     });
@@ -87,7 +87,7 @@ describe("executeInspectV4", () => {
         expect(result.workspaceEvidence.mode).toBe("symbol");
         expect(result.contentText).toContain("Signals");
         // Protocol validator accepts mode 'symbol' (not 'file').
-        expect(result.workspaceEvidence.schemaVersion).toBe(4);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
         expect(result.workspaceEvidence.sessionId).toMatch(/^[0-9a-f]{64}$/);
         expect(Array.isArray(result.workspaceEvidence.resources)).toBe(true);
@@ -126,7 +126,7 @@ describe("executeDirectoryInspect", () => {
         expect(result.workspaceEvidence.mode).toBe("map");
         expect(result.workspaceEvidence.resources).toEqual([]);
         expect(result.lineCount).toBeGreaterThan(0);
-        expect(result.workspaceEvidence.schemaVersion).toBe(4);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
     });
 });
@@ -143,7 +143,7 @@ describe("executeFileInspect", () => {
         expect(result.contentText).toContain("Signals");
         expect(result.workspaceEvidence.mode).toBe("symbol");
         expect(Array.isArray(result.workspaceEvidence.resources)).toBe(true);
-        expect(result.workspaceEvidence.schemaVersion).toBe(4);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
         expect(result.workspaceEvidence.sessionId).toMatch(/^[0-9a-f]{64}$/);
     });

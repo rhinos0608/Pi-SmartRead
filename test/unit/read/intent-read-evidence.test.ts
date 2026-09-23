@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PROTOCOL_SCHEMA_VERSION } from "@rhinos0608/pi-workspace-protocol";
 import { createIntentReadTool } from "../../../src/read/intent-read.js";
 import { ensureHashlineReady } from "../../../src/utils.js";
 import { makeEmbedder, setupIntentReadEnv } from "./intent-read-helpers.js";
@@ -7,7 +8,7 @@ setupIntentReadEnv();
 
 function makeEnvelopeFor(path: string, resourceId: string) {
 	return {
-		schemaVersion: 4,
+		schemaVersion: PROTOCOL_SCHEMA_VERSION,
 		inspectionId: "0".repeat(64),
 		sessionId: "deadbeef".repeat(8),
 		workspaceRoot: "/",
@@ -77,7 +78,7 @@ describe("intent_read: batch workspace evidence", () => {
 		expect(details.packing.fullIncludedCount).toBeGreaterThan(0);
 		const batch = details.workspaceEvidence;
 		expect(batch).toBeDefined();
-		expect(batch.schemaVersion).toBe(4);
+		expect(batch.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
 		const ids = batch.resources.map((r: any) => r.canonicalPath).sort();
 		expect(ids).toEqual(["/alpha", "/b"]);
 		expect(batch.inspectionId).toMatch(/^[0-9a-f]{64}$/);

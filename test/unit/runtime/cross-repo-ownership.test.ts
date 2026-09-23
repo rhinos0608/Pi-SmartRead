@@ -9,7 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // through a shared globalThis Symbol map (see src/mutation-ownership.ts) with
 // no runtime import between them. Skips gracefully if the sibling isn't checked
 // out (e.g. in an isolated CI checkout of this repo alone).
-const smartEditModulePath = join(__dirname, "../../../../Pi-SmartEdit/src/mutation-ownership.ts");
+const smartEditModulePath = join(__dirname, "../../../../Pi-SmartEdit/src/mutation/mutation-ownership.ts");
 
 describe.skipIf(!existsSync(smartEditModulePath))("cross-repo diagnostics ownership compatibility", () => {
   it("SmartRead recognizes a claim written by SmartEdit's mutation-ownership store", async () => {
