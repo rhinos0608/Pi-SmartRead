@@ -88,10 +88,15 @@ function callMcpServer(
     }
 
     // Collect all JSON-RPC responses; fall back to the last one on close.
+    // Buffer partial lines: a large single-line response (repo-map) can
+    // fragment across pipe chunks, and neither half parses alone.
     const responses: Array<Record<string, unknown>> = [];
+    let carry = "";
 
     child.stdout.on("data", (data: Buffer) => {
-      for (const raw of data.toString().split("\n")) {
+      const segments = (carry + data.toString()).split("\n");
+      carry = data.toString().endsWith("\n") ? "" : (segments.pop() ?? "");
+      for (const raw of segments) {
         const line = raw.trim();
         if (!line) continue;
         try {
@@ -115,6 +120,19 @@ function callMcpServer(
     child.on("close", () => {
       if (settled) return;
       settled = true;
+      // Flush a trailing line that arrived without a newline.
+      if (carry.trim()) {
+        try {
+          const parsed = JSON.parse(carry) as Record<string, unknown>;
+          responses.push(parsed);
+          if (expectedId !== undefined && parsed.id === expectedId) {
+            clearTimeout(timeout);
+            clearInterval(pollStartup);
+            resolve(parsed);
+            return;
+          }
+        } catch { /* ignore */ }
+      }
       clearTimeout(timeout);
       clearInterval(pollStartup);
       if (responses.length === 0) {
