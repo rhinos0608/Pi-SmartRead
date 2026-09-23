@@ -4,10 +4,10 @@
  * Server-dependent absences SKIP honestly via ctx.skip().
  * Opt-in: PI_SMARTREAD_LSP_CONFORMANCE=1 (alias PI_REAL_SERVER=1).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
 import {
   REAL_LSP_ENABLED,
@@ -21,6 +21,27 @@ const binary = resolveBinary(BIN_CANDIDATES);
 
 function binaryUsable(): string | null {
   if (!binary) return null;
+  // pyright-langserver requires a transport flag: bare `--version` exits with
+  // "Connection input stream is not set", which proves the binary is
+  // executable rather than proving it is broken. Probe accordingly without
+  // changing the BIN_CANDIDATES spawn preference (langserver first).
+  if (basename(binary).includes("langserver")) {
+    try {
+      execFileSync(join(dirname(binary), "pyright"), ["--version"], { encoding: "utf-8", timeout: 15_000 });
+      return binary;
+    } catch { /* sibling CLI absent — fall through to smoke probes */ }
+    try {
+      execFileSync(binary, ["--version"], { encoding: "utf-8", timeout: 15_000 });
+      return binary;
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.message}\n${(err as { stderr?: unknown }).stderr ?? ""}` : String(err);
+      if (/connection input stream/i.test(msg)) return binary;
+      const smoke = spawnSync(binary, ["--stdio"], { input: "", encoding: "utf-8", timeout: 10_000 });
+      const combined = `${smoke.stdout ?? ""}${smoke.stderr ?? ""}${smoke.error?.message ?? ""}`;
+      if (/connection input stream/i.test(combined)) return binary;
+      return `unusable:${msg.split("\n")[0]}`;
+    }
+  }
   try {
     execFileSync(binary, ["--version"], { encoding: "utf-8", timeout: 15_000 });
     return binary;
