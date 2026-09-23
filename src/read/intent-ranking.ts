@@ -24,7 +24,7 @@ import { LruCache } from "../utils.js";
 import { chunkTextAst } from "../structural/chunking.js";
 import { applyHyde, type HydeResult } from "../search/hyde.js";
 import { listAdrs } from "../repository/adr-store.js";
-import { rerank, type RerankerInput } from "../ranking/rerank.js";
+import { rerank, rerankWithExternal, type RerankerInput } from "../ranking/rerank.js";
 import { enrichRerankSignals } from "../ranking/rerank-signal-bridge.js";
 import {
   classifyConfidence,
@@ -436,19 +436,37 @@ export async function rankCandidates<TFileDetail extends RankingFileDetail>(
         })
       );
 
-      // WP-7: enrich with halsteadComplexity, astProfile, minHashProximity from file bodies
+      // WP-7: enrich with halsteadComplexity, astProfile, minHashProximity from file bodies.
       const enrichedInputs = await enrichRerankSignals(rerankInputs, bodyByPath);
-      const rerankResults = rerank(enrichedInputs);
+      let rerankResults;
+      let rerankStatus: "ok" | "failed_fallback" = "ok";
+      let rerankStrategy = "structural";
+
+      if (embeddingConfig.externalReranker) {
+        const documents = rankedSuccessOrder.map((path) => bodyByPath.get(path) ?? "");
+        const external = await rerankWithExternal(
+          enrichedInputs,
+          query,
+          documents,
+          embeddingConfig.externalReranker,
+        );
+        rerankResults = external.results;
+        rerankStrategy = external.externalUsed ? "external" : "structural-fallback";
+        if (!external.externalUsed) rerankStatus = "failed_fallback";
+      } else {
+        rerankResults = rerank(enrichedInputs);
+      }
+
       const changedCount = rerankResults.filter((r) => r.changed).length;
       if (changedCount > 0) {
         const reordered = [...rerankResults].sort((a, b) => a.newRank - b.newRank);
         rankedSuccessOrder = reordered.map((r) => r.path);
       }
       rerankingResult = {
-        status: "ok",
+        status: rerankStatus,
         changedOrder: changedCount > 0,
         candidateCount: rerankResults.length,
-        strategy: "structural",
+        strategy: rerankStrategy,
       };
     }
   return {

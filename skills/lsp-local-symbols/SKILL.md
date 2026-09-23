@@ -1,6 +1,6 @@
 ---
 name: lsp-local-symbols
-description: File outline via LSP documentSymbols to pick exact read slices instead of full-file reads.
+description: Outline a file with strict LSP document symbols so reads can target exact source slices.
 ---
 
 # lsp-local-symbols
@@ -9,35 +9,34 @@ Outline first, read slices second.
 
 ## WHEN
 
-- Large file, need symbol list before reading
-- Need exact symbol line ranges for `read { offset, limit }`
-- Choosing between overloads/members with same name
+- A file is large or has many members.
+- You need symbol ranges before selecting a `read` slice.
 
 ## WHEN NOT
 
-- Small file — plain `read` is cheaper
-- Cross-file search — use `lsp-explore` (`workspaceSymbols`)
-- Usage blast radius — use `lsp-impact`
+- The file is small enough for a normal read.
+- You need cross-file symbols. Use `lsp-explore`.
+- You need usage scope. Use `lsp-impact`.
 
 ## Workflow
 
-1. `lsp documentSymbols { path }` for outline
-2. Pick target symbol range from outline
-3. `read { path, offset, limit }` exact range only
+1. `LSP { operation: "documentSymbols", path }`.
+2. Pick the relevant returned symbol/range.
+3. Convert the 0-based LSP range to the 1-based `read { offset, limit }` line convention.
+4. Read only the required slice.
 
 ## Guardrails
 
-- Read-only. No edit/write/patch from this skill.
-- Never paste full outline + full file both — outline then slice.
+- LSP positions/ranges are 0-based; `read.offset` is 1-based.
+- Keep the strict envelope provenance if server choice matters.
+- Read-only. No mutation calls.
 
 ## EXAMPLE
 
-```js
-const outline = await lsp.documentSymbols({ path: "src/auth.ts" });
-const fn = outline.items.find((s) => s.name === "handleAuth");
-return { range: fn.range };
+```json
+{"operation":"documentSymbols","path":"src/auth.ts","limit":100}
 ```
 
 ## Budgets
 
-1 `lsp.*` call + 1 sliced `read`. Outline is cheap; full-file follow-up is the failure mode.
+One LSP outline call plus one or two targeted reads.

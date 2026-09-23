@@ -378,7 +378,7 @@ describe("MCP advanced capabilities", () => {
     });
   }, 60_000);
 
-  it("reading smartread://repo-map returns placeholder text", async () => {
+  it("reading smartread://repo-map returns a generated repository map", async () => {
     const response = await callMcpServer([
       mcpInitialize(),
       mcpInitialized(),
@@ -393,7 +393,9 @@ describe("MCP advanced capabilities", () => {
     const result = response.result as any;
     const content = result.contents[0]!;
     expect(content.uri).toBe("smartread://repo-map");
-    expect(content.text).toContain("repo-map-placeholder");
+    expect(typeof content.text).toBe("string");
+    expect(content.text.length).toBeGreaterThan(0);
+    expect(content.text).not.toContain("repo-map-placeholder");
   }, 60_000);
 
   it("throws for unknown resource URI", async () => {

@@ -1,43 +1,43 @@
 ---
 name: lsp-rename
-description: Rename scope check via LSP references and prepareRename; proposal only, SmartEdit applies the edit.
+description: Scope and request a strict LSP rename proposal; SmartRead never applies it and SmartEdit owns mutation.
 ---
 
 # lsp-rename
 
-Scope a rename, propose it, stop before mutating.
+Propose a semantic rename without writing files.
 
 ## WHEN
 
-- Symbol rename requested (variable, function, class, method)
-- Need renameability check (`prepareRename`) + usage list (`references`)
+- A code symbol needs a semantic rename.
+- You need renameability, usage scope, and a server-produced WorkspaceEdit proposal.
 
 ## WHEN NOT
 
-- Already scoped — hand proposal to SmartEdit directly
-- Text-only rename across non-code files — use `grep`
-- Post-rename check — use `lsp-verify`
+- It is a text-only rename across non-code files. Use `grep`.
+- You only need usage scope. Use `lsp-impact`.
+- The rename has already been applied. Use `lsp-verify`.
 
 ## Workflow
 
-1. `lsp prepareRename { path, line, character }` — renameable?
-2. `lsp references { path, line, character }` — full scope list
-3. Return proposal: `{ oldName, newName, anchor, usageCount, files }`
-4. Stop. SmartEdit owns mutation.
+1. `prepareRename` on the anchor.
+2. `findReferences` to inspect scope.
+3. `rename` with `newName` to obtain a proposal.
+4. Hand the proposal and provenance to SmartEdit. Do not apply it here.
 
 ## Guardrails
 
-- SmartRead obtains semantic proposals; SmartEdit owns mutation. This skill MUST NOT emit edit/write/patch calls.
-- Never apply rename file-by-file from SmartRead side; cross-file renames race without single-owner apply.
+- `rename` is proposal-only and never auto-retries after a server crash.
+- Use only an `ok` envelope with `meta.freshness.state === "fresh"`.
+- Positions are 0-based in `server.positionEncoding`.
+- SmartRead never applies WorkspaceEdits.
 
 ## EXAMPLE
 
-```js
-const ok = await lsp.prepareRename({ path: "src/auth.ts", line: 42, character: 10 });
-const refs = await lsp.references({ path: "src/auth.ts", line: 42, character: 10 });
-return { oldName: "handleAuth", newName: "authorizeRequest", renameable: !!ok, usages: refs.items };
+```json
+{"operation":"rename","path":"src/auth.ts","position":{"line":41,"character":9},"newName":"authorizeRequest"}
 ```
 
 ## Budgets
 
-2–4 `lsp.*` calls. Proposal object out, zero mutations.
+Usually 2-3 LSP calls: prepare, references, proposal.

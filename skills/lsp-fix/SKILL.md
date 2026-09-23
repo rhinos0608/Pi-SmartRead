@@ -1,44 +1,44 @@
 ---
 name: lsp-fix
-description: Diagnostics-driven fix proposal via LSP diagnostics, hover, and codeAction; proposal only, SmartEdit applies the edit.
+description: Turn strict LSP diagnostics into server-backed code-action proposals without mutating files.
 ---
 
 # lsp-fix
 
-From squiggle to fix proposal, no mutation.
+From diagnostic to validated proposal, with SmartEdit owning the write.
 
 ## WHEN
 
-- Compiler/linter diagnostic on a range
-- Need `hover` for type context + `codeAction` for server quickfixes
+- A compiler or language-server diagnostic identifies a failing range.
+- You want quick fixes grounded in the server's current document state.
 
 ## WHEN NOT
 
-- No diagnostic — use `lsp-explore` first
-- Refactor without diagnostic — use `lsp-safe-refactor`
-- Post-fix check — use `lsp-verify`
+- There is no diagnostic. Use `lsp-explore` or `grep` first.
+- You need a non-diagnostic refactor. Use `lsp-safe-refactor`.
+- You are checking an already-applied fix. Use `lsp-verify`.
 
 ## Workflow
 
-1. `lsp diagnostics { path }` (or file diagnostics) for the error range
-2. `lsp hover { path, line, character }` for type context at range
-3. `lsp codeAction { path, line, character }` for server quickfixes
-4. Return proposal: `{ diagnostic, quickfix, range }`. Stop. SmartEdit owns mutation.
+1. `diagnostics` for the file.
+2. Choose the exact diagnostic range.
+3. Optionally `hover` at the range start for type context.
+4. `codeActions` for that range, passing diagnostic context when useful.
+5. Return the selected action/proposal. SmartEdit applies it.
 
 ## Guardrails
 
-- SmartRead obtains semantic proposals; SmartEdit owns mutation. This skill MUST NOT emit edit/write/patch calls.
-- Quote diagnostic verbatim; never silently broaden the fix range beyond the diagnostic.
+- Do not silently broaden the diagnostic range.
+- Check strict envelope status and freshness.
+- Code actions are proposals; SmartRead does not apply them.
+- Positions and ranges are 0-based in negotiated encoding.
 
 ## EXAMPLE
 
-```js
-const diags = await lsp.diagnostics({ path: "src/auth.ts" });
-const at = diags.items[0];
-const fix = await lsp.codeAction({ path: "src/auth.ts", line: at.line, character: at.character });
-return { diagnostic: at.message, quickfixes: fix.items.map((a) => a.title) };
+```json
+{"operation":"diagnostics","path":"src/auth.ts"}
 ```
 
 ## Budgets
 
-3–5 `lsp.*` calls. Proposal object out, zero mutations.
+Diagnostics plus one code-action request is the default; add hover only when it resolves ambiguity.

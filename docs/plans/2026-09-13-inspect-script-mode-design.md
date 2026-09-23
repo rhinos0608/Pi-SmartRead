@@ -4,6 +4,8 @@
 **Status:** Implemented — QuickJS spike complete and results recorded (see Risks section); script mode shipped
 **Owner:** Pi
 
+> Historical implementation snapshot. The shipped contract has since moved to explicit `inspect { mode: "script", script }` routing and the current workspace-protocol version. For current behavior, use `README.md`, `AGENTS.md`, and `src/inspect/inspect-tool.ts`; preserve the dated analysis below as implementation history.
+
 ## Goal
 Let `inspect` accept a bounded, read-only JS script that composes several retrieval/graph/LSP operations (grep, read, file/dir inspect, LSP navigation, graph impact/deadCode/callgraph) inside one tool call, instead of forcing N sequential tool round trips.
 

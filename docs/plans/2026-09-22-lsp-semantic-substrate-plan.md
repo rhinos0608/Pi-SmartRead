@@ -4,6 +4,8 @@
 **Status:** Waves 1–5 landed — real-server suite RS1–RS7 covered opt-in
 **Owner:** Pi-SmartRead
 
+> Historical implementation plan. Status notes inside the plan record intermediate waves and may describe surfaces that were later completed or renamed. Current runtime behavior is authoritative in `README.md`, `AGENTS.md`, `docs/lsp-conformance.md`, and the `src/lsp/` implementation.
+
 ## Goal
 
 Add exactly one model-facing tool, `LSP`, that gives agents direct access to language-server semantics without inheriting the convenience/fallback behavior of `grep`, `read`, or `inspect`.

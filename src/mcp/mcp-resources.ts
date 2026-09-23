@@ -15,10 +15,11 @@ import { findNearClones } from "../ranking/near-clone.js";
 import { discoverFiles } from "../file-discovery.js";
 import { getIndexLockStatus } from "../indexing/index-lock.js";
 import { verifySnapshot } from "../indexing/index-snapshot.js";
+import { RepoMap } from "../repomap.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const VERSION = "0.1.0";
+const VERSION = "0.5.0";
 
 /** Threshold in bytes beyond which a tool result should be offered as a resource link. */
 export const LARGE_RESULT_THRESHOLD = 8 * 1024; // 8 KB
@@ -215,10 +216,18 @@ export async function resolveResource(uri: string): Promise<{ uri: string; mimeT
   }
 
   if (uri === "smartread://repo-map") {
+    const repoMap = new RepoMap(process.cwd());
+    const result = await repoMap.getRepoMap({
+      mapTokens: 4096,
+      compact: true,
+      useImportBased: true,
+      autoFallback: true,
+      verbose: false,
+    });
     return {
       uri,
       mimeType: "text/plain",
-      text: "<repo-map-placeholder>Run the repo_map tool to generate the full repository symbol map.</repo-map-placeholder>",
+      text: result.map || "[No source files found to map.]",
     };
   }
 
@@ -414,8 +423,7 @@ export type ContentItem = { type: "text"; text: string } | { type: "resource_lin
  * If `content` exceeds the `LARGE_RESULT_THRESHOLD`, return a resource_link item
  * instead of embedding it inline. Otherwise, return the inline text item.
  *
- * Use this helper in tool result handlers for large-content tools like
- * `repo_map` and `search`.
+ * Use this helper when a tool result is too large to return inline.
  *
  * @param name  - Resource name used for the URI (`smartread://result/{name}`)
  * @param content - Raw content string

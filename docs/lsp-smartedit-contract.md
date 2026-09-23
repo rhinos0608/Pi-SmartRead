@@ -11,7 +11,7 @@ against it.
   `src/lsp/lsp-executor.ts`. Pipeline: validate, route, gate, prepare,
   issue, normalize, envelope. No fallback server guessing inside the
   executor (hintless pathless request returns `unavailable`).
-- Model-facing surface is exactly one tool: `lsp` (`src/lsp/lsp-tool.ts`,
+- Model-facing surface is exactly one tool: `LSP` (`src/lsp/lsp-tool.ts`,
   registered once via `registerLspTool()` in `src/extension-registration.ts`
   as READ). Flat TypeBox schema, no anyOf; per-operation shape enforced at
   runtime by `validateStrictRequest`; validation failures are tool errors,
@@ -87,13 +87,13 @@ On every envelope, before using a proposal:
    `projectRoot`, `positionEncoding`. Positions in the proposal are in
    `server.positionEncoding` (0-based) — convert before applying to a
    buffer with a different encoding.
-3. `meta.freshness.state`: direct strict-`lsp` consumers MUST use a
+3. `meta.freshness.state`: direct strict-`LSP` consumers MUST use a
    proposal only when `meta.freshness.state === "fresh"`. The
    language-intelligence RPC does not expose the strict envelope; SmartRead
    therefore enforces the same gate before returning any rename/format/
    organize-imports/code-action WorkspaceEdit. `stale`/`unknown` becomes
    RPC error `unconfirmed`, never a usable proposal.
-4. `meta.documentVersion` + `meta.readiness`: for direct strict-`lsp`
+4. `meta.documentVersion` + `meta.readiness`: for direct strict-`LSP`
    use, if `documentVersion` does not match the buffer SmartEdit is about
    to mutate, discard the proposal and re-request. `readiness`, when
    present, is additional indexing evidence, not a substitute for freshness.
@@ -196,7 +196,7 @@ column has no contract yet — do not assume it.
   `isRpcProposalEncodingSupported` in
   `src/language-intelligence/language-intelligence-provider.ts`; verified:
   `test/unit/language-intelligence/language-intelligence-encoding-guard.test.ts`).
-  The direct strict-`lsp` path is unaffected — negotiated encoding stays
+  The direct strict-`LSP` path is unaffected — negotiated encoding stays
   surfaced via `server.positionEncoding`.
 - **Fixed local timeouts (SmartRead-local).** Every provider call passes
   `timeoutMs: 10000` to `runExecutor`

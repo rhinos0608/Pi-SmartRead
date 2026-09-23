@@ -35,7 +35,7 @@ function createGitNotesReadTool(): ToolDefinition {
     name: "git_notes_read",
     label: "git_notes_read",
     description:
-      "[EXPERIMENTAL] Read AI session notes attached to git commits, including prior decisions, constraints, and rejected approaches. Use when continuing work on a branch or inspecting commit-specific context, e.g. { commit: \"HEAD\" } or {} for branch notes. Prefer git log/diff via shell for raw version history, repo_map/search for code discovery, and git_notes_write only when adding durable session context.",
+      "[EXPERIMENTAL] Read AI session notes attached to git commits, including prior decisions, constraints, and rejected approaches. Use when continuing work on a branch or inspecting commit-specific context, e.g. { commit: \"HEAD\" } or {} for branch notes. Prefer git log/diff via shell for raw version history, inspect/grep for code discovery, and git_notes_write only when adding durable session context.",
     parameters: GitNotesReadSchema,
 
     async execute(

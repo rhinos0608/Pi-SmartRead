@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach as _afterEach, beforeEach, describe, expect, it } from "vitest";
 import { validateEmbeddingConfig } from "../../src/config.js";
 
@@ -14,6 +17,8 @@ describe("config: validateEmbeddingConfig", () => {
     delete process.env.PI_SMARTREAD_CHUNK_SIZE;
     delete process.env.PI_SMARTREAD_CHUNK_OVERLAP;
     delete process.env.PI_SMARTREAD_MAX_CHUNKS;
+    delete process.env.PI_SMARTREAD_RERANKER_BASE_URL;
+    delete process.env.PI_SMARTREAD_RERANKER_API_KEY;
   });
 
   it("returns null when baseUrl is missing", () => {
@@ -105,5 +110,40 @@ describe("config: validateEmbeddingConfig", () => {
     expect(cfg!.chunkSizeChars).toBe(1024);
     expect(cfg!.chunkOverlapChars).toBe(128);
     expect(cfg!.maxChunksPerFile).toBe(8);
+  });
+
+  it("loads HyDE and reranker knobs while keeping reranker endpoint credentials env-only", () => {
+    const root = mkdtempSync(join(tmpdir(), "smartread-config-"));
+    try {
+      writeFileSync(join(root, "pi-smartread.config.json"), JSON.stringify({
+        model: "nomic-embed-text",
+        hydeEnabled: true,
+        rerankEnabled: true,
+        externalReranker: {
+          baseUrl: "https://repo-controlled.invalid/v1",
+          apiKey: "repo-secret",
+          model: "rerank-test",
+          timeoutMs: 1234,
+          maxDocuments: 7,
+        },
+      }));
+      process.env.PI_SMARTREAD_EMBEDDING_BASE_URL = "http://localhost:11434/v1";
+      process.env.PI_SMARTREAD_RERANKER_BASE_URL = "http://localhost:11435/v1";
+      process.env.PI_SMARTREAD_RERANKER_API_KEY = "env-secret";
+
+      const cfg = validateEmbeddingConfig(root);
+      expect(cfg).not.toBeNull();
+      expect(cfg!.hydeEnabled).toBe(true);
+      expect(cfg!.rerankEnabled).toBe(true);
+      expect(cfg!.externalReranker).toEqual({
+        baseUrl: "http://localhost:11435/v1",
+        apiKey: "env-secret",
+        model: "rerank-test",
+        timeoutMs: 1234,
+        maxDocuments: 7,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

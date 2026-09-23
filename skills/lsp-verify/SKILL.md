@@ -1,45 +1,42 @@
 ---
 name: lsp-verify
-description: Post-edit verification via LSP definition, references, and diagnostics to confirm a change landed clean.
+description: Verify an applied change with fresh strict LSP diagnostics, definition, and references.
 ---
 
 # lsp-verify
 
-Confirm the edit, don't assume it.
+Re-check semantics after SmartEdit changes the files.
 
 ## WHEN
 
-- After SmartEdit applies rename/refactor/fix
-- Need fresh `diagnostics` on touched files
-- Need `definition`/`references` re-check that scope matches proposal
+- SmartEdit applied a rename, refactor, or fix.
+- You need fresh diagnostics or semantic navigation on the changed state.
 
 ## WHEN NOT
 
-- Pre-edit scoping — use `lsp-impact`/`lsp-rename`/`lsp-fix`
-- No edit happened — nothing to verify
-- Broad repo health — use `inspect` directory mode
+- No edit happened.
+- You are still scoping a future change. Use `lsp-impact`, `lsp-rename`, or `lsp-fix`.
 
 ## Workflow
 
-1. `lsp diagnostics { path }` on each touched file — zero new errors?
-2. `lsp definition { path, line, character }` at new anchor — resolves?
-3. `lsp references { path, line, character }` — count matches proposal scope?
-4. Report pass/fail with verbatim diagnostics; on fail, new proposal, not a silent retry loop
+1. `diagnostics` on each touched file.
+2. Re-run `goToDefinition` at the new anchor when resolution matters.
+3. Re-run `findReferences` when scope/count matters.
+4. Report the strict statuses and any new diagnostics. Do not silently retry mutation.
 
 ## Guardrails
 
-- Read-only. No edit/write/patch from this skill — verification only, even on failure.
-- Cap at one verify pass per edit; second failure goes back to owner with evidence.
+- Verification is read-only even when it fails.
+- Require fresh results when judging the post-edit state.
+- Positions are 0-based in negotiated encoding.
+- One failed verification returns evidence to the mutation owner.
 
 ## EXAMPLE
 
-```js
-const diags = await lsp.diagnostics({ path: "src/auth.ts" });
-const def = await lsp.definition({ path: "src/auth.ts", line: 42, character: 10 });
-const refs = await lsp.references({ path: "src/auth.ts", line: 42, character: 10 });
-return { clean: diags.items.length === 0, resolves: def.items.length > 0, usages: refs.items.length };
+```json
+{"operation":"diagnostics","path":"src/auth.ts","timeoutMs":5000}
 ```
 
 ## Budgets
 
-3–5 `lsp.*` calls per touched file. Fail loud with evidence.
+One diagnostic pass plus only the semantic checks needed for the edit's acceptance criteria.

@@ -1,45 +1,44 @@
 ---
 name: lsp-impact
-description: Blast-radius check via LSP references and call hierarchy before changing a symbol.
+description: Measure change blast radius with strict LSP references, implementation lookup, and call hierarchy.
 ---
 
 # lsp-impact
 
-Find every caller before touching shared code.
+Map semantic dependents before changing shared code.
 
 ## WHEN
 
-- Changing shared function/class/method signature
-- Need caller/callee chains (`incomingCalls`/`outgoingCalls`)
-- Need full usage list (`references`) for safe edit scope
+- A function, class, interface, or method signature may change.
+- You need references, implementations, or caller/callee chains.
 
 ## WHEN NOT
 
-- Single local variable — plain `read` suffices
-- Just need definition — use `lsp-explore`
-- Post-edit check — use `lsp-verify`
+- The change is file-local and already understood.
+- You only need a definition. Use `lsp-explore`.
+- You are verifying an edit that already landed. Use `lsp-verify`.
 
 ## Workflow
 
-1. `lsp references { path, line, character }` for all usages
-2. `lsp prepareCallHierarchy { path, line, character }`, then `incomingCalls`/`outgoingCalls` for chains
-3. `lsp implementation { path, line, character }` for interface dispatch targets
-4. Summarize scope: files + call depth, hand to edit owner
+1. `findReferences` on the anchor.
+2. `goToImplementation` when interface/abstract dispatch matters.
+3. `prepareCallHierarchy` on the anchor.
+4. Pass the returned hierarchy `item` to `incomingCalls` or `outgoingCalls`.
+5. Summarize touched files and semantic edges before mutation.
 
 ## Guardrails
 
-- Read-only. No edit/write/patch from this skill.
-- Cap hierarchy expansion: depth 1–2 default, depth 3+ only with explicit reason.
+- Use `LSP` strict operations, not legacy `lsp.foo(...)` syntax.
+- Positions are 0-based in negotiated encoding.
+- `incomingCalls`/`outgoingCalls` require an `item`, not path+position.
+- Read-only. SmartEdit owns any mutation.
 
 ## EXAMPLE
 
-```js
-const refs = await lsp.references({ path: "src/auth.ts", line: 42, character: 10 });
-const hier = await lsp.prepareCallHierarchy({ path: "src/auth.ts", line: 42, character: 10 });
-const callers = await lsp.incomingCalls({ path: "src/auth.ts", line: 42, character: 10 });
-return { usageCount: refs.items.length, callers: callers.items };
+```json
+{"operation":"findReferences","path":"src/auth.ts","position":{"line":41,"character":9},"includeDeclaration":true}
 ```
 
 ## Budgets
 
-5–8 `lsp.*` calls. Degraded result with partial caller list over timeout, never throw.
+Start with references plus one hierarchy direction. Expand only when the first hop shows meaningful fan-out.

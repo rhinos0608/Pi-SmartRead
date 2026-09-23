@@ -1,9 +1,9 @@
 /**
  * Script-mode shared types.
  *
- * Self-contained engine for the planned `inspect({ script })` feature.
- * Schema/tool wiring is a separate follow-up — nothing here touches
- * `src/inspect/inspect-tool.ts` or `executeInspectV4`'s dispatch.
+ * Self-contained engine for the implemented `inspect({ mode: "script", script })` feature.
+ * Tool wiring lives in `src/inspect/inspect-tool.ts`; this module keeps the
+ * execution contract independent from the outer inspect dispatch.
  */
 import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import type { ContextGraph } from "../context-graph.js";

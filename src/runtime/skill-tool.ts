@@ -306,7 +306,7 @@ export function createSkillTool(): ToolDefinition {
   return {
     name: "skill",
     label: "skill",
-    description: "Discover and read Pi Agent Skills: reusable procedural instructions for tasks like debugging, security review, frontend design, or documentation. Use before specialized work, e.g. { action: \"search\", query: \"diagnose flaky test\" } or { name: \"security-review\" }. Prefer repo tools like search, read, and repo_map for project source code; skills explain how to work, not what the current code contains.",
+    description: "Discover and read Pi Agent Skills: reusable procedural instructions for tasks like debugging, security review, frontend design, or documentation. Use before specialized work, e.g. { action: \"search\", query: \"diagnose flaky test\" } or { name: \"security-review\" }. Prefer repo tools like grep, read, and inspect for project source code; skills explain how to work, not what the current code contains.",
     parameters: SkillToolSchema as Record<string, unknown>,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const input = (params ?? {}) as SkillToolInput;

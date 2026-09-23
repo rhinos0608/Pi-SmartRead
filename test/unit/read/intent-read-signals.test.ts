@@ -120,6 +120,56 @@ describe("intent_read: structural reranker integration", () => {
     }
   });
 
+  it("uses the configured external reranker in the intent-ranking path", async () => {
+    const root = mkdtempSync(join(tmpdir(), "intent-read-external-rerank-"));
+    const originalRerankerBaseUrl = process.env.PI_SMARTREAD_RERANKER_BASE_URL;
+    try {
+      writeFileSync(join(root, "pi-smartread.config.json"), JSON.stringify({
+        model: "test",
+        rerankEnabled: true,
+        externalReranker: { model: "rerank-test", maxDocuments: 2 },
+      }));
+      process.env.PI_SMARTREAD_RERANKER_BASE_URL = "http://localhost:11435/v1";
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ ranked_indices: [1, 0] }),
+      }));
+
+      const fileA = join(root, "a.ts");
+      const fileB = join(root, "b.ts");
+      writeFileSync(fileA, "export function auth() { return true; }");
+      writeFileSync(fileB, "export function authorize() { return true; }");
+
+      const tool = createIntentReadTool(
+        () => makeReadTool({ [fileA]: readFileSync(fileA, "utf-8"), [fileB]: readFileSync(fileB, "utf-8") }) as any,
+        makeEmbedder([[1, 0], [1, 0], [1, 0]]),
+      );
+
+      const result = await runIntentRead(
+        tool,
+        { query: "auth", files: [{ path: fileA }, { path: fileB }], topK: 2 },
+        root,
+        "id",
+      );
+
+      const details = result.details as any;
+      expect(details.reranking).toMatchObject({
+        status: "ok",
+        strategy: "external",
+        candidateCount: 2,
+      });
+      expect(fetch).toHaveBeenCalledWith(
+        "http://localhost:11435/v1/rerank",
+        expect.objectContaining({ method: "POST" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+      if (originalRerankerBaseUrl === undefined) delete process.env.PI_SMARTREAD_RERANKER_BASE_URL;
+      else process.env.PI_SMARTREAD_RERANKER_BASE_URL = originalRerankerBaseUrl;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not include reranking metadata when rerankEnabled is false", async () => {
     const tool = createIntentReadTool(
       () => makeReadTool({ "/a": "auth code" }) as any,

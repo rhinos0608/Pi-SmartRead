@@ -1,6 +1,6 @@
 ---
 name: lsp-explore
-description: First contact with unfamiliar code via LSP definition, hover, and workspace symbols before reading files.
+description: First contact with unfamiliar code via strict LSP symbols, definition, and hover before reading files.
 ---
 
 # lsp-explore
@@ -9,37 +9,35 @@ Resolve what a symbol is before reading around it.
 
 ## WHEN
 
-- Unfamiliar symbol, need def + docs + type fast
-- Need jump target (`definition`) before opening file
-- Need candidate locations (`workspaceSymbols`) before grep
+- You need a definition, type/docs, or workspace symbol candidates.
+- You want semantic navigation before broader grep/read exploration.
 
 ## WHEN NOT
 
-- Already know file/line — use plain `read`
-- Need all usages — use `lsp-impact`
-- Need file outline — use `lsp-local-symbols`
+- You already know the file and lines. Use `read`.
+- You need all usages. Use `lsp-impact`.
+- You only need a file outline. Use `lsp-local-symbols`.
 
 ## Workflow
 
-1. `lsp workspaceSymbols { query }` for candidate locations
-2. `lsp definition { path, line, character }` for jump target
-3. `lsp hover { path, line, character }` for type/docs
-4. `read` exact jump target only
+1. `LSP { operation: "workspaceSymbols", query }` to locate candidates.
+2. `LSP { operation: "goToDefinition", path, position }` for the jump target.
+3. `LSP { operation: "hover", path, position }` for type/docs.
+4. `read` the exact target when source text is needed.
 
 ## Guardrails
 
-- Read-only. No edit/write/patch from this skill.
-- Positions are 1-based line, 1-based character per tool contract.
+- The model-facing tool name is `LSP`.
+- `position` is 0-based in the returned server's negotiated encoding.
+- Check the strict envelope `status`; `unavailable` is not a guessed fallback.
+- Read-only. No edit/write/patch calls.
 
 ## EXAMPLE
 
-```js
-const sym = await lsp.workspaceSymbols({ query: "handleAuth" });
-const def = await lsp.definition({ path: "src/auth.ts", line: 42, character: 10 });
-const docs = await lsp.hover({ path: "src/auth.ts", line: 42, character: 10 });
-return { sym: sym.items, def: def.items, docs };
+```json
+{"operation":"goToDefinition","path":"src/auth.ts","position":{"line":41,"character":9}}
 ```
 
 ## Budgets
 
-3–5 `lsp.*` calls. Stop at first exact definition hit.
+Use 2-4 LSP calls, then read only the exact source you need.
