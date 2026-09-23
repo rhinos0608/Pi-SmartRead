@@ -148,7 +148,7 @@ Examples:
 
 Pi-SmartRead exposes language intelligence over the event-bus RPC channel `pi.workspace.language_intelligence.rpc` (`RPC_CHANNELS.languageIntelligence`). Handler: `createLanguageIntelligenceProvider(bus)` in `src/language-intelligence/language-intelligence-provider.ts`.
 
-All methods that return edits validate via `validateWorkspaceEdit()` and enforce a 10s budget (`withBudget`).
+All methods that return edits validate via `validateWorkspaceEdit()` (UTF-16 positions, fail-closed on non-UTF-16 negotiated encoding) and clamp per-call deadlines into the protocol envelope [250ms, 30000ms] (default 10s; provider passes the exact clamped value to the executor; post-edit diagnostics use a 4s service / 5s transport budget).
 
 | Method | Request | Response |
 |---|---|---|
