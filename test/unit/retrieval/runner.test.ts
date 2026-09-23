@@ -3,6 +3,8 @@
  * the minimal persistentIndexChannel projection used by query-retrieval.
  */
 import { describe, expect, it } from "vitest";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type {
   ChannelContext,
   ChannelName,
@@ -115,7 +117,9 @@ describe("persistentIndexChannel", () => {
     const searched: Array<{ query: string; options: unknown }> = [];
     const channel = persistentIndexChannel(
       {
-        root: "/root",
+        // Platform-native root: resolve() spells POSIX "/root" as a
+        // drive-letter path on Windows, so hardcoding breaks the projection.
+        root: join(tmpdir(), "runner-root"),
         async search(query: string, options: { topK: number; pathPrefix?: string }) {
           searched.push({ query, options });
           return [
@@ -138,7 +142,7 @@ describe("persistentIndexChannel", () => {
     expect(result.strategy).toBe("persistent-index");
     expect(result.candidates).toEqual([
       {
-        file: "/root/src/auth.ts",
+        file: resolve(join(tmpdir(), "runner-root"), "src/auth.ts"),
         line: 3,
         endLine: 7,
         name: "const",

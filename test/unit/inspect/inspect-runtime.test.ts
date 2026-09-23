@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   canonicalizeNavigationItems,
@@ -57,7 +59,7 @@ describe("canonicalizeNavigationItems", () => {
     expect((out[0] as any).uri).toMatch(/^file:\/\//);
   });
 
-  it.each(["/tmp/a#b.ts", "/tmp/a%b.ts", "/tmp/a b.ts"])("escapes %s and round-trips via fileURLToPath", (p) => {
+  it.each(["a#b.ts", "a%b.ts", "a b.ts"].map((n) => join(tmpdir(), n)))("escapes %s and round-trips via fileURLToPath", (p) => {
     const out = canonicalizeSingleNavItem({ uri: pathToFileURL(p).href, range: RANGE }) as { uri: string };
     expect(out.uri).toBe(pathToFileURL(p).href);
     expect(fileURLToPath(out.uri)).toBe(p);

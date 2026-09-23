@@ -75,6 +75,25 @@ function asDiagnostics(raw: unknown): LSPDiagnostic[] | null {
   return items as LSPDiagnostic[];
 }
 
+/**
+ * file: URI or absolute path → filesystem path. fileURLToPath throws on
+ * Windows for drive-less URIs (file:///tmp/x.ts), so fall back to the
+ * decoded URL pathname — it resolves exactly like "/tmp/x.ts" and keeps
+ * absolute-path and URI lookups on one cache key on all platforms.
+ */
+function toFsPath(uriOrPath: string): string {
+  if (!uriOrPath.startsWith("file:")) return uriOrPath;
+  try {
+    return fileURLToPath(uriOrPath);
+  } catch {
+    try {
+      return decodeURIComponent(new URL(uriOrPath).pathname);
+    } catch {
+      return uriOrPath;
+    }
+  }
+}
+
 export class LspDiagnosticsBroker {
   private push = new Map<string, PushEntry>();
   private lastPull = new Map<string, PullEntry>();
@@ -85,14 +104,11 @@ export class LspDiagnosticsBroker {
   constructor(private readonly deps: BrokerDeps) {}
 
   private keyOf(filePath: string): string {
-    return resolve(filePath);
+    return resolve(toFsPath(filePath));
   }
 
   private pullKey(uriOrPath: string): string {
-    try {
-      if (uriOrPath.startsWith("file:")) return resolve(fileURLToPath(uriOrPath));
-    } catch (err) { void err; }
-    return resolve(uriOrPath);
+    return resolve(toFsPath(uriOrPath));
   }
 
   /** FROZEN: cached last-pull state by resolved path (absolute path or file:// URI). Copy or null. */

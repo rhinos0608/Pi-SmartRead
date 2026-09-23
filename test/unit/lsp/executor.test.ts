@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { cachedManager, evictManagerForRoot, sessionStore } from "../../../src/lsp/lsp-manager.js";
 import { canonicalProjectRoot } from "../../../src/lsp/lsp-session-key.js";
 import { executeLspOperation, type ExecutorConnection } from "../../../src/lsp/lsp-executor.js";
@@ -98,14 +99,14 @@ describe("executor", () => {
         return { contents: "x" };
       },
     });
-    const workspace = "/tmp/lsp-executor-workspace";
+    const workspace = join(tmpdir(), "lsp-executor-workspace");
     const env = await executeLspOperation(
       { operation: "hover", path: "src/a.ts", position: { line: 0, character: 0 }, workspace },
       { getManager: () => mgr(c), cwd: "/" },
     );
     expect(env.status).toBe("ok");
     expect(preparedPath).toBe(join(workspace, "src", "a.ts"));
-    expect(requestUri).toBe("file:///tmp/lsp-executor-workspace/src/a.ts");
+    expect(requestUri).toBe(pathToFileURL(join(workspace, "src", "a.ts")).href);
   });
 
   it("path result metadata reports fresh vs stale synchronized content", async () => {
@@ -169,7 +170,9 @@ describe("executor", () => {
       leases: 0,
       lastUsed: Date.now(),
     });
-    const manager = cachedManager(ROOT);
+    // Executor resolves cwd before cachedManager; use the same spelling or the
+    // spy lands on a different manager (drive-letter root on Windows).
+    const manager = cachedManager(resolve(ROOT));
     const getServer = vi.spyOn(manager, "getServer").mockResolvedValue(c as never);
 
     try {
@@ -186,7 +189,7 @@ describe("executor", () => {
     } finally {
       getServer.mockRestore();
       sessionStore.delete(key);
-      await evictManagerForRoot(ROOT);
+      await evictManagerForRoot(resolve(ROOT));
     }
   });
 
@@ -516,9 +519,13 @@ describe("executor", () => {
   });
   it("affinity notes success after ok", async () => {
     const affinity = new LspAffinity();
-    const c = conn({ getCapabilityRegistry: () => ({ can: () => true }), requestImpl: async () => [{ uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }] });
+    // Platform-round-trippable URI: drive-less file:///a.ts is unresolvable on
+    // Windows and fail-closed canonicalization would drop it (no ok, no note).
+    const locUri = pathToFileURL(join(tmpdir(), "affinity-note.ts")).href;
+    const c = conn({ getCapabilityRegistry: () => ({ can: () => true }), requestImpl: async () => [{ uri: locUri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }] });
     await executeLspOperation({ operation: "goToDefinition", path: "a.ts", position: { line: 0, character: 0 } }, { getManager: () => mgr(c), cwd: ROOT, affinity });
-    expect(affinity.preferred(`${ROOT}::typescript`, ["ts", "other"])).toBe("ts");
+    // Executor scope-keys on the resolved root (drive-letter root on Windows).
+    expect(affinity.preferred(`${resolve(ROOT)}::typescript`, ["ts", "other"])).toBe("ts");
   });
   it("error status with code/message on transport failure", async () => {
     const c = conn({ getCapabilityRegistry: () => ({ can: () => true }), requestImpl: async () => { throw new Error("boom-wire"); } });
