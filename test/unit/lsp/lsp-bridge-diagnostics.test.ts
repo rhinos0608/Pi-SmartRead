@@ -53,7 +53,10 @@ function makeFakeProc(): FakeProc {
         try {
           const msg = JSON.parse(content);
           if (msg.method === "initialize" && msg.id !== undefined) {
-            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: {} } }));
+            // Advertise definitionProvider: bridge delegates to the canonical
+            // executor, which capability-gates navigation. Conn-level tests
+            // below never consult this cap, so they are unaffected.
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true } } }));
           }
         } catch { /* ignore */ }
       }
@@ -70,6 +73,7 @@ vi.mock("node:child_process", () => ({
 
 const { spawn } = await import("node:child_process");
 const { LSPConnection, getLSPBridge, resetLSPBridge, shutdownAllManagers, invalidateResolvedServerCacheForRoot } = await import("../../../src/lsp/lsp-bridge.js");
+const { _clearSessionStore } = await import("../../../src/lsp/lsp-manager.js");
 
 async function makeConnection(root: string): Promise<{ conn: InstanceType<typeof LSPConnection>; proc: FakeProc }> {
   const conn = new LSPConnection();
@@ -113,8 +117,9 @@ describe("LSPConnection diagnostics plumbing", () => {
     invalidateResolvedServerCacheForRoot(root);
     rmSync(root, { recursive: true, force: true });
     vi.clearAllMocks();
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc());
     await shutdownAllManagers();
-    resetLSPBridge();
+    resetLSPBridge(); _clearSessionStore();
   });
 
   it("sends didOpen (not didChange) on first touch of an unopened document", async () => {
@@ -206,27 +211,27 @@ describe("LSPConnection diagnostics plumbing", () => {
   it("caps the accumulated stdout buffer and force-closes the connection on overflow", async () => {
     const { conn, proc } = await makeConnection(root);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // Feed chunks with no complete "Content-Length" message so they keep
+      // accumulating in the internal buffer, well past the 50MB cap.
+      const chunk = "x".repeat(1024 * 1024); // 1MB
+      for (let i = 0; i < 51; i++) {
+        expect(() => proc.stdout.emit("data", Buffer.from(chunk, "utf-8"))).not.toThrow();
+      }
 
-    // Feed chunks with no complete "Content-Length" message so they keep
-    // accumulating in the internal buffer, well past the 50MB cap.
-    const chunk = "x".repeat(1024 * 1024); // 1MB
-    for (let i = 0; i < 51; i++) {
-      expect(() => proc.stdout.emit("data", Buffer.from(chunk, "utf-8"))).not.toThrow();
+      expect(errorSpy).toHaveBeenCalled();
+      expect(proc.kill).toHaveBeenCalled();
+
+      // Connection should now be closed: further requests reject with
+      // LspServerExitError immediately instead of hanging or resolving null.
+      await expect(conn.request("workspace/symbol", { query: "x" })).rejects.toThrow("LSP server exited");
+    } finally {
+      errorSpy.mockRestore();
     }
-
-    expect(errorSpy).toHaveBeenCalled();
-    expect(proc.kill).toHaveBeenCalled();
-
-    // Connection should now be closed: further requests resolve to null
-    // immediately instead of hanging or throwing.
-    const result = await conn.request("workspace/symbol", { query: "x" });
-    expect(result).toBeNull();
-
-    errorSpy.mockRestore();
   });
 
   it("isAvailable reflects actual cached managers, not the dead __default__ sentinel", async () => {
-    resetLSPBridge();
+    resetLSPBridge(); _clearSessionStore();
     const bridge = await getLSPBridge();
     expect(bridge).not.toBeNull();
 
@@ -283,7 +288,7 @@ describe("LSPConnection diagnostics plumbing", () => {
 describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
   let root: string;
   beforeEach(() => { installFakeServerBin(); root = mkdtempSync(join(tmpdir(), "lsp-bridge-outcome-")); });
-  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
+  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc()); await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore(); });
 
   it("goToDefinitionOutcome: 1-based public pos translated to 0-based internally", async () => {
     // fake server echoes position so we can assert wire format
@@ -362,12 +367,12 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     expect(empty.status).toBe("empty");
     mode = "confirmed";
     // need fresh manager cache for new proc mode -> reset bridge to pick up new mock
-    await shutdownAllManagers(); resetLSPBridge();
+    await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore();
     const bridge2 = await getLSPBridge();
     const conf = await (bridge2 as any).goToDefinitionOutcome(filePath, 1, 1, root, { timeoutMs: 800 });
     expect(conf.status).toBe("confirmed");
     mode = "hang";
-    await shutdownAllManagers(); resetLSPBridge();
+    await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore();
     const bridge3 = await getLSPBridge();
     const degraded = await (bridge3 as any).goToDefinitionOutcome(filePath, 1, 1, root, { timeoutMs: 120 });
     expect(degraded.status).toBe("degraded");
@@ -417,11 +422,21 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
       void proc;
       const orig = proc.stdin.write as any;
       proc.stdin.write = vi.fn((data: string) => {
-        orig(data);
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (!m) return true;
         const len = parseInt(m[1]!, 10);
         const body = String(data).slice(m[0].length, m[0].length + len);
+        try {
+          const msg = JSON.parse(body);
+          if (msg.method === "initialize" && msg.id !== undefined) {
+            // Advertise pull support: bridge delegates to the canonical
+            // executor, which capability-gates the diagnostics op. Pull itself
+            // goes unanswered here (falls back to push after the op timeout).
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true } } }));
+            return true;
+          }
+        } catch {}
+        orig(data);
         try {
           const msg = JSON.parse(body);
           if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
@@ -441,19 +456,33 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     expect(unconfirmed.diagnostics).toEqual([]);
 
     // Case 2: confirmed-empty via publishDiagnostics empty set -> empty
-    await shutdownAllManagers(); resetLSPBridge();
+    await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore();
     (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
       const proc = makeFakeProc();
       void proc;
       const orig = proc.stdin.write as any;
       proc.stdin.write = vi.fn((data: string) => {
-        orig(data);
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (!m) return true;
         const len = parseInt(m[1]!, 10);
         const body = String(data).slice(m[0].length, m[0].length + len);
         try {
           const msg = JSON.parse(body);
+          if (msg.method === "initialize" && msg.id !== undefined) {
+            // Advertise pull support: bridge delegates to the canonical
+            // executor, which capability-gates the diagnostics op.
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true } } }));
+            return true;
+          }
+        } catch {}
+        orig(data);
+        try {
+          const msg = JSON.parse(body);
+          if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
+            // Confirmed-empty via pull: honest executor reports empty only on
+            // confirmed evidence. Answer pull with empty items (not unanswered).
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { kind: "full", items: [] } }));
+          }
           if (msg.method === "textDocument/didOpen") {
             const uri = msg.params?.textDocument?.uri;
             queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: [] } }));
@@ -493,16 +522,21 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     });
     // Ensure pull path is reached: make diagnostic pull unsupported via error not used, but our spy overrides to null;
     // need poll to have no receipt and no diags, so keep default fake proc with no publishDiagnostics.
-    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc() as any);
-    await shutdownAllManagers(); resetLSPBridge();
-    let bridge: any = await getLSPBridge();
+    let bridge: any;
     let filePath = join(root, "closed-null.ts");
-    writeFileSync(filePath, "export const a = 1;");
-    installFakeServerBin();
-    const degraded = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
-    expect(degraded.status).toBe("degraded");
-    expect(degraded.diagnostics).toEqual([]);
-    spy.mockRestore();
+    let degraded: any;
+    try {
+      (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc() as any);
+      await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore();
+      bridge = await getLSPBridge();
+      writeFileSync(filePath, "export const a = 1;");
+      installFakeServerBin();
+      degraded = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
+      expect(degraded.status).toBe("degraded");
+      expect(degraded.diagnostics).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
     // Now verify successful empty pull (non-null) still yields empty, not degraded
     const { LSPConnection: LSPConn2 } = await import("../../../src/lsp/lsp-bridge.js");
     const orig2 = (LSPConn2.prototype as any).request;
@@ -510,16 +544,170 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
       if (method === "textDocument/diagnostic") return Promise.resolve({ items: [] });
       return (orig2 as any).call(this, method, params);
     });
-    await shutdownAllManagers(); resetLSPBridge();
-    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc() as any);
-    bridge = await getLSPBridge();
-    filePath = join(root, "closed-success-empty.ts");
-    writeFileSync(filePath, "export const b = 1;");
+    let empty: any;
+    try {
+      await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore();
+      (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        const proc = makeFakeProc() as any;
+        const orig = proc.stdin.write as any;
+        // Advertise pull support via initialize: bridge delegates to the canonical
+        // executor, which capability-gates the diagnostics op on the handshake
+        // registry (direct serverCapabilities mutation below only feeds the broker).
+        proc.stdin.write = vi.fn((data: string) => {
+          const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+          if (m) {
+            const len = parseInt(m[1]!, 10);
+            const body = String(data).slice(m[0].length, m[0].length + len);
+            try {
+              const msg = JSON.parse(body);
+              if (msg.method === "initialize" && msg.id !== undefined) {
+                queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true } } }));
+                return true;
+              }
+            } catch {}
+          }
+          return orig(data);
+        });
+        return proc;
+      });
+      bridge = await getLSPBridge();
+      filePath = join(root, "closed-success-empty.ts");
+      writeFileSync(filePath, "export const b = 1;");
+      installFakeServerBin();
+      // Capability-gated pull: advertise diagnosticProvider so broker.pullDocument is supported (frozen API: unsupported=>confirmed:false).
+      const { acquireSession } = await import("../../../src/lsp/lsp-manager.js");
+      const { detectLanguageFromExtension } = await import("../../../src/lsp/lsp-types.js");
+      const session = await acquireSession(root, detectLanguageFromExtension(filePath) ?? "typescript");
+      (session?.conn as any).serverCapabilities = { diagnosticProvider: true };
+      empty = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
+      expect(empty.status).toBe("empty");
+      expect(empty.diagnostics).toEqual([]);
+    } finally {
+      spy2.mockRestore();
+    }
+  });
+
+  it("pull unchanged with prior pull replays cached diagnostics as confirmed (false-clean)", async () => {
+    const prior = [{ message: "prior", severity: 1 }];
+    let pullMode: "full" | "unchanged" = "full";
+    const seenParams: unknown[] = [];
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      const proc = makeFakeProc();
+      const orig = proc.stdin.write as any;
+      proc.stdin.write = vi.fn((data: string) => {
+        const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+        if (m) {
+          const len = parseInt(m[1]!, 10);
+          const body = String(data).slice(m[0].length, m[0].length + len);
+          try {
+            const init = JSON.parse(body);
+            if (init.method === "initialize" && init.id !== undefined) {
+              // Advertise pull support via initialize (executor capability gate
+              // reads the handshake registry; broker reads live caps below).
+              queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: init.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true } } }));
+              return true;
+            }
+          } catch {}
+        }
+        orig(data);
+        if (!m) return true;
+        const retryLen = parseInt(m[1]!, 10);
+        const retryBody = String(data).slice(m[0].length, m[0].length + retryLen);
+        try {
+          const msg = JSON.parse(retryBody);
+          if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
+            seenParams.push(msg.params);
+            if (pullMode === "full") {
+              queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { kind: "full", items: prior, resultId: "r1" } }));
+            } else {
+              queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { kind: "unchanged", resultId: "r1" } }));
+            }
+          }
+          if (msg.method === "textDocument/didOpen" && pullMode === "full") {
+            const uri = msg.params?.textDocument?.uri;
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: [] } }));
+          }
+        } catch {}
+        return true;
+      });
+      return proc as any;
+    });
+    let bridge: any;
+    { await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore(); bridge = await getLSPBridge(); }
+    const filePath = join(root, "unchanged-prior.ts");
+    writeFileSync(filePath, "export const a = 1;");
     installFakeServerBin();
-    const empty = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
-    expect(empty.status).toBe("empty");
-    expect(empty.diagnostics).toEqual([]);
-    spy2.mockRestore();
+    const { acquireSession } = await import("../../../src/lsp/lsp-manager.js");
+    const { detectLanguageFromExtension } = await import("../../../src/lsp/lsp-types.js");
+    const session = await acquireSession(root, detectLanguageFromExtension(filePath) ?? "typescript");
+    (session?.conn as any).serverCapabilities = { diagnosticProvider: true };
+    const broker = (session?.conn as any).getDiagnosticsBroker();
+    // Seed prior pull directly through the broker (populates lastPull + resultId).
+    const { pathToFileURL: toFileUrl } = await import("node:url");
+    const { resolve: resolvePath } = await import("node:path");
+    const seeded = await broker.pullDocument(toFileUrl(resolvePath(filePath)).href);
+    expect(seeded.confirmed).toBe(true);
+    expect(seeded.diagnostics).toEqual(prior);
+    // Now the server reports unchanged: broker must replay cached diagnostics as confirmed.
+    pullMode = "unchanged";
+    // Bridge refresh clears stale push state up front (pull cache preserved for unchanged replay).
+    const r = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
+    expect(r.status).toBe("confirmed");
+    expect(r.diagnostics).toEqual(prior);
+    // previousResultId sourced from broker.getPullState and passed through on the wire.
+    expect(broker.getPullState(filePath)?.resultId).toBe("r1");
+    expect(seenParams.at(-1)).toMatchObject({ previousResultId: "r1" });
+  });
+
+  it("pull unchanged without prior pull stays degraded (never empty)", async () => {
+    const seenParams: unknown[] = [];
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      const proc = makeFakeProc();
+      const orig = proc.stdin.write as any;
+      proc.stdin.write = vi.fn((data: string) => {
+        const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
+        if (m) {
+          const len = parseInt(m[1]!, 10);
+          const body = String(data).slice(m[0].length, m[0].length + len);
+          try {
+            const init = JSON.parse(body);
+            if (init.method === "initialize" && init.id !== undefined) {
+              // Advertise pull support via initialize (executor capability gate
+              // reads the handshake registry; broker reads live caps below).
+              queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: init.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true } } }));
+              return true;
+            }
+          } catch {}
+        }
+        orig(data);
+        if (!m) return true;
+        const retryLen = parseInt(m[1]!, 10);
+        const retryBody = String(data).slice(m[0].length, m[0].length + retryLen);
+        try {
+          const msg = JSON.parse(retryBody);
+          if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
+            seenParams.push(msg.params);
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { kind: "unchanged", resultId: "r1" } }));
+          }
+        } catch {}
+        return true;
+      });
+      return proc as any;
+    });
+    await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore();
+    const bridge: any = await getLSPBridge();
+    const filePath = join(root, "unchanged-noprior.ts");
+    writeFileSync(filePath, "export const a = 1;");
+    installFakeServerBin();
+    const { acquireSession } = await import("../../../src/lsp/lsp-manager.js");
+    const { detectLanguageFromExtension } = await import("../../../src/lsp/lsp-types.js");
+    const session = await acquireSession(root, detectLanguageFromExtension(filePath) ?? "typescript");
+    (session?.conn as any).serverCapabilities = { diagnosticProvider: true };
+    const r = await bridge.getFreshDiagnosticsOutcome(filePath, root, { timeoutMs: 800, waitMs: 80 });
+    expect(r.status).toBe("degraded");
+    expect(r.diagnostics).toEqual([]);
+    // Null previousResultId is omitted from the wire params, not sent as null.
+    expect(seenParams.at(-1)).not.toMatchObject({ previousResultId: expect.anything() });
   });
 
   it("status enum additive: needs-triage does not break consumer", async () => {
@@ -538,14 +726,14 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
 describe("convertWorkspaceEdit characterization (via rename)", () => {
   let root: string;
   beforeEach(() => { installFakeServerBin(); root = mkdtempSync(join(tmpdir(), "lsp-wsedit-char-")); });
-  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
+  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc()); await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore(); });
 
   function enableRename(conn: InstanceType<typeof LSPConnection>): void {
     (conn as unknown as Record<string, unknown>).serverCapabilities = { renameProvider: true };
   }
 
-  function stubRenameResult(conn: InstanceType<typeof LSPConnection>, canned: unknown): void {
-    vi.spyOn(conn, "request").mockImplementation(async (method: string) => {
+  function stubRenameResult(conn: InstanceType<typeof LSPConnection>, canned: unknown): { mockRestore(): void } {
+    return vi.spyOn(conn, "request").mockImplementation(async (method: string) => {
       if (method === "textDocument/rename") return canned;
       throw new Error(`unexpected LSP request in characterization test: ${method}`);
     });
@@ -569,12 +757,16 @@ describe("convertWorkspaceEdit characterization (via rename)", () => {
   it("WS-RESOURCE-OPS: create/rename/delete resource operations are rejected", async () => {
     const { conn } = await makeConnection(root);
     enableRename(conn);
-    const filePath = join(root, "a.ts");
-    const uri = pathToFileURL(resolve(filePath)).href;
-    for (const kind of ["create", "rename", "delete"]) {
-      vi.restoreAllMocks();
-      stubRenameResult(conn, { documentChanges: [{ kind, uri, ...(kind === "create" ? { newUri: uri } : {}) }] });
-      await expect(conn.rename(filePath, 0, 0, "newName")).resolves.toBeNull();
+    const stubs: Array<{ mockRestore(): void }> = [];
+    try {
+      const filePath = join(root, "a.ts");
+      const uri = pathToFileURL(resolve(filePath)).href;
+      for (const kind of ["create", "rename", "delete"]) {
+        stubs.push(stubRenameResult(conn, { documentChanges: [{ kind, uri, ...(kind === "create" ? { newUri: uri } : {}) }] }));
+        await expect(conn.rename(filePath, 0, 0, "newName")).resolves.toBeNull();
+      }
+    } finally {
+      for (let i = stubs.length - 1; i >= 0; i--) stubs[i]!.mockRestore();
     }
   });
 
@@ -636,7 +828,7 @@ describe("convertWorkspaceEdit characterization (via rename)", () => {
 describe("LSPConnection framing robustness", () => {
   let root: string;
   beforeEach(() => { installFakeServerBin(); root = mkdtempSync(join(tmpdir(), "lsp-frame-char-")); });
-  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); await shutdownAllManagers(); resetLSPBridge(); });
+  afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc()); await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore(); });
 
   it("FRAME-MALFORMED-JSON: malformed JSON frames are ignored and the connection keeps running", async () => {
     const { conn, proc } = await makeConnection(root);
@@ -663,6 +855,19 @@ describe("LSPConnection framing robustness", () => {
     await expect(pending).resolves.toEqual(["ok"]);
   });
 
+  it("FRAME-EXTRA-HEADER: Content-Length may follow another LSP header", async () => {
+    const { conn, proc } = await makeConnection(root);
+    const pending = conn.request("workspace/symbol", { query: "x" });
+    const id = writtenMessages(proc).at(-1)!.id as number;
+    const body = JSON.stringify({ jsonrpc: "2.0", id, result: ["ok"] });
+    const framed = Buffer.from(
+      `Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`,
+      "utf-8",
+    );
+    proc.stdout.emit("data", framed);
+    await expect(pending).resolves.toEqual(["ok"]);
+  });
+
   it("FRAME-OVERFLOW: buffer overflow closes the process and rejects every pending request", async () => {
     const { conn, proc } = await makeConnection(root);
     const p1 = conn.request("workspace/symbol", { query: "a" });
@@ -673,7 +878,7 @@ describe("LSPConnection framing robustness", () => {
     await expect(p1).rejects.toThrow("LSP connection buffer overflow");
     await expect(p2).rejects.toThrow("LSP connection buffer overflow");
     expect(proc.kill).toHaveBeenCalled();
-    await expect(conn.request("workspace/symbol", { query: "late" })).resolves.toBeNull();
+    await expect(conn.request("workspace/symbol", { query: "late" })).rejects.toThrow("LSP server exited");
   });
 
   it("FRAME-HANDLER-ISOLATION: exception in a notification handler does not break subsequent frames", async () => {
@@ -689,6 +894,83 @@ describe("LSPConnection framing robustness", () => {
       sendToStdout(proc, { jsonrpc: "2.0", method: "window/logMessage", params: { message: "two" } });
     }).not.toThrow();
     expect(seen).toEqual([{ message: "one" }, { message: "two" }]);
+  });
+});
+
+describe("LSPConnection distinct timeout vs process-exit errors", () => {
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(join(tmpdir(), "lsp-timeout-exit-")); });
+  afterEach(async () => {
+    vi.useRealTimers();
+    invalidateResolvedServerCacheForRoot(root);
+    rmSync(root, { recursive: true, force: true });
+    vi.clearAllMocks();
+    (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc());
+    await shutdownAllManagers();
+    resetLSPBridge(); _clearSessionStore();
+  });
+
+  it("timeout rejects with a distinct timeout error and removes its pending entry", async () => {
+    const { conn } = await makeConnection(root);
+
+    vi.useFakeTimers();
+    let timeoutErr: unknown;
+    const timed = conn.request("workspace/symbol", { query: "slow" }).then(
+      () => { throw new Error("expected timeout rejection"); },
+      (err: unknown) => { timeoutErr = err; },
+    );
+    vi.advanceTimersByTime(15_001);
+    await timed;
+    vi.useRealTimers();
+
+    const timeoutError = timeoutErr as Error;
+    expect(timeoutError.name).toBe("LspRequestTimeoutError");
+    expect(timeoutError.message).toContain("timed out");
+    expect((conn as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0);
+  });
+
+  it("spawn/process error rejects in-flight requests immediately and clears pending", async () => {
+    const { conn, proc } = await makeConnection(root);
+    const pending = conn.request("workspace/symbol", { query: "boom" });
+    expect((conn as unknown as { pending: Map<number, unknown> }).pending.size).toBe(1);
+
+    proc.emit("error", new Error("spawn broke"));
+
+    const error = await pending.then(
+      () => { throw new Error("expected process-error rejection"); },
+      (err: unknown) => err as Error,
+    );
+    expect(error.name).toBe("LspServerExitError");
+    expect((conn as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0);
+  });
+
+  it("server process exit rejects in-flight requests with a distinct exit error and clears pending", async () => {
+    const { conn, proc } = await makeConnection(root);
+
+    vi.useFakeTimers();
+    let timeoutErr: unknown;
+    const timed = conn.request("workspace/symbol", { query: "slow" }).then(
+      () => { throw new Error("expected timeout rejection"); },
+      (err: unknown) => { timeoutErr = err; },
+    );
+    vi.advanceTimersByTime(15_001);
+    await timed;
+    vi.useRealTimers();
+
+    const exiting = conn.request("workspace/symbol", { query: "again" });
+    expect((conn as unknown as { pending: Map<number, unknown> }).pending.size).toBe(1);
+    proc.emit("exit");
+    const exitError = await exiting.then(
+      () => { throw new Error("expected exit rejection"); },
+      (err: unknown) => err as Error,
+    );
+
+    expect(exitError.name).toBe("LspServerExitError");
+    expect(exitError.message).toContain("LSP server exited");
+    // Distinct from the timeout error in both name and message.
+    expect(exitError.name).not.toBe((timeoutErr as Error).name);
+    expect(exitError.message).not.toBe((timeoutErr as Error).message);
+    expect((conn as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0);
   });
 });
 

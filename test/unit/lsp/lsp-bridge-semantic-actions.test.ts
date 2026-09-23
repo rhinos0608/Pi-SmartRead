@@ -45,6 +45,9 @@ vi.mock("node:child_process", () => ({
   spawn: vi.fn(() => makeFakeProc()),
   execFileSync: vi.fn(() => Buffer.from("")),
 }));
+vi.mock("../../../src/lsp/lsp-executor.js", () => ({
+  executeLspOperation: vi.fn(),
+}));
 const { spawn } = await import("node:child_process");
 const { LSPConnection, shutdownAllManagers, resetLSPBridge } = await import("../../../src/lsp/lsp-bridge.js");
 
@@ -318,5 +321,45 @@ describe("LSPConnection semantic actions", () => {
     });
     const result = await conn.codeActions(join(root, "a.ts"), { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, {});
     expect(result).toEqual([]);
+  });
+});
+
+describe("workspaceSymbols URI provenance (no fabrication)", () => {
+  const R = { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } };
+  function okSymbols(result: unknown) {
+    return { status: "ok", operation: "workspaceSymbols", method: "test/workspaceSymbols", server: {}, result, meta: { truncated: false } };
+  }
+  beforeEach(() => { resetLSPBridge(); vi.clearAllMocks(); });
+  afterEach(() => { resetLSPBridge(); vi.clearAllMocks(); });
+
+  it("drops entry without uri", async () => {
+    const { getLSPBridge } = await import("../../../src/lsp/lsp-bridge.js");
+    const { executeLspOperation } = await import("../../../src/lsp/lsp-executor.js");
+    vi.mocked(executeLspOperation).mockResolvedValueOnce(okSymbols([{ name: "NoUri", kind: 12, range: R }]) as never);
+    const bridge = await getLSPBridge();
+    expect(await bridge!.workspaceSymbol("x", "/tmp")).toEqual([]);
+  });
+
+  it("mixed list keeps valid entries only", async () => {
+    const { getLSPBridge } = await import("../../../src/lsp/lsp-bridge.js");
+    const { executeLspOperation } = await import("../../../src/lsp/lsp-executor.js");
+    const valid = { name: "Ok", kind: 12, uri: "file:///a.ts", range: R };
+    const invalid = { name: "Bad", kind: 12, range: R };
+    vi.mocked(executeLspOperation).mockResolvedValueOnce(okSymbols([invalid, valid]) as never);
+    const bridge = await getLSPBridge();
+    const out = await bridge!.workspaceSymbol("x", "/tmp");
+    expect(out).toHaveLength(1);
+    expect(out[0]!.location.uri).toBe("file:///a.ts");
+  });
+
+  it("all-invalid returns []", async () => {
+    const { getLSPBridge } = await import("../../../src/lsp/lsp-bridge.js");
+    const { executeLspOperation } = await import("../../../src/lsp/lsp-executor.js");
+    vi.mocked(executeLspOperation).mockResolvedValueOnce(okSymbols([
+      { name: "A", kind: 12 },
+      { name: "B", kind: 12, uri: 42, range: R },
+    ]) as never);
+    const bridge = await getLSPBridge();
+    expect(await bridge!.workspaceSymbol("x", "/tmp")).toEqual([]);
   });
 });

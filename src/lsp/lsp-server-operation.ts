@@ -8,8 +8,9 @@
  */
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cachedManager, type LSPManager } from "./lsp-manager.js";
+import { cachedManager, acquireLease, releaseLease, type LSPManager } from "./lsp-manager.js";
 import type { LSPConnection } from "./lsp-connection.js";
+import { LSP_TIMEOUT_MS_DEFAULT } from "@rhinos0608/pi-workspace-protocol";
 import {
   detectLanguageFromExtension,
   withBudget,
@@ -21,35 +22,32 @@ export function toFileUri(filePath: string): string {
 }
 
 /**
- * Convert an LSP location URI to a filesystem path.
+ * Convert an LSP location URI to a filesystem path (fail-closed).
  *
- * Handles both `file://` URIs (via fileURLToPath) and raw filesystem paths.
- * Windows drive-letter paths like `D:\src\a.ts` are NOT file URIs and must
- * not be passed to fileURLToPath (which throws on them) — they are returned
- * as-is. Malformed file URIs fall back to the raw string rather than throwing.
+ * file: scheme only — returns the path iff fileURLToPath succeeds, else null.
+ * Non-file/malformed URIs (https:, untitled:, garbage, raw paths) return null
+ * so callers can never resolve() a raw fallback string into a path
+ * (cf. connection workspaceUriToPath, bridge legacyRenameUriToPath).
  */
-export function lspUriToPath(uri: string): string {
-  if (typeof uri !== "string" || uri.length === 0) return uri;
-  if (uri.startsWith("file:")) {
+export function lspUriToPath(uri: string): string | null {
+  if (typeof uri !== "string" || uri.length === 0) return null;
+  if (!uri.startsWith("file:")) return null;
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    // Cross-platform fallback: POSIX file URLs (file:///Users/...) throw
+    // ERR_INVALID_FILE_URL_PATH on Windows. Return the decoded pathname.
     try {
-      return fileURLToPath(uri);
+      return decodeURIComponent(new URL(uri).pathname);
     } catch {
-      // Cross-platform fallback: POSIX file URLs (file:///Users/...) throw
-      // ERR_INVALID_FILE_URL_PATH on Windows. Return the decoded pathname.
-      try {
-        return decodeURIComponent(new URL(uri).pathname);
-      } catch {
-        return uri;
-      }
+      return null;
     }
   }
-  // Raw filesystem path (POSIX or Windows drive-letter like D:\...).
-  return uri;
 }
 
 export function toZeroBased(line1: number): number { return Math.max(0, line1 - 1); }
 
-export const DEFAULT_OUTCOME_TIMEOUT_MS = 5000;
+export const DEFAULT_OUTCOME_TIMEOUT_MS = LSP_TIMEOUT_MS_DEFAULT;
 
 export interface WithServerOptions {
   timeoutMs?: number;
@@ -57,6 +55,27 @@ export interface WithServerOptions {
   purpose?: "warmup" | "request";
   /** Budget acquisition only; action keeps its own inner budgets (fresh-diagnostics poll). */
   unbudgetedAction?: boolean;
+  descriptorId?: string;
+  serverId?: string;
+  role?: string;
+  initializationOptions?: Record<string, unknown>;
+  settings?: Record<string, unknown>;
+  workspaceFolders?: string[];
+  envOverlay?: Record<string, string>;
+  allowInstall?: boolean;
+  /** LSP method name gating exactly-once retry; retry only when idempotent observational. */
+  method?: string;
+}
+
+/** Idempotent observational ops safe for exactly-once retry on dead connection. */
+const IDEMPOTENT_OBSERVATIONAL_OPS = new Set([
+  "workspace/symbol", "textDocument/hover", "textDocument/documentSymbol",
+  "textDocument/definition", "textDocument/references", "textDocument/implementation",
+]);
+
+function isDeadConnectionError(e: unknown): boolean {
+  const m = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  return /LSP server exited|dead|closed|ECONNRESET|EPIPE/i.test(m);
 }
 
 /**
@@ -67,6 +86,36 @@ export interface WithServerOptions {
  * matching the legacy fire-and-forget reads. Throws on action error
  * (caller maps to its own degraded fallback).
  */
+function toSessionOpts(opts?: WithServerOptions): Record<string, unknown> {
+  return { purpose: opts?.purpose ?? "request", descriptorId: opts?.descriptorId, serverId: opts?.serverId, role: opts?.role, initializationOptions: opts?.initializationOptions, settings: opts?.settings, workspaceFolders: opts?.workspaceFolders, envOverlay: opts?.envOverlay, allowInstall: opts?.allowInstall };
+}
+
+function isIdempotentRetry(opts?: WithServerOptions): boolean {
+  return !!opts?.method && IDEMPOTENT_OBSERVATIONAL_OPS.has(opts.method);
+}
+
+async function acquireSessionServer(mgr: LSPManager, langId: string, sessionOpts: Record<string, unknown>, opts?: WithServerOptions): Promise<LSPConnection | null> {
+  if (opts?.timeoutMs === undefined) return mgr.getServer(langId, { ...sessionOpts } as any);
+  return withBudget(mgr.getServer(langId, { ...sessionOpts } as any), opts.timeoutMs, opts.signal);
+}
+
+async function runActionWithLease<T>(server: LSPConnection, mgr: LSPManager, action: (server: LSPConnection, mgr: LSPManager) => Promise<T>, opts?: WithServerOptions): Promise<T> {
+  const key = (server as any).sessionKey as string | undefined;
+  if (key) acquireLease(key);
+  try {
+    if (opts?.timeoutMs === undefined || opts.unbudgetedAction) return action(server, mgr);
+    return withBudget(action(server, mgr), opts.timeoutMs, opts.signal);
+  } finally {
+    if (key) releaseLease(key);
+  }
+}
+
+async function runOnce<T>(mgr: LSPManager, langId: string, sessionOpts: Record<string, unknown>, action: (server: LSPConnection, mgr: LSPManager) => Promise<T>, opts?: WithServerOptions): Promise<T | null> {
+  const server = await acquireSessionServer(mgr, langId, sessionOpts, opts);
+  if (!server) return null;
+  return runActionWithLease(server, mgr, action, opts);
+}
+
 export async function withServer<T>(
   root: string,
   langId: string,
@@ -74,19 +123,14 @@ export async function withServer<T>(
   opts?: WithServerOptions,
 ): Promise<T | null> {
   const mgr = cachedManager(root);
-  if (opts?.timeoutMs === undefined) {
-    const server = await mgr.getServer(langId, opts?.purpose ? { purpose: opts.purpose } : undefined);
-    if (!server) return null;
-    return action(server, mgr);
+  const sessionOpts = toSessionOpts(opts);
+  // Exactly-once retry: dead-connection + idempotent observational context only.
+  try {
+    return await runOnce(mgr, langId, sessionOpts, action, opts);
+  } catch (e) {
+    if (!isDeadConnectionError(e) || !isIdempotentRetry(opts)) throw e;
+    return runOnce(mgr, langId, sessionOpts, action, opts);
   }
-  const server = await withBudget(
-    mgr.getServer(langId, { purpose: opts.purpose ?? "request" }),
-    opts.timeoutMs,
-    opts.signal,
-  );
-  if (!server) return null;
-  if (opts.unbudgetedAction) return action(server, mgr);
-  return withBudget(action(server, mgr), opts.timeoutMs, opts.signal);
 }
 
 /** Manager-level operations (workspaceSymbol, hover, file tracking) share one acquisition point. */

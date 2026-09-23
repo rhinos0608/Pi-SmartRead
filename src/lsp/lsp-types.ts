@@ -8,13 +8,19 @@
 import type { LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 import { existsSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
-import { resolveLanguageServer } from "../language-intelligence/language-intelligence-runtime.js";
+import { resolveAllLanguageServers } from "../language-intelligence/language-intelligence-runtime.js";
 
 // ── Language intelligence wiring ───────────────────────────────────────
 // Cache of resolved executable/args per `${root}:${languageId}` so that
 // LSPManager can spawn the exact resolved binary (project-local path or
 // override) rather than the bare PATH command. Key: `${root}:${languageId}`
-export const resolvedServerCache = new Map<string, { executable: string; args: string[] }>();
+export const resolvedServerCache = new Map<string, { descriptorId: string; executable: string; args: string[]; role?: string }>();
+
+// Multi-role list cache: every eligible descriptor per `${root}:${languageId}`
+// (best tier each, roles intact). The single-entry resolvedServerCache above
+// stays as first-entry compat. Manager setup reads the list first.
+export type ResolvedServerEntry = { descriptorId: string; executable: string; args: string[]; role?: string };
+export const resolvedServerListCache = new Map<string, ResolvedServerEntry[]>();
 
 const EXT_FOR_LANGUAGE: Record<string, string> = {
   typescript: ".ts",
@@ -349,6 +355,43 @@ export interface ServerConfig {
   command: string;
   args: string[];
   languageIds: string[];
+  /** Session identity: catalog descriptor this config was resolved from. */
+  descriptorId?: string;
+  /** Carried into initialize params + configuration responses + didChangeConfiguration. */
+  initializationOptions?: Record<string, unknown>;
+  settings?: Record<string, unknown>;
+  workspaceFolders?: string[];
+  /** Validated env overlay applied at spawn. */
+  envOverlay?: Record<string, string>;
+  /** Declared requiredEnv keys and their observed values (fingerprint input). */
+  requiredEnvValues?: Record<string, string | undefined>;
+  /** Role tag (e.g. "primary" | "fallback") for multi-server selection. */
+  role?: string;
+}
+
+/** Per-acquisition session options (sole shared-types owner this wave). */
+export interface LspSessionOptions {
+  purpose?: "warmup" | "request";
+  /** Explicit descriptor/server selection for multi same-language servers. */
+  descriptorId?: string;
+  serverId?: string;
+  role?: string;
+  initializationOptions?: Record<string, unknown>;
+  settings?: Record<string, unknown>;
+  workspaceFolders?: string[];
+  envOverlay?: Record<string, string>;
+  /** Strict path passes false to forbid auto-install; undefined preserves legacy behavior. */
+  allowInstall?: boolean;
+}
+
+/** Ambiguous multi-server selection — caller must pick descriptorId/serverId explicitly. */
+export class AmbiguousServerError extends Error {
+  candidates: string[];
+  constructor(languageId: string, candidates: string[]) {
+    super(`ambiguous server for ${languageId}: ${candidates.join(", ")}; pass descriptorId explicitly`);
+    this.name = "AmbiguousServerError";
+    this.candidates = candidates;
+  }
 }
 
 export const ALL_SERVER_CONFIGS: ServerConfig[] = [
@@ -385,9 +428,17 @@ function findAvailableServers(neededLanguages: string[], root: string = process.
     seenLangs.add(lang);
     const dummy = dummyFileForLanguage(lang, root);
     try {
-      const res = resolveLanguageServer(dummy, root);
+      const all = resolveAllLanguageServers(dummy, root);
+      const res = all[0];
       if (res && res.status === "available") {
-        resolvedServerCache.set(`${root}:${lang}`, { executable: res.executable, args: res.args });
+        const entries: ResolvedServerEntry[] = all.map((r) => ({
+          descriptorId: r.descriptorId,
+          executable: r.executable,
+          args: r.args,
+          ...(r.role !== undefined ? { role: r.role } : {}),
+        }));
+        resolvedServerListCache.set(`${root}:${lang}`, entries);
+        resolvedServerCache.set(`${root}:${lang}`, entries[0]!);
         const cmd = res.executable.includes("/") || res.executable.includes("\\") ? basename(res.executable) : res.executable;
         // Push the exact executable for overrides (e.g. my-pyright) so caller sees it; for project-local push basename for compat
         if (res.executable.includes("/") || res.executable.includes("\\")) {
@@ -397,9 +448,11 @@ function findAvailableServers(neededLanguages: string[], root: string = process.
         }
         resolvedLanguages.push(lang);
       } else {
+        resolvedServerListCache.delete(`${root}:${lang}`);
         resolvedServerCache.delete(`${root}:${lang}`);
       }
     } catch {
+      resolvedServerListCache.delete(`${root}:${lang}`);
       resolvedServerCache.delete(`${root}:${lang}`);
     }
   }
