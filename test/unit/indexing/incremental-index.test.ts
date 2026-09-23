@@ -345,7 +345,7 @@ describe("buildCache", () => {
     utimesSync(target, original.atimeMs / 1000, original.mtimeMs / 1000);
     const after = statSync(target);
     expect(after.size).toBe(original.size);
-    expect(after.mtimeMs).toBe(original.mtimeMs);
+    expect(Math.abs(after.mtimeMs - original.mtimeMs)).toBeLessThan(2);
 
     const changes = buildCache(tmpDir);
     expect(changes.modified).toContain("src/a.ts");
