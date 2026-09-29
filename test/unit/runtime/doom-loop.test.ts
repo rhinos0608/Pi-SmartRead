@@ -672,25 +672,32 @@ function suggestionToolHints(suggestions: readonly Suggestion[]): string[] {
 }
 
 describe("doom-loop suggestions", () => {
-  it("read suggestions point to inspect and read query mode", () => {
+  it("read suggestions route discovery, semantics, and structural analysis to the right tools", () => {
     const hints = suggestionToolHints(SUGGESTIONS.read ?? []);
+    expect(hints).toContain("grep");
+    expect(hints).toContain("LSP");
     expect(hints).toContain("inspect");
-    expect(hints).toContain("read");
+    expect(hints).not.toContain("read");
   });
 
-  it("grep suggestions point to read query mode", () => {
+  it("grep suggestions route found source to read and exact semantics to LSP", () => {
     const suggestions = SUGGESTIONS.grep ?? [];
-    expect(suggestionToolHints(suggestions)).toContain("read");
-    expect(suggestions).toContainEqual(expect.objectContaining({
-      toolHint: "read",
-      toolInput: { query: "<describe what you are looking for>" },
-    }));
+    const hints = suggestionToolHints(suggestions);
+    expect(hints).toContain("read");
+    expect(hints).toContain("LSP");
+    expect(suggestions.some((suggestion) =>
+      typeof suggestion !== "string" &&
+      suggestion.toolHint === "read" &&
+      suggestion.toolInput !== undefined
+    )).toBe(false);
   });
 
-  it("inspect suggestions offer read query and grep alternatives", () => {
+  it("inspect suggestions offer read, grep, and LSP alternatives without query-read syntax", () => {
     const hints = suggestionToolHints(SUGGESTIONS.inspect ?? []);
     expect(hints).toContain("read");
     expect(hints).toContain("grep");
+    expect(hints).toContain("LSP");
+    expect(JSON.stringify(SUGGESTIONS.inspect)).not.toContain('"query"');
   });
 
   it("has no suggestions for removed tools", () => {

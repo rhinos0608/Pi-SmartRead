@@ -54,11 +54,20 @@ describe("detectBashMisuseHint", () => {
     expect(detectBashMisuseHint("find src -name '*.ts'")).toContain('inspect({ mode: "directory"');
   });
 
-  it("suggests navigate for symbol-decl search", () => {
+  it("suggests schema-valid LSP calls for symbol-decl search", () => {
     const hint = detectBashMisuseHint("rg 'function myHandler'");
-    expect(hint).toContain("navigate");
-    expect(hint).toContain("references");
-    expect(hint).toContain("line: 12, character: 1");
+    expect(hint).toContain('LSP({ operation: "workspaceSymbols", query: "symbol" })');
+    expect(hint).toContain('operation: "findReferences"');
+    expect(hint).toContain("0-based");
+    expect(hint).toContain("does not accept path");
+    expect(hint).not.toContain("proposals only");
+  });
+
+  it("grep hints advertise the useful schema surface and LSP boundary", () => {
+    const hint = detectBashMisuseHint("rg foo");
+    expect(hint).toContain("pattern or queries");
+    expect(hint).toContain("path/glob/literal");
+    expect(hint).toContain("LSP");
   });
 
   it("flags dependent chase but not independent searches", () => {

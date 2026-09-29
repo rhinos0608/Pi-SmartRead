@@ -66,10 +66,14 @@ function formatReadPath(file: string | undefined): string {
 }
 
 function grepHint(pattern?: string): string {
-  if (pattern !== undefined && isSafePatternLiteral(pattern)) {
-    return `\n\n[SmartRead hint] Use grep({ pattern: "${pattern}" }) instead of shell search.`;
-  }
-  return `\n\n[SmartRead hint] Use grep({ pattern: "symbol" }) instead of shell search.`;
+  const call = pattern !== undefined && isSafePatternLiteral(pattern)
+    ? `grep({ pattern: "${pattern}" })`
+    : `grep({ pattern: "symbol" })`;
+  return `\n\n[SmartRead hint] Use ${call} instead of shell search. grep accepts pattern or queries (not both); narrow with path/glob/literal/perQueryLimit/contextLines and use graphFilter/structural when appropriate. Use LSP for exact semantic definitions, references, types, hierarchy, or diagnostics.`;
+}
+
+function semanticSymbolHint(): string {
+  return `\n\n[SmartRead hint] Use grep({ pattern: "symbol" }) for broad textual discovery or LSP({ operation: "workspaceSymbols", query: "symbol" }) for semantic workspace symbols. For exact references use LSP({ operation: "findReferences", path: "src/file.ts", position: { line: 0, character: 0 }, includeDeclaration: true }). LSP positions are 0-based; workspaceSymbols requires query and does not accept path.`;
 }
 
 /** Lex + split into pipeline segments. Returns null on fail-closed input. */
@@ -370,7 +374,7 @@ export function detectBashMisuseHint(
     if (exe === "git" && seg.argv[1] === "grep") {
       const pattern = firstPattern(["git", ...args.slice(1)]);
       if (pattern !== undefined && isDeclPattern(pattern)) {
-        return `\n\n[SmartRead hint] Search symbol declarations with grep({ pattern: "symbol" }) first, then inspect({ mode: "navigate", path: "...", navigation: { operation: "references", line: 12, character: 1 } }) (1-based). Uppercase LSP is available for proposals only.`;
+        return semanticSymbolHint();
       }
       return grepHint(pattern);
     }
@@ -378,7 +382,7 @@ export function detectBashMisuseHint(
     if (SEARCH_BINARIES.has(exe)) {
       const pattern = firstPattern(seg.argv);
       if (pattern !== undefined && isDeclPattern(pattern)) {
-        return `\n\n[SmartRead hint] Search symbol declarations with grep({ pattern: "symbol" }) first, then inspect({ mode: "navigate", path: "...", navigation: { operation: "references", line: 12, character: 1 } }) (1-based). Uppercase LSP is available for proposals only.`;
+        return semanticSymbolHint();
       }
       return grepHint(pattern);
     }
