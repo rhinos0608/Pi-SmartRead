@@ -108,7 +108,9 @@ describe("createExtendedReadTool", () => {
     const tool = createExtendedReadTool();
     expect(tool.name).toBe("read");
     expect(tool.label).toBeDefined();
-    expect(tool.description).toContain("Read files with strong workspace evidence");
+    expect(tool.description).toContain("Read already-known source content with strong workspace evidence");
+    expect(tool.description).toContain("Use grep to discover files/text");
+    expect(tool.description).toContain("LSP for definitions/references");
   });
 
   it("does not reuse session git cache for nested project reads", async () => {
@@ -249,8 +251,10 @@ describe("registerSessionHooks", () => {
       expect(typeof typed!.systemPrompt).toBe("string");
       const promptText = typed!.systemPrompt;
       expect(promptText).toContain("SmartRead Tool Guide");
-      expect(promptText).toContain("BM25+embedding RRF");
-      expect(promptText).toContain("inspect { mode, path, ... }");
+      expect(promptText).toContain("grep discovers candidates");
+      expect(promptText).toContain("read has no natural-language query mode");
+      expect(promptText).toContain("Inspect does not expose LSP navigation or diagnostics");
+      expect(promptText).toContain("LSP { operation, ... }");
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }

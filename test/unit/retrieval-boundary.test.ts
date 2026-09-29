@@ -6,7 +6,6 @@ import { executeInspectV4 } from "../../src/inspect/inspect.js";
 import { computePathEvidence } from "../../src/evidence/path-evidence.js";
 import { createRepoTool } from "../../src/repomap/repomap-tool.js";
 import { createReadTool } from "../../src/read/unified-read.js";
-import { retrieveQuery } from "../../src/read/query-retrieval.js";
 
 function makeCtx(cwd: string, sessionFile: string) {
   return { cwd, sessionManager: { getSessionFile: () => sessionFile } } as any;
@@ -128,41 +127,4 @@ describe("cross-workspace retrieval (no allowed-root gating)", () => {
     expect(text).toContain("outside.ts");
   });
 
-  it("allows query with explicit directory outside project root", async () => {
-    // Query with explicit directory outside the project root
-    // Uses grep+AST fallback since no semantic index exists for outside dir
-    const result = await retrieveQuery({
-      query: "boundarySharedSymbol",
-      cwd: root,
-      directory: "outside",
-      topK: 10,
-      toolCallId: "test-query-outside",
-    });
-    expect(result.hits.length).toBeGreaterThan(0);
-    expect(result.hits.some((h) => h.absolutePath.includes("outside.ts"))).toBe(true);
-    expect(result.hits.some((h) => h.absolutePath.includes("inside.ts"))).toBe(false);
-  });
-
-  it("allows query with explicit directory inside project root", async () => {
-    const result = await retrieveQuery({
-      query: "boundarySharedSymbol",
-      cwd: root,
-      directory: "allowed",
-      topK: 10,
-      toolCallId: "test-query-inside",
-    });
-    expect(result.hits.length).toBeGreaterThan(0);
-    expect(result.hits.some((h) => h.absolutePath.includes("inside.ts"))).toBe(true);
-    expect(result.hits.some((h) => h.absolutePath.includes("outside.ts"))).toBe(false);
-  });
-
-  it("allows query with no directory (cwd) inside project root", async () => {
-    const result = await retrieveQuery({
-      query: "boundarySharedSymbol",
-      cwd: root,
-      topK: 10,
-      toolCallId: "test-query-cwd",
-    });
-    expect(result.hits.length).toBeGreaterThan(0);
-  });
 });

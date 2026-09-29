@@ -52,7 +52,6 @@ import {
 } from "./runtime/microagents.js";
 import { findProjectWorkspace, isProjectWorkspace, projectWorkspaceForFile } from "./workspace/workspace-scope.js";
 import { createReadManyTool } from "./read/read-many.js";
-import { retrieveQuery } from "./read/query-retrieval.js";
 import { disposeSemanticIndexes, effectiveSemanticRoot, getOrCreateSemanticIndex } from "./indexing/semantic-index-registry.js";
 
 // ── Key computation ───────────────────────────────────────────────
@@ -559,29 +558,25 @@ const PathEntrySchema = Type.Object({
 
 // Flattened schema — providers (e.g. Console Go upstream) require a root
 // JSON Schema of type "object" and reject anyOf unions at the top level.
-// The four-mode XOR is enforced at runtime in execute() + rejectForeignKeys.
+// The three-selector XOR is enforced at runtime in execute() + rejectForeignKeys.
 const ReadSchema = Type.Object({
-  path: Type.Optional(Type.String({ description: "Path to a single file (relative or absolute). Use with optional offset/limit." })),
-  paths: Type.Optional(Type.Array(PathEntrySchema, { minItems: 1, maxItems: 100, description: "Multiple files to read in the exact order listed (max 100)." })),
+  path: Type.Optional(Type.String({ description: "Known path to a single file (relative or absolute). Use with optional offset/limit." })),
+  paths: Type.Optional(Type.Array(PathEntrySchema, { minItems: 1, maxItems: 100, description: "Multiple known files to read in the exact order listed (max 100)." })),
   stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (paths mode; default false)." })),
-  query: Type.Optional(Type.String({ description: "Natural-language intent. Ranks and reads most relevant files in cwd/directory. Falls back to grep+AST when semantic search unavailable." })),
-  directory: Type.Optional(Type.String({ description: "Directory to scan (only with query; default: cwd)." })),
-  topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to return when query is set (default: 20)." })),
-  symbol: Type.Optional(Type.String({ description: "Resolve qualified name (e.g. 'AuthService.login') to file+line via LSP, then read surrounding code." })),
+  symbol: Type.Optional(Type.String({ description: "Known qualified symbol name to resolve to file+line, then read surrounding source. For semantic navigation or relationship questions use LSP directly." })),
   offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based start line. Single-file and symbol modes only." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines. Single-file and symbol modes only." })),
 }, {
   additionalProperties: false,
-  description: "Read modes: { path, offset?, limit? } single file; { paths, stopOnError? } batch; { query, directory?, topK? } intent; { symbol, offset?, limit? } symbol. Exactly one selector per call.",
+  description: "Read known source content only: { path, offset?, limit? } for one file, { paths, stopOnError? } for several known files, or { symbol, offset?, limit? } for a known symbol. Exactly one selector per call. Use grep to discover files/text and LSP for compiler-backed definitions, references, types, hierarchy, diagnostics, or refactor semantics.",
 });
 
 type ReadInput = ReadParams;
 
 export interface SingleFileReadParams { path: string; offset?: number; limit?: number; }
 export interface MultiFileReadParams { paths: { path: string; offset?: number; limit?: number; }[]; stopOnError?: boolean; }
-export interface QueryReadParams { query: string; directory?: string; topK?: number; }
 export interface SymbolReadParams { symbol: string; offset?: number; limit?: number; }
-export type ReadParams = SingleFileReadParams | MultiFileReadParams | QueryReadParams | SymbolReadParams;
+export type ReadParams = SingleFileReadParams | MultiFileReadParams | SymbolReadParams;
 
 /** Reject keys that do not belong to this branch — the runtime half of the discriminated union. */
 function rejectForeignKeys(raw: Record<string, unknown>, selector: string, allowed: ReadonlySet<string>): string | undefined {
@@ -595,7 +590,6 @@ function rejectForeignKeys(raw: Record<string, unknown>, selector: string, allow
 
 const PATH_KEYS: ReadonlySet<string> = new Set(["path", "offset", "limit"]);
 const PATHS_KEYS: ReadonlySet<string> = new Set(["paths", "stopOnError"]);
-const QUERY_KEYS: ReadonlySet<string> = new Set(["query", "directory", "topK"]);
 const SYMBOL_KEYS: ReadonlySet<string> = new Set(["symbol", "offset", "limit"]);
 
 // ── WrapReadToolOptions ──────────────────────────────────────────
@@ -696,57 +690,12 @@ async function handlePathsRead(multi: MultiFileReadParams, b: ReadBranchCtx): Pr
   } as never, b.signal, b.onUpdate as never, b.ctx);
 }
 
-async function handleQueryRead(queryParams: QueryReadParams, b: ReadBranchCtx): Promise<unknown> {
-  const raw = queryParams as unknown as Record<string, unknown>;
-  const foreignErr = rejectForeignKeys(raw, "query", QUERY_KEYS);
-  if (foreignErr) throw new Error(foreignErr);
-  const query = queryParams.query.trim();
-  if (!query) throw new Error("query must not be empty or whitespace-only");
-  requirePositiveInteger(queryParams.topK, "topK");
-  const retrieval = await retrieveQuery({
-    query,
-    cwd: b.ctx.cwd,
-    directory: queryParams.directory,
-    topK: queryParams.topK,
-    signal: b.signal,
-    toolCallId: b.toolCallId,
-  });
-  if (retrieval.hits.length === 0) {
-    return {
-      content: [{ type: "text" as const, text: `[No ${retrieval.strategy} matches for "${query}".]` }],
-      details: {
-        query,
-        retrievalStrategy: retrieval.strategy,
-        ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
-        processedCount: 0,
-        successCount: 0,
-        errorCount: 0,
-      },
-    };
-  }
-  const singleReadFactory = createEvidenceReadFactory(b.ctx);
-  const manyTool = createReadManyTool(singleReadFactory, { publishInspection: b.opts?.publishInspection });
-  const result = await manyTool.execute(b.toolCallId, {
-    files: retrieval.hits.map((hit) => ({ path: hit.absolutePath })),
-    stopOnError: false,
-  } as never, b.signal, b.onUpdate as never, b.ctx);
-  const details = result.details && typeof result.details === "object" ? result.details as Record<string, unknown> : {};
-  return {
-    ...result,
-    details: {
-      ...details,
-      query,
-      retrievalStrategy: retrieval.strategy,
-      ...(retrieval.strategy === "fallback" ? { fallbackReason: retrieval.reason } : {}),
-    },
-  };
-}
-
 /**
- * Factory for an extended `read` tool that supports three modes:
- *   - Single file: { path, offset?, limit? }
- *   - Multiple files: { paths: [{ path, offset?, limit? }, ...] }
- *   - Semantic search: { query, directory?, topK? }
+ * Factory for the SmartRead `read` tool.
+ *
+ * Public contract is intentionally narrow: read already-known content by
+ * path(s), or read around a known symbol. Discovery belongs to grep and
+ * compiler-backed semantic relationships belong to LSP.
  *
  * Every mode returns a versioned `details.workspaceEvidence` envelope
  * with coverage semantics that determine patch authority.
@@ -755,7 +704,7 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
   return {
     name: "read",
     label: "read",
-    description: "Read files with strong workspace evidence. Single file: { path: \"src/auth.ts\" } or { path, offset, limit }. Multiple files: { paths: [{ path: \"a.ts\" }, { path: \"b.ts\" }] }. Query: { query: \"auth flow\" } — uses shared indexed BM25+embedding RRF and reads selected files, with grep+AST discovery only when semantic retrieval is unavailable. Batch evidence covers complete file blocks actually rendered; partial or omitted blocks are not authorized. Large supported source files read without offset/limit return a compact AST symbol outline (signatures + line ranges, no bodies) instead of the full file — use offset/limit or symbol to read a specific part. Chasing a multi-hop lead across dependent grep/read/inspect calls? Compose the chase in one call with `inspect({ mode: \"script\", script })`.",
+    description: "Read already-known source content with strong workspace evidence. Use { path, offset?, limit? } for one known file, { paths: [{ path, offset?, limit? }, ...], stopOnError? } for several known files, or { symbol, offset?, limit? } when you already know the qualified symbol and want surrounding source. This tool does not search by natural-language intent. Use grep to discover files/text, LSP for definitions/references/types/hierarchy/diagnostics/refactor semantics, and inspect for structural or architectural analysis of a known file/directory. Batch evidence covers complete file blocks actually rendered; partial or omitted blocks are not authorized. Large supported source files read without offset/limit may return a compact AST outline, so use offset/limit or symbol for a specific slice.",
     parameters: ReadSchema as unknown as Record<string, unknown>,
 
     async execute(
@@ -768,19 +717,16 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
       const raw = params as unknown as Record<string, unknown>;
       const hasPath = raw.path !== undefined;
       const hasPaths = raw.paths !== undefined;
-      const hasQuery = raw.query !== undefined;
       const hasSymbol = raw.symbol !== undefined;
-      const selectedModes = [hasPath, hasPaths, hasQuery, hasSymbol].filter(Boolean).length;
+      const selectedModes = [hasPath, hasPaths, hasSymbol].filter(Boolean).length;
       if (selectedModes !== 1) {
-        throw new Error("Provide exactly one of: path, paths, query, or symbol");
+        throw new Error("Provide exactly one of: path, paths, or symbol");
       }
 
       const branch: ReadBranchCtx = { toolCallId, signal, onUpdate, ctx, opts };
       if (hasSymbol) return handleSymbolRead(params as SymbolReadParams, branch);
       if (hasPath) return handleSingleRead(params as SingleFileReadParams, branch);
-      if (hasPaths) return handlePathsRead(params as MultiFileReadParams, branch);
-      // hasQuery implied by the selectedModes check above
-      return handleQueryRead(params as QueryReadParams, branch);
+      return handlePathsRead(params as MultiFileReadParams, branch);
     },
   } as unknown as ToolDefinition;
 }

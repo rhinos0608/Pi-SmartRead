@@ -818,9 +818,8 @@ interface IntentReadFileDetail {
 }
 
 /**
- * Options for {@link createIntentReadTool}. Mirrors the read_files
- * publish hook so a single callback can collect batch evidence from
- * intent reads.
+ * Options for the internal intent-retrieval adapter. This engine is consumed
+ * by deep-search/retrieval workflows; it is not a public read mode.
  */
 export interface IntentReadToolOptions {
   readonly publishInspection?: (
@@ -910,7 +909,7 @@ export function createIntentReadTool(
   return {
     name: "intent_read",
     label: "intent_read",
-    description: `Find and read files relevant to a natural-language intent, then pack top results under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}. Internal engine for read_files query mode, e.g. { query: "where refresh tokens are validated", directory: "src", topK: 5 }.`,
+    description: `Internal semantic-retrieval adapter used by deep-search workflows. Ranks candidate files for a natural-language intent and packs selected source under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)}. This tool definition is not registered as a public read mode.`,
     parameters: IntentReadSchema,
 
     async execute(

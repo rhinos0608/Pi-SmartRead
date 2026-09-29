@@ -17,7 +17,6 @@ import {
 	pickDelimiter,
 } from "../utils.js";
 import { registerHandler } from "../protocols/internal-url-router.js";
-import { createIntentReadTool } from "./intent-read.js";
 import { skillHandler } from "../protocols/skill-protocol.js";
 import { memoryHandler } from "../protocols/memory-protocol.js";
 import { graphHandler } from "../protocols/graph-protocol.js";
@@ -46,22 +45,22 @@ export interface ReadManyToolOptions {
 }
 
 const ReadManySchema = Type.Object({
-	files: Type.Optional(Type.Array(
+	files: Type.Array(
 		Type.Object({
-			path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-			offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
-			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
-		}),
+			path: Type.String({ description: "Known path to the file to read (relative or absolute)." }),
+			offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based line number to start reading from." })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read." })),
+		}, { additionalProperties: false }),
 		{
 			minItems: 1,
 			maxItems: 100,
-			description: "Files to read in the exact order listed (max 100). Required unless query is set.",
+			description: "Known files to read in the exact order listed (max 100).",
 		},
-	)),
-	query: Type.Optional(Type.String({ description: "Natural-language intent. When set, candidate files (from files, directory, or cwd) are ranked by hybrid BM25 + semantic relevance and only the most relevant are packed. Use when you know the goal but not the exact files." })),
-	directory: Type.Optional(Type.String({ description: "Directory to scan for candidates (only valid with query; default: cwd)." })),
-	topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to pack when query is set (default: 20)." })),
-	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)" })),
+	),
+	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)." })),
+}, {
+	additionalProperties: false,
+	description: "Batch read for already-known file paths only. Use grep to discover files/text, LSP for compiler-backed semantic relationships, and inspect for structural or architectural analysis.",
 });
 
 type ReadManyInput = Static<typeof ReadManySchema>;
@@ -99,7 +98,6 @@ export function createReadManyTool(
 	readToolFactory: typeof createReadTool = createReadTool,
 	opts: ReadManyToolOptions = {},
 ): ToolDefinition {
-	let intentTool: ToolDefinition | undefined;
 	return {
 		name: "read_files",
 		label: "read_files",
@@ -113,22 +111,14 @@ export function createReadManyTool(
 			onUpdate: unknown,
 			ctx: ExtensionContext,
 		) {
-			if (params.query?.trim()) {
-				const tool = intentTool ?? (intentTool = createIntentReadTool(readToolFactory));
-				return tool.execute(toolCallId, {
-					query: params.query,
-					files: params.files,
-					directory: params.directory,
-					topK: params.topK,
-					stopOnError: params.stopOnError,
-					defaultToCwd: true,
-				}, signal, onUpdate as never, ctx);
+			const raw = params as unknown as Record<string, unknown>;
+			for (const key of Object.keys(raw)) {
+				if (key !== "files" && key !== "stopOnError") {
+					throw new Error(`read_files param "${key}" is not supported`);
+				}
 			}
-			if (params.directory || params.topK !== undefined) {
-				throw new Error("directory/topK are only valid together with query");
-			}
-			if (!params.files || params.files.length === 0) {
-				throw new Error("Provide files to read, or query to rank and read by intent");
+			if (!Array.isArray(params.files) || params.files.length === 0) {
+				throw new Error("Provide files to read");
 			}
 
 			await ensureHashlineReady();
