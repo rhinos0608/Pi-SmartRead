@@ -83,12 +83,14 @@ const GrepSchema = Type.Object({
     maxResults: Type.Optional(Type.Number({ description: "Global max rendered hits across all queries after cross-query dedup (default: 100, max: 200).", minimum: 1, maximum: 200 })),
     ...GrepOptionProperties,
     ...TopLevelSkipProperty,
+}, {
+    description: "Primary textual/code discovery search. Provide exactly one of pattern or queries. Narrow with path/glob/literal/perQueryLimit/contextLines; use graphFilter for graph-constrained hits and structural for ast-grep queries. Use LSP instead when exact semantic symbol resolution, references, types, hierarchy, or diagnostics are required.",
 });
 
 type GrepInput = Static<typeof GrepSchema>;
 export type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. Use as your primary code-search tool — handles exact matches, symbol lookups, and conceptual queries automatically. Returns ranked, deduplicated file/line hits. Per-query hits are capped by perQueryLimit (default 20, max 50; deprecated limit still works as an alias); batch calls dedup overlapping hits across queries and cap the merged render at maxResults (default 100, max 200); maxResults also caps single-query renders. Pattern matching is a literal substring unless the pattern contains regex syntax (| ^ $ .* .+ [class] (group) {n} \\d \\w \\s \\b or \\.); a bare '.' is not regex. Set literal:true to force substring. In Pi, use \`read({ query })\` for semantic/fused multi-channel retrieval or \`read({ symbol })\` for a known symbol; use \`inspect({ mode: 'file', path })\` for structural facts in a known file. In MCP, conceptual matches use embeddings when semantic indexing is available. Chasing a multi-hop investigation (see \`inspect\`) across dependent calls (grep, then read, then grep again following the lead)? Compose the chase in one call with \`inspect({ mode: 'script', script })\``;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. This is the primary broad/textual discovery tool. Provide exactly one of pattern or queries; queries batches up to 10 full searches. Narrow with path, glob, literal, perQueryLimit, contextLines, and maxResults; graphFilter uses "EDGE_TYPE->target"; structural enables ast-grep search. Pattern matching is literal unless regex syntax is detected, and literal:true always forces substring matching. After discovery, use read for source content at known paths. Use LSP for exact compiler-backed semantics such as definitions, references, types, hierarchy, diagnostics, and refactor safety. Use inspect for aggregate structural or architectural analysis of a known file/directory, and inspect script only for dependent multi-hop chases.`;
 
 // ── Factory ─────────────────────────────────────────────────────────
 

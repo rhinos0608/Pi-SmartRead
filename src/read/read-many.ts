@@ -17,11 +17,10 @@ import {
 	pickDelimiter,
 } from "../utils.js";
 import { registerHandler } from "../protocols/internal-url-router.js";
-import { createIntentReadTool } from "./intent-read.js";
 import { skillHandler } from "../protocols/skill-protocol.js";
 import { memoryHandler } from "../protocols/memory-protocol.js";
 import { graphHandler } from "../protocols/graph-protocol.js";
-import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import type { EditMode, WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { sessionFileFromContext } from "../inspect/inspect-tool.js";
 import { readBatchFiles, type BatchFileDetail } from "./read-many-reader.js";
 import { packingHelp, planAndRender } from "./read-many-plan.js";
@@ -43,25 +42,27 @@ export interface ReadManyToolOptions {
 		sessionFilePath: string,
 		workspaceRoot: string,
 	) => void;
+	/** Edit dialect resolved once at activation; defaults to hashline. */
+	readonly editMode?: EditMode;
 }
 
 const ReadManySchema = Type.Object({
-	files: Type.Optional(Type.Array(
+	files: Type.Array(
 		Type.Object({
-			path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-			offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
-			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
-		}),
+			path: Type.String({ description: "Known path to the file to read (relative or absolute)." }),
+			offset: Type.Optional(Type.Integer({ minimum: 1, description: "1-based line number to start reading from." })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read." })),
+		}, { additionalProperties: false }),
 		{
 			minItems: 1,
 			maxItems: 100,
-			description: "Files to read in the exact order listed (max 100). Required unless query is set.",
+			description: "Known files to read in the exact order listed (max 100).",
 		},
-	)),
-	query: Type.Optional(Type.String({ description: "Natural-language intent. When set, candidate files (from files, directory, or cwd) are ranked by hybrid BM25 + semantic relevance and only the most relevant are packed. Use when you know the goal but not the exact files." })),
-	directory: Type.Optional(Type.String({ description: "Directory to scan for candidates (only valid with query; default: cwd)." })),
-	topK: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Max files to pack when query is set (default: 20)." })),
-	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)" })),
+	),
+	stopOnError: Type.Optional(Type.Boolean({ description: "Stop on first error (default false)." })),
+}, {
+	additionalProperties: false,
+	description: "Batch read for already-known file paths only. Use grep to discover files/text, LSP for compiler-backed semantic relationships, and inspect for structural or architectural analysis.",
 });
 
 type ReadManyInput = Static<typeof ReadManySchema>;
@@ -95,11 +96,46 @@ interface ReadManyDetails {
 	workspaceEvidence?: WorkspaceEvidenceEnvelope;
 }
 
+/** Resolve the batch edit dialect, priming the hashline engine unless in text mode. */
+async function resolveBatchEditMode(opts: ReadManyToolOptions): Promise<EditMode> {
+	const editMode = opts.editMode ?? "hashline";
+	if (editMode !== "text") {
+		await ensureHashlineReady();
+	}
+	return editMode;
+}
+
+/** Bundle for the batch details assembly (avoids excess-arity flags). */
+interface BatchDetailsArgs {
+	readonly batch: Awaited<ReturnType<typeof readBatchFiles>>;
+	readonly rendered: ReturnType<typeof planAndRender>;
+	readonly candidates: FileCandidate[];
+}
+
+/** Assemble the read_files details object from batch + packing outcomes. */
+function buildBatchDetails({ batch, rendered, candidates }: BatchDetailsArgs): ReadManyDetails {
+	return {
+		processedCount: batch.fileDetails.length,
+		successCount: batch.fileDetails.filter((f) => f.ok).length,
+		errorCount: batch.fileDetails.filter((f) => !f.ok).length,
+		files: batch.fileDetails,
+		packing: {
+			strategy: rendered.plan.strategy,
+			switchedForCoverage: rendered.switchedForCoverage,
+			fullIncludedCount: rendered.plan.fullCount,
+			fullIncludedSuccessCount: rendered.plan.fullSuccessCount,
+			partialIncludedPath: rendered.partialIncludedPath,
+			omittedPaths: rendered.plan.omittedIndexes.map((index) => candidates[index]!.path),
+		},
+		...(rendered.rerankingResult && { reranking: rendered.rerankingResult }),
+		combinedTruncation: rendered.outputTruncation.truncated ? rendered.outputTruncation : undefined,
+	};
+}
+
 export function createReadManyTool(
 	readToolFactory: typeof createReadTool = createReadTool,
 	opts: ReadManyToolOptions = {},
 ): ToolDefinition {
-	let intentTool: ToolDefinition | undefined;
 	return {
 		name: "read_files",
 		label: "read_files",
@@ -113,25 +149,17 @@ export function createReadManyTool(
 			onUpdate: unknown,
 			ctx: ExtensionContext,
 		) {
-			if (params.query?.trim()) {
-				const tool = intentTool ?? (intentTool = createIntentReadTool(readToolFactory));
-				return tool.execute(toolCallId, {
-					query: params.query,
-					files: params.files,
-					directory: params.directory,
-					topK: params.topK,
-					stopOnError: params.stopOnError,
-					defaultToCwd: true,
-				}, signal, onUpdate as never, ctx);
+			const raw = params as unknown as Record<string, unknown>;
+			for (const key of Object.keys(raw)) {
+				if (key !== "files" && key !== "stopOnError") {
+					throw new Error(`read_files param "${key}" is not supported`);
+				}
 			}
-			if (params.directory || params.topK !== undefined) {
-				throw new Error("directory/topK are only valid together with query");
-			}
-			if (!params.files || params.files.length === 0) {
-				throw new Error("Provide files to read, or query to rank and read by intent");
+			if (!Array.isArray(params.files) || params.files.length === 0) {
+				throw new Error("Provide files to read");
 			}
 
-			await ensureHashlineReady();
+			const editMode = await resolveBatchEditMode(opts);
 			const readTool = readToolFactory(ctx.cwd);
 			const batch = await readBatchFiles({
 				files: params.files,
@@ -141,25 +169,11 @@ export function createReadManyTool(
 				cwd: ctx.cwd,
 				readTool: readTool as unknown as Parameters<typeof readBatchFiles>[0]["readTool"],
 				stopOnError: params.stopOnError,
+				editMode,
 			});
 			const candidates: FileCandidate[] = batch.candidates;
-			const rendered = planAndRender(candidates);
-			const details: ReadManyDetails = {
-				processedCount: batch.fileDetails.length,
-				successCount: batch.fileDetails.filter((f) => f.ok).length,
-				errorCount: batch.fileDetails.filter((f) => !f.ok).length,
-				files: batch.fileDetails,
-				packing: {
-					strategy: rendered.plan.strategy,
-					switchedForCoverage: rendered.switchedForCoverage,
-					fullIncludedCount: rendered.plan.fullCount,
-					fullIncludedSuccessCount: rendered.plan.fullSuccessCount,
-					partialIncludedPath: rendered.partialIncludedPath,
-					omittedPaths: rendered.plan.omittedIndexes.map((index) => candidates[index]!.path),
-				},
-				...(rendered.rerankingResult && { reranking: rendered.rerankingResult }),
-				combinedTruncation: rendered.outputTruncation.truncated ? rendered.outputTruncation : undefined,
-			};
+			const rendered = planAndRender(candidates, editMode);
+			const details: ReadManyDetails = buildBatchDetails({ batch, rendered, candidates });
 
 			const sessionFilePath = sessionFileFromContext(ctx);
 			const batchEvidence = aggregateBatchEvidence({

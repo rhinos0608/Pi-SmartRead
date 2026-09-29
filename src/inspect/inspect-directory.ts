@@ -232,6 +232,13 @@ export async function buildDirDiagnosticsSection(input: InspectV4Input, cwd: str
 
 export async function buildLayersSection(input: InspectV4Input, cwd: string): Promise<string> {
     return runSectionAsync("Architectural Layers", async () => {
+        if (!input.contextGraph) {
+            return joinSectionLines([
+                "## Architectural Layers (derived from imports)",
+                "",
+                "(context graph unavailable — layer derivation needs the shared import graph)",
+            ]);
+        }
         const importEdges = buildImportEdges(input.contextGraph);
         const files = await findSrcFiles(pathResolve(cwd, input.path));
         const layerMap = deriveLayers(importEdges, files);
@@ -292,6 +299,13 @@ export function buildDirDeadCodeSection(input: InspectV4Input, cwd: string, call
 
 export function buildClustersSection(input: InspectV4Input, cwd: string): string {
     return runSection("Community Clusters", () => {
+        if (!input.contextGraph) {
+            return joinSectionLines([
+                "## Community Clusters",
+                "",
+                "(context graph unavailable — cluster detection needs the shared import graph)",
+            ]);
+        }
         const importEdges = buildImportEdges(input.contextGraph);
         const clusters = detectCommunities(importEdges);
         const lines: string[] = [

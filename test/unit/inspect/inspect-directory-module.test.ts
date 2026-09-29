@@ -17,6 +17,7 @@ import {
     buildDirDeadCodeSection,
     buildDirGraphSchemaSection,
     buildClustersSection,
+    buildLayersSection,
     buildBoundariesSection,
 } from "../../../src/inspect/inspect-directory.js";
 import { executeDirectoryInspect as dirExec } from "../../../src/inspect/inspect-directory.js";
@@ -64,10 +65,30 @@ describe("directory module boundary", () => {
         expect(text).toContain("## Dead Code");
     });
 
-    it("graph-schema + clusters + boundaries degrade gracefully without contextGraph", () => {
+    it("graph-schema + clusters + layers + boundaries degrade gracefully without contextGraph", async () => {
         expect(buildDirGraphSchemaSection({} as any)).toContain("## Graph Schema");
         expect(buildClustersSection({} as any, process.cwd())).toContain("## Community Clusters");
+        expect(buildClustersSection({} as any, process.cwd())).toContain("context graph unavailable — cluster detection needs the shared import graph");
+        const layers = await buildLayersSection({ path: ".", cwd: process.cwd() } as any, process.cwd());
+        expect(layers).toContain("## Architectural Layers");
+        expect(layers).toContain("context graph unavailable — layer derivation needs the shared import graph");
         expect(buildBoundariesSection(process.cwd())).toContain("## Service Boundaries");
+    });
+
+    it("clusters and layers compute when contextGraph is present", async () => {
+        function makeGraphStub(): any {
+            return {
+                getProvenanceEdges: () => [],
+                getCapacityStats: () => ({ fileIndex: { entries: 0 }, graphIndex: { entries: 0 } }),
+                getFileNeighbours: async () => [],
+                getNeighbors: async () => [],
+                getSymbolIndex: () => ({}),
+            };
+        }
+        const marker = "context graph unavailable";
+        expect(buildClustersSection({ contextGraph: makeGraphStub() } as any, process.cwd())).not.toContain(marker);
+        const layers = await buildLayersSection({ path: "src/inspect", cwd: process.cwd(), contextGraph: makeGraphStub() } as any, process.cwd());
+        expect(layers).not.toContain(marker);
     });
 
     it("shared runtime: tryCanonical + mergeRanges", () => {

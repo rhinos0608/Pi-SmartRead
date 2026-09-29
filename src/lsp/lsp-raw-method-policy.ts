@@ -36,7 +36,8 @@ export interface RawMethodPolicyDecision {
 /**
  * Exact observational allowlist. Every entry is a client→server request whose
  * result is read-only observation or edit-proposal JSON: proposals never write
- * files (SmartEdit remains the sole mutation authority), and resolve/
+ * files directly (SmartEdit remains the sole mutation authority; the only
+ * mutating path is applyProposal through SmartEdit's RPC), and resolve/
  * continuation methods only refine or extend a prior observational answer.
  * Lifecycle (initialize/shutdown/exit) is intentionally absent — transport
  * owns it, the raw escape hatch does not.

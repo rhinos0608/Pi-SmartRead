@@ -25,10 +25,14 @@ against it.
   error). Only the observational allowlist issues. Verified:
   `test/unit/lsp/strict-contract.test.ts` (`isRawMethodAllowed`),
   `test/unit/lsp/executor.test.ts` (raw allow/deny).
-- SmartRead never applies edits: unsolicited `workspace/applyEdit` is
+- SmartRead never applies edits directly: unsolicited `workspace/applyEdit` is
   answered `applied:false` and retained only as a bounded in-memory
   proposal record (FIFO, 256 cap, `APPLY_EDIT_PROPOSAL_LIMIT` in
-  `src/lsp/lsp-connection.ts`). SmartEdit is the sole mutation authority.
+  `src/lsp/lsp-connection.ts`). SmartEdit is the sole mutation authority; the
+  only mutating path is `applyProposal`, which applies a staged proposal
+  through SmartEdit's evidence-checked edit path over event-bus RPC
+  (`stage_workspace_edit` / `apply_staged_edit` on
+  `RPC_CHANNELS.workspaceEdit`).
 
 ## 2. StrictEnvelope proposal ops SmartEdit consumes
 

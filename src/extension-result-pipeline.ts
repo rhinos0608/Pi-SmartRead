@@ -82,6 +82,21 @@ function mutationDetailsFromDetails(details: unknown): MutationDetails | undefin
   return value.ok ? value.value : undefined;
 }
 
+/** LSP applyProposal results carry { apply: { status, changedFiles } } in details. */
+export function lspApplyChangedPaths(details: unknown): string[] {
+  if (!details || typeof details !== "object") return [];
+  const apply = (details as Record<string, unknown>).apply;
+  if (!apply || typeof apply !== "object") return [];
+  const a = apply as Record<string, unknown>;
+  if (a.status !== "applied") return [];
+  if (!Array.isArray(a.changedFiles)) return [];
+  return a.changedFiles.filter((p): p is string => typeof p === "string" && p.length > 0);
+}
+
+function isLspApplyResult(s: PipelineState): boolean {
+  return lspApplyChangedPaths(s.details).length > 0;
+}
+
 /** Extract paths only from protocol-valid, applied mutation details. */
 export function changedPathsFromDetails(details: unknown): string[] {
   const mutation = mutationDetailsFromDetails(details);
@@ -108,23 +123,39 @@ function mutationApplied(details: unknown): boolean | undefined {
   return mutation ? mutation.status.kind === "applied" : undefined;
 }
 
+const EDIT_MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit", "transfer", "LSP"]);
+
+function graphMutateResources(
+  input: Record<string, unknown>,
+  workspaceRoot: string,
+): ContextHygieneResource[] {
+  const resources: ContextHygieneResource[] = [];
+  if (typeof input.from === "string") resources.push(buildFileResource(canonicalResourcePath(input.from, workspaceRoot)));
+  if (typeof input.to === "string") resources.push(buildFileResource(canonicalResourcePath(input.to, workspaceRoot)));
+  return resources;
+}
+
+/** LSP apply edit branch: authoritative changed paths win, else fall back to input paths. */
+function lspApplyResources(
+  toolName: string,
+  input: Record<string, unknown>,
+  changedPaths: string[],
+  workspaceRoot: string,
+): ContextHygieneResource[] {
+  // changedResources.canonicalPath is authoritative for edit/transfer results when present.
+  // LSP applyProposal results carry changedFiles in details.apply.
+  if (changedPaths.length > 0) return changedPaths.map((p) => buildFileResource(canonicalResourcePath(p, workspaceRoot)));
+  return resourcesForTool(toolName, input, workspaceRoot);
+}
+
 export function mutationResourcesForTool(
   toolName: string,
   input: Record<string, unknown>,
   changedPaths: string[],
   workspaceRoot = process.cwd(),
 ): ContextHygieneResource[] {
-  if (toolName === "graph_mutate") {
-    const resources: ContextHygieneResource[] = [];
-    if (typeof input.from === "string") resources.push(buildFileResource(canonicalResourcePath(input.from, workspaceRoot)));
-    if (typeof input.to === "string") resources.push(buildFileResource(canonicalResourcePath(input.to, workspaceRoot)));
-    return resources;
-  }
-  if (toolName === "write" || toolName === "edit" || toolName === "transfer") {
-    // changedResources.canonicalPath is authoritative for edit/transfer results when present.
-    if (changedPaths.length > 0) return changedPaths.map((p) => buildFileResource(canonicalResourcePath(p, workspaceRoot)));
-    return resourcesForTool(toolName, input, workspaceRoot);
-  }
+  if (toolName === "graph_mutate") return graphMutateResources(input, workspaceRoot);
+  if (EDIT_MUTATION_TOOLS.has(toolName)) return lspApplyResources(toolName, input, changedPaths, workspaceRoot);
   return [];
 }
 
@@ -368,7 +399,7 @@ export async function trackLspDocuments(s: PipelineState): Promise<void> {
   if (s.toolName === "write" || s.toolName === "edit" || s.toolName === "transfer") await trackMutationClose(s, lspInput);
 }
 
-const CACHE_INVALIDATING_MUTATION_TOOLS = new Set(["write", "edit", "transfer", "graph_mutate"]);
+const CACHE_INVALIDATING_MUTATION_TOOLS = new Set(["write", "edit", "transfer", "graph_mutate", "LSP"]);
 
 /**
  * Centralized successful mutation invalidation. Only successful
@@ -376,21 +407,8 @@ const CACHE_INVALIDATING_MUTATION_TOOLS = new Set(["write", "edit", "transfer", 
  * must NOT mutate state. Order per target: fs-scan → semantic, then
  * incremental once, then graph. graph_mutate invalidates the graph only.
  */
-export function invalidateCachesOnMutation(s: PipelineState): void {
-  if (!CACHE_INVALIDATING_MUTATION_TOOLS.has(s.toolName)) return;
-  const applied = mutationApplied(s.details);
-  if (applied === false || (applied === undefined && s.outputEvent.isError)) return;
-  if (s.toolName === "graph_mutate") {
-    // Graph mutation must cause a graph rebuild on next use.
-    invalidateSharedGraph();
-    return;
-  }
-  const targets =
-    (s.toolName === "edit" || s.toolName === "transfer") && s.changedPaths.length > 0
-      ? s.changedPaths
-      : [s.input.path, s.input.filePath, s.input.relative_path].filter(
-          (p): p is string => typeof p === "string",
-        );
+/** Per-target invalidation: fs-scan → semantic per path. Advisory; never throws. */
+function invalidateMutationTargets(targets: string[]): void {
   for (const target of targets) {
     invalidateFsScanCache(target);
     try {
@@ -402,6 +420,25 @@ export function invalidateCachesOnMutation(s: PipelineState): void {
       // semantic invalidation is advisory
     }
   }
+}
+
+export function invalidateCachesOnMutation(s: PipelineState): void {
+  if (!CACHE_INVALIDATING_MUTATION_TOOLS.has(s.toolName)) return;
+  if (s.toolName === "LSP" && !isLspApplyResult(s)) return;
+  const applied = mutationApplied(s.details);
+  if (applied === false || (applied === undefined && s.outputEvent.isError)) return;
+  if (s.toolName === "graph_mutate") {
+    // Graph mutation must cause a graph rebuild on next use.
+    invalidateSharedGraph();
+    return;
+  }
+  const targets =
+    ((s.toolName === "edit" || s.toolName === "transfer" || s.toolName === "LSP") && s.changedPaths.length > 0)
+      ? s.changedPaths
+      : [s.input.path, s.input.filePath, s.input.relative_path].filter(
+          (p): p is string => typeof p === "string",
+        );
+  invalidateMutationTargets(targets);
   try {
     getIncrementalIndex(process.cwd()).invalidate();
   } catch {
@@ -662,6 +699,24 @@ export function handleToolCall(state: ActivationState, event: any): undefined {
  * bash guard, bash suggestions) return immediately when they rewrite,
  * skipping later transforms — matching the original handler.
  */
+function isFileMutationTool(toolName: string): boolean {
+  return toolName === "edit" || toolName === "transfer";
+}
+
+/** LSP apply branch of changed-path resolution, kept separate for complexity budget. */
+function lspApplyChangedPathsForEvent(event: any, workspaceRoot: string): string[] {
+  if ((event.toolName as string) !== "LSP" || event.isError) return [];
+  return lspApplyChangedPaths(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot));
+}
+
+function resolveChangedPaths(event: any, workspaceRoot: string): string[] {
+  // changedResources.canonicalPath is authoritative for edit/transfer results when present.
+  if (isFileMutationTool(event.toolName as string) && !event.isError) {
+    return changedPathsFromDetails(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot));
+  }
+  return lspApplyChangedPathsForEvent(event, workspaceRoot);
+}
+
 export async function handleToolResult(state: ActivationState, event: any): Promise<any> {
   const workspaceRoot = canonicalizeWorkspaceRoot(process.cwd());
   const s: PipelineState = {
@@ -669,11 +724,7 @@ export async function handleToolResult(state: ActivationState, event: any): Prom
     toolCallId: event.toolCallId as string,
     input: (event.input ?? {}) as Record<string, unknown>,
     details: (event.details ?? {}) as Record<string, unknown>,
-    // changedResources.canonicalPath is authoritative for edit/transfer results when present.
-    changedPaths:
-      ((event.toolName as string) === "edit" || (event.toolName as string) === "transfer") && !event.isError
-        ? changedPathsFromDetails(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot))
-        : [],
+    changedPaths: resolveChangedPaths(event, workspaceRoot),
     outputEvent: event,
     outputChanged: false,
   };

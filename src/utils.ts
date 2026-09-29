@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { resolve as pathResolve } from "node:path";
+import type { EditMode } from "@rhinos0608/pi-workspace-protocol";
 import { resolveWorkspaceDirectory } from "./workspace/workspace-boundary.js";
 import {
 	DEFAULT_MAX_BYTES,
@@ -622,15 +623,30 @@ export function stripHashlineAnchors(body: string): string {
 // Keep WRAPPER_LINES in sync with this format.
 export const WRAPPER_LINES = 3;
 
+/**
+ * Prefix body lines for the active edit dialect: hashline anchors
+ * (`Nab|`) in hashline mode, plain `N|` prefixes in text mode.
+ * Text mode never touches the hashline engine. Defaults to hashline so
+ * callers without a resolved mode keep today's byte-identical output.
+ */
+export function prefixLinesForEditMode(body: string, startLine = 1, mode: EditMode = "hashline"): string {
+	if (mode === "text") {
+		return body.split("\n").map((line, i) => `${startLine + i}|${line}`).join("\n");
+	}
+	return prefixLinesWithAnchors(body, startLine);
+}
+
 export function formatContentBlock(
 	path: string,
 	body: string,
 	index: number,
-	options?: { anchorBody?: boolean; startLine?: number },
+	options?: { anchorBody?: boolean; startLine?: number; editMode?: EditMode },
 ): string {
 	const delimiter = pickDelimiter(path, index, body);
 	const anchorBody = options?.anchorBody ?? true;
-	const anchoredBody = anchorBody ? prefixLinesWithAnchors(body, options?.startLine ?? 1) : body;
+	const anchoredBody = anchorBody
+		? prefixLinesForEditMode(body, options?.startLine ?? 1, options?.editMode ?? "hashline")
+		: body;
 	return `@${path}\n<<'${delimiter}'\n${anchoredBody}\n${delimiter}`;
 }
 
@@ -709,7 +725,7 @@ export function formatRecoveryHint(
 	return `[${count} ${fileWord} omitted; use smaller limits or read files individually]`;
 }
 
-export function buildPartialSection(candidate: FileCandidate, remainingLines: number, remainingBytes: number): string | undefined {
+export function buildPartialSection(candidate: FileCandidate, remainingLines: number, remainingBytes: number, editMode: EditMode = "hashline"): string | undefined {
 	if (!candidate.body) {
 		return undefined;
 	}
@@ -734,6 +750,7 @@ export function buildPartialSection(candidate: FileCandidate, remainingLines: nu
 
 		const partialText = formatContentBlock(candidate.path, trunc.content, candidate.index + 1, {
 			startLine: candidate.startLine ?? 1,
+			editMode,
 		});
 		const metrics = measureText(partialText);
 
@@ -752,7 +769,7 @@ export function buildPartialSection(candidate: FileCandidate, remainingLines: nu
 	return undefined;
 }
 
-export function buildPlan(strategy: PackingStrategy, order: number[], candidates: FileCandidate[]): PackingPlan {
+export function buildPlan(strategy: PackingStrategy, order: number[], candidates: FileCandidate[], editMode: EditMode = "hashline"): PackingPlan {
 	const state = { usedBytes: 0, usedLines: 0, sectionCount: 0 };
 	const fullIncluded = new Set<number>();
 	let fullSuccessCount = 0;
@@ -786,7 +803,7 @@ export function buildPlan(strategy: PackingStrategy, order: number[], candidates
 			break;
 		}
 
-		const partialText = buildPartialSection(candidates[index]!, remainingLines, remainingBytes);
+		const partialText = buildPartialSection(candidates[index]!, remainingLines, remainingBytes, editMode);
 		if (!partialText) {
 			continue;
 		}

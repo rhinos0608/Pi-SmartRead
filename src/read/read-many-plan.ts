@@ -5,6 +5,7 @@ import {
 	truncateHead,
 	type TruncationResult,
 } from "@mariozechner/pi-coding-agent";
+import type { EditMode } from "@rhinos0608/pi-workspace-protocol";
 import {
 	type FileCandidate,
 	type PackingStrategy,
@@ -29,7 +30,7 @@ export interface PackedOutput extends PackingChoice {
 }
 
 export function packingHelp(): string {
-	return `Read several files in one call. With exact paths, pass { files: [{ path, offset?, limit? }] }; with query: "your intent", candidate files are ranked by relevance and only the best are packed — use when you know the goal but not the exact files. Output is packed under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)} using adaptive ordering while preserving rendered request order. Prefer read for one known file, search for exact text/code patterns, and repo_map for a repository overview.`;
+	return `Read several already-known files in one call with { files: [{ path, offset?, limit? }] }. Output is packed under ${DEFAULT_MAX_LINES} lines / ${formatSize(DEFAULT_MAX_BYTES)} using adaptive ordering while preserving rendered request order. Use read for one known file, grep to discover files/text, LSP for compiler-backed semantic relationships, and inspect for structural or architectural analysis.`;
 }
 
 function scoreLocation(pathLower: string): number {
@@ -91,11 +92,11 @@ function orderByRelevance(candidates: FileCandidate[], requestOrder: number[]): 
 }
 
 /** Pick strategy fitting most complete successful files; render stays in request order. */
-export function choosePackingPlan(candidates: FileCandidate[]): PackingChoice {
+export function choosePackingPlan(candidates: FileCandidate[], editMode: EditMode = "hashline"): PackingChoice {
 	const requestOrder = candidates.map((_, i) => i);
-	const requestPlan = buildPlan("request-order", requestOrder, candidates);
-	const smallestPlan = buildPlan("smallest-first", orderBySize(candidates, requestOrder), candidates);
-	const relevancePlan = buildPlan("relevance-first", orderByRelevance(candidates, requestOrder), candidates);
+	const requestPlan = buildPlan("request-order", requestOrder, candidates, editMode);
+	const smallestPlan = buildPlan("smallest-first", orderBySize(candidates, requestOrder), candidates, editMode);
+	const relevancePlan = buildPlan("relevance-first", orderByRelevance(candidates, requestOrder), candidates, editMode);
 	if (relevancePlan.fullSuccessCount > requestPlan.fullSuccessCount && relevancePlan.fullSuccessCount > smallestPlan.fullSuccessCount) {
 		return { plan: relevancePlan, rerankingResult: { status: "ok", changedOrder: true, candidateCount: candidates.length } };
 	}
@@ -134,7 +135,7 @@ function buildRecoveryHints(candidates: FileCandidate[], plan: PackingPlan, outp
 	const hints: string[] = [];
 	if (plan.omittedIndexes.length > 0) {
 		hints.push(formatRecoveryHint("file", "", { type: "omitted", count: plan.omittedIndexes.length }));
-		hints.push(`${plan.omittedIndexes.length} file(s) omitted by the output budget. Add query: "<your intent>" to rank files by relevance and pack the best ones instead.`);
+		hints.push(`${plan.omittedIndexes.length} file(s) omitted by the output budget. Split the batch or use grep first to choose a narrower set of files.`);
 	}
 	const hint = partialHint(candidates, plan);
 	if (hint) hints.push(hint);
@@ -166,8 +167,8 @@ function assembledSize(content: string, hintText: string): { lines: number; byte
 }
 
 /** Render full + partial sections in request order, truncate combined output, add recovery hints. */
-export function planAndRender(candidates: FileCandidate[]): PackedOutput {
-	const { plan, rerankingResult } = choosePackingPlan(candidates);
+export function planAndRender(candidates: FileCandidate[], editMode: EditMode = "hashline"): PackedOutput {
+	const { plan, rerankingResult } = choosePackingPlan(candidates, editMode);
 	const sectionsText = renderSections(candidates, plan).join("\n\n");
 	// Reserve hint space before truncation so the final assembly (content +
 	// hints) stays within the documented line/byte budgets. Iterate: each

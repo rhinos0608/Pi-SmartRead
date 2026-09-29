@@ -493,6 +493,27 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
   const def = getOperationDef(r.operation);
   if (!def) throw new Error(`unknown operation: ${String((r as { operation?: unknown }).operation)}`);
 
+  // applyProposal never touches a language server: the mutation lives in
+  // SmartEdit behind event-bus RPC (handled in lsp-tool). At this layer it
+  // is always unroutable — unavailable, never a wire request.
+  if (r.operation === "applyProposal") {
+    const info: StrictServerInfo = {
+      descriptorId: "unknown",
+      name: "unknown",
+      languageId: "unknown",
+      projectRoot: root,
+      positionEncoding: "utf-16",
+    };
+    return {
+      status: classifyStatus({ kind: "no-session" }),
+      operation: r.operation,
+      method: "workspaceEdit/apply",
+      server: info,
+      result: null,
+      meta: { truncated: false },
+    };
+  }
+
   const cursors = deps.cursors ?? sharedCursors;
   const affinity = deps.affinity ?? sharedAffinity;
   const timeoutMs = r.timeoutMs ?? deps.defaultTimeoutMs ?? 15000;

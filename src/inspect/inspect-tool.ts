@@ -1,22 +1,27 @@
 /**
- * SmartRead `inspect` tool — four explicit modes sharing one entry point.
+ * SmartRead `inspect` tool — structural/contextual analysis only.
  *
- * file → artifact inspection (structural facts + quality signals).
- * directory → ranked repo map + architecture. navigate → LSP-backed symbol
- * navigation + diagnostics. script → bounded read-only multi-hop composition.
- * Query/symbol/action params removed — use grep for code search.
+ * file → aggregate structural facts + quality signals.
+ * directory → ranked repo map + architecture.
+ * script → bounded read-only multi-hop composition.
+ *
+ * Exact compiler-backed semantics (definitions, references, hover, symbols,
+ * hierarchy, diagnostics, refactor proposals) belong to the LSP tool.
  */
 import { Type } from "@sinclair/typebox";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { executeInspectV4 } from "./inspect.js";
 import type {
-    DiagnosticsParams,
     InspectParams,
     InspectV4Input,
     InspectV4Result,
-    NavigationParams,
 } from "./inspect-types.js";
 import type { ContextGraph } from "../context-graph.js";
+import {
+    needsContextGraph,
+    normalizeFileAnalysis,
+    normalizeDirectoryAnalysis,
+} from "./inspect-mode-contract.js";
 
 const SignalsSchema = Type.Array(
     Type.Union([
@@ -61,13 +66,11 @@ const FileAnalysisSchema = Type.Object(
 const DirectoryAnalysisSchema = Type.Object(
     {
         mapTokens: Type.Optional(
-            Type.Number({ description: "Token budget for directory mode (256-32768, default 4096)." }),
+            Type.Number({ minimum: 256, maximum: 32768, description: "Token budget for directory mode (256-32768, default 4096)." }),
         ),
         focus: Type.Optional(Type.Array(Type.String(), { description: "Files/symbols to boost in directory mode." })),
         compact: Type.Optional(Type.Boolean({ description: "Compact output (default true for directory)." })),
-        signals: Type.Optional(SignalsSchema),
         deadCode: Type.Optional(Type.Boolean({ description: "Return zero-caller functions in scope." })),
-        impact: Type.Optional(Type.Boolean({ description: "Blast radius: files/symbols reachable from target." })),
         diff: Type.Optional(DiffSchema),
         graphSchema: Type.Optional(
             Type.Boolean({ description: "Return graph structure summary (node/edge counts, sample names)." }),
@@ -79,39 +82,6 @@ const DirectoryAnalysisSchema = Type.Object(
         boundaries: Type.Optional(Type.Boolean({ description: "Detect service boundaries from monorepo config." })),
     },
     { additionalProperties: false },
-);
-
-const NavigationSchema = Type.Object(
-    {
-        operation: Type.Union(
-            [
-                Type.Literal("definition"),
-                Type.Literal("references"),
-                Type.Literal("implementation"),
-                Type.Literal("hover"),
-                Type.Literal("documentSymbols"),
-                Type.Literal("workspaceSymbols"),
-                Type.Literal("prepareCallHierarchy"),
-                Type.Literal("incomingCalls"),
-                Type.Literal("outgoingCalls"),
-            ],
-            { description: "LSP navigation operation" },
-        ),
-        line: Type.Optional(Type.Number({ minimum: 1, description: "1-based line; file-target ops" })),
-        character: Type.Optional(Type.Number({ minimum: 1, description: "1-based character; file-target ops" })),
-        query: Type.Optional(Type.String({ description: "workspaceSymbols only" })),
-        maxResults: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: "default 20, max 100" })),
-    },
-    { description: "LSP navigation", additionalProperties: false },
-);
-
-const DiagnosticsSchema = Type.Object(
-    {
-        waitMs: Type.Optional(Type.Number({ minimum: 0, description: "waitMs default 1500" })),
-        maxPerFile: Type.Optional(Type.Number({ minimum: 1, description: "max per file default 12" })),
-        maxFiles: Type.Optional(Type.Number({ minimum: 1, description: "max files default 20, dir only" })),
-    },
-    { description: "LSP diagnostics", additionalProperties: false },
 );
 
 const ScriptBranchDescription = `WHEN:
@@ -127,18 +97,19 @@ EXAMPLE: { mode: "script", script: "const g = await grep(\\"handleAuth\\", { lit
 
 // Flattened schema — providers (e.g. Console Go upstream) require a root
 // JSON Schema of type "object" and reject anyOf unions at the top level.
-// The four-mode XOR is enforced at runtime in execute() + rejectForeignKeys.
+// The three-mode XOR is enforced at runtime in execute() + rejectForeignKeys.
 const InspectSchema = Type.Object(
     {
-        mode: Type.Union([Type.Literal("file"), Type.Literal("directory"), Type.Literal("navigate"), Type.Literal("script")], {
-            description: "Inspect mode to run.",
+        mode: Type.Union([Type.Literal("file"), Type.Literal("directory"), Type.Literal("script")], {
+            description:
+                "Structural/contextual inspect mode. Use file for one artifact, directory for repository architecture, or script for a dependent multi-hop read-only investigation. For compiler-backed semantic lookup/navigation use LSP instead.",
         }),
-        path: Type.Optional(Type.String({ description: "File, directory, or navigation target path. Required for file/directory/navigate; optional cwd anchor for script." })),
-        analysis: Type.Optional(Type.Union([FileAnalysisSchema, DirectoryAnalysisSchema], {
-            description: "Mode-specific analysis options: file signals/call-graph or directory map/architecture. Must match mode.",
+        path: Type.Optional(Type.String({
+            description: "Known file or directory target. Required for file/directory; optional cwd anchor for script.",
         })),
-        navigation: Type.Optional(NavigationSchema),
-        diagnostics: Type.Optional(DiagnosticsSchema),
+        analysis: Type.Optional(Type.Union([FileAnalysisSchema, DirectoryAnalysisSchema], {
+            description: "Aggregate structural analysis only: file signals/call graph/impact/dead-code/routes, or directory repo map/clusters/layers/boundaries. Do not use for definitions, references, hover, language-server symbols, or diagnostics; use LSP for those. Fields belonging to the other inspect mode are rejected at runtime.",
+        })),
         script: Type.Optional(
             Type.String({
                 minLength: 1,
@@ -149,7 +120,7 @@ const InspectSchema = Type.Object(
     {
         additionalProperties: false,
         description:
-            "Inspect modes: file (artifact facts + signals), directory (repo map + architecture), navigate (LSP navigation + diagnostics), script (bounded multi-hop composition).",
+            "Inspect known code structure and repository architecture. Modes: file (aggregate structural facts + quality signals), directory (repo map + architecture), script (bounded dependent multi-hop composition). Use LSP instead for exact compiler/language-server semantics such as definitions, references, hover, symbols, type/call hierarchy, diagnostics, completion, and refactor proposals.",
     },
 );
 
@@ -162,11 +133,11 @@ export interface InspectToolOptions {
     readonly getSessionFilePath: () => string | null | undefined;
     /** ContextGraph instance or getter for graph-dependent inspect params (WP-5 DI). */
     readonly contextGraph?: ContextGraph | ((cwd: string) => ContextGraph | Promise<ContextGraph>);
-    /** Shared LSP inspection provider — injected by runtime, threaded lazily to inspect (WP-SR5 DI). */
+    /** Shared LSP provider retained for script-mode host calls; public inspect modes do not expose LSP navigation. */
     readonly lspInspectionProvider?: import("../lsp/lsp-inspection.js").LspInspectionProvider;
 }
 
-const INSPECT_V4_DESCRIPTION = `Inspect code via explicit modes. { mode: "file", path, analysis? }: structural facts (dependents, dependencies, call sites, parent/children, overrides, re-exports) + quality signals. { mode: "directory", path, analysis? }: ranked repository map + architecture. { mode: "navigate", path, navigation?, diagnostics? }: LSP symbol navigation + diagnostics. { mode: "script", script, path? }: compose a multi-hop investigation where each call's arguments depend on the previous result in one bounded read-only call.`;
+const INSPECT_V4_DESCRIPTION = `Inspect aggregate code structure and repository architecture for already-known targets. Use { mode: "file", path, analysis? } for structural facts such as dependencies/dependents, call graph, impact, dead code, routes, diff mapping, and quality signals. Use { mode: "directory", path, analysis? } for repository maps, graph summaries, clusters, layers, service boundaries, hotspots, routes, and other architectural views. Use { mode: "script", script, path? } only for bounded dependent multi-hop investigations. Do not use inspect for exact compiler-backed semantic lookup or navigation. Use LSP for definitions, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion/signature/inlay information, and refactor proposals. Use read when you simply need the contents of a known file.`;
 
 function legacyParamError(params: Record<string, unknown>): string | undefined {
     if (params.query !== undefined) return "inspect no longer supports query mode. Use grep('pattern').";
@@ -191,128 +162,14 @@ function rejectForeignKeys(
     return undefined;
 }
 
-/** Reject unknown option keys inside a branch option bag. */
-function rejectUnknownOptions(
-    bag: Record<string, unknown>,
-    allowed: ReadonlySet<string>,
-    what: string,
-): string | undefined {
-    for (const key of Object.keys(bag)) {
-        if (!allowed.has(key)) {
-            return `Error: inspect ${what} has no option "${key}"`;
-        }
-    }
-    return undefined;
-}
-
 const FILE_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "analysis"]);
 const DIRECTORY_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "analysis"]);
-const NAVIGATE_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "navigation", "diagnostics"]);
 const SCRIPT_MODE_KEYS: ReadonlySet<string> = new Set(["mode", "path", "script"]);
-
-const FILE_ANALYSIS_KEYS: ReadonlySet<string> = new Set([
-    "signals",
-    "compact",
-    "callDepth",
-    "callDirection",
-    "deadCode",
-    "impact",
-    "diff",
-    "graphSchema",
-    "hotspots",
-    "routes",
-]);
-
-const DIRECTORY_ANALYSIS_KEYS: ReadonlySet<string> = new Set([
-    "mapTokens",
-    "focus",
-    "compact",
-    "signals",
-    "deadCode",
-    "impact",
-    "diff",
-    "graphSchema",
-    "hotspots",
-    "routes",
-    "clusters",
-    "layers",
-    "boundaries",
-]);
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
     return typeof value === "object" && value !== null && !Array.isArray(value)
         ? (value as Record<string, unknown>)
         : undefined;
-}
-
-// ── WP-SR3 navigation/diagnostics validation (decision §1 §2 verbatim matrix) ──
-function validateNavigation(
-    nav: Record<string, unknown> | undefined,
-    mode: "file" | "directory",
-): string | undefined {
-    if (!nav) return undefined;
-    const op = nav.operation as string;
-    const hasLine = nav.line !== undefined;
-    const hasChar = nav.character !== undefined;
-    const hasQuery = nav.query !== undefined;
-    const hasMax = nav.maxResults !== undefined;
-    if (hasMax) {
-        const v = nav.maxResults as number;
-        if (typeof v !== "number" || v < 1 || v > 100) return "Error: inspect navigation.maxResults must be 1..100";
-    }
-    const fileOps = new Set([
-        "definition",
-        "references",
-        "implementation",
-        "hover",
-        "prepareCallHierarchy",
-        "incomingCalls",
-        "outgoingCalls",
-    ]);
-    const docOps = new Set(["documentSymbols"]);
-    const wsOps = new Set(["workspaceSymbols"]);
-    if (fileOps.has(op)) {
-        if (mode !== "file") return `Error: inspect navigation operation "${op}" requires a file target`;
-        if (!hasLine || !hasChar) return `Error: inspect navigation operation "${op}" requires line and character`;
-        if (hasQuery) return `Error: inspect navigation operation "${op}" forbids query`;
-        return undefined;
-    }
-    if (docOps.has(op)) {
-        if (mode !== "file") return `Error: inspect navigation operation "${op}" requires a file target`;
-        if (hasLine || hasChar) return `Error: inspect navigation operation "${op}" forbids line/character`;
-        if (hasQuery) return `Error: inspect navigation operation "${op}" forbids query`;
-        return undefined;
-    }
-    if (wsOps.has(op)) {
-        if (mode !== "directory") return `Error: inspect navigation operation "${op}" requires a directory target`;
-        if (!hasQuery) return `Error: inspect navigation operation "${op}" requires query`;
-        if (hasLine || hasChar) return `Error: inspect navigation operation "${op}" forbids line/character`;
-        return undefined;
-    }
-    // unknown operation — let inspect handle as degraded rather than throw
-    return undefined;
-}
-
-function validateDiagnostics(
-    d: Record<string, unknown> | undefined,
-    mode: "file" | "directory",
-): string | undefined {
-    if (!d) return undefined;
-    if (mode === "file" && d.maxFiles !== undefined)
-        return "Error: inspect diagnostics.maxFiles requires a directory target";
-    return undefined;
-}
-
-/**
- * Whether this branch actually consumes ContextGraph and therefore justifies
- * awaiting the async `opts.contextGraph` getter. Only directory
- * clusters/layers/graphSchema and file impact/graphSchema read the graph.
- */
-function branchNeedsContextGraph(kind: "file" | "directory", bag: Record<string, unknown>): boolean {
-    if (kind === "directory") {
-        return bag.clusters === true || bag.layers === true || bag.graphSchema === true;
-    }
-    return bag.impact === true || bag.graphSchema === true;
 }
 
 export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
@@ -467,15 +324,7 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                     if (!bag) {
                         throw new Error(`Error: inspect mode "${kind}" option "${bagKey}" must be an object`);
                     }
-                    const unknownErr = rejectUnknownOptions(
-                        bag,
-                        kind === "file" ? FILE_ANALYSIS_KEYS : DIRECTORY_ANALYSIS_KEYS,
-                        `mode "${kind}" ${bagKey}`,
-                    );
-                    if (unknownErr) throw new Error(unknownErr);
-                    if (kind === "file" && bag.callDirection !== undefined && bag.callDepth === undefined) {
-                        throw new Error("Error: inspect callDirection requires callDepth to be set");
-                    }
+                    const normalized = kind === "file" ? normalizeFileAnalysis(bag) : normalizeDirectoryAnalysis(bag);
 
                     const { resolveInspectV4Mode } = await import("./inspect.js");
                     const probe: InspectV4Input = {
@@ -500,62 +349,29 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
                         cwd: ctx.cwd,
                         sessionFilePath,
                         signal,
-                        ...(bag as Record<string, never>),
+                        ...normalized,
                     };
-                    if (branchNeedsContextGraph(kind, bag)) {
-                        // WP-5: resolve contextGraph from DI (await getter so a registered
-                        // runtime tool never receives an unbuilt graph).
-                        inspectInput.contextGraph = await resolveGraph();
+                    if (needsContextGraph(kind, normalized)) {
+                        // getSharedContextGraphAsync can rethrow a raw native
+                        // tree-sitter/parser error from the graph build; every
+                        // downstream consumer of input.contextGraph already
+                        // renders a "not available" fallback when it is
+                        // undefined, so leave it unset here (same graceful
+                        // degradation as "no DI graph registered").
+                        try {
+                            inspectInput.contextGraph = await resolveGraph();
+                        } catch (e) {
+                            if (signal?.aborted) throw e;
+                            // leave contextGraph undefined — downstream falls back
+                        }
                     }
                     const details = await executeInspectV4(inspectInput);
                     return respond(details);
                 }
 
-                case "navigate": {
-                    const foreignErr = rejectForeignKeys(raw, "navigate", NAVIGATE_MODE_KEYS);
-                    if (foreignErr) throw new Error(foreignErr);
-                    if (typeof raw.path !== "string" || raw.path.length === 0) {
-                        throw new Error('Error: inspect mode "navigate" requires "path"');
-                    }
-                    const nav = raw.navigation === undefined ? undefined : asObject(raw.navigation);
-                    if (raw.navigation !== undefined && !nav) {
-                        throw new Error('Error: inspect mode "navigate" option "navigation" must be an object');
-                    }
-                    const diag = raw.diagnostics === undefined ? undefined : asObject(raw.diagnostics);
-                    if (raw.diagnostics !== undefined && !diag) {
-                        throw new Error('Error: inspect mode "navigate" option "diagnostics" must be an object');
-                    }
-                    const { resolveInspectV4Mode } = await import("./inspect.js");
-                    const probe: InspectV4Input = {
-                        path: raw.path,
-                        cwd: ctx.cwd,
-                        sessionFilePath,
-                        signal,
-                    };
-                    const resolvedMode = resolveInspectV4Mode(probe);
-                    const navErr = validateNavigation(nav, resolvedMode);
-                    if (navErr) throw new Error(navErr);
-                    const diagErr = validateDiagnostics(diag, resolvedMode);
-                    if (diagErr) throw new Error(diagErr);
-                    const navigateInput: InspectV4Input = {
-                        path: raw.path,
-                        cwd: ctx.cwd,
-                        sessionFilePath,
-                        signal,
-                        ...(nav ? { navigation: nav as unknown as NavigationParams } : {}),
-                        ...(diag ? { diagnostics: diag as unknown as DiagnosticsParams } : {}),
-                    };
-                    if (opts.lspInspectionProvider) {
-                        // WP-SR5: thread shared LSP provider — lazy, no server start unless navigation/diagnostics used
-                        navigateInput.lspInspectionProvider = opts.lspInspectionProvider;
-                    }
-                    const details = await executeInspectV4(navigateInput);
-                    return respond(details);
-                }
-
                 default:
                     throw new Error(
-                        'Error: inspect requires "mode" to be one of "file" | "directory" | "navigate" | "script"',
+                        'Error: inspect requires "mode" to be one of "file" | "directory" | "script"',
                     );
             }
         },

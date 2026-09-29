@@ -1,17 +1,12 @@
-/**
- * Kernel Phase 2: runQueryChannels fanout / degraded / abort semantics, plus
- * the minimal persistentIndexChannel projection used by query-retrieval.
- */
+/** Kernel Phase 2: runQueryChannels fanout / degraded / abort semantics. */
 import { describe, expect, it } from "vitest";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
 import type {
   ChannelContext,
   ChannelName,
   RetrievalCandidate,
   RetrievalChannel,
 } from "../../../src/retrieval/types.js";
-import { persistentIndexChannel, runQueryChannels } from "../../../src/retrieval/runner.js";
+import { runQueryChannels } from "../../../src/retrieval/runner.js";
 
 function stubContext(overrides: Partial<ChannelContext> = {}): ChannelContext {
   return {
@@ -109,49 +104,5 @@ describe("runQueryChannels", () => {
   it("rethrows Operation aborted rejections even without a signal", async () => {
     const channels = [stubChannel("graph", new Error("Operation aborted"))];
     await expect(runQueryChannels(channels, stubContext())).rejects.toThrow("Operation aborted");
-  });
-});
-
-describe("persistentIndexChannel", () => {
-  it("projects index hits losslessly onto candidates with no discovery", async () => {
-    const searched: Array<{ query: string; options: unknown }> = [];
-    const channel = persistentIndexChannel(
-      {
-        // Platform-native root: resolve() spells POSIX "/root" as a
-        // drive-letter path on Windows, so hardcoding breaks the projection.
-        root: join(tmpdir(), "runner-root"),
-        async search(query: string, options: { topK: number; pathPrefix?: string }) {
-          searched.push({ query, options });
-          return [
-            {
-              filePath: "src/auth.ts",
-              lineStart: 3,
-              lineEnd: 7,
-              symbolKind: "const",
-              codeSnippet: "needle",
-              score: 0.9,
-            },
-          ];
-        },
-      },
-      { topK: 5, pathPrefix: "src" },
-    );
-    expect(channel.name).toBe("semantic");
-    const result = await channel.run(stubContext({ query: "needle" }));
-    expect(searched).toEqual([{ query: "needle", options: { topK: 5, pathPrefix: "src" } }]);
-    expect(result.strategy).toBe("persistent-index");
-    expect(result.candidates).toEqual([
-      {
-        file: resolve(join(tmpdir(), "runner-root"), "src/auth.ts"),
-        line: 3,
-        endLine: 7,
-        name: "const",
-        kind: "const",
-        snippet: "needle",
-        channel: "semantic",
-        rawScore: 0.9,
-        rank: 1,
-      },
-    ]);
   });
 });
