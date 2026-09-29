@@ -1,6 +1,6 @@
 # Pi-SmartRead
 
-Code intelligence for [Pi](https://github.com/mariozechner/pi-coding-agent): evidence-bearing reads, hybrid code search, structural inspection, repository intelligence, bounded multi-hop investigation, and strict read-only LSP access.
+Code intelligence for [Pi](https://github.com/mariozechner/pi-coding-agent): evidence-bearing reads, hybrid code search, structural inspection, repository intelligence, bounded multi-hop investigation, and strict LSP access (read-only except applyProposal).
 
 Pi-SmartRead is both:
 
@@ -39,7 +39,7 @@ pi -e ./src/index.ts
 | `read` | ✓ | — | Strong-evidence reads for already-known files or symbols |
 | `inspect` | ✓ | ✓ | Structural/architectural file/directory analysis and bounded script composition |
 | `grep` | ✓ | ✓ | Broad text, symbol, semantic, structural, and graph-filtered code discovery |
-| `LSP` | ✓ | ✓ | Strict read-only compiler/language-server semantic operations |
+| `LSP` | ✓ | ✓ | Strict compiler/language-server semantic operations (read-only except applyProposal) |
 | `skill` | ✓ | ✓ | Discover and read procedural agent skills |
 | `graph_mutate` | opt-in | opt-in | Persist observed breakage/co-change edges |
 | `git_notes_read/write` | opt-in | opt-in | Git-backed durable AI notes |
@@ -350,9 +350,9 @@ Every successful dispatch returns a provenance-bearing envelope with:
 
 An exact `server` field routes to that descriptor id only. Unroutable requests return `unavailable`; SmartRead does not silently guess another server.
 
-### Proposal-only mutation boundary
+### Proposal mutation boundary
 
-Rename, code-action, and formatting operations return proposals. They never write files.
+Rename, formatting, and resolved code-action (resolveCodeAction) operations return proposals. When SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path.
 
 Unsolicited `workspace/applyEdit` is rejected, and raw `workspace/executeCommand` / `workspace/applyEdit` calls are fail-closed.
 

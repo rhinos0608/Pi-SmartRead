@@ -57,6 +57,7 @@ export const STRICT_LSP_OPERATIONS = [
   "foldingRanges",
   "selectionRanges",
   "request",
+  "applyProposal",
 ] as const;
 
 export type StrictOperation = (typeof STRICT_LSP_OPERATIONS)[number];
@@ -91,6 +92,7 @@ export interface StrictRequest {
   readonly limit?: number;
   readonly cursor?: string;
   readonly timeoutMs?: number;
+  readonly proposalId?: string;
 }
 
 export type ReadinessState = "confirmed" | "settling" | "unknown";
@@ -199,6 +201,7 @@ const FIELD_MATRIX: Readonly<Record<StrictOperation, ReadonlySet<string>>> = {
   foldingRanges: new Set(["path"]),
   selectionRanges: new Set(["path", "position"]),
   request: new Set(["method", "params"]),
+  applyProposal: new Set(["proposalId"]),
 };
 
 /** Required fields per operation (beyond `operation` itself). */
@@ -239,6 +242,7 @@ const REQUIRED_FIELDS: Readonly<Record<StrictOperation, readonly string[]>> = {
   foldingRanges: ["path"],
   selectionRanges: ["path", "position"],
   request: ["method"],
+  applyProposal: ["proposalId"],
 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -352,6 +356,9 @@ export function validateStrictRequest(req: unknown): StrictRequestValidation {
   }
   if (r.newName !== undefined && (typeof r.newName !== "string" || r.newName.length === 0)) {
     return { ok: false, error: `operation "${op}": newName must be a non-empty string` };
+  }
+  if (r.proposalId !== undefined && (typeof r.proposalId !== "string" || r.proposalId.length === 0)) {
+    return { ok: false, error: `operation "${op}": proposalId must be a non-empty string` };
   }
   if (r.limit !== undefined && (typeof r.limit !== "number" || !Number.isInteger(r.limit) || r.limit <= 0)) {
     return { ok: false, error: `operation "${op}": limit must be a positive integer` };

@@ -40,6 +40,7 @@ const ALL_OPERATIONS: StrictOperation[] = [
   "foldingRanges",
   "selectionRanges",
   "request",
+  "applyProposal",
 ];
 
 describe("operation registry", () => {
@@ -70,7 +71,8 @@ describe("operation registry", () => {
   it("every remote operation has a non-null wire method", () => {
     for (const def of listOperations()) {
       if (def.operation === "publishedDiagnostics" || def.operation === "capabilities" ||
-          def.operation === "sessionStatus" || def.operation === "request") continue;
+          def.operation === "sessionStatus" || def.operation === "request" ||
+          def.operation === "applyProposal") continue;
       expect(typeof def.method, def.operation).toBe("string");
     }
   });
@@ -84,7 +86,7 @@ describe("operation registry", () => {
       .filter((d) => d.capability === null)
       .map((d) => d.operation)
       .sort();
-    expect(nullCaps).toEqual(["capabilities", "publishedDiagnostics", "request", "sessionStatus"]);
+    expect(nullCaps).toEqual(["applyProposal", "capabilities", "publishedDiagnostics", "request", "sessionStatus"]);
   });
 
   it("non-idempotent set is exact", () => {
@@ -93,6 +95,7 @@ describe("operation registry", () => {
       .map((d) => d.operation)
       .sort();
     expect(nonIdem).toEqual([
+      "applyProposal",
       "codeActions",
       "formatDocument",
       "formatOnType",
@@ -218,8 +221,8 @@ describe("operation registry", () => {
     }
   });
 
-  it("request + local-only trio are flagged false (gating N/A, never pre-gate)", () => {
-    for (const op of ["request", "publishedDiagnostics", "capabilities", "sessionStatus"] as const) {
+  it("request + local-only trio + applyProposal are flagged false (gating N/A, never pre-gate)", () => {
+    for (const op of ["request", "publishedDiagnostics", "capabilities", "sessionStatus", "applyProposal"] as const) {
       expect(getOperationDef(op)?.capability, op).toBeNull();
       expect(getOperationDef(op)?.capabilityExact, op).toBe(false);
     }

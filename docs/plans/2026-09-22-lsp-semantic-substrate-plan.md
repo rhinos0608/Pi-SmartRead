@@ -39,7 +39,7 @@ The public tool should stay small even if the subsystem beneath it becomes subst
 1. **One additional model-facing tool.** Do not create one Pi tool per LSP method.
 2. **Strict provenance.** Typed `LSP` operations never fall back to non-LSP intelligence.
 3. **Protocol-native coordinates.** Positions are 0-based and use the encoding negotiated for that connection.
-4. **Read-only authority.** Edit-producing language-server operations return validated proposals; they never mutate disk.
+4. **Read-only authority.** Edit-producing language-server operations return validated proposals; the only mutation path is applyProposal, which applies a SmartEdit-staged proposal.
 5. **Raw request escape hatch.** Keep a permanent `request` operation, but fail closed around side effects.
 6. **Exact routing.** A strict operation resolves to one server/session unless the operation explicitly defines aggregation.
 7. **Orchestration lives above the primitive.** Multi-step developer workflows belong in skills or higher-level SmartRead surfaces.

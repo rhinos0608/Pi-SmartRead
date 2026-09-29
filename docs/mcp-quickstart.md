@@ -28,7 +28,7 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 |---|---|
 | `inspect` | Structural/architectural analysis: `file` facts/signals, `directory` repo map/architecture, and bounded read-only `script` composition |
 | `grep` | Broad code discovery — literal/regex, BM25, symbol, semantic fallback, structural options, and graph filters |
-| `LSP` | Strict read-only compiler/language-server semantics: definitions, references, hover, symbols, hierarchy, diagnostics, completion, and refactor proposals |
+| `LSP` | Strict compiler/language-server semantics (read-only except applyProposal): definitions, references, hover, symbols, hierarchy, diagnostics, completion, and refactor proposals |
 | `skill` | Discover/read procedural skills from package/project/global skill roots |
 | `graph_mutate` | [experimental] Record semantic coupling edges — requires `experimental.graphMutate: true` |
 | git-notes tools | [experimental] Read/write git notes — requires `experimental.gitNotes: true` |

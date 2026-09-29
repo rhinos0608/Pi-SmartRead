@@ -55,7 +55,7 @@ import {
   type ConfidenceClass,
   type RelevanceClass,
 } from "../ranking/classifiers.js";
-import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import type { EditMode, WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { aggregateBatchEvidence } from "../evidence/read-many-evidence.js";
 import { sessionFileFromContext } from "../inspect/inspect-tool.js";
 
@@ -624,6 +624,7 @@ function packIntentSections(
 function buildPackCandidates(
   rankedSuccessOrder: string[],
   successfulFiles: FileReadResult[],
+  editMode: EditMode = "hashline",
 ): FileCandidate[] {
   return rankedSuccessOrder.map((path, i) => {
     const f = successfulFiles.find((x) => x.path === path)!;
@@ -631,6 +632,7 @@ function buildPackCandidates(
     const fullText = formatContentBlock(f.displayPath, body, i + 1, {
       anchorBody: f.anchorBody ?? true,
       startLine: f.startLine ?? 1,
+      editMode,
     });
     return { index: i, path, ok: true, fullText, fullMetrics: measureText(fullText), body };
   });
@@ -766,7 +768,7 @@ function collectPackEvidence(
 }
 
 /** Pick the packing plan covering the most files; tie-break prefers #1 ranked file. */
-function choosePackingPlan(packCandidates: FileCandidate[]) {
+function choosePackingPlan(packCandidates: FileCandidate[], editMode: EditMode = "hashline") {
   const requestOrder = packCandidates.map((_, i) => i);
   const smallestFirstOrder = [...requestOrder].sort((a, b) => {
     const d = packCandidates[a]!.fullMetrics.bytes - packCandidates[b]!.fullMetrics.bytes;
@@ -779,9 +781,9 @@ function choosePackingPlan(packCandidates: FileCandidate[]) {
     ? [0, ...smallestFirstOrder.filter((i) => i !== 0)]
     : [];
   const candidates = [
-    { plan: buildPlan("request-order", requestOrder, packCandidates), name: "request-order" },
-    { plan: buildPlan("smallest-first", smallestFirstOrder, packCandidates), name: "smallest-first" },
-    { plan: buildPlan("relevance-first", relevanceFirstOrder, packCandidates), name: "relevance-first" },
+    { plan: buildPlan("request-order", requestOrder, packCandidates, editMode), name: "request-order" },
+    { plan: buildPlan("smallest-first", smallestFirstOrder, packCandidates, editMode), name: "smallest-first" },
+    { plan: buildPlan("relevance-first", relevanceFirstOrder, packCandidates, editMode), name: "relevance-first" },
   ];
   const best = candidates.sort((a, b) => {
     const d = b.plan.fullSuccessCount - a.plan.fullSuccessCount;
@@ -827,6 +829,8 @@ export interface IntentReadToolOptions {
     sessionFilePath: string,
     workspaceRoot: string,
   ) => void;
+  /** Edit dialect resolved once at activation; defaults to hashline. */
+  readonly editMode?: EditMode;
 }
 
 interface WorkingIntentReadFileDetail extends IntentReadFileDetail {
@@ -919,8 +923,11 @@ export function createIntentReadTool(
       _onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
-      // 0. Ensure hashline engine is ready
-      await ensureHashlineReady();
+      // 0. Ensure hashline engine is ready (text mode never touches it)
+      const editMode = opts.editMode ?? "hashline";
+      if (editMode !== "text") {
+        await ensureHashlineReady();
+      }
 
       // 1. Validate embedding config — null means baseUrl or model is missing.
       // Degrade gracefully to BM25-only with a loud warning instead of hard-failing.
@@ -1039,8 +1046,8 @@ export function createIntentReadTool(
       markUnpackedFiles(fileResults, fileDetails, topKPaths, filteredBelowThresholdPaths);
 
       // 6. Pack top-K files using buildPlan (in RRF rank order)
-      const packCandidates = buildPackCandidates(rankedSuccessOrder.slice(0, effectiveTopK), successfulFiles);
-      const { plan, switchedForCoverage } = choosePackingPlan(packCandidates);
+      const packCandidates = buildPackCandidates(rankedSuccessOrder.slice(0, effectiveTopK), successfulFiles, editMode);
+      const { plan, switchedForCoverage } = choosePackingPlan(packCandidates, editMode);
 
       // Build output sections in RRF rank order
       const sections = packIntentSections(packCandidates, plan, fileDetails);

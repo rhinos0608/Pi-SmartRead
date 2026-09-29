@@ -4,7 +4,7 @@
 
 These instructions apply to the repository root. Keep agent-specific operational rules here; put user-facing behavior and setup in `README.md`.
 
-Pi-SmartRead is a TypeScript/ESM Pi extension plus standalone MCP server. It owns code retrieval, structural analysis, repository intelligence, read-only language-server access, workspace evidence production, and the SmartRead side of the SmartEdit evidence/LSP proposal contract.
+Pi-SmartRead is a TypeScript/ESM Pi extension plus standalone MCP server. It owns code retrieval, structural analysis, repository intelligence, language-server access (read-only except applyProposal), workspace evidence production, and the SmartRead side of the SmartEdit evidence/LSP proposal contract.
 
 ## Canonical commands
 
@@ -32,7 +32,7 @@ Before finishing source changes, run the narrowest relevant tests plus `npm run 
 - `read`: already-known source content only; exactly one selector per call: `path`, `paths`, or `symbol`. Natural-language query mode does not exist.
 - `inspect`: explicit `mode: "file" | "directory" | "script"`; structural/architectural analysis only, never LSP navigation.
 - `grep`: broad text/symbol/concept discovery, batch queries, structural options, graph filters.
-- `LSP`: strict read-only compiler/language-server semantics. Tool name is uppercase `LSP`.
+- `LSP`: strict compiler/language-server semantics (read-only except applyProposal). Tool name is uppercase `LSP`.
 - `skill`: discovers project/package/global skills.
 - Experimental: `graph_mutate`, `git_notes_read`, `git_notes_write` only when enabled.
 
@@ -74,7 +74,7 @@ Do not port examples between the strict tool and script host helpers without con
 - `inspect` and `grep` produce discovery/search-match evidence. Read the relevant file/range before mutation.
 - `details.workspaceEvidence` on tool results is the durable source of truth. The in-memory resolver cache is derived from tool-result events.
 - Evidence-producing canonical paths must use real paths with symlinks resolved. Follow the existing `tryCanonical`/realpath pattern; do not replace it with bare `path.resolve`.
-- SmartRead publishes evidence and semantic proposals. **SmartEdit owns file mutation.** SmartRead must never apply LSP WorkspaceEdits.
+- SmartRead publishes evidence and semantic proposals. **SmartEdit owns file mutation.** SmartRead never applies LSP WorkspaceEdits directly; `applyProposal` is the only mutating operation and it applies a staged proposal through SmartEdit's evidence-checked edit path.
 
 See `docs/lsp-smartedit-contract.md` before changing language-intelligence RPC proposal behavior.
 

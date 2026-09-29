@@ -20,7 +20,7 @@ import { registerHandler } from "../protocols/internal-url-router.js";
 import { skillHandler } from "../protocols/skill-protocol.js";
 import { memoryHandler } from "../protocols/memory-protocol.js";
 import { graphHandler } from "../protocols/graph-protocol.js";
-import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import type { EditMode, WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { sessionFileFromContext } from "../inspect/inspect-tool.js";
 import { readBatchFiles, type BatchFileDetail } from "./read-many-reader.js";
 import { packingHelp, planAndRender } from "./read-many-plan.js";
@@ -42,6 +42,8 @@ export interface ReadManyToolOptions {
 		sessionFilePath: string,
 		workspaceRoot: string,
 	) => void;
+	/** Edit dialect resolved once at activation; defaults to hashline. */
+	readonly editMode?: EditMode;
 }
 
 const ReadManySchema = Type.Object({
@@ -121,7 +123,10 @@ export function createReadManyTool(
 				throw new Error("Provide files to read");
 			}
 
-			await ensureHashlineReady();
+			const editMode = opts.editMode ?? "hashline";
+			if (editMode !== "text") {
+				await ensureHashlineReady();
+			}
 			const readTool = readToolFactory(ctx.cwd);
 			const batch = await readBatchFiles({
 				files: params.files,
@@ -131,9 +136,10 @@ export function createReadManyTool(
 				cwd: ctx.cwd,
 				readTool: readTool as unknown as Parameters<typeof readBatchFiles>[0]["readTool"],
 				stopOnError: params.stopOnError,
+				editMode,
 			});
 			const candidates: FileCandidate[] = batch.candidates;
-			const rendered = planAndRender(candidates);
+			const rendered = planAndRender(candidates, editMode);
 			const details: ReadManyDetails = {
 				processedCount: batch.fileDetails.length,
 				successCount: batch.fileDetails.filter((f) => f.ok).length,

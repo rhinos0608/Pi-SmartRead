@@ -8,7 +8,7 @@
  * Tools exposed by default:
  *   - inspect: Structural/architectural file and directory analysis
  *   - grep:   Primary broad/textual code discovery
- *   - LSP:    Strict read-only compiler/language-server semantics
+ *   - LSP:    Strict compiler/language-server semantics (read-only except applyProposal)
  *   - skill:  Run named SmartRead skills
  * Experimental tools may be enabled through configuration.
  *

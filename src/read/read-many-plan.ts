@@ -5,6 +5,7 @@ import {
 	truncateHead,
 	type TruncationResult,
 } from "@mariozechner/pi-coding-agent";
+import type { EditMode } from "@rhinos0608/pi-workspace-protocol";
 import {
 	type FileCandidate,
 	type PackingStrategy,
@@ -91,11 +92,11 @@ function orderByRelevance(candidates: FileCandidate[], requestOrder: number[]): 
 }
 
 /** Pick strategy fitting most complete successful files; render stays in request order. */
-export function choosePackingPlan(candidates: FileCandidate[]): PackingChoice {
+export function choosePackingPlan(candidates: FileCandidate[], editMode: EditMode = "hashline"): PackingChoice {
 	const requestOrder = candidates.map((_, i) => i);
-	const requestPlan = buildPlan("request-order", requestOrder, candidates);
-	const smallestPlan = buildPlan("smallest-first", orderBySize(candidates, requestOrder), candidates);
-	const relevancePlan = buildPlan("relevance-first", orderByRelevance(candidates, requestOrder), candidates);
+	const requestPlan = buildPlan("request-order", requestOrder, candidates, editMode);
+	const smallestPlan = buildPlan("smallest-first", orderBySize(candidates, requestOrder), candidates, editMode);
+	const relevancePlan = buildPlan("relevance-first", orderByRelevance(candidates, requestOrder), candidates, editMode);
 	if (relevancePlan.fullSuccessCount > requestPlan.fullSuccessCount && relevancePlan.fullSuccessCount > smallestPlan.fullSuccessCount) {
 		return { plan: relevancePlan, rerankingResult: { status: "ok", changedOrder: true, candidateCount: candidates.length } };
 	}
@@ -166,8 +167,8 @@ function assembledSize(content: string, hintText: string): { lines: number; byte
 }
 
 /** Render full + partial sections in request order, truncate combined output, add recovery hints. */
-export function planAndRender(candidates: FileCandidate[]): PackedOutput {
-	const { plan, rerankingResult } = choosePackingPlan(candidates);
+export function planAndRender(candidates: FileCandidate[], editMode: EditMode = "hashline"): PackedOutput {
+	const { plan, rerankingResult } = choosePackingPlan(candidates, editMode);
 	const sectionsText = renderSections(candidates, plan).join("\n\n");
 	// Reserve hint space before truncation so the final assembly (content +
 	// hints) stays within the documented line/byte budgets. Iterate: each

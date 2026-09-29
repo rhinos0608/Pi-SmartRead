@@ -26,6 +26,7 @@ import {
 } from "./git/git-context.js";
 import { loadGitContextConfig, validateEmbeddingConfig } from "./config.js";
 import { formatBranchNotes, scanBranchNotes } from "./git/git-notes.js";
+import type { EditMode } from "@rhinos0608/pi-workspace-protocol";
 import {
    ensureHashlineReady,
 } from "./utils.js";
@@ -492,8 +493,11 @@ async function interceptContextualRead(
       return result;
    }
 
-   // Ensure hashline engine is ready for anchor computation
-   await ensureHashlineReady();
+   const editMode = opts?.editMode ?? "hashline";
+   // Text-mode prefixes need no hashline engine; skip its init entirely.
+   if (editMode !== "text") {
+      await ensureHashlineReady();
+   }
 
    const cwd = path.resolve((params.directory as string) ?? ctx.cwd);
 
@@ -539,7 +543,7 @@ async function interceptContextualRead(
    // Anchors + footer assembly lives in ./hook-enrich.js; preserves
    // displayContent snapshot, anchor skip, and contextFooter separation so
    // batch packing/evidence/cache still describe rendered file content only.
-   applyTextEnrichment(result, displayStartLine, contextLines);
+   applyTextEnrichment(result, displayStartLine, contextLines, editMode);
 
    return result;
 }
@@ -611,6 +615,12 @@ export interface WrapReadToolOptions {
     * ContextGraph.findSymbolFiles() fallback.
     */
    readonly resolveSymbol?: (symbol: string, cwd?: string) => Promise<SymbolResolution | null>;
+   /**
+    * Edit dialect resolved once at activation. Threaded to all render
+    * code; render code must not read process.env itself. Defaults to
+    * hashline (today's byte-identical output) when unset (e.g. tests).
+    */
+   readonly editMode?: EditMode;
 }
 
 function requirePositiveInteger(value: unknown, name: string): void {
@@ -682,8 +692,8 @@ async function handlePathsRead(multi: MultiFileReadParams, b: ReadBranchCtx): Pr
     requirePositiveInteger(request.offset, `paths[${index}].offset`);
     requirePositiveInteger(request.limit, `paths[${index}].limit`);
   }
-  const singleReadFactory = createEvidenceReadFactory(b.ctx);
-  const manyTool = createReadManyTool(singleReadFactory, { publishInspection: b.opts?.publishInspection });
+  const singleReadFactory = createEvidenceReadFactory(b.ctx, b.opts?.editMode);
+   const manyTool = createReadManyTool(singleReadFactory, { publishInspection: b.opts?.publishInspection, editMode: b.opts?.editMode });
   return manyTool.execute(b.toolCallId, {
     files: multi.paths,
     stopOnError: multi.stopOnError,
@@ -732,25 +742,26 @@ export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefiniti
 }
 
 function createEvidenceReadFactory(
-  ctx: ExtensionContext,
+   ctx: ExtensionContext,
+   editMode?: EditMode,
 ): typeof import("@mariozechner/pi-coding-agent").createReadTool {
-  return (() => ({
-    execute: (
-      toolCallId: string,
-      params: Record<string, unknown>,
-      signal: AbortSignal | undefined,
-      onUpdate: unknown,
-    ) => interceptContextualRead(
-      params,
-      createDelegatedExecute(ctx),
-      toolCallId,
-      signal,
-      onUpdate,
-      ctx,
-      // Internal reads expose evidence to the batch aggregator but do not publish
-      // per-file envelopes; only the final rendered batch is published.
-      undefined,
-    ),
+   return (() => ({
+      execute: (
+         toolCallId: string,
+         params: Record<string, unknown>,
+         signal: AbortSignal | undefined,
+         onUpdate: unknown,
+      ) => interceptContextualRead(
+         params,
+         createDelegatedExecute(ctx),
+         toolCallId,
+         signal,
+         onUpdate,
+         ctx,
+         // Internal reads expose evidence to the batch aggregator but do not publish
+         // per-file envelopes; only the final rendered batch is published.
+         { editMode },
+      ),
   })) as unknown as typeof import("@mariozechner/pi-coding-agent").createReadTool;
 }
 

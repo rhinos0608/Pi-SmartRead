@@ -13,7 +13,7 @@ Core tools below are available through the Pi extension API (`src/index.ts`); li
 | 1 | **read** | READ | `src/read/unified-read.ts` → `src/hook.ts` | Stable | Reads already-known files or source around a known symbol with strong evidence. |
 | 2 | **inspect** | READ | `src/inspect/inspect-tool.ts` | Stable | Structural/architectural file or directory analysis plus bounded script composition. |
 | 3 | **grep** | READ | `src/search/grep-tool.ts` | Stable | Broad code discovery: BM25 + AST symbol + semantic cascade. |
-| 4 | **LSP** | READ | `src/lsp/lsp-tool.ts` | Stable | Strict read-only compiler/language-server semantics and proposals. |
+| 4 | **LSP** | READ | `src/lsp/lsp-tool.ts` | Stable | Strict compiler/language-server semantics (read-only except applyProposal) and proposals. |
 | 5 | **graph_mutate** | MUTATE | `src/graph/graph-mutate.ts` | Experimental | Records breakage / co-change edges between files/symbols. |
 | 6 | **skill** | SKILL | `src/runtime/skill-tool.ts` | Stable | Agent skill discovery: list, search, read SKILL.md files. |
 | 7 | **git_notes_read** | NOTES | `src/git/git-notes-tool.ts` | Experimental | Reads AI session notes attached to git commits. |

@@ -7,6 +7,7 @@
  * All best-effort catches and the watcher invalidation order match the
  * original src/index.ts activation path.
  */
+import { resolveEditMode, type EditMode } from "@rhinos0608/pi-workspace-protocol";
 import { resetContextHygieneTracker } from "./runtime/context-hygiene.js";
 import { createDoomLoopState } from "./runtime/doom-loop.js";
 import { resolveBashContextGuardConfig } from "./runtime/bash-context-guard.js";
@@ -35,6 +36,8 @@ export interface ActivationState {
   languageIntelligenceDispose: (() => void) | null;
   /** Set true once the runtime grep tool is registered; read at event time. */
   grepRegisteredRef: { current: boolean };
+  /** Edit dialect resolved once at activation; threaded to all render code. */
+  editMode: EditMode;
 }
 
 export function createActivationState(): ActivationState {
@@ -50,6 +53,7 @@ export function createActivationState(): ActivationState {
     freshGraphGetter: async (root = process.cwd()) => getSharedContextGraphAsync(root),
     languageIntelligenceDispose: null,
     grepRegisteredRef: { current: false },
+    editMode: resolveEditMode(process.env).mode,
   };
 }
 
