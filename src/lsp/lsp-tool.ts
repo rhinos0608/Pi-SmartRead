@@ -351,6 +351,13 @@ export interface LspToolOptions {
   readonly getBus?: () => BusLike | null;
   /** Session file path override. Defaults to ctx.sessionManager at execute time. */
   readonly getSessionFilePath?: () => string | null;
+  /**
+   * Executor override, primarily a test seam: module-namespace spies on
+   * executeLspOperation are unreliable across platforms (dual module
+   * instances under Windows path casing), so tests inject the envelope
+   * producer here instead. Production callers omit it.
+   */
+  readonly executeOperation?: typeof executeLspOperation;
 }
 
 export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
@@ -372,7 +379,8 @@ export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
       if (validation.value.operation === "applyProposal") {
         return applyProposalResult({ toolCallId: _toolCallId, proposalId: validation.value.proposalId as string, cwd, opts, ctx });
       }
-      const envelope = await executeLspOperation(validation.value, resolveExecutorDeps(opts, cwd, _signal));
+      const runOperation = opts.executeOperation ?? executeLspOperation;
+      const envelope = await runOperation(validation.value, resolveExecutorDeps(opts, cwd, _signal));
       const staged = await maybeStageProposal({ request: validation.value, envelope, cwd, opts, ctx });
       if (!staged) return unstagedResult(envelope);
       return stagedResult(envelope, staged);

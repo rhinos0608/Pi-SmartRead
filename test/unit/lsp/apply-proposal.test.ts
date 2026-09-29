@@ -101,37 +101,9 @@ describe("rename staging over mock SmartEdit RPC", () => {
     });
     try {
       const tool = createLspTool({
-        executorDeps: { acquire: async () => null } as never,
+        executeOperation: executorReturning(RENAME_EDIT) as never,
         getBus: () => bus,
       });
-      // Bypass executor wiring: inject via executorDeps.acquire is not enough;
-      // drive through the real executor seam with a stubbed executeLspOperation.
-      const mod = await import("../../../src/lsp/lsp-executor.js");
-      const spy = vi.spyOn(mod, "executeLspOperation").mockImplementationOnce(executorReturning(RENAME_EDIT) as never);
-      try {
-        const res = await (tool.execute as Function)(
-          "call-1",
-          { operation: "rename", path: "a.ts", position: { line: 0, character: 1 }, newName: "bbb" },
-          undefined,
-          undefined,
-          CTX,
-        );
-        expect(res.details.proposal.proposalId).toBe("prop-1");
-        expect(res.content[0].text).toMatch(/prop-1/);
-      } finally {
-        spy.mockRestore();
-      }
-    } finally {
-      server.dispose();
-      bus.dispose();
-    }
-  });
-
-  it("rename with no server returns the unchanged read-only result", async () => {
-    const mod = await import("../../../src/lsp/lsp-executor.js");
-    const spy = vi.spyOn(mod, "executeLspOperation").mockImplementationOnce(executorReturning(RENAME_EDIT) as never);
-    try {
-      const tool = createLspTool();
       const res = await (tool.execute as Function)(
         "call-1",
         { operation: "rename", path: "a.ts", position: { line: 0, character: 1 }, newName: "bbb" },
@@ -139,11 +111,25 @@ describe("rename staging over mock SmartEdit RPC", () => {
         undefined,
         CTX,
       );
-      expect(res.details.proposal).toBeUndefined();
-      expect(res.content[0].text).not.toMatch(/prop-1/);
+      expect(res.details.proposal.proposalId).toBe("prop-1");
+      expect(res.content[0].text).toMatch(/prop-1/);
     } finally {
-      spy.mockRestore();
+      server.dispose();
+      bus.dispose();
     }
+  });
+
+  it("rename with no server returns the unchanged read-only result", async () => {
+    const tool = createLspTool({ executeOperation: executorReturning(RENAME_EDIT) as never });
+    const res = await (tool.execute as Function)(
+      "call-1",
+      { operation: "rename", path: "a.ts", position: { line: 0, character: 1 }, newName: "bbb" },
+      undefined,
+      undefined,
+      CTX,
+    );
+    expect(res.details.proposal).toBeUndefined();
+    expect(res.content[0].text).not.toMatch(/prop-1/);
   });
 });
 
@@ -239,30 +225,24 @@ describe("applyProposal", () => {
       },
     });
     try {
-      const tool = createLspTool({
-        executorDeps: { acquire: async () => null } as never,
+      const utf8 = executorReturning(RENAME_EDIT);
+      const toolWithUtf8 = createLspTool({
+        executeOperation: (async () => {
+          const env = await (utf8 as () => Promise<Record<string, unknown>>)();
+          (env.server as Record<string, unknown>).positionEncoding = "utf-8";
+          return env as never;
+        }) as never,
         getBus: () => bus,
       });
-      const mod = await import("../../../src/lsp/lsp-executor.js");
-      const utf8 = executorReturning(RENAME_EDIT);
-      const spy = vi.spyOn(mod, "executeLspOperation").mockImplementationOnce(async () => {
-        const env = await (utf8 as () => Promise<Record<string, unknown>>)();
-        (env.server as Record<string, unknown>).positionEncoding = "utf-8";
-        return env as never;
-      });
-      try {
-        const res = await (tool.execute as Function)(
-          "call-1",
-          { operation: "rename", path: "a.ts", position: { line: 0, character: 1 }, newName: "bbb" },
-          undefined,
-          undefined,
-          CTX,
-        );
-        expect(stageCalls).toBe(0);
-        expect(res.details.proposal).toBeUndefined();
-      } finally {
-        spy.mockRestore();
-      }
+      const res = await (toolWithUtf8.execute as Function)(
+        "call-1",
+        { operation: "rename", path: "a.ts", position: { line: 0, character: 1 }, newName: "bbb" },
+        undefined,
+        undefined,
+        CTX,
+      );
+      expect(stageCalls).toBe(0);
+      expect(res.details.proposal).toBeUndefined();
     } finally {
       server.dispose();
       bus.dispose();
@@ -284,39 +264,33 @@ describe("applyProposal", () => {
       },
     });
     try {
+      const FORMAT_EDITS = [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "x" }];
       const tool = createLspTool({
-        executorDeps: { acquire: async () => null } as never,
+        executeOperation: (async () => ({
+          status: "ok",
+          operation: "formatDocument",
+          method: "textDocument/formatting",
+          server: {
+            descriptorId: "ts",
+            name: "ts",
+            languageId: "typescript",
+            projectRoot: "/tmp/apply-proposal-test",
+            positionEncoding: "utf-16",
+          },
+          result: FORMAT_EDITS,
+          meta: { truncated: false },
+        })) as never,
         getBus: () => bus,
       });
-      const mod = await import("../../../src/lsp/lsp-executor.js");
-      const FORMAT_EDITS = [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "x" }];
-      const spy = vi.spyOn(mod, "executeLspOperation").mockImplementationOnce(async () => ({
-        status: "ok",
-        operation: "formatDocument",
-        method: "textDocument/formatting",
-        server: {
-          descriptorId: "ts",
-          name: "ts",
-          languageId: "typescript",
-          projectRoot: "/tmp/apply-proposal-test",
-          positionEncoding: "utf-16",
-        },
-        result: FORMAT_EDITS,
-        meta: { truncated: false },
-      }) as never);
-      try {
-        const res = await (tool.execute as Function)(
-          "call-2",
-          { operation: "formatDocument", path: "/tmp/apply-proposal-test/b.ts" },
-          undefined,
-          undefined,
-          CTX,
-        );
-        expect(seenFilePath).toBe("/tmp/apply-proposal-test/b.ts");
-        expect(res.details.proposal.proposalId).toBe("prop-abs");
-      } finally {
-        spy.mockRestore();
-      }
+      const res = await (tool.execute as Function)(
+        "call-2",
+        { operation: "formatDocument", path: "/tmp/apply-proposal-test/b.ts" },
+        undefined,
+        undefined,
+        CTX,
+      );
+      expect(seenFilePath).toBe("/tmp/apply-proposal-test/b.ts");
+      expect(res.details.proposal.proposalId).toBe("prop-abs");
     } finally {
       server.dispose();
       bus.dispose();
