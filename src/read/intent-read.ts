@@ -795,6 +795,29 @@ function choosePackingPlan(packCandidates: FileCandidate[], editMode: EditMode =
   return { plan: best.plan, switchedForCoverage: best.name !== "request-order" };
 }
 
+/** Packed top-K output bundle for the intent execute phase. */
+interface IntentPackResult {
+	readonly packCandidates: FileCandidate[];
+	readonly plan: ReturnType<typeof buildPlan>;
+	readonly switchedForCoverage: boolean;
+	readonly outputText: string;
+}
+
+/** Pack top-K ranked files into output sections for the given edit dialect. */
+interface PackIntentArgs {
+	readonly rankedSuccessOrder: string[];
+	readonly effectiveTopK: number;
+	readonly successfulFiles: FileReadResult[];
+	readonly editMode: EditMode;
+	readonly fileDetails: Map<string, Partial<WorkingIntentReadFileDetail>>;
+}
+function packIntentOutput({ rankedSuccessOrder, effectiveTopK, successfulFiles, editMode, fileDetails }: PackIntentArgs): IntentPackResult {
+	const packCandidates = buildPackCandidates(rankedSuccessOrder.slice(0, effectiveTopK), successfulFiles, editMode);
+	const { plan, switchedForCoverage } = choosePackingPlan(packCandidates, editMode);
+	const sections = packIntentSections(packCandidates, plan, fileDetails);
+	return { packCandidates, plan, switchedForCoverage, outputText: sections.join("\n\n") };
+}
+
 interface IntentReadFileDetail {
   path: string;
   ok: boolean;
@@ -1046,12 +1069,7 @@ export function createIntentReadTool(
       markUnpackedFiles(fileResults, fileDetails, topKPaths, filteredBelowThresholdPaths);
 
       // 6. Pack top-K files using buildPlan (in RRF rank order)
-      const packCandidates = buildPackCandidates(rankedSuccessOrder.slice(0, effectiveTopK), successfulFiles, editMode);
-      const { plan, switchedForCoverage } = choosePackingPlan(packCandidates, editMode);
-
-      // Build output sections in RRF rank order
-      const sections = packIntentSections(packCandidates, plan, fileDetails);
-      const outputText = sections.join("\n\n");
+      const { packCandidates, plan, switchedForCoverage, outputText } = packIntentOutput({ rankedSuccessOrder, effectiveTopK, successfulFiles, editMode, fileDetails });
 
       // 7. Build details.files: successful files in RRF order, then errored files in input order.
       const allFileDetails = buildIntentFileDetails(

@@ -96,6 +96,42 @@ interface ReadManyDetails {
 	workspaceEvidence?: WorkspaceEvidenceEnvelope;
 }
 
+/** Resolve the batch edit dialect, priming the hashline engine unless in text mode. */
+async function resolveBatchEditMode(opts: ReadManyToolOptions): Promise<EditMode> {
+	const editMode = opts.editMode ?? "hashline";
+	if (editMode !== "text") {
+		await ensureHashlineReady();
+	}
+	return editMode;
+}
+
+/** Bundle for the batch details assembly (avoids excess-arity flags). */
+interface BatchDetailsArgs {
+	readonly batch: Awaited<ReturnType<typeof readBatchFiles>>;
+	readonly rendered: ReturnType<typeof planAndRender>;
+	readonly candidates: FileCandidate[];
+}
+
+/** Assemble the read_files details object from batch + packing outcomes. */
+function buildBatchDetails({ batch, rendered, candidates }: BatchDetailsArgs): ReadManyDetails {
+	return {
+		processedCount: batch.fileDetails.length,
+		successCount: batch.fileDetails.filter((f) => f.ok).length,
+		errorCount: batch.fileDetails.filter((f) => !f.ok).length,
+		files: batch.fileDetails,
+		packing: {
+			strategy: rendered.plan.strategy,
+			switchedForCoverage: rendered.switchedForCoverage,
+			fullIncludedCount: rendered.plan.fullCount,
+			fullIncludedSuccessCount: rendered.plan.fullSuccessCount,
+			partialIncludedPath: rendered.partialIncludedPath,
+			omittedPaths: rendered.plan.omittedIndexes.map((index) => candidates[index]!.path),
+		},
+		...(rendered.rerankingResult && { reranking: rendered.rerankingResult }),
+		combinedTruncation: rendered.outputTruncation.truncated ? rendered.outputTruncation : undefined,
+	};
+}
+
 export function createReadManyTool(
 	readToolFactory: typeof createReadTool = createReadTool,
 	opts: ReadManyToolOptions = {},
@@ -123,10 +159,7 @@ export function createReadManyTool(
 				throw new Error("Provide files to read");
 			}
 
-			const editMode = opts.editMode ?? "hashline";
-			if (editMode !== "text") {
-				await ensureHashlineReady();
-			}
+			const editMode = await resolveBatchEditMode(opts);
 			const readTool = readToolFactory(ctx.cwd);
 			const batch = await readBatchFiles({
 				files: params.files,
@@ -140,22 +173,7 @@ export function createReadManyTool(
 			});
 			const candidates: FileCandidate[] = batch.candidates;
 			const rendered = planAndRender(candidates, editMode);
-			const details: ReadManyDetails = {
-				processedCount: batch.fileDetails.length,
-				successCount: batch.fileDetails.filter((f) => f.ok).length,
-				errorCount: batch.fileDetails.filter((f) => !f.ok).length,
-				files: batch.fileDetails,
-				packing: {
-					strategy: rendered.plan.strategy,
-					switchedForCoverage: rendered.switchedForCoverage,
-					fullIncludedCount: rendered.plan.fullCount,
-					fullIncludedSuccessCount: rendered.plan.fullSuccessCount,
-					partialIncludedPath: rendered.partialIncludedPath,
-					omittedPaths: rendered.plan.omittedIndexes.map((index) => candidates[index]!.path),
-				},
-				...(rendered.rerankingResult && { reranking: rendered.rerankingResult }),
-				combinedTruncation: rendered.outputTruncation.truncated ? rendered.outputTruncation : undefined,
-			};
+			const details: ReadManyDetails = buildBatchDetails({ batch, rendered, candidates });
 
 			const sessionFilePath = sessionFileFromContext(ctx);
 			const batchEvidence = aggregateBatchEvidence({

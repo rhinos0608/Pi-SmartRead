@@ -493,59 +493,87 @@ async function interceptContextualRead(
       return result;
    }
 
-   const editMode = opts?.editMode ?? "hashline";
-   // Text-mode prefixes need no hashline engine; skip its init entirely.
-   if (editMode !== "text") {
-      await ensureHashlineReady();
-   }
+   const editMode = await resolveReadEditMode(opts);
 
    const cwd = path.resolve((params.directory as string) ?? ctx.cwd);
 
    if (!existsSync(fullPath)) return result;
 
-   // ── Workspace evidence ────────────────────────────────────────────
-   // Same strong path-mode envelope inspect produces; best-effort, never
-   // blocks the read. Binding root ctx.cwd, TOCTOU revalidation, and
-   // zero-lines skip enforced in ./hook-enrich.js.
+   attachReadEvidence(result, { fullPath, ctx, normalizedParams, displayStartLine, opts });
+   await appendReadEnrichment(result, { fullPath, cwd, ctx, displayStartLine, editMode });
+
+   return result;
+}
+
+/** Edit-mode threading: resolve mode and init the hashline engine unless text mode. */
+async function resolveReadEditMode(opts?: WrapReadToolOptions): Promise<EditMode> {
+   const editMode = opts?.editMode ?? "hashline";
+   // Text-mode prefixes need no hashline engine; skip its init entirely.
+   if (editMode !== "text") await ensureHashlineReady();
+   return editMode;
+}
+
+interface EvidenceArgs {
+   fullPath: string;
+   ctx: ExtensionContext;
+   normalizedParams: Record<string, unknown>;
+   displayStartLine: number;
+   opts?: WrapReadToolOptions;
+}
+
+// ── Workspace evidence ────────────────────────────────────────────
+// Same strong path-mode envelope inspect produces; best-effort, never
+// blocks the read. Binding root ctx.cwd, TOCTOU revalidation, and
+// zero-lines skip enforced in ./hook-enrich.js.
+function attachReadEvidence(result: HookResponse, args: EvidenceArgs): void {
    const isImageResult = result.content.some((c: { type: string }) => c.type === "image");
-   const sessionFilePath = sessionFileFromCtx(ctx);
+   const sessionFilePath = sessionFileFromCtx(args.ctx);
    const builtinText = (result.content.find((c: { type: string }) => c.type === "text") as
       | { type: "text"; text: string }
       | undefined)?.text;
    attachPathEvidence({
       result,
-      fullPath,
-      cwd: ctx.cwd,
+      fullPath: args.fullPath,
+      cwd: args.ctx.cwd,
       sessionFilePath,
       builtinText,
       isImageResult,
-      normalizedParams,
-      displayStartLine,
-      ...(opts?.publishInspection ? { publishInspection: opts.publishInspection } : {}),
+      normalizedParams: args.normalizedParams,
+      displayStartLine: args.displayStartLine,
+      ...(args.opts?.publishInspection ? { publishInspection: args.opts.publishInspection } : {}),
    });
+}
 
-   // Enrichment footer: imports, git history, git notes, graph, LSP
+interface EnrichmentArgs {
+   fullPath: string;
+   cwd: string;
+   ctx: ExtensionContext;
+   displayStartLine: number;
+   editMode: EditMode;
+}
+
+function reusableSessionGitCache(cwd: string, fullPath: string, ctx: ExtensionContext) {
    const repoKeyForGit = computeRepoKey(cwd);
    const fileProjectRoot = projectWorkspaceForFile(fullPath);
    const callerProjectRoot = projectWorkspaceForFile(ctx.cwd);
-   const canReuseSessionGitCache = sessionGitCacheKey === repoKeyForGit
+   const reusable = sessionGitCacheKey === repoKeyForGit
       && sessionGitCache !== null
       && fileProjectRoot !== null
       && fileProjectRoot === callerProjectRoot;
+   return reusable ? { gitConfig: sessionGitCache!.gitConfig, gitRoot: sessionGitCache!.gitRoot } : {};
+}
+
+// Enrichment footer: imports, git history, git notes, graph, LSP.
+// Anchors + footer assembly lives in ./hook-enrich.js; preserves
+// displayContent snapshot, anchor skip, and contextFooter separation so
+// batch packing/evidence/cache still describe rendered file content only.
+async function appendReadEnrichment(result: HookResponse, args: EnrichmentArgs): Promise<void> {
    const contextLines = await buildFileContextLines({
-      fullPath,
-      cwd,
-      ...(canReuseSessionGitCache
-         ? { gitConfig: sessionGitCache!.gitConfig, gitRoot: sessionGitCache!.gitRoot }
-         : {}),
+      fullPath: args.fullPath,
+      cwd: args.cwd,
+      ...reusableSessionGitCache(args.cwd, args.fullPath, args.ctx),
    });
-
-   // Anchors + footer assembly lives in ./hook-enrich.js; preserves
-   // displayContent snapshot, anchor skip, and contextFooter separation so
-   // batch packing/evidence/cache still describe rendered file content only.
-   applyTextEnrichment(result, displayStartLine, contextLines, editMode);
-
-   return result;
+   applyTextEnrichment(result, args.displayStartLine, contextLines, args.editMode);
 }
 
 // ── Extended Read Schema ────────────────────────────────────────────
@@ -683,17 +711,25 @@ async function handleSingleRead(single: SingleFileReadParams, b: ReadBranchCtx):
   );
 }
 
-async function handlePathsRead(multi: MultiFileReadParams, b: ReadBranchCtx): Promise<unknown> {
-  const raw = multi as unknown as Record<string, unknown>;
-  const foreignErr = rejectForeignKeys(raw, "paths", PATHS_KEYS);
-  if (foreignErr) throw new Error(foreignErr);
+function validatePathsEntries(multi: MultiFileReadParams): void {
   if (multi.paths.length === 0) throw new Error("paths must contain at least one file");
   for (const [index, request] of multi.paths.entries()) {
     requirePositiveInteger(request.offset, `paths[${index}].offset`);
     requirePositiveInteger(request.limit, `paths[${index}].limit`);
   }
+}
+
+function createBatchReadTool(b: ReadBranchCtx) {
   const singleReadFactory = createEvidenceReadFactory(b.ctx, b.opts?.editMode);
-   const manyTool = createReadManyTool(singleReadFactory, { publishInspection: b.opts?.publishInspection, editMode: b.opts?.editMode });
+  return createReadManyTool(singleReadFactory, { publishInspection: b.opts?.publishInspection, editMode: b.opts?.editMode });
+}
+
+async function handlePathsRead(multi: MultiFileReadParams, b: ReadBranchCtx): Promise<unknown> {
+  const raw = multi as unknown as Record<string, unknown>;
+  const foreignErr = rejectForeignKeys(raw, "paths", PATHS_KEYS);
+  if (foreignErr) throw new Error(foreignErr);
+  validatePathsEntries(multi);
+  const manyTool = createBatchReadTool(b);
   return manyTool.execute(b.toolCallId, {
     files: multi.paths,
     stopOnError: multi.stopOnError,

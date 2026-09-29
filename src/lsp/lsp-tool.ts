@@ -188,19 +188,52 @@ function unavailableApplyEnvelope(cwd: string) {
   };
 }
 
-async function applyProposalResult(
-  toolCallId: string,
-  proposalId: string,
-  cwd: string,
-  opts: LspToolOptions,
-  ctx: ExtensionContext,
-) {
+function resolveExecuteCwd(opts: LspToolOptions, ctx: ExtensionContext): string {
+  return opts.executorDeps?.cwd ?? opts.getCwd?.() ?? ctx?.cwd ?? process.cwd();
+}
+
+function resolveExecutorDeps(opts: LspToolOptions, cwd: string, signal: AbortSignal | undefined): ExecutorDeps {
+  return { ...opts.executorDeps, cwd, signal: opts.executorDeps?.signal ?? signal };
+}
+
+function unstagedResult(envelope: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    details: { envelope },
+  };
+}
+
+function stagedResult(envelope: unknown, staged: { proposalId: string; files: string[]; diff: string }) {
+  const plural = staged.files.length === 1 ? "" : "s";
+  const diffSuffix = staged.diff ? `\n${staged.diff}` : "";
+  const text =
+    `${JSON.stringify(envelope, null, 2)}\n\nStaged proposal ${staged.proposalId} ` +
+    `(${staged.files.length} file${plural}: ${staged.files.join(", ")}). ` +
+    `Run { operation: "applyProposal", proposalId: "${staged.proposalId}" } to apply it through SmartEdit.` +
+    diffSuffix;
+  return {
+    content: [{ type: "text" as const, text }],
+    details: { envelope, proposal: staged },
+  };
+}
+
+interface ApplyProposalArgs {
+  toolCallId: string;
+  proposalId: string;
+  cwd: string;
+  opts: LspToolOptions;
+  ctx: ExtensionContext;
+}
+
+async function applyProposalResult(args: ApplyProposalArgs) {
+  const { proposalId } = args;
+  const { cwd } = args;
   const outcome = await applyStagedProposal({
-    bus: resolveBus(opts, ctx),
-    proposalId,
-    toolCallId,
-    sessionFilePath: resolveSessionFilePath(opts, ctx),
-    cwd,
+    bus: resolveBus(args.opts, args.ctx),
+    proposalId: args.proposalId,
+    toolCallId: args.toolCallId,
+    sessionFilePath: resolveSessionFilePath(args.opts, args.ctx),
+    cwd: args.cwd,
   });
   if (outcome.kind === "unavailable") {
     const envelope = unavailableApplyEnvelope(cwd);
@@ -235,39 +268,77 @@ async function applyProposalResult(
   };
 }
 
-/** Stage proposal-bearing results with SmartEdit. Null keeps today's read-only result. Never throws. */
-async function maybeStageProposal(
-  request: { operation: string; path?: unknown },
-  envelope: { status: string; result: unknown; server?: { descriptorId?: unknown; positionEncoding?: unknown } },
+type StageableRequest = { operation: string; path?: unknown };
+type StageableEnvelope = {
+  status: string;
+  result: unknown;
+  server?: { descriptorId?: unknown; positionEncoding?: unknown };
+};
+interface StageArgs {
+  request: StageableRequest;
+  envelope: StageableEnvelope;
+  cwd: string;
+  opts: LspToolOptions;
+  ctx: ExtensionContext;
+}
+
+function isStageableEnvelope(request: StageableRequest, envelope: StageableEnvelope): boolean {
+  if (!STAGEABLE_OPERATIONS.has(request.operation)) return false;
+  if (envelope.status !== "ok" || envelope.result == null) return false;
+  return true;
+}
+
+/** Protocol accepts utf-16 only: fail closed on any other negotiated encoding. */
+function hasSupportedEncoding(envelope: StageableEnvelope): boolean {
+  const encoding = envelope.server?.positionEncoding;
+  if (typeof encoding !== "string") return true;
+  return encoding === "utf-16";
+}
+
+/** Pure: convert a stageable envelope result into a workspace edit. Null when nothing actionable. */
+function buildWorkspaceEditFromEnvelope(
+  request: StageableRequest,
+  envelope: StageableEnvelope,
   cwd: string,
-  opts: LspToolOptions,
-  ctx: ExtensionContext,
+) {
+  const fallback = typeof request.path === "string" ? resolve(cwd, request.path) : undefined;
+  return envelopeResultToWorkspaceEdit(envelope.result, fallback);
+}
+
+function serverDescriptorOf(envelope: StageableEnvelope): string | undefined {
+  const id = envelope.server?.descriptorId;
+  return typeof id === "string" ? id : undefined;
+}
+
+/** Perform the SmartEdit stage RPC for an already-converted edit. Null on any failure. */
+async function stageConvertedEdit(
+  args: StageArgs & { workspaceEdit: NonNullable<ReturnType<typeof envelopeResultToWorkspaceEdit>> },
 ): Promise<{ proposalId: string; files: string[]; diff: string } | null> {
   try {
-    if (!STAGEABLE_OPERATIONS.has(request.operation)) return null;
-    if (envelope.status !== "ok" || envelope.result == null) return null;
-    // Protocol accepts utf-16 only: fail closed on any other negotiated encoding.
-    if (
-      typeof envelope.server?.positionEncoding === "string" &&
-      envelope.server.positionEncoding !== "utf-16"
-    ) {
-      return null;
-    }
-    const fallback = typeof request.path === "string" ? resolve(cwd, request.path) : undefined;
-    const workspaceEdit = envelopeResultToWorkspaceEdit(envelope.result, fallback);
-    if (!workspaceEdit) return null;
-    const serverDescriptorId =
-      typeof envelope.server?.descriptorId === "string" ? envelope.server.descriptorId : undefined;
+    const serverDescriptorId = serverDescriptorOf(args.envelope);
     const staged = await stageWorkspaceEdit({
-      bus: resolveBus(opts, ctx),
-      workspaceEdit,
-      operation: request.operation,
+      bus: resolveBus(args.opts, args.ctx),
+      workspaceEdit: args.workspaceEdit,
+      operation: args.request.operation,
       ...(serverDescriptorId ? { serverDescriptorId } : {}),
-      sessionFilePath: resolveSessionFilePath(opts, ctx),
-      cwd,
+      sessionFilePath: resolveSessionFilePath(args.opts, args.ctx),
+      cwd: args.cwd,
     });
     if (!staged || !staged.ok) return null;
     return { proposalId: staged.proposalId, files: staged.files, diff: staged.diff };
+  } catch {
+    return null;
+  }
+}
+
+/** Stage proposal-bearing results with SmartEdit. Null keeps the read-only result. Never throws. */
+async function maybeStageProposal(args: StageArgs): Promise<{ proposalId: string; files: string[]; diff: string } | null> {
+  try {
+    if (!isStageableEnvelope(args.request, args.envelope)) return null;
+    if (!hasSupportedEncoding(args.envelope)) return null;
+    const workspaceEdit = buildWorkspaceEditFromEnvelope(args.request, args.envelope, args.cwd);
+    if (!workspaceEdit) return null;
+    return await stageConvertedEdit({ ...args, workspaceEdit });
   } catch {
     return null;
   }
@@ -297,32 +368,14 @@ export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
     ) {
       const validation = validateStrictRequest(params as unknown);
       if (!validation.ok) throw new Error(validation.error);
-      const cwd = opts.executorDeps?.cwd ?? opts.getCwd?.() ?? ctx?.cwd ?? process.cwd();
+      const cwd = resolveExecuteCwd(opts, ctx);
       if (validation.value.operation === "applyProposal") {
-        return applyProposalResult(_toolCallId, validation.value.proposalId as string, cwd, opts, ctx);
+        return applyProposalResult({ toolCallId: _toolCallId, proposalId: validation.value.proposalId as string, cwd, opts, ctx });
       }
-      const deps: ExecutorDeps = {
-        ...opts.executorDeps,
-        cwd,
-        signal: opts.executorDeps?.signal ?? _signal,
-      };
-      const envelope = await executeLspOperation(validation.value, deps);
-      const staged = await maybeStageProposal(validation.value, envelope, cwd, opts, ctx);
-      if (!staged) {
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-          details: { envelope },
-        };
-      }
-      const text =
-        `${JSON.stringify(envelope, null, 2)}\n\nStaged proposal ${staged.proposalId} ` +
-        `(${staged.files.length} file${staged.files.length === 1 ? "" : "s"}: ${staged.files.join(", ")}). ` +
-        `Run { operation: "applyProposal", proposalId: "${staged.proposalId}" } to apply it through SmartEdit.` +
-        (staged.diff ? `\n${staged.diff}` : "");
-      return {
-        content: [{ type: "text" as const, text }],
-        details: { envelope, proposal: staged },
-      };
+      const envelope = await executeLspOperation(validation.value, resolveExecutorDeps(opts, cwd, _signal));
+      const staged = await maybeStageProposal({ request: validation.value, envelope, cwd, opts, ctx });
+      if (!staged) return unstagedResult(envelope);
+      return stagedResult(envelope, staged);
     },
   } as unknown as ToolDefinition;
 }

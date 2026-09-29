@@ -92,28 +92,23 @@ describe("edit-mode render: read-many batch path follows the mode", () => {
     return createReadManyTool(() => readTool as any, opts);
   }
 
-  it("text mode renders N| prefixes", async () => {
-    const result = await stubBatchTool({ editMode: "text" }).execute(
-      "call-text",
+  async function runStubBatch(editModeOpts: { editMode?: "text" | "hashline" }, callId: string): Promise<string> {
+    const result = await stubBatchTool(editModeOpts).execute(
+      callId,
       { files: [{ path: "/a.txt" }] },
       undefined,
       undefined,
       { cwd: "/" } as any,
     );
-    const text = (result.content[0] as any).text as string;
-    expect(text).toContain("\n1|a\n2|b\n");
+    return (result.content[0] as any).text as string;
+  }
+
+  it("text mode renders N| prefixes", async () => {
+    expect(await runStubBatch({ editMode: "text" }, "call-text")).toContain("\n1|a\n2|b\n");
   });
 
   it("default (hashline) output keeps Nab| anchors", async () => {
-    const result = await stubBatchTool().execute(
-      "call-hash",
-      { files: [{ path: "/a.txt" }] },
-      undefined,
-      undefined,
-      { cwd: "/" } as any,
-    );
-    const text = (result.content[0] as any).text as string;
-    expect(text).toMatch(/\n1[a-z]{2}\|a\n2[a-z]{2}\|b\n/);
+    expect(await runStubBatch({}, "call-hash")).toMatch(/\n1[a-z]{2}\|a\n2[a-z]{2}\|b\n/);
   });
 });
 

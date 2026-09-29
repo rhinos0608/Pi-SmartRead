@@ -123,24 +123,39 @@ function mutationApplied(details: unknown): boolean | undefined {
   return mutation ? mutation.status.kind === "applied" : undefined;
 }
 
+const EDIT_MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit", "transfer", "LSP"]);
+
+function graphMutateResources(
+  input: Record<string, unknown>,
+  workspaceRoot: string,
+): ContextHygieneResource[] {
+  const resources: ContextHygieneResource[] = [];
+  if (typeof input.from === "string") resources.push(buildFileResource(canonicalResourcePath(input.from, workspaceRoot)));
+  if (typeof input.to === "string") resources.push(buildFileResource(canonicalResourcePath(input.to, workspaceRoot)));
+  return resources;
+}
+
+/** LSP apply edit branch: authoritative changed paths win, else fall back to input paths. */
+function lspApplyResources(
+  toolName: string,
+  input: Record<string, unknown>,
+  changedPaths: string[],
+  workspaceRoot: string,
+): ContextHygieneResource[] {
+  // changedResources.canonicalPath is authoritative for edit/transfer results when present.
+  // LSP applyProposal results carry changedFiles in details.apply.
+  if (changedPaths.length > 0) return changedPaths.map((p) => buildFileResource(canonicalResourcePath(p, workspaceRoot)));
+  return resourcesForTool(toolName, input, workspaceRoot);
+}
+
 export function mutationResourcesForTool(
   toolName: string,
   input: Record<string, unknown>,
   changedPaths: string[],
   workspaceRoot = process.cwd(),
 ): ContextHygieneResource[] {
-  if (toolName === "graph_mutate") {
-    const resources: ContextHygieneResource[] = [];
-    if (typeof input.from === "string") resources.push(buildFileResource(canonicalResourcePath(input.from, workspaceRoot)));
-    if (typeof input.to === "string") resources.push(buildFileResource(canonicalResourcePath(input.to, workspaceRoot)));
-    return resources;
-  }
-  if (toolName === "write" || toolName === "edit" || toolName === "transfer" || toolName === "LSP") {
-    // changedResources.canonicalPath is authoritative for edit/transfer results when present.
-    // LSP applyProposal results carry changedFiles in details.apply.
-    if (changedPaths.length > 0) return changedPaths.map((p) => buildFileResource(canonicalResourcePath(p, workspaceRoot)));
-    return resourcesForTool(toolName, input, workspaceRoot);
-  }
+  if (toolName === "graph_mutate") return graphMutateResources(input, workspaceRoot);
+  if (EDIT_MUTATION_TOOLS.has(toolName)) return lspApplyResources(toolName, input, changedPaths, workspaceRoot);
   return [];
 }
 
@@ -684,6 +699,24 @@ export function handleToolCall(state: ActivationState, event: any): undefined {
  * bash guard, bash suggestions) return immediately when they rewrite,
  * skipping later transforms — matching the original handler.
  */
+function isFileMutationTool(toolName: string): boolean {
+  return toolName === "edit" || toolName === "transfer";
+}
+
+/** LSP apply branch of changed-path resolution, kept separate for complexity budget. */
+function lspApplyChangedPathsForEvent(event: any, workspaceRoot: string): string[] {
+  if ((event.toolName as string) !== "LSP" || event.isError) return [];
+  return lspApplyChangedPaths(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot));
+}
+
+function resolveChangedPaths(event: any, workspaceRoot: string): string[] {
+  // changedResources.canonicalPath is authoritative for edit/transfer results when present.
+  if (isFileMutationTool(event.toolName as string) && !event.isError) {
+    return changedPathsFromDetails(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot));
+  }
+  return lspApplyChangedPathsForEvent(event, workspaceRoot);
+}
+
 export async function handleToolResult(state: ActivationState, event: any): Promise<any> {
   const workspaceRoot = canonicalizeWorkspaceRoot(process.cwd());
   const s: PipelineState = {
@@ -691,13 +724,7 @@ export async function handleToolResult(state: ActivationState, event: any): Prom
     toolCallId: event.toolCallId as string,
     input: (event.input ?? {}) as Record<string, unknown>,
     details: (event.details ?? {}) as Record<string, unknown>,
-    // changedResources.canonicalPath is authoritative for edit/transfer results when present.
-    changedPaths:
-      ((event.toolName as string) === "edit" || (event.toolName as string) === "transfer") && !event.isError
-        ? changedPathsFromDetails(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot))
-        : (event.toolName as string) === "LSP" && !event.isError
-          ? lspApplyChangedPaths(event.details ?? {}).map((path) => canonicalResourcePath(path, workspaceRoot))
-          : [],
+    changedPaths: resolveChangedPaths(event, workspaceRoot),
     outputEvent: event,
     outputChanged: false,
   };

@@ -43,6 +43,19 @@ const ALL_OPERATIONS: StrictOperation[] = [
   "applyProposal",
 ];
 
+const LOCALLY_HANDLED = new Set<StrictOperation>([
+  "publishedDiagnostics",
+  "capabilities",
+  "sessionStatus",
+  "request",
+  "applyProposal",
+]);
+
+/** Operations served locally without an LSP wire method. */
+function isLocallyHandled(op: StrictOperation): boolean {
+  return LOCALLY_HANDLED.has(op);
+}
+
 describe("operation registry", () => {
   it("resolves every StrictOperation", () => {
     for (const op of ALL_OPERATIONS) {
@@ -70,9 +83,7 @@ describe("operation registry", () => {
 
   it("every remote operation has a non-null wire method", () => {
     for (const def of listOperations()) {
-      if (def.operation === "publishedDiagnostics" || def.operation === "capabilities" ||
-          def.operation === "sessionStatus" || def.operation === "request" ||
-          def.operation === "applyProposal") continue;
+      if (isLocallyHandled(def.operation)) continue;
       expect(typeof def.method, def.operation).toBe("string");
     }
   });
