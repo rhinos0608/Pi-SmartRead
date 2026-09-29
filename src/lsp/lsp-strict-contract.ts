@@ -20,43 +20,46 @@ export type StrictStatus =
   | "error"
   | "ambiguous";
 
-export type StrictOperation =
-  | "goToDefinition"
-  | "goToDeclaration"
-  | "goToTypeDefinition"
-  | "goToImplementation"
-  | "findReferences"
-  | "hover"
-  | "documentHighlights"
-  | "documentSymbols"
-  | "workspaceSymbols"
-  | "prepareCallHierarchy"
-  | "incomingCalls"
-  | "outgoingCalls"
-  | "prepareTypeHierarchy"
-  | "supertypes"
-  | "subtypes"
-  | "diagnostics"
-  | "workspaceDiagnostics"
-  | "publishedDiagnostics"
-  | "capabilities"
-  | "sessionStatus"
-  | "prepareRename"
-  | "rename"
-  | "codeActions"
-  | "resolveCodeAction"
-  | "formatDocument"
-  | "formatRange"
-  | "formatOnType"
-  | "completion"
-  | "resolveCompletion"
-  | "signatureHelp"
-  | "inlayHints"
-  | "resolveInlayHint"
-  | "semanticTokens"
-  | "foldingRanges"
-  | "selectionRanges"
-  | "request";
+export const STRICT_LSP_OPERATIONS = [
+  "goToDefinition",
+  "goToDeclaration",
+  "goToTypeDefinition",
+  "goToImplementation",
+  "findReferences",
+  "hover",
+  "documentHighlights",
+  "documentSymbols",
+  "workspaceSymbols",
+  "prepareCallHierarchy",
+  "incomingCalls",
+  "outgoingCalls",
+  "prepareTypeHierarchy",
+  "supertypes",
+  "subtypes",
+  "diagnostics",
+  "workspaceDiagnostics",
+  "publishedDiagnostics",
+  "capabilities",
+  "sessionStatus",
+  "prepareRename",
+  "rename",
+  "codeActions",
+  "resolveCodeAction",
+  "formatDocument",
+  "formatRange",
+  "formatOnType",
+  "completion",
+  "resolveCompletion",
+  "signatureHelp",
+  "inlayHints",
+  "resolveInlayHint",
+  "semanticTokens",
+  "foldingRanges",
+  "selectionRanges",
+  "request",
+] as const;
+
+export type StrictOperation = (typeof STRICT_LSP_OPERATIONS)[number];
 
 export interface StrictPosition {
   readonly line: number;
@@ -146,44 +149,7 @@ export interface StrictEnvelope<T = unknown> {
   readonly error?: StrictError;
 }
 
-const OPERATIONS: ReadonlySet<string> = new Set([
-  "goToDefinition",
-  "goToDeclaration",
-  "goToTypeDefinition",
-  "goToImplementation",
-  "findReferences",
-  "hover",
-  "documentHighlights",
-  "documentSymbols",
-  "workspaceSymbols",
-  "prepareCallHierarchy",
-  "incomingCalls",
-  "outgoingCalls",
-  "prepareTypeHierarchy",
-  "supertypes",
-  "subtypes",
-  "diagnostics",
-  "workspaceDiagnostics",
-  "publishedDiagnostics",
-  "capabilities",
-  "sessionStatus",
-  "prepareRename",
-  "rename",
-  "codeActions",
-  "resolveCodeAction",
-  "formatDocument",
-  "formatRange",
-  "formatOnType",
-  "completion",
-  "resolveCompletion",
-  "signatureHelp",
-  "inlayHints",
-  "resolveInlayHint",
-  "semanticTokens",
-  "foldingRanges",
-  "selectionRanges",
-  "request",
-]);
+const OPERATIONS: ReadonlySet<string> = new Set(STRICT_LSP_OPERATIONS);
 
 /** Globally allowed on every operation (never foreign). */
 const GLOBAL_FIELDS: ReadonlySet<string> = new Set([

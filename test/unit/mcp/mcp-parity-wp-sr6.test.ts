@@ -1,11 +1,9 @@
 /**
- * WP-SR6 — MCP parity verification for 3 new capabilities.
- * Verifies inspect.navigation, inspect.diagnostics, grep.structural are
- * reachable and correctly shaped through the MCP mirror (src/mcp-server.ts /
- * src/mcp-registry.ts) and that rendered text (not just `details`, which MCP
- * drops) contains everything an MCP-only client needs.
- * Only touches source if a defect surfaces — this file asserts the existing
- * mirror is self-sufficient.
+ * MCP parity verification for the canonical SmartRead surfaces.
+ * Public inspect owns structural/architectural analysis; strict LSP owns
+ * compiler-backed semantics; grep owns broad/structural discovery. Verify the
+ * same split is exposed through the MCP registry/server and that MCP content
+ * remains self-sufficient after rich `details` are dropped.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from "node:fs";
@@ -91,111 +89,73 @@ function callMcpViaStdio(msgs: Record<string, unknown> | Record<string, unknown>
   });
 }
 
-describe("WP-SR6 MCP parity — no new tool names, existing mirror", () => {
-  it("tools/list exposes only expected surface (no new names)", () => {
+describe("MCP parity — canonical tool split", () => {
+  it("tools/list exposes inspect, grep, LSP, and skill without edit/read mutation surfaces", () => {
     const tools = buildToolRegistry();
     const names = tools.map((t: any) => t.name);
     expect(names).toContain("inspect");
     expect(names).toContain("grep");
+    expect(names).toContain("LSP");
     expect(names).toContain("skill");
-    // WP-SR6 forbids new MCP tool names / parallel surface
     expect(names).not.toContain("pilens_definition");
     expect(names).not.toContain("pilens_references");
     expect(names).not.toContain("pilens_diagnostics");
     expect(names).not.toContain("structural_search");
-    // No SmartEdit edit/read surface
     expect(names).not.toContain("edit");
     expect(names).not.toContain("read");
   });
 
-  it("schemas expose inspect.navigation, inspect.diagnostics, grep.structural", () => {
+  it("schemas separate inspect structure from strict LSP semantics and keep grep.structural", () => {
     const inspect = findTool("inspect");
+    const lsp = findTool("LSP");
     const grep = findTool("grep");
     const inspectSchema: any = inspect.parameters;
+    const lspSchema: any = lsp.parameters;
     const grepSchema: any = grep.parameters;
+
     expect(inspectSchema.type).toBe("object");
     expect(inspectSchema.anyOf).toBeUndefined();
     expect(inspectSchema.oneOf).toBeUndefined();
     const iprops = inspectSchema.properties ?? {};
-    expect(iprops.navigation).toBeDefined();
-    expect(iprops.navigation.properties.operation).toBeDefined();
-    expect(iprops.diagnostics).toBeDefined();
+    expect(iprops.navigation).toBeUndefined();
+    expect(iprops.diagnostics).toBeUndefined();
+    expect(JSON.stringify(iprops.mode)).not.toContain("navigate");
+    expect(inspectSchema.description).toMatch(/use LSP/i);
+
+    expect(lspSchema.properties.operation.enum).toContain("goToDefinition");
+    expect(lspSchema.properties.operation.enum).toContain("findReferences");
+    expect(lspSchema.properties.operation.enum).toContain("diagnostics");
+    expect(lspSchema.description).toMatch(/use inspect instead/i);
+
     const gprops = grepSchema.properties ?? grepSchema;
     expect(gprops.structural).toBeDefined();
     expect(gprops.structural.properties.skip).toBeDefined();
     expect(gprops.structural.properties.groupByFile).toBeDefined();
-    // per-query structural too
     const qprops = gprops.queries?.items?.properties ?? {};
     expect(qprops.structural).toBeDefined();
   });
 });
 
-describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details)", () => {
-  it("inspect.navigation file documentSymbols: text contains operation/status/source/truncated/items (no details needed)", async () => {
-    const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, makeCtx());
-    // details is rich but MCP drops it — prove text is self-sufficient
-    expect(result.details?.navigation).toBeDefined();
-    expect(result.details.navigation.schemaVersion).toBe(1);
-    expect(result.details.navigation.source).toBe("lsp");
-    expect(validateInspectionEnvelope(result.details.workspaceEvidence).ok).toBe(true);
-    const text = toMcpContent(result);
-    expect(text).toContain("## LSP Navigation");
-    expect(text).toContain("Operation: documentSymbols");
-    expect(text).toContain("status:");
-    expect(text).toContain("source: lsp");
-    // items or No results — either is self-describing
-    expect(text.includes("Results (") || text.includes("No results.")).toBe(true);
-    // coverage stays search-match
-    for (const r of result.details.workspaceEvidence.resources as any[]) expect(r.coverage).toBe("search-match");
+describe("MCP parity — rendered text self-sufficient (MCP drops details)", () => {
+  it("strict LSP result is self-sufficient JSON text and preserves its envelope in details", async () => {
+    const lsp = findTool("LSP");
+    const result: any = await lsp.execute("c", { operation: "capabilities" }, undefined, undefined, makeCtx());
+    expect(result.details?.envelope).toBeDefined();
+    expect(result.details.envelope.operation).toBe("capabilities");
+    const parsed = JSON.parse(toMcpContent(result));
+    expect(parsed).toEqual(result.details.envelope);
+    expect(parsed.operation).toBe("capabilities");
+    expect(typeof parsed.status).toBe("string");
   });
 
-  it("inspect.navigation directory workspaceSymbols: text contains query results and stays mode map zero resources", async () => {
-    const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { mode: "navigate", path: "src", navigation: { operation: "workspaceSymbols", query: "a" } }, undefined, undefined, makeCtx());
-    expect(result.details.mode).toBe("directory");
-    expect(result.details.workspaceEvidence.mode).toBe("map");
-    expect(result.details.workspaceEvidence.resources).toEqual([]);
-    expect(result.details.navigation.operation).toBe("workspaceSymbols");
-    const text = toMcpContent(result);
-    expect(text).toContain("## LSP Navigation");
-    expect(text).toContain("workspaceSymbols");
-    expect(text).toContain("source: lsp");
-  });
-
-  it("inspect.navigation validation still reachable via MCP registry (requires/forbids matrix)", async () => {
-    const inspect = findTool("inspect");
-    await expect(inspect.execute("c", { mode: "navigate", path: "hello.ts", navigation: { operation: "definition" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires line/);
-    await expect(inspect.execute("c", { mode: "navigate", path: "src", navigation: { operation: "workspaceSymbols" } } as any, undefined, undefined, makeCtx())).rejects.toThrow(/requires query/);
-  });
-
-  it("inspect.diagnostics file: text contains status/source/files/truncated even after MCP detail drop", async () => {
-    const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } }, undefined, undefined, makeCtx());
-    expect(result.details?.diagnostics).toBeDefined();
-    expect(result.details.diagnostics.schemaVersion).toBe(1);
-    expect(result.details.diagnostics.source).toBe("lsp");
-    expect(["findings", "unconfirmed", "unavailable", "partial"].includes(result.details.diagnostics.status) || typeof result.details.diagnostics.status === "string").toBe(true);
-    expect(validateInspectionEnvelope(result.details.workspaceEvidence).ok).toBe(true);
-    const text = toMcpContent(result);
-    expect(text).toContain("## LSP Diagnostics");
-    expect(text).toContain("Status:");
-    expect(text).toContain("source: lsp");
-    // per-file line present (path : count)
-    expect(text).toContain("diagnostic(s)");
-  });
-
-  it("inspect.diagnostics directory: text contains per-file lines and stays mode map zero resources for directory envelope", async () => {
-    const inspect = findTool("inspect");
-    const result: any = await inspect.execute("c", { mode: "navigate", path: "src", diagnostics: { waitMs: 10, maxPerFile: 2, maxFiles: 1 } }, undefined, undefined, makeCtx());
-    expect(result.details.mode).toBe("directory");
-    expect(result.details.workspaceEvidence.mode).toBe("map");
-    // directory diagnostics keeps zero resources (covers §2 invariants) — navigation/diagnostics are search-match on file mode only
-    expect(result.details.workspaceEvidence.resources).toEqual([]);
-    expect(result.details.diagnostics.files).toBeDefined();
-    const text = toMcpContent(result);
-    expect(text).toContain("## LSP Diagnostics");
-    expect(text).toContain("source: lsp");
+  it("strict LSP validation is reachable through the MCP registry", async () => {
+    const lsp = findTool("LSP");
+    await expect(
+      lsp.execute("c", { operation: "workspaceSymbols", query: "a", path: "src" } as any, undefined, undefined, makeCtx()),
+    ).rejects.toThrow(/foreign field "path"/);
+    await expect(
+      lsp.execute("c", { operation: "findReferences", path: "hello.ts" } as any, undefined, undefined, makeCtx()),
+    ).rejects.toThrow(/requires field "position"/);
   });
 
   it("grep.structural ok: text contains header + status line + read args for each match (MCP drops details)", async () => {
@@ -262,13 +222,13 @@ describe("WP-SR6 MCP parity — rendered text self-sufficient (MCP drops details
   });
 });
 
-describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call, content-only, no details)", () => {
+describe("MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call, content-only, no details)", () => {
   const repoRoot = realpathSync(join(dirname(fileURLToPath(import.meta.url)), "../.."));
   let stdioDir: string = repoRoot;
   const stdioProbeDirs: string[] = [];
   beforeEach(() => {
-    // Use repo root as cwd so inspect LSP + graph stay in a real project. Seed a tiny file
-    // under repo for grep.structural uniqueness without polluting src/.
+    // Use repo root as cwd so LSP and graph-backed tools see a real project. Seed a tiny
+    // file under repo for grep.structural uniqueness without polluting src/.
     stdioDir = repoRoot;
     const probeDir = join(repoRoot, ".tmp-mcp-sr6-" + Math.random().toString(36).slice(2));
     try { mkdirSync(probeDir, { recursive: true }); writeFileSync(join(probeDir, "s.ts"), "console.log(a)\n", "utf8"); stdioProbeDirs.push(probeDir); } catch {}
@@ -277,50 +237,47 @@ describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call
     for (const d of stdioProbeDirs.splice(0)) { try { rmSync(d, { recursive: true, force: true }); } catch {} }
   });
 
-  it("tools/list via stdio exposes inspect.navigation, inspect.diagnostics, grep.structural", async () => {
+  it("tools/list via stdio exposes strict LSP and removes inspect navigation/diagnostics", async () => {
     const res = await callMcpViaStdio([mcpInit(), mcpInited(), { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }], stdioDir);
     const tools = (res.result as any)?.tools as any[];
     expect(Array.isArray(tools)).toBe(true);
     const inspect = tools.find((t) => t.name === "inspect");
+    const lsp = tools.find((t) => t.name === "LSP");
     const grep = tools.find((t) => t.name === "grep");
     expect(inspect).toBeDefined();
+    expect(lsp).toBeDefined();
     expect(grep).toBeDefined();
     expect(inspect.inputSchema.type).toBe("object");
-    expect(inspect.inputSchema.anyOf).toBeUndefined();
-    expect(inspect.inputSchema.oneOf).toBeUndefined();
-    expect(inspect.inputSchema.properties.navigation).toBeDefined();
-    expect(inspect.inputSchema.properties.diagnostics).toBeDefined();
+    expect(inspect.inputSchema.properties.navigation).toBeUndefined();
+    expect(inspect.inputSchema.properties.diagnostics).toBeUndefined();
+    expect(lsp.inputSchema.properties.operation.enum).toContain("goToDefinition");
+    expect(lsp.inputSchema.properties.operation.enum).toContain("diagnostics");
     expect(grep.inputSchema.properties.structural).toBeDefined();
-    // no parallel surface
     expect(tools.map((t) => t.name)).not.toContain("structural_search");
   }, 60_000);
 
-  it("tools/call inspect navigation via MCP handler returns content-only with self-sufficient text (no details)", async () => {
-    // Real MCP round-trip through the actual registered handler exported from
-    // src/mcp-server.ts (handleMcpToolCall), not a hand-rolled Value.Check +
-    // coerceText copy of its logic. In-process avoids wasm/LSP stdio cold-boot timeout.
+  it("tools/call strict LSP via MCP handler returns content-only self-sufficient JSON", async () => {
     const { handleMcpToolCall } = await import("../../../src/mcp-server.js");
-    writeFileSync(join(workdir, "hello.ts"), "export const hello = 'x';\nexport function greet(){ return hello; }\n", "utf8");
     const ctx = makeCtx();
-    const mcpResult: any = await handleMcpToolCall("inspect", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, ctx as any);
+    const mcpResult: any = await handleMcpToolCall("LSP", { operation: "capabilities" }, ctx as any);
     expect(mcpResult.isError).toBe(false);
     const text = mcpResult.content?.[0]?.text ?? "";
-    expect(text).toContain("## LSP Navigation");
-    expect(text).toContain("Operation: documentSymbols");
+    const parsed = JSON.parse(text);
+    expect(parsed.operation).toBe("capabilities");
+    expect(typeof parsed.status).toBe("string");
     expect((mcpResult as any).details).toBeUndefined();
-    expect(text.includes("Results (") || text.includes("No results.")).toBe(true);
   }, 90_000);
 
-  it("tools/call inspect diagnostics via MCP handler returns content-only with self-sufficient text", async () => {
+  it("tools/call rejects removed inspect navigate mode instead of routing it", async () => {
     const { handleMcpToolCall } = await import("../../../src/mcp-server.js");
-    writeFileSync(join(workdir, "hello.ts"), "export const hello = 'x';", "utf8");
     const ctx = makeCtx();
-    const mcpResult: any = await handleMcpToolCall("inspect", { mode: "navigate", path: "hello.ts", diagnostics: { waitMs: 10, maxPerFile: 1 } } as any, ctx as any);
-    expect(mcpResult.isError).toBe(false);
-    const text = mcpResult.content?.[0]?.text ?? "";
-    expect(text).toContain("## LSP Diagnostics");
-    expect(text).toContain("Status:");
-    expect((mcpResult as any).details).toBeUndefined();
+    const mcpResult: any = await handleMcpToolCall(
+      "inspect",
+      { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } } as any,
+      ctx as any,
+    );
+    expect(mcpResult.isError).toBe(true);
+    expect(mcpResult.content?.[0]?.text ?? "").toMatch(/Invalid params|file.*directory.*script/i);
   }, 90_000);
 
   it("tools/call grep structural via stdio returns MCP content only with status line and read hints", async () => {

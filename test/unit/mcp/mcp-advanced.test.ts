@@ -298,9 +298,10 @@ describe("MCP advanced capabilities", () => {
     expect(msg.role).toBe("user");
     expect(msg.content.type).toBe("text");
     expect(msg.content.text).toContain("find all usages of Authenticator");
-    expect(msg.content.text).toContain("BM25+embedding RRF");
-    expect(msg.content.text).toContain("inspect { mode, path, ... }");
-    expect(msg.content.text).toContain('grep { pattern }:');
+    expect(msg.content.text).toContain("grep discovers candidates");
+    expect(msg.content.text).toContain("read has no natural-language query mode");
+    expect(msg.content.text).toContain("Inspect does not expose LSP navigation or diagnostics");
+    expect(msg.content.text).toContain("LSP { operation, ... }");
   }, 60_000);
 
   it("throws for unknown prompt", async () => {

@@ -57,7 +57,8 @@ describe("lsp-tool", () => {
   });
 
   it("empty path with valid op → unavailable envelope, not throw", async () => {
-    const env = await run({ operation: "documentSymbols", path: "missing-file-xyz.ts" });
+    const result = await run({ operation: "documentSymbols", path: "missing-file-xyz.ts" });
+    const env = result.details.envelope;
     expect(env.status).toBe("unavailable");
     expect(env.operation).toBe("documentSymbols");
     expect(env.server.positionEncoding).toBe("utf-16");
@@ -69,18 +70,29 @@ describe("lsp-tool", () => {
       query: "foo",
       server: "__missing_lsp_server__",
     });
-    expect(env.status).toBe("unavailable");
-    expect(env.operation).toBe("workspaceSymbols");
-    expect(env.server).toMatchObject({ projectRoot: expect.any(String) });
-    expect(env.meta).toMatchObject({ truncated: false });
+    const envelope = env.details.envelope;
+    expect(envelope.status).toBe("unavailable");
+    expect(envelope.operation).toBe("workspaceSymbols");
+    expect(envelope.server).toMatchObject({ projectRoot: expect.any(String) });
+    expect(envelope.meta).toMatchObject({ truncated: false });
   });
 
-  it("envelope returned verbatim (operation/method/server/result/meta keys)", async () => {
-    const env = await run({ operation: "capabilities" });
+  it("returns a Pi-renderable AgentToolResult instead of a raw envelope", async () => {
+    const result = await run({ operation: "capabilities" });
+    expect(result.content).toEqual([
+      { type: "text", text: expect.stringContaining("\"operation\": \"capabilities\"") },
+    ]);
+    expect(result.details.envelope.operation).toBe("capabilities");
+  });
+
+  it("preserves the strict envelope verbatim in result details", async () => {
+    const result = await run({ operation: "capabilities" });
+    const env = result.details.envelope;
     expect(Object.keys(env).sort()).toEqual(
       expect.arrayContaining(["status", "operation", "method", "server", "result", "meta"]),
     );
     expect(env.operation).toBe("capabilities");
+    expect(JSON.parse(result.content[0].text)).toEqual(env);
   });
 
   it("description mentions read-only + 0-based", () => {
@@ -91,6 +103,32 @@ describe("lsp-tool", () => {
   it("description mentions exact server routing + proposals-not-mutations", () => {
     expect(LSP_DESCRIPTION).toMatch(/exact server/i);
     expect(LSP_DESCRIPTION).toMatch(/proposal/i);
+  });
+
+  it("description distinguishes LSP semantics from inspect structural analysis", () => {
+    expect(LSP_DESCRIPTION).toMatch(/use inspect/i);
+    expect(LSP_DESCRIPTION).toMatch(/structural|architecture/i);
+    expect(LSP_DESCRIPTION).toMatch(/definitions|references|diagnostics/i);
+  });
+
+  it("tool schema enumerates the strict operation surface and rejects invented discovery ops", () => {
+    const schema = createLspTool().parameters as any;
+    expect(schema.properties.operation.enum).toContain("workspaceSymbols");
+    expect(schema.properties.operation.enum).toContain("findReferences");
+    expect(schema.properties.operation.enum).not.toContain("listOperations");
+    expect(schema.properties.operation.description).toMatch(/no listOperations/i);
+  });
+
+  it("tool schema documents operation-specific field shapes", () => {
+    const schema = createLspTool().parameters as any;
+    expect(schema.properties.path.description).toMatch(/workspaceSymbols/i);
+    expect(schema.properties.query.description).toMatch(/workspaceSymbols/i);
+    expect(schema.properties.item.description).toMatch(/incomingCalls.*outgoingCalls/i);
+    expect(schema.properties.formatting.properties).toMatchObject({
+      tabSize: expect.any(Object),
+      insertSpaces: expect.any(Object),
+    });
+    expect(schema.description).toMatch(/foreign fields/i);
   });
 
   it("tool factory shape: name LSP + parameters object", () => {
