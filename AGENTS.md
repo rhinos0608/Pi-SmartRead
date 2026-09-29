@@ -29,16 +29,16 @@ Before finishing source changes, run the narrowest relevant tests plus `npm run 
 
 ### Pi extension
 
-- `read`: exactly one selector per call: `path`, `paths`, `query`, or `symbol`.
-- `inspect`: explicit `mode: "file" | "directory" | "navigate" | "script"`; mode is never inferred.
-- `grep`: text/symbol/concept search, batch queries, structural options, graph filters.
-- `LSP`: strict read-only LSP contract. Tool name is uppercase `LSP`.
+- `read`: already-known source content only; exactly one selector per call: `path`, `paths`, or `symbol`. Natural-language query mode does not exist.
+- `inspect`: explicit `mode: "file" | "directory" | "script"`; structural/architectural analysis only, never LSP navigation.
+- `grep`: broad text/symbol/concept discovery, batch queries, structural options, graph filters.
+- `LSP`: strict read-only compiler/language-server semantics. Tool name is uppercase `LSP`.
 - `skill`: discovers project/package/global skills.
 - Experimental: `graph_mutate`, `git_notes_read`, `git_notes_write` only when enabled.
 
 ### Standalone MCP
 
-The MCP registry exposes `inspect`, `grep`, `skill`, plus enabled experimental registry tools. It does **not** expose the Pi-only wrapped `read` tool or the Pi-registered strict `LSP` tool.
+The MCP registry exposes `inspect`, `grep`, `LSP`, `skill`, plus enabled experimental registry tools. It does **not** expose the Pi-only wrapped `read` tool.
 
 MCP also exposes prompts from `src/mcp/mcp-prompts.ts` and `smartread://` resources from `src/mcp/mcp-resources.ts`.
 
@@ -46,10 +46,10 @@ MCP also exposes prompts from `src/mcp/mcp-prompts.ts` and `smartread://` resour
 
 There are two LSP-facing contracts:
 
-- Strict `LSP` tool: `position: { line, character }` is **0-based** in `server.positionEncoding`. Operations use names such as `goToDefinition`, `findReferences`, `codeActions`.
-- `inspect { mode: "navigate" }` and script-mode `lsp.*` helpers: navigation `line` / `character` are **1-based** and use the inspect navigation operation names such as `definition`, `references`, `implementation`.
+- Strict `LSP` tool (Pi + standalone MCP): `position: { line, character }` is **0-based** in `server.positionEncoding`. Operations use names such as `goToDefinition`, `findReferences`, `codeActions`.
+- Script-mode `lsp.*` helpers are an internal composition API: their navigation `line` / `character` inputs are **1-based** and use helper operation names such as `definition`, `references`, `implementation`.
 
-Do not port examples between these surfaces without converting both operation names and coordinates.
+Do not port examples between the strict tool and script host helpers without converting both operation names and coordinates. Public `inspect` has no navigation/diagnostics surface.
 
 ## Source routing
 

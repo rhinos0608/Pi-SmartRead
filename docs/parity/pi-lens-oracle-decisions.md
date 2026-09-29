@@ -1,5 +1,7 @@
 # pi-lens Parity — Oracle Decisions + V1 Wave Plan
 
+> **Historical decision record, superseded for current tool routing.** Public `inspect.navigation` / `inspect.diagnostics` were later removed; strict `LSP` is now the canonical semantic/navigation/diagnostics surface in both Pi and MCP. Public `read` natural-language query mode was also removed without a compatibility shim. Preserve the sections below as implementation history, not current API guidance.
+
 > Produced by `oracle` subagent (2026-08-30) after reviewing
 > `pi-lens-capability-matrix.md`, `AGENTS.md`, and direct source in both repos.
 > Corrects two stale matrix claims: SmartEdit already runs post-write/edit LSP

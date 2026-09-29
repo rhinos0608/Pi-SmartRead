@@ -36,10 +36,10 @@ pi -e ./src/index.ts
 
 | Surface | Pi extension | MCP server | Purpose |
 |---|---:|---:|---|
-| `read` | ✓ | — | Strong-evidence file, batch, intent, and symbol reads |
-| `inspect` | ✓ | ✓ | File/directory analysis, LSP navigation, bounded script composition |
-| `grep` | ✓ | ✓ | Text, symbol, semantic, structural, and graph-filtered code search |
-| `LSP` | ✓ | — | Strict read-only Language Server Protocol operations |
+| `read` | ✓ | — | Strong-evidence reads for already-known files or symbols |
+| `inspect` | ✓ | ✓ | Structural/architectural file/directory analysis and bounded script composition |
+| `grep` | ✓ | ✓ | Broad text, symbol, semantic, structural, and graph-filtered code discovery |
+| `LSP` | ✓ | ✓ | Strict read-only compiler/language-server semantic operations |
 | `skill` | ✓ | ✓ | Discover and read procedural agent skills |
 | `graph_mutate` | opt-in | opt-in | Persist observed breakage/co-change edges |
 | `git_notes_read/write` | opt-in | opt-in | Git-backed durable AI notes |
@@ -49,10 +49,10 @@ The Pi extension also installs runtime hooks for context hygiene, repo-map/tool 
 
 ## Which tool should I use?
 
-- **Know the file?** Use `read`.
-- **Know a literal/string/symbol/concept?** Use `grep`.
-- **Need structure or architecture?** Use `inspect` in `file` or `directory` mode.
-- **Need semantic navigation or diagnostics?** Use strict `LSP`, or `inspect` `navigate` when you want navigation folded into inspect output.
+- **Know the file and need its source?** Use `read`.
+- **Need to discover text, names, concepts, or candidate files?** Use `grep`.
+- **Need aggregate structure, architecture, blast radius, graph, routes, or quality signals?** Use `inspect` in `file` or `directory` mode.
+- **Need exact compiler-backed semantics such as definitions, references, hover, symbols, hierarchy, or diagnostics?** Use strict `LSP`.
 - **Need a dependent multi-hop chase?** Use `inspect { mode: "script", ... }`.
 - **Need a reusable workflow?** Search/read a `skill`.
 
@@ -94,13 +94,7 @@ Or a specific line range:
 
 Up to 100 file entries are accepted. Batch evidence covers only complete rendered blocks; omitted or partial packed blocks do not gain edit authority.
 
-### Intent/query read
-
-```json
-{"query":"authentication request flow","directory":"src","topK":12}
-```
-
-The indexed path ranks the corpus with lexical and semantic channels, fuses ranks, optionally applies ADR/structural/reranker signals, then reads the selected files. When the semantic index is unavailable it degrades to lexical/structural candidate discovery.
+Natural-language query mode is intentionally not part of `read`. Use `grep` to discover candidate files, then `read` the relevant source. Use `LSP` when the question is compiler-backed rather than textual.
 
 ### Symbol read
 
@@ -241,26 +235,7 @@ Directory mode builds a ranked repository map and can add architecture views suc
 
 Directory-specific fields include `mapTokens`, `focus`, `clusters`, `layers`, and `boundaries`, plus several shared analysis flags.
 
-### Navigate mode
-
-```json
-{
-  "mode":"navigate",
-  "path":"src/auth.ts",
-  "navigation":{
-    "operation":"definition",
-    "line":42,
-    "character":10
-  },
-  "diagnostics":{"waitMs":1200,"maxPerFile":12}
-}
-```
-
-Navigate mode uses the inspect navigation adapter. Supported navigation operations include:
-
-`definition`, `references`, `implementation`, `hover`, `documentSymbols`, `workspaceSymbols`, `prepareCallHierarchy`, `incomingCalls`, and `outgoingCalls`.
-
-**Inspect-navigation coordinates are 1-based.** This differs from the strict `LSP` tool below.
+`inspect` deliberately does not expose semantic navigation or diagnostics. Use the strict `LSP` tool for definitions, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion, and refactor proposals. This keeps `inspect` focused on aggregate structural and architectural analysis.
 
 ### Script mode
 
@@ -849,9 +824,9 @@ Main CI runs `npm ci`, typecheck, and the full test suite on Node 20 across Ubun
 
 | Directory | Responsibility |
 |---|---|
-| `src/read/` | Batch/intent/read planning, ranking, evidence-aware reading |
+| `src/read/` | Evidence-aware known-file/symbol reads plus internal retrieval engines |
 | `src/search/` | Grep cascade, structural search, semantic/graph filtering |
-| `src/inspect/` | File/directory/navigate inspect orchestration |
+| `src/inspect/` | File/directory structural analysis and script orchestration |
 | `src/script-mode/` | Bounded QuickJS composition |
 | `src/lsp/` | Strict LSP contract, executor, transport, sessions, codecs |
 | `src/language-intelligence/` | Server catalog, resolver, trust, installs, SmartEdit provider |
@@ -889,9 +864,9 @@ Trust the root with `/lsp trust [path]`.
 
 Correct behavior. SmartRead returns proposals; SmartEdit owns mutation.
 
-**An inspect navigate example is off by one when copied to `LSP`**
+**An old inspect navigate example no longer works**
 
-The contracts differ: inspect navigation is 1-based; strict `LSP` is 0-based negotiated encoding.
+That public mode was removed. Use strict `LSP` directly; its positions are 0-based in the negotiated server encoding. Script-mode `lsp.*` helpers remain an internal composition API and use their documented helper coordinates.
 
 **A large `read { path }` returned signatures instead of the whole file**
 
@@ -916,13 +891,13 @@ Current equivalents:
 | Older surface | Current surface |
 |---|---|
 | `read_files` | `read { paths: [...] }` |
-| intent/semantic read | `read { query: "..." }` |
+| intent/semantic read | `grep` for discovery, then `read`; use `LSP` for compiler-backed semantics |
 | symbol read | `read { symbol: "..." }` |
 | `search` | `grep` |
 | `repo_map` | `inspect { mode: "directory", path: ... }` |
 | old inspect query/symbol | `grep` or `read { symbol }` |
 | old auto-detected inspect path | explicit `inspect.mode` |
-| ad-hoc LSP helpers | strict `LSP` or inspect `navigate` |
+| inspect `navigate` / ad-hoc LSP helpers | strict `LSP` |
 
 Historical design documents under `docs/archive/` may still use removed tool names.
 

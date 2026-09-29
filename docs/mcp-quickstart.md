@@ -26,13 +26,14 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 
 | MCP Tool | Description |
 |---|---|
-| `inspect` | Four explicit modes: `file` structural facts/signals, `directory` repo map/architecture, `navigate` LSP-backed navigation/diagnostics, and bounded read-only `script` composition |
-| `grep` | Code search — literal/regex, BM25, symbol, semantic fallback, structural options, and graph filters |
+| `inspect` | Structural/architectural analysis: `file` facts/signals, `directory` repo map/architecture, and bounded read-only `script` composition |
+| `grep` | Broad code discovery — literal/regex, BM25, symbol, semantic fallback, structural options, and graph filters |
+| `LSP` | Strict read-only compiler/language-server semantics: definitions, references, hover, symbols, hierarchy, diagnostics, completion, and refactor proposals |
 | `skill` | Discover/read procedural skills from package/project/global skill roots |
 | `graph_mutate` | [experimental] Record semantic coupling edges — requires `experimental.graphMutate: true` |
 | git-notes tools | [experimental] Read/write git notes — requires `experimental.gitNotes: true` |
 
-> **Note:** the wrapped `read` tool and strict model-facing `LSP` tool are Pi-extension-only and are **not** exposed over MCP. MCP `inspect`/`grep` are discovery surfaces and do not provide the Pi read wrapper's strong file-read provenance.
+> **Note:** the wrapped `read` tool remains Pi-extension-only because it depends on Pi's read/evidence integration. Strict `LSP` is exposed over both Pi and MCP. `inspect` is structural/architectural analysis; use `LSP` for exact compiler-backed semantics.
 
 ---
 
@@ -245,7 +246,7 @@ Or in `.mcp.json`:
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
 | **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
 | **Install** | `pi install git:...` | `npx tsx src/mcp-server.ts` |
-| **Same tools?** | `read`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools | `inspect`, `grep`, `skill`, and optional experimental tools only — wrapped `read` and strict `LSP` are not exposed |
+| **Same tools?** | `read`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools | `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools; only the wrapped `read` surface is Pi-only |
 
 ---
 
