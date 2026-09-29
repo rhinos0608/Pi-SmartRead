@@ -82,7 +82,7 @@ describe("script schema", () => {
         expect(schema.properties.path).toBeDefined();
         expect(schema.required ?? []).not.toContain("path");
         expect(schema.additionalProperties).toBe(false);
-        // Runtime: file/directory/navigate reject a missing path; script accepts it.
+        // Runtime: file/directory reject a missing path; script accepts it.
         await expect(
             tool.execute("x-no-path", { mode: "file" } as any, undefined, undefined, makeCtx()),
         ).rejects.toThrow();
@@ -101,7 +101,6 @@ describe("script schema", () => {
         const cases: Array<Record<string, unknown>> = [
             { mode: "file", path: "f.ts", architecture: {} },
             { mode: "directory", path: ".", navigation: {} },
-            { mode: "navigate", path: "f.ts", analysis: {} },
             { mode: "script", script: "return 1;", navigation: {} },
         ];
         for (const params of cases) {
@@ -375,4 +374,103 @@ describe("script cross-root behavior", () => {
             rmSync(root, { recursive: true, force: true });
         }
     }, 20_000);
+});
+
+describe("script graph/contract hardening", () => {
+    function makeGraphStub(): any {
+        return {
+            getProvenanceEdges: () => [],
+            getCapacityStats: () => ({ fileIndex: { entries: 0 }, graphIndex: { entries: 0 } }),
+            getFileNeighbours: async () => [],
+            getNeighbors: async () => [],
+            getSymbolIndex: () => ({}),
+        };
+    }
+
+    it("inspectDir with clusters:true requests the shared graph", async () => {
+        const { executeScriptMode } = await import("../../../src/script-mode/index.js");
+        let calls = 0;
+        const result = await executeScriptMode({
+            script: `const r = await inspectDir(".", { clusters: true }); return { mode: r.mode, text: r.contentText };`,
+            cwd: dir,
+            sessionFilePath: sessionFile,
+            contextGraph: (() => {
+                calls++;
+                return makeGraphStub();
+            }) as any,
+        });
+        expect(calls).toBeGreaterThan(0);
+        expect(result.status).toBe("ok");
+        const returned = result.returnValue as { mode: string; text: string };
+        expect(returned.mode).toBe("directory");
+        expect(returned.text).not.toContain("context graph unavailable — cluster detection needs the shared import graph");
+    }, 30_000);
+
+    it("inspectDir with unavailable graph degrades cluster section", async () => {
+        const { executeScriptMode } = await import("../../../src/script-mode/index.js");
+        const result = await executeScriptMode({
+            script: `const r = await inspectDir(".", { clusters: true }); return { mode: r.mode, text: r.contentText };`,
+            cwd: dir,
+            sessionFilePath: sessionFile,
+            contextGraph: (() => undefined) as any,
+        });
+        expect(result.status).toBe("ok");
+        expect((result.returnValue as { text: string }).text).toContain("context graph unavailable — cluster detection needs the shared import graph");
+    }, 30_000);
+
+    it("a throwing graph source degrades instead of aborting the script", async () => {
+        const { executeScriptMode } = await import("../../../src/script-mode/index.js");
+        const result = await executeScriptMode({
+            script: `const r = await inspectFile("f.ts", { impact: true }); return r.mode;`,
+            cwd: dir,
+            sessionFilePath: sessionFile,
+            contextGraph: (() => {
+                throw new Error("boom: native parser failure");
+            }) as any,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.returnValue).toBe("file");
+    }, 30_000);
+
+    it("graph.impact on a directory throws requires-a-file-target", async () => {
+        const { executeScriptMode } = await import("../../../src/script-mode/index.js");
+        const result = await executeScriptMode({
+            script: `await graph.impact({ path: "." }); return "no-throw";`,
+            cwd: dir,
+            sessionFilePath: sessionFile,
+        });
+        expect(result.status).toBe("degraded");
+        expect(result.errorMessage ?? "").toMatch(/requires a file target/);
+    }, 30_000);
+
+    it("inspectFile with clusters:true throws no-option instead of silently no-op'ing", async () => {
+        const { executeScriptMode } = await import("../../../src/script-mode/index.js");
+        const result = await executeScriptMode({
+            script: `await inspectFile("f.ts", { clusters: true }); return "no-throw";`,
+            cwd: dir,
+            sessionFilePath: sessionFile,
+        });
+        expect(result.status).toBe("degraded");
+        expect(result.errorMessage ?? "").toMatch(/no option "clusters"/);
+    }, 30_000);
+
+    it("rejects invalid inspect analysis options", async () => {
+        const { executeScriptMode } = await import("../../../src/script-mode/index.js");
+        const cases = [
+            [`inspectFile("f.ts", { callDirection: "both" })`, /callDirection requires callDepth/],
+            [`inspectFile("f.ts", { callDepth: 999 })`, /callDepth must be 1\.\.5/],
+            [`inspectFile("f.ts", { callDepth: NaN })`, /callDepth must be 1\.\.5/],
+            [`inspectFile("f.ts", { diff: "banana" })`, /diff must be one of/],
+            [`inspectFile("f.ts", { signals: ["banana"] })`, /signals must be an array/],
+            [`inspectDir(".", { mapTokens: -100 })`, /mapTokens must be 256\.\.32768/],
+            [`inspectDir(".", { mapTokens: NaN })`, /mapTokens must be 256\.\.32768/],
+            [`inspectFile("f.ts", { completelyMadeUpOption: 123 })`, /no option "completelyMadeUpOption"/],
+        ] as const;
+        for (const [call, message] of cases) {
+            const result = await executeScriptMode({ script: `await ${call};`, cwd: dir, sessionFilePath: sessionFile });
+            expect(result.status).toBe("degraded");
+            expect(result.errorMessage ?? "").toMatch(message);
+        }
+    }, 30_000);
+
 });
