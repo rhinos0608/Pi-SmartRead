@@ -198,6 +198,106 @@ export function checkPrivateExisting(stat: {
     return { ok: true };
 }
 
+/** Minimal shape a report JSON must have to participate in paired comparison. */
+export interface PairedReportQuery {
+    qid: string;
+    fileHit?: boolean;
+    covered?: boolean;
+    abstained?: boolean;
+    renderedTokens?: number;
+    readReady?: boolean;
+}
+
+export interface PairedReport {
+    manifest?: {
+        fixtureSha?: string;
+        inventoryHashBefore?: string;
+        queryCount?: number;
+        engineSourceHash?: string;
+    };
+    queries?: PairedReportQuery[];
+}
+
+export interface PairedQueryDelta {
+    qid: string;
+    readReady: "win" | "loss" | "tie";
+    fileHit: "win" | "loss" | "tie";
+    abstention: "win" | "loss" | "tie";
+    tokenDelta: number;
+}
+
+export interface PairedComparison {
+    baseline: string;
+    variant: string;
+    queryCount: number;
+    readReady: { wins: number; losses: number; ties: number };
+    fileHit: { wins: number; losses: number; ties: number };
+    abstention: { wins: number; losses: number; ties: number };
+    meanTokenDelta: number;
+    deltas: PairedQueryDelta[];
+}
+
+function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
+    if (base === change) return "tie";
+    return change ? "win" : "loss";
+}
+
+/**
+ * Paired per-query comparison of two report JSONs (baseline, variant).
+ * Pairing requires identical fixture/corpus identity: fixtureSha,
+ * corpus inventory hash, and the ordered qid set must all match.
+ * engineSourceHash is the ONLY identity field allowed to differ (it is
+ * the point of the comparison). Throws on any other mismatch.
+ * Abstention "win" means the variant abstained where baseline did not.
+ */
+export function pairReports(baseline: PairedReport, variant: PairedReport, names?: { baseline: string; variant: string }): PairedComparison {
+    const bManifest = baseline.manifest ?? {};
+    const vManifest = variant.manifest ?? {};
+    if (bManifest.fixtureSha !== vManifest.fixtureSha) {
+        throw new Error(`refuses-pair: fixtureSha mismatch (${bManifest.fixtureSha} vs ${vManifest.fixtureSha})`);
+    }
+    if (bManifest.inventoryHashBefore !== vManifest.inventoryHashBefore) {
+        throw new Error("refuses-pair: corpus inventory hash mismatch");
+    }
+    const bQueries = baseline.queries ?? [];
+    const vQueries = variant.queries ?? [];
+    const bQids = bQueries.map((q) => q.qid);
+    const vQids = vQueries.map((q) => q.qid);
+    if (bQids.length !== vQids.length || !bQids.every((qid, i) => qid === vQids[i])) {
+        throw new Error("refuses-pair: ordered qid set mismatch");
+    }
+    const vByQid = new Map(vQueries.map((q) => [q.qid, q]));
+    const deltas: PairedQueryDelta[] = bQueries.map((b) => {
+        const v = vByQid.get(b.qid)!;
+        return {
+            qid: b.qid,
+            readReady: boolWinLoss(b.readReady === true, v.readReady === true),
+            fileHit: boolWinLoss(b.fileHit === true, v.fileHit === true),
+            // Abstention direction is inverted: abstaining where baseline did
+            // not is recorded as a "win" only in the abstention column.
+            abstention: b.abstained === v.abstained ? "tie" : (v.abstained ? "win" : "loss"),
+            tokenDelta: (v.renderedTokens ?? 0) - (b.renderedTokens ?? 0),
+        };
+    });
+    const tally = (pick: (d: PairedQueryDelta) => "win" | "loss" | "tie"): { wins: number; losses: number; ties: number } => ({
+        wins: deltas.filter((d) => pick(d) === "win").length,
+        losses: deltas.filter((d) => pick(d) === "loss").length,
+        ties: deltas.filter((d) => pick(d) === "tie").length,
+    });
+    return {
+        baseline: names?.baseline ?? "baseline",
+        variant: names?.variant ?? "variant",
+        queryCount: deltas.length,
+        readReady: tally((d) => d.readReady),
+        fileHit: tally((d) => d.fileHit),
+        abstention: tally((d) => d.abstention),
+        meanTokenDelta: deltas.length > 0
+            ? deltas.reduce((sum, d) => sum + d.tokenDelta, 0) / deltas.length
+            : 0,
+        deltas,
+    };
+}
+
 /** Completed judge_degraded runs keep measured coverage; only hard errors lose it. */
 export function isHardError(status: string): boolean {
     return status.startsWith("error:");

@@ -4,6 +4,7 @@
  * helpers from scripts/eval/judge/grep-e2e-contract.ts — no engine IO.
  */
 import { describe, expect, it } from "vitest";
+import type { PairedReport } from "../../../scripts/eval/judge/grep-e2e-contract.js";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import {
     computeRunFingerprint,
     errorStatus,
     hashEngineSources,
+    pairReports,
     isConsistentDuplicate,
     isHardError,
     isKnownSourceHash,
@@ -253,5 +255,51 @@ describe("hashEngineSources (temp git fixture)", () => {
     it("fails closed on missing/unhashable trees", () => {
         expect(isKnownSourceHash(hashEngineSources(join(tmpdir(), "smartread-no-such-dir")))).toBe(false);
         expect(isKnownSourceHash("unknown:hash-failed")).toBe(false);
+    });
+});
+
+describe("pairReports", () => {
+    const manifest = (overrides: Record<string, string | number> = {}): PairedReport["manifest"] => ({
+        fixtureSha: "aaa",
+        inventoryHashBefore: "bbb",
+        queryCount: 2,
+        ...overrides,
+    });
+    const report = (engine: string, rows: PairedReport["queries"]): PairedReport => ({
+        manifest: { ...manifest(), engineSourceHash: engine },
+        queries: rows,
+    });
+    const base = report("sha256:base", [
+        { qid: "q01", fileHit: true, covered: true, abstained: false, renderedTokens: 100, readReady: true },
+        { qid: "q02", fileHit: false, covered: false, abstained: true, renderedTokens: 200, readReady: false },
+    ]);
+    const variant = report("sha256:variant", [
+        { qid: "q01", fileHit: false, covered: false, abstained: false, renderedTokens: 150, readReady: false },
+        { qid: "q02", fileHit: true, covered: true, abstained: false, renderedTokens: 200, readReady: true },
+    ]);
+    it("emits per-query wins/losses/ties and token deltas", () => {
+        const paired = pairReports(base, variant);
+        expect(paired.queryCount).toBe(2);
+        expect(paired.readReady).toEqual({ wins: 1, losses: 1, ties: 0 });
+        expect(paired.fileHit).toEqual({ wins: 1, losses: 1, ties: 0 });
+        // q02 stopped abstaining: recorded as an abstention "loss".
+        expect(paired.abstention).toEqual({ wins: 0, losses: 1, ties: 1 });
+        expect(paired.meanTokenDelta).toBe(25);
+        expect(paired.deltas.map((d) => d.qid)).toEqual(["q01", "q02"]);
+    });
+    it("tolerates engineSourceHash differences but refuses other identity mismatches", () => {
+        expect(() => pairReports(base, variant)).not.toThrow();
+        expect(() => pairReports(
+            { ...base, manifest: manifest({ fixtureSha: "zzz" }) },
+            variant,
+        )).toThrow(/fixtureSha/);
+        expect(() => pairReports(
+            { ...base, manifest: manifest({ inventoryHashBefore: "zzz" }) },
+            variant,
+        )).toThrow(/inventory/);
+        expect(() => pairReports(
+            base,
+            { ...variant, queries: [...variant.queries!].reverse() },
+        )).toThrow(/qid/);
     });
 });
