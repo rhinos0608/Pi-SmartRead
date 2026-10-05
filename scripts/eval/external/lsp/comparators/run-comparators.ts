@@ -186,13 +186,21 @@ export interface PositionLatency {
   system: Record<LatencyOperation, number>;
   /** Reference workspace/symbol time: its own series, not setup/index time. */
   workspaceSymbolMs: number;
-  /** Actual startup/index work; workspace/symbol no longer lands here. */
-  setupMs: number;
+  /** Measured startup/index work once per run; null when untimed (never zero). */
+  setupMs: number | null;
+  /** Present when setupMs is null: why setup timing is unavailable. */
+  setupReason?: string | null;
 }
 
 export interface LatencySummary {
   p50: number;
   p95: number;
+  n: number;
+}
+
+export interface NullableLatencySummary {
+  p50: number | null;
+  p95: number | null;
   n: number;
 }
 
@@ -202,12 +210,21 @@ export interface LatencyReport {
   /** Reference workspace/symbol latency, kept apart from answer latency. */
   workspaceSymbol: LatencySummary;
   /** Labeled separately: index/setup time, not comparable answer latency. */
-  setup: LatencySummary;
+  setup: NullableLatencySummary;
+  /** Present when setup is unmeasured: why, instead of a zero placeholder. */
+  setupNote: string | null;
 }
 
 function summarize(values: number[]): LatencySummary {
   if (values.length === 0) return { p50: 0, p95: 0, n: 0 };
   return { p50: percentile(values, 50), p95: percentile(values, 95), n: values.length };
+}
+
+/** Setup summarization: untimed entries are excluded; all-untimed yields nulls, never zeros. */
+function summarizeSetup(values: Array<number | null>): NullableLatencySummary {
+  const measured = values.filter((v): v is number => typeof v === "number");
+  if (measured.length === 0) return { p50: null, p95: null, n: 0 };
+  return { p50: percentile(measured, 50), p95: percentile(measured, 95), n: measured.length };
 }
 
 /**
@@ -224,7 +241,8 @@ export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
   const refTotals: number[] = [];
   const sysTotals: number[] = [];
   const workspaceSymbol: number[] = [];
-  const setup: number[] = [];
+  const setup: Array<number | null> = [];
+  let setupReason: string | null = null;
   for (const p of positions) {
     let refTotal = 0;
     let sysTotal = 0;
@@ -238,6 +256,9 @@ export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
     sysTotals.push(sysTotal);
     workspaceSymbol.push(p.workspaceSymbolMs);
     setup.push(p.setupMs);
+    if (p.setupMs === null && setupReason === null) {
+      setupReason = p.setupReason ?? "setup timing unavailable: startup/open ran outside the timed section";
+    }
   }
   return {
     reference: {
@@ -253,7 +274,8 @@ export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
       perPositionTotal: summarize(sysTotals),
     },
     workspaceSymbol: summarize(workspaceSymbol),
-    setup: summarize(setup),
+    setup: summarizeSetup(setup),
+    setupNote: summarizeSetup(setup).n === 0 ? (setupReason ?? "setup timing unavailable") : null,
   };
 }
 
@@ -292,8 +314,11 @@ async function main(): Promise<void> {
   };
 
   try {
-    await refConn.start(TLS_BIN, ["--stdio"], root);
-    await comparator.open(root);
+    const setupTimed = await timed(async () => {
+      await refConn.start(TLS_BIN, ["--stdio"], root);
+      await comparator.open(root);
+    });
+    const setupMs = setupTimed.ms;
 
     for (const pos of positions) {
       const uri = pathToFileURL(pos.file).href;
@@ -313,7 +338,7 @@ async function main(): Promise<void> {
         reference: { definition: def.ms, references: refsIncl.ms, hover: hov.ms },
         system: { definition: 0, references: 0, hover: 0 },
         workspaceSymbolMs: sym.ms,
-        setupMs: 0,
+        setupMs,
       });
 
       const refDefs = rawToLocs(def.value);

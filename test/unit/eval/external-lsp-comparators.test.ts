@@ -132,8 +132,29 @@ describe("parseMcpHover", () => {
   });
 });
 
-describe("summarizeLatency", () => {
-  const position = (def: number, refs: number, hov: number, sym = 5, setup = 0): PositionLatency => ({
+describe("summarizeLatency setup timing", () => {
+    const latency = (setupMs: number | null): PositionLatency => ({
+        reference: { definition: 10, references: 20, hover: 30 },
+        system: { definition: 5, references: 10, hover: 15 },
+        workspaceSymbolMs: 5,
+        setupMs,
+    });
+
+    it("reports measured setup time instead of zero", () => {
+        const report = summarizeLatency([latency(1200), latency(1200)]);
+        expect(report.setup.p50).toBe(1200);
+        expect(report.setup.n).toBe(2);
+    });
+
+    it("reports setup as unavailable (null) with a reason, never zero, when untimed", () => {
+        const report = summarizeLatency([latency(null), latency(null)]);
+        expect(report.setup).toMatchObject({ p50: null, p95: null, n: 0 });
+        expect(typeof report.setupNote).toBe("string");
+        expect(report.setupNote!.length).toBeGreaterThan(0);
+    });
+});
+  describe("summarizeLatency", () => {
+    const position = (def: number, refs: number, hov: number, sym = 5, setup = 0): PositionLatency => ({
     reference: { definition: def, references: refs, hover: hov },
     system: { definition: def / 2, references: refs / 2, hover: hov / 2 },
     workspaceSymbolMs: sym,
@@ -171,6 +192,6 @@ describe("summarizeLatency", () => {
     const report = summarizeLatency([]);
     expect(report.reference.definition).toEqual({ p50: 0, p95: 0, n: 0 });
     expect(report.workspaceSymbol).toEqual({ p50: 0, p95: 0, n: 0 });
-    expect(report.setup).toEqual({ p50: 0, p95: 0, n: 0 });
+    expect(report.setup).toEqual({ p50: null, p95: null, n: 0 });
   });
 });
