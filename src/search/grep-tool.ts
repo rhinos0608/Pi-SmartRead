@@ -38,6 +38,7 @@ import {
     type GrepDegradation,
     type GrepExecutionResult,
     type GrepHit,
+    type GrepRouting,
 } from "./grep-cascade.js";
 export type { GrepDegradation, StructuralDetails } from "./grep-cascade.js";
 export { _bm25CorpusCacheForTests, _resetBm25CorpusCacheForTests, _bm25CacheBenchmark } from "./grep-cascade.js";
@@ -55,6 +56,7 @@ const GrepOptionProperties = {
     glob: Type.Optional(Type.String({ description: "File filter, e.g. '*.ts' or 'src/**/*.py'." })),
     ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)." })),
     literal: Type.Optional(Type.Boolean({ description: "Force exact substring. Disables regex auto-detect, BM25, and semantic (default: false)." })),
+    regex: Type.Optional(Type.Boolean({ description: "Force regex matching. Pattern must be a valid regex; conflicts with literal:true." })),
     limit: Type.Optional(Type.Number({ description: "Deprecated alias for per-query limit (default: 20, max: 100). Use perQueryLimit instead; perQueryLimit wins when both are given.", default: 20, minimum: 1, maximum: 100 })),
     perQueryLimit: Type.Optional(Type.Number({ description: "Max results per query (default: 20, max: 50). Wins over deprecated limit when both are given.", minimum: 1, maximum: 50 })),
     contextLines: Type.Optional(Type.Number({ description: "Lines of context per match (default: 2, max: 20). Applies after the global output cap.", default: 2, minimum: 0, maximum: 20 })),
@@ -66,7 +68,7 @@ const TopLevelSkipProperty = {
     skip: Type.Optional(Type.Number({ description: "Matches to skip (pagination) for structural search — routes into structural.skip.", minimum: 0 })),
 };
 
-const PATTERN_DESCRIPTION = "Literal substring by default. Auto-regex only if the pattern contains |, ^, $, .*, .+, [class], (group), {n}, \\d/\\w/\\s/\\b, or \\. Bare '.' is literal: foo.bar matches foo.bar, not fooXbar. import\\.meta\\.dirname is regex. Set literal:true to force substring.";
+const PATTERN_DESCRIPTION = "Literal substring by default. Compact regex syntax (|, ^, $, [class], {n}, \\d/\\w/\\s/\\b, \\. or compact foo.*bar / (group) without inner spaces) auto-routes to regex. Multi-line patterns, prose with parenthesised asides, and isolated .* / .+ in multi-word text stay on the smart cascade. Set regex:true to force regex (must be valid) or literal:true to force substring.";
 
 const GrepQuerySchema = Type.Object({
     pattern: Type.String({ description: PATTERN_DESCRIPTION, minLength: 1 }),
@@ -85,13 +87,13 @@ const GrepSchema = Type.Object({
     ...GrepOptionProperties,
     ...TopLevelSkipProperty,
 }, {
-    description: "Primary textual/code discovery search. Provide exactly one of pattern or queries. Narrow with path/glob/literal/perQueryLimit/contextLines; use graphFilter for graph-constrained hits and structural for ast-grep queries. Use LSP instead when exact semantic symbol resolution, references, types, hierarchy, or diagnostics are required.",
+    description: "Primary textual/code discovery search. Provide exactly one of pattern or queries. Narrow with path/glob/literal/regex/perQueryLimit/contextLines; use graphFilter for graph-constrained hits and structural for ast-grep queries. Use LSP instead when exact semantic symbol resolution, references, types, hierarchy, or diagnostics are required.",
 });
 
 type GrepInput = Static<typeof GrepSchema>;
 export type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. This is the primary broad/textual discovery tool. Provide exactly one of pattern or queries; queries batches up to 10 full searches. Narrow with path, glob, literal, perQueryLimit, contextLines, and maxResults; graphFilter uses "EDGE_TYPE->target"; structural enables ast-grep search. Pattern matching is literal unless regex syntax is detected, and literal:true always forces substring matching. After discovery, use read for source content at known paths. Use LSP for exact compiler-backed semantics such as definitions, references, types, hierarchy, diagnostics, and refactor safety. Use inspect for aggregate structural or architectural analysis of a known file/directory, and inspect script only for dependent multi-hop chases.`;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. This is the primary broad/textual discovery tool. Provide exactly one of pattern or queries; queries batches up to 10 full searches. Narrow with path, glob, literal, perQueryLimit, contextLines, and maxResults; graphFilter uses "EDGE_TYPE->target"; structural enables ast-grep search. Pattern matching is literal unless compact regex syntax is detected (multi-line patterns and prose with parenthesised asides stay on the smart cascade), literal:true always forces substring matching, and regex:true forces regex matching (pattern must be a valid regex). After discovery, use read for source content at known paths. Use LSP for exact compiler-backed semantics such as definitions, references, types, hierarchy, diagnostics, and refactor safety. Use inspect for aggregate structural or architectural analysis of a known file/directory, and inspect script only for dependent multi-hop chases.`;
 
 // ── Factory ─────────────────────────────────────────────────────────
 
@@ -176,6 +178,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             if (params.glob !== undefined) shared.glob = params.glob;
             if (params.ignoreCase !== undefined) shared.ignoreCase = params.ignoreCase;
             if (params.literal !== undefined) shared.literal = params.literal;
+            if ((params as any).regex !== undefined) shared.regex = (params as any).regex;
             if (params.limit !== undefined) shared.limit = params.limit;
             if (params.perQueryLimit !== undefined) shared.perQueryLimit = (params as any).perQueryLimit;
             if (params.contextLines !== undefined) shared.contextLines = params.contextLines;
@@ -275,6 +278,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         truncated: result.truncated,
                         maxResults: globalCap,
                         engines: result.engines,
+                        ...(result.routing ? { routing: result.routing } : {}),
                         ...(result.degradation ? { degradation: result.degradation } : {}),
                         ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
                         ...("judge" in result && result.judge ? { judge: result.judge } : {}),
@@ -300,6 +304,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         shownHits: result.shown.length,
                         truncated: result.truncated,
                         engines: result.engines,
+                        ...(result.routing ? { routing: result.routing } : {}),
                         elapsedMs: result.elapsedMs,
                         ...(result.degradation ? { degradation: result.degradation } : {}),
                         ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
@@ -402,7 +407,7 @@ async function executeGrepQuery(
     const caseSensitive = !(params.ignoreCase ?? false);
     const startTime = Date.now();
 
-    const regexPattern = params.literal ? null : detectRegexPattern(params.pattern);
+    const routing = decideGrepRouting(params.pattern, { literal: (params as any).literal, regex: (params as any).regex });
     const fileGlob = params.glob;
     const hasGraphFilter = params.graphFilter !== undefined;
     if (hasGraphFilter && !parseGraphFilter(params.graphFilter!)) {
@@ -430,8 +435,9 @@ async function executeGrepQuery(
     let graphFilterNotes: string[] = [];
     for (;;) {
         const textInput = { pattern: params.pattern, searchDir, topK: gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob };
-        const searchResult = params.literal || regexPattern === null
-            ? params.literal
+        const searchResult = routing.mode === "regex"
+            ? await runRegexGrep({ ...textInput, pattern: params.pattern })
+            : routing.mode === "literal"
                 ? await runLiteralGrep(textInput)
                 : await runSmartCascade(
                     {
@@ -450,8 +456,7 @@ async function executeGrepQuery(
                         // fallback layers available in that mode.
                         allowExactShortCircuit: !hasGraphFilter,
                     },
-                )
-            : await runRegexGrep({ ...textInput, pattern: regexPattern });
+                );
         let current = searchResult.hits;
         engines = searchResult.engines;
         degradation = searchResult.degradation;
@@ -482,8 +487,8 @@ async function executeGrepQuery(
     const staged = await maybeJudgeGrepHits({
         query: params.pattern,
         hits,
-        literal: params.literal === true,
-        regex: regexPattern !== null,
+        literal: routing.mode === "literal",
+        regex: routing.mode === "regex",
         structural: false,
         contextLines,
         cwd,
@@ -508,6 +513,7 @@ async function executeGrepQuery(
 
     return {
         pattern: params.pattern,
+        routing,
         shown: shownHits,
         totalHits,
         engines,
@@ -563,17 +569,82 @@ function resolveSearchScope(cwd: string, inputPath: string | undefined): { searc
     return { searchDir: tryCanonical(target) };
 }
 
-const REGEX_SYNTAX = /(^|[^\\])(?:\||\^|\$|\.\*|\.\+|\[[^\]]+\]|\([^)]*\)|\{\d+(?:,\d*)?\}|\\[bBdDsSwW]|\\\.)/;
+export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; regex?: boolean }): GrepRouting {
+    if (flags?.regex === true && flags?.literal === true) {
+        throw new Error("regex:true cannot be combined with literal:true; choose one");
+    }
+    if (flags?.regex === true) {
+        try {
+            new RegExp(pattern);
+        } catch {
+            throw new Error(`regex:true but pattern is not a valid regex: ${pattern}`);
+        }
+        return { mode: "regex", reason: "forced_regex" };
+    }
+    if (flags?.literal === true) return { mode: "literal", reason: "forced_literal" };
+    if (pattern.includes("\n")) {
+        return { mode: "smart", reason: "auto_declined_newline", note: "Multi-line pattern: regex auto-detect declined; using smart cascade. Set regex:true to force regex." };
+    }
+    if (!isValidGrepRegex(pattern)) {
+        if (hasStrongRegexSyntax(pattern)) {
+            return { mode: "smart", reason: "auto_declined_invalid_regex", note: "Pattern looks like regex but is invalid; using smart cascade." };
+        }
+        return { mode: "smart", reason: "auto_literal", note: "No regex syntax detected; using smart cascade." };
+    }
+    if (hasStrongRegexSyntax(pattern)) return { mode: "regex", reason: "auto_regex" };
+    if (hasWhitespaceParenGroup(pattern)) {
+        return { mode: "smart", reason: "auto_declined_prose_group", note: "Parenthesised aside looks like prose; regex auto-detect declined. Set regex:true to force regex." };
+    }
+    if (hasIsolatedProseWildcard(pattern)) {
+        return { mode: "smart", reason: "auto_declined_prose_wildcard", note: "Isolated .* / .+ in multi-word text is ambiguous; regex auto-detect declined. Set regex:true to force regex." };
+    }
+    if (COMPACT_GREP_REGEX.test(pattern)) return { mode: "regex", reason: "auto_regex" };
+    return { mode: "smart", reason: "auto_literal", note: "No regex syntax detected; using smart cascade." };
+}
 
-function detectRegexPattern(pattern: string): string | null {
-    if (!REGEX_SYNTAX.test(pattern)) return null;
+function hasUnescapedGrep(text: string, char: string): boolean {
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] !== char) continue;
+        let backslashes = 0;
+        for (let j = i - 1; j >= 0 && text[j] === "\\"; j--) backslashes++;
+        if (backslashes % 2 === 0) return true;
+    }
+    return false;
+}
+
+function hasStrongRegexSyntax(pattern: string): boolean {
+    if (hasUnescapedGrep(pattern, "|")) return true;
+    if (pattern.startsWith("^") || (pattern.endsWith("$") && !pattern.endsWith("\\$"))) return true;
+    if (/\[[^\]]+\]/.test(pattern)) return true;
+    if (/\{\d+(,\d*)?\}/.test(pattern)) return true;
+    if (/\\[bBdDsSwW.]/.test(pattern)) return true;
+    const group = /\(([^()]*)\)/.exec(pattern);
+    if (group && (group[1] ?? "").length > 0 && !/\s/.test(group[1] ?? "")) return true;
+    if (/\w\.\*\w|\w\.\+\w/.test(pattern)) return true;
+    return false;
+}
+
+function hasWhitespaceParenGroup(pattern: string): boolean {
+    const m = /\(([^()]*)\)/.exec(pattern);
+    return !!m && /\s/.test(m[1] ?? "");
+}
+
+function hasIsolatedProseWildcard(pattern: string): boolean {
+    if (!/\.\*|\.\+/.test(pattern)) return false;
+    if (/\w\.\*\w|\w\.\+\w/.test(pattern)) return false;
+    return /\s/.test(pattern);
+}
+
+function isValidGrepRegex(pattern: string): boolean {
     try {
         new RegExp(pattern);
-        return pattern;
+        return true;
     } catch {
-        return null;
+        return false;
     }
 }
+
+const COMPACT_GREP_REGEX = /(\||\[|\{\d|\\[bBdDsSwW.]|\(\S+\))/;
 
 /**
  * Multi-range resource identity: resourceId and inspectionId hash the FULL
@@ -675,6 +746,7 @@ function formatExecutionOutput(result: GrepExecutionResult & GrepJudgeResultExtr
         result.elapsedMs,
         result.graphFilterNotes,
         result.degradation,
+        result.routing,
         result.judge
             ? {
                 judge: result.judge,
@@ -718,7 +790,7 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
     const header: string[] = [];
     for (let i = 0; i < results.length; i++) {
         const result = results[i]!;
-        header.push(`Query ${i + 1}: "${result.pattern}" (${result.totalHits} hits, ${result.elapsedMs}ms)`);
+        header.push(`Query ${i + 1}: "${result.pattern}" (${result.totalHits} hits, ${result.elapsedMs}ms, ${result.routing ? `${result.routing.mode}/${result.routing.reason}` : result.engines.join("+")})`);
     }
     header.push("");
     // Merged global view: duplicates render once with matched-query provenance.
@@ -767,6 +839,7 @@ function formatOutput(
     elapsedMs: number,
     graphFilterNotes?: string[],
     degradation?: GrepDegradation[],
+    routing?: GrepRouting,
     judgeExtra?: {
         judge: GrepJudgeDetails;
         abstainMessage?: string;
@@ -775,10 +848,15 @@ function formatOutput(
 ): string {
     const engineStr = engines.join(" + ");
     const judgedSuffix = judgeExtra ? ", judged" : "";
+    const routingSuffix = routing ? `, ${routing.mode}/${routing.reason}` : "";
     const lines: string[] = [
-        `${totalHits} result(s) for "${pattern}" (${engineStr}${judgedSuffix}, ${(elapsedMs / 1000).toFixed(1)}s)`,
+        `${totalHits} result(s) for "${pattern}" (${engineStr}${judgedSuffix}${routingSuffix}, ${(elapsedMs / 1000).toFixed(1)}s)`,
         "",
     ];
+    if (routing?.note) {
+        lines.push(routing.note);
+        lines.push("");
+    }
 
     if (judgeExtra?.abstainMessage) {
         lines.push(judgeExtra.abstainMessage);
