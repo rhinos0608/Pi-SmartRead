@@ -255,6 +255,21 @@ describe("ranking knobs end to end (no-index fallback)", () => {
         expect(_bm25CorpusCacheForTests().builds).toBe(2);
     });
 
+    it("isolates cached corpora across k1/b scoring params (no stale-score reuse)", async () => {
+        const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => 0 }));
+        const params = { pattern: "totalRevenue", path: "src" } as any;
+        await tool.execute("r1", params, undefined, undefined, makeCtx(workdir));
+        expect(_bm25CorpusCacheForTests().builds).toBe(1);
+        process.env[GREP_RANK_BM25_ENV_VAR] = "1.5,0.5";
+        await tool.execute("r2", params, undefined, undefined, makeCtx(workdir));
+        // k1/b are baked into the compiled scorer closure, so a changed
+        // setting must miss the cache and rebuild — never reuse old scores.
+        expect(_bm25CorpusCacheForTests().builds).toBe(2);
+        expect(_bm25CorpusCacheForTests().size).toBe(2);
+        await tool.execute("r3", params, undefined, undefined, makeCtx(workdir));
+        expect(_bm25CorpusCacheForTests().builds).toBe(2);
+    });
+
     it("demotes test paths when the demote knob is on", async () => {
         const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => 0 }));
         const params = { pattern: "totalRevenue", path: "src" } as any;

@@ -687,7 +687,14 @@ export async function getSearchCorpus(
         return { entry: await buildCorpus(searchDir, scopedFile, fileGlob, ranking), cached: false };
     }
     const glob = fileGlob ?? "";
-    const rankingKey = ranking ? rankingCorpusKeySegment(ranking) : "";
+    // k1/b are baked into the compiled scorer closure (scoring.ts captures
+    // them at compile time), so they must isolate cache entries — otherwise a
+    // changed PI_SMARTREAD_GREP_RANK_BM25 silently reuses old scores.
+    // Score-only knobs applied at rank time (demote, coverage, stopwords)
+    // need no isolation and share the corpus.
+    const baseRankingKey = ranking ? rankingCorpusKeySegment(ranking) : "";
+    const bm25Segment = ranking ? `bm25=${ranking.bm25k1},${ranking.bm25b}` : "";
+    const rankingKey = [baseRankingKey, bm25Segment].filter(Boolean).join("\u0000");
     for (let attempt = 0; attempt < 5; attempt++) {
         const revision = getWorkspaceRevision();
         const key = corpusKeyString({ root, revision, searchDir, cwd, glob, rankingKey });
