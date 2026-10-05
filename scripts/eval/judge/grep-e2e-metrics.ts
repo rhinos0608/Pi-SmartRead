@@ -414,12 +414,12 @@ export function scoreReadReadySpan(
         const cumulative = blockEnds ? Math.ceil(blockEnds[i]! / 4) : spent + Math.ceil(unitRenderedChars(unit) / 4);
         if (cumulative > budget) break;
         spent = cumulative;
-        if (unit.relFile !== gold.file) continue;
         const span = parseRenderedSpan(unit.snippet);
         if (!span) {
             noGutterUnits++;
             continue;
         }
+        if (unit.relFile !== gold.file) continue;
         let hitsGold = false;
         for (let line = gold.startLine; line <= gold.endLine; line++) {
             if (span.lines.has(line)) { hitsGold = true; break; }

@@ -285,6 +285,14 @@ describe("scoreReadReadySpan", () => {
         expect(r.success).toBe(false);
         expect(r.noGutterUnits).toBe(1);
     });
+    it("counts gutter-less units on other files too, not only gold-file units", () => {
+        const r = scoreReadReadySpan(gold, [
+            card(1, 1, "plain snippet", "src/other.ts"),
+            card(100, 105, "plain snippet"),
+        ]);
+        expect(r.success).toBe(false);
+        expect(r.noGutterUnits).toBe(2);
+    });
     it("fails when the gold file is absent from the first K units", () => {
         expect(scoreReadReadySpan(gold, [card(100, 110, "     100 | hit\n", "src/other.ts")]).success)
             .toBe(false);
