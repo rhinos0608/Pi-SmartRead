@@ -603,7 +603,7 @@ export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; 
         if (hasStrongRegexSyntax(pattern)) {
             return { mode: "smart", reason: "auto_declined_invalid_regex", note: "Pattern looks like regex but is invalid; using smart cascade." };
         }
-        return { mode: "smart", reason: "auto_literal", note: "No regex syntax detected; using smart cascade." };
+        return { mode: "smart", reason: "auto_literal" };
     }
     if (hasStrongRegexSyntax(pattern)) {
         if (hasBracketClassOnly(pattern)) {
@@ -618,7 +618,7 @@ export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; 
         return { mode: "smart", reason: "auto_declined_prose_wildcard", note: "Isolated .* / .+ in multi-word text is ambiguous; regex auto-detect declined. Set regex:true to force regex." };
     }
     if (COMPACT_GREP_REGEX.test(pattern)) return { mode: "regex", reason: "auto_regex" };
-    return { mode: "smart", reason: "auto_literal", note: "No regex syntax detected; using smart cascade." };
+    return { mode: "smart", reason: "auto_literal" };
 }
 
 /** A trailing `$` is an end anchor only with even backslash parity (odd = escaped). */
