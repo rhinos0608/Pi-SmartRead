@@ -17,7 +17,17 @@ import { handleSymbol } from "./find-symbol-tool.js";
 import { getSemanticIndex } from "../indexing/semantic-index-registry.js";
 import { pathPrefixForDirectory } from "../indexing/semantic-index.js";
 import { recordDegradation } from "../runtime/runtime-health.js";
-import { tokenize, compileBm25Corpus, type Bm25Corpus } from "../scoring.js";
+import { compileBm25Corpus, type Bm25Corpus } from "../scoring.js";
+import {
+    resolveGrepRankingOptions,
+    tokenizeRankingQuery,
+    withFilenameHeader,
+    coverageBoostFactor,
+    isTestOrDocPath,
+    activeRankingKnobs,
+    rankingCorpusKeySegment,
+    type GrepRankingOptions,
+} from "./grep-ranking.js";
 import { buildSymbolUnitHits, resolveGrepUnitMode, type GrepUnitMode } from "./grep-units.js";
 import { findCodeFiles } from "../file-discovery.js";
 import { LruCache } from "../utils.js";
@@ -58,6 +68,8 @@ export interface GrepExecutionResult {
     structuralSearch?: StructuralDetails;
     /** Active BM25 result-unit mode (D31 seam; additive for reports). */
     unitMode?: GrepUnitMode;
+    /** Active experimental BM25 ranking knobs (additive; empty when all off). */
+    rankingKnobs?: string[];
 }
 
 export interface StructuralDetails {
@@ -287,13 +299,14 @@ function buildNoIndexEngines(exactCount: number, bm25Size: number, symbolOk: boo
 // No-semantic-index path: exact lexical + in-memory BM25 + AST symbol fusion.
 async function runNoIndexCascade(
     ctx: NoIndexCascadeCtx,
-): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[] }> {
+): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[]; rankingKnobs: string[] }> {
+    const rankingKnobs = activeRankingKnobs(resolveGrepRankingOptions());
     // Exact lexical results already satisfy the requested limit: skip the AST
     // scan and BM25 corpus build. gatherK is >= 2x the requested limit
     // (capped at 200), so this preserves displayed exact results.
     const requestedLimit = Math.max(1, Math.ceil(ctx.bigK / 2));
     if (ctx.allowExactShortCircuit && ctx.exactHits.length >= requestedLimit) {
-        return { hits: ctx.exactHits, engines: ["lexical-passthrough"], degradation: ctx.degradation };
+        return { hits: ctx.exactHits, engines: ["lexical-passthrough"], degradation: ctx.degradation, rankingKnobs };
     }
     const symbolHits = new Map<string, GrepHit>();
     const graphOk = tryGraphExactSymbol({ pattern: ctx.pattern, root: ctx.root, opts: ctx.opts, cwd: ctx.cwd, scopedFile: ctx.scopedFile }, symbolHits);
@@ -307,7 +320,7 @@ async function runNoIndexCascade(
     );
     let combined = fuseAndDedup(bm25Hits, symbolHits);
     if (ctx.exactHits.length > 0) combined = prependExactHits(ctx.exactHits, combined);
-    return { hits: combined, engines: buildNoIndexEngines(ctx.exactHits.length, bm25Hits.size, searchedOk), degradation: ctx.degradation };
+    return { hits: combined, engines: buildNoIndexEngines(ctx.exactHits.length, bm25Hits.size, searchedOk), degradation: ctx.degradation, rankingKnobs };
 }
 
 async function searchIndexedBm25(
@@ -417,7 +430,7 @@ async function runIndexedCascade(
 
 export async function runSmartCascade(
     input: GrepCascadeInput,
-): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[]; unitMode: GrepUnitMode }> {
+): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[]; unitMode: GrepUnitMode; rankingKnobs: string[] }> {
     const unitMode = resolveGrepUnitMode();
     const {
         pattern,
@@ -447,7 +460,7 @@ export async function runSmartCascade(
             scopedFile, fileGlob, opts, allowExactShortCircuit, root,
             degradation, exactHits: exactResult.hits,
         });
-        return { ...noIndex, unitMode };
+        return { ...noIndex, unitMode, rankingKnobs: noIndex.rankingKnobs };
     }
 
     const indexed = await runIndexedCascade({
@@ -455,7 +468,7 @@ export async function runSmartCascade(
         scopedFile, fileGlob, opts, allowExactShortCircuit, root,
         degradation, semanticIndex, exactHits: exactResult.hits,
     });
-    return { ...indexed, unitMode };
+    return { ...indexed, unitMode, rankingKnobs: [] };
 }
 
 // ── Literal grep passthrough ────────────────────────────────────────
@@ -593,8 +606,9 @@ const corpusCache = new LruCache<CorpusEntry>(MAX_CORPUS_CACHE_ENTRIES);
 const pendingCorpusBuilds = new Map<string, Promise<CorpusEntry | null>>();
 let corpusBuildCount = 0; // test instrumentation
 
-function corpusKeyString(root: string, revision: number, searchDir: string, cwd: string, fileGlob: string): string {
-    return `${root}\u0000${revision}\u0000${searchDir}\u0000${cwd}\u0000${fileGlob}`;
+function corpusKeyString(parts: { root: string; revision: number; searchDir: string; cwd: string; glob: string; rankingKey: string }): string {
+    const { root, revision, searchDir, cwd, glob, rankingKey } = parts;
+    return `${root}\u0000${revision}\u0000${searchDir}\u0000${cwd}\u0000${glob}\u0000${rankingKey}`;
 }
 
 function isWithinWorkspace(root: string, dir: string): boolean {
@@ -606,6 +620,7 @@ async function buildCorpus(
     searchDir: string,
     scopedFile: string | undefined,
     fileGlob: string | undefined,
+    ranking?: GrepRankingOptions,
 ): Promise<CorpusEntry> {
     corpusBuildCount++;
     const fs = await import("node:fs/promises");
@@ -635,7 +650,10 @@ async function buildCorpus(
             // skip unreadable files
         }
     }
-    return { fileList, contents, corpus: compileBm25Corpus(contents) };
+    const corpusDocs = ranking?.filenamePrepend
+        ? fileList.map((f, i) => withFilenameHeader(contents[i]!, relativeToSearchDir(searchDir, f)))
+        : contents;
+    return { fileList, contents, corpus: compileBm25Corpus(corpusDocs, { k1: ranking?.bm25k1, b: ranking?.bm25b }) };
 }
 
 /**
@@ -652,12 +670,13 @@ export interface GetSearchCorpusInput {
     fileGlob: string | undefined;
     root: string;
     getWorkspaceRevision: (() => number) | undefined;
+    ranking?: GrepRankingOptions;
 }
 
 export async function getSearchCorpus(
     input: GetSearchCorpusInput,
 ): Promise<{ entry: CorpusEntry; cached: boolean }> {
-    const { searchDir, scopedFile, cwd, fileGlob, root, getWorkspaceRevision } = input;
+    const { searchDir, scopedFile, cwd, fileGlob, root, getWorkspaceRevision, ranking } = input;
     // Uncacheable scope: single-file target, no revision source, or a search
     // that leaves the tracked workspace (revision doesn't reflect it).
     const cacheable =
@@ -665,12 +684,13 @@ export async function getSearchCorpus(
         getWorkspaceRevision !== undefined &&
         isWithinWorkspace(root, searchDir);
     if (!cacheable) {
-        return { entry: await buildCorpus(searchDir, scopedFile, fileGlob), cached: false };
+        return { entry: await buildCorpus(searchDir, scopedFile, fileGlob, ranking), cached: false };
     }
     const glob = fileGlob ?? "";
+    const rankingKey = ranking ? rankingCorpusKeySegment(ranking) : "";
     for (let attempt = 0; attempt < 5; attempt++) {
         const revision = getWorkspaceRevision();
-        const key = corpusKeyString(root, revision, searchDir, cwd, glob);
+        const key = corpusKeyString({ root, revision, searchDir, cwd, glob, rankingKey });
         const hit = corpusCache.get(key);
         if (hit) return { entry: hit, cached: true };
         let pending = pendingCorpusBuilds.get(key);
@@ -678,7 +698,7 @@ export async function getSearchCorpus(
             // Builder must not inherit any caller abort signal: a coalesced
             // build serves all concurrent callers, so cancellation is handled
             // by the caller before/after the await, never inside the build.
-            pending = buildCorpus(searchDir, scopedFile, fileGlob).then((entry) => {
+            pending = buildCorpus(searchDir, scopedFile, fileGlob, ranking).then((entry) => {
                 if (getWorkspaceRevision() !== revision) return null; // stale — don't publish
                 corpusCache.set(key, entry);
                 return entry;
@@ -696,7 +716,7 @@ export async function getSearchCorpus(
         }
     }
     // Safety net: loop exited without a fresh build (revision churn).
-    return { entry: await buildCorpus(searchDir, scopedFile, fileGlob), cached: false };
+    return { entry: await buildCorpus(searchDir, scopedFile, fileGlob, ranking), cached: false };
 }
 
 export interface FallbackBm25Input {
@@ -737,12 +757,30 @@ function formatSnippetLines(lines: string[], centerLine: number, contextLines: n
     return snippetLines.join("\n");
 }
 
-function rankCorpusFiles(entry: CorpusEntry, pattern: string): Array<{ file: string; score: number; content: string }> {
+function rankCorpusFiles(
+    entry: CorpusEntry,
+    pattern: string,
+    searchDir: string,
+    ranking?: GrepRankingOptions,
+): Array<{ file: string; score: number; content: string }> {
     const { fileList, contents, corpus } = entry;
-    const scores = corpus.score(pattern);
+    const queryTokens = tokenizeRankingQuery(pattern, ranking ?? resolveGrepRankingOptions());
+    // Stopword filtering is a query-side transform: re-join filtered tokens
+    // so the shared corpus scorer tokenizes the same token stream.
+    const scoringPattern = ranking?.stopwords ? queryTokens.join(" ") : pattern;
+    const scores = corpus.score(scoringPattern);
     const ranked: Array<{ file: string; score: number; content: string }> = [];
     for (let i = 0; i < fileList.length; i++) {
-        const score = scores[i] ?? 0;
+        const base = scores[i] ?? 0;
+        if (base <= 0) continue;
+        let score = base;
+        const rel = relativeToSearchDir(searchDir, fileList[i]!);
+        if (ranking?.testDemoteFactor !== null && ranking?.testDemoteFactor !== undefined && isTestOrDocPath(rel)) {
+            score *= ranking.testDemoteFactor;
+        }
+        if (ranking?.coverageBoost) {
+            score *= coverageBoostFactor(queryTokens, contents[i]!.toLowerCase());
+        }
         if (score > 0) ranked.push({ file: fileList[i]!, score, content: contents[i]! });
     }
     ranked.sort((a, b) => b.score - a.score);
@@ -753,19 +791,20 @@ export async function runFallbackBm25(
     input: FallbackBm25Input,
 ): Promise<Map<string, GrepHit>> {
     const { pattern, searchDir, topK, contextLines, cwd, signal, scopedFile, fileGlob, deps: opts, root } = input;
+    const ranking = resolveGrepRankingOptions();
     const hits = new Map<string, GrepHit>();
     if (signal?.aborted) throw new Error("Operation aborted");
 
     const { entry } = await getSearchCorpus(
-        { searchDir, scopedFile, cwd, fileGlob, root, getWorkspaceRevision: opts?.getWorkspaceRevision },
+        { searchDir, scopedFile, cwd, fileGlob, root, getWorkspaceRevision: opts?.getWorkspaceRevision, ranking },
     );
     // Cancellation is honored around (not inside) the shared corpus build.
     if (signal?.aborted) throw new Error("Operation aborted");
 
 
     if (entry.fileList.length === 0) return hits;
-    const queryTokens = tokenize(pattern);
-    const ranked = rankCorpusFiles(entry, pattern);
+    const queryTokens = tokenizeRankingQuery(pattern, ranking);
+    const ranked = rankCorpusFiles(entry, pattern, searchDir, ranking);
 
     for (const item of ranked.slice(0, topK)) {
         const absPath = tryCanonical(item.file);
