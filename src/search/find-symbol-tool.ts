@@ -2,7 +2,7 @@ import { existsSync, promises as fs, realpathSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import Parser from "tree-sitter";
 import { initParser, loadLanguage, getQueryPath } from "../structural/tags.js";
-import { filenameToLang } from "../languages.js";
+import { filenameToLang, type SupportedLanguage } from "../languages.js";
 import { findSrcFiles } from "../file-discovery.js";
 import { expandToMonorepoRoots } from "../workspace/monorepo-detector.js";
 import { getLSPBridge, type LSPBridge } from "../lsp/lsp-bridge.js";
@@ -155,7 +155,15 @@ async function discoverAndFilterSymbolFiles(
   return { allFiles, matchesGlob };
 }
 
-/** Tree-sitter scan of candidate files for definitions matching the query. */
+/** Tree-sitter scan of candidate files for definitions matching the query.
+ *
+ * One Parser and one compiled Query are reused per language for the whole
+ * scan (the loop below is sequential, so sharing is safe). `Parser.parse`
+ * with a fresh input closure per file carries no cross-call state, and
+ * `Query.matches` is read-only; the native binding exposes no
+ * delete/dispose API (verified against the installed tree-sitter
+ * typings), so previous trees are reclaimed by GC when superseded.
+ */
 async function scanFileDefinitions(
   allFiles: string[],
   query: string,
@@ -169,11 +177,12 @@ async function scanFileDefinitions(
 
   const queryLower = query.toLowerCase();
   const queryParts = queryLower.split(".");
+  const scanCache: SymbolScanCache = new Map();
 
   for (const filePath of allFiles) {
     if (signal?.aborted) throw new Error("Operation aborted");
     if (matches.length >= maxResults) break;
-    const found = await scanSingleFile(filePath, queryLower, queryParts, includeBody, cwd);
+    const found = await scanSingleFile(filePath, queryLower, queryParts, includeBody, cwd, scanCache);
     totalDefs += found.defs;
     for (const m of found.matches) {
       if (matches.length >= maxResults) break;
@@ -184,6 +193,42 @@ async function scanFileDefinitions(
   return { matches, totalDefs };
 }
 
+/** Reused per-language parse state for one scan. `null` memoizes "unsupported". */
+type SymbolScanCache = Map<string, { parser: Parser; tsQuery: Parser.Query } | null>;
+
+/** Lazily create (then reuse) one Parser + compiled Query for a language. */
+async function getScanContext(
+  lang: SupportedLanguage,
+  scanCache: SymbolScanCache,
+): Promise<{ parser: Parser; tsQuery: Parser.Query } | null> {
+  if (scanCache.has(lang)) return scanCache.get(lang) ?? null;
+  const miss = (): null => {
+    scanCache.set(lang, null);
+    return null;
+  };
+  const grammar = loadLanguage(lang);
+  if (!grammar) return miss();
+  const queryPath = getQueryPath(lang);
+  if (!queryPath || !existsSync(queryPath)) return miss();
+  let querySource: string;
+  try {
+    querySource = await fs.readFile(queryPath, "utf-8");
+  } catch {
+    return miss();
+  }
+  let tsQuery: Parser.Query;
+  try {
+    tsQuery = new Parser.Query(grammar, querySource);
+  } catch {
+    return miss();
+  }
+  const parser = new Parser();
+  parser.setLanguage(grammar);
+  const ctx = { parser, tsQuery };
+  scanCache.set(lang, ctx);
+  return ctx;
+}
+
 /** Parse one file and return definitions matching the query. Never throws. */
 async function scanSingleFile(
   filePath: string,
@@ -191,31 +236,21 @@ async function scanSingleFile(
   queryParts: string[],
   includeBody: boolean,
   cwd: string,
+  scanCache: SymbolScanCache,
 ): Promise<{ matches: SymbolEntry[]; defs: number }> {
   const empty = { matches: [] as SymbolEntry[], defs: 0 };
   const lang = filenameToLang(filePath);
   if (!lang) return empty;
-  const grammar = loadLanguage(lang);
-  if (!grammar) return empty;
+  const ctx = await getScanContext(lang, scanCache);
+  if (!ctx) return empty;
 
   let code: string;
   try { code = await fs.readFile(filePath, "utf-8"); } catch { return empty; }
 
-  const parser = new Parser();
-  parser.setLanguage(grammar);
-  const tree = parser.parse((offset) => code.slice(offset, offset + 1024));
+  const tree = ctx.parser.parse((offset) => code.slice(offset, offset + 1024));
   if (!tree?.rootNode) return empty;
 
-  const queryPath = getQueryPath(lang);
-  if (!queryPath || !existsSync(queryPath)) return empty;
-
-  let tsQuery: Parser.Query;
-  try {
-    const querySource = await fs.readFile(queryPath, "utf-8");
-    tsQuery = new Parser.Query(grammar, querySource);
-  } catch { return empty; }
-
-  return extractQueryMatches(tsQuery.matches(tree.rootNode), queryLower, queryParts, includeBody, relative(displayRoot(cwd), tryCanonical(filePath)));
+  return extractQueryMatches(ctx.tsQuery.matches(tree.rootNode), queryLower, queryParts, includeBody, relative(displayRoot(cwd), tryCanonical(filePath)));
 }
 
 /** Pull (name, definition) captures out of raw query matches and keep query hits. */
