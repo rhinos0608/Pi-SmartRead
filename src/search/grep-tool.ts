@@ -27,6 +27,11 @@ import type { ContextGraph } from "../context-graph.js";
 import { runGrepJudgeStage, type GrepJudgeDetails, type GrepJudgeProvider, type JudgedGrepHit } from "../judge/grep-judge-stage.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
 import { sessionFileFromContext } from "../inspect/inspect-tool.js";
+import {
+    resolveGrepUnitExcerptLines,
+    resolveGrepUnitMaxPerFile,
+    resolveGrepUnitMode,
+} from "./grep-units.js";
 import { executeStructuralQuery } from "./grep-structural-executor.js";
 export { GREP_STRUCTURAL_FETCH_SIZE, GREP_STRUCTURAL_MAX_ITERATIONS } from "./grep-structural-executor.js";
 import {
@@ -278,6 +283,9 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         truncated: result.truncated,
                         maxResults: globalCap,
                         engines: result.engines,
+                        unitMode: result.unitMode ?? resolveGrepUnitMode(),
+                        unitMaxPerFile: resolveGrepUnitMaxPerFile(),
+                        unitExcerptLines: resolveGrepUnitExcerptLines(),
                         ...(result.routing ? { routing: result.routing } : {}),
                         ...(result.degradation ? { degradation: result.degradation } : {}),
                         ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
@@ -298,12 +306,18 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                     truncated: (queryResults as any).globalTruncated as boolean,
                     maxResults: resolveMaxResults(params as { maxResults?: number }),
                     engines: unique(queryResults.flatMap((result) => result.engines)),
+                    unitMode: resolveGrepUnitMode(),
+                    unitMaxPerFile: resolveGrepUnitMaxPerFile(),
+                    unitExcerptLines: resolveGrepUnitExcerptLines(),
                     queryResults: queryResults.map((result) => ({
                         pattern: result.pattern,
                         totalHits: result.totalHits,
                         shownHits: result.shown.length,
                         truncated: result.truncated,
                         engines: result.engines,
+                        unitMode: result.unitMode ?? resolveGrepUnitMode(),
+                        unitMaxPerFile: resolveGrepUnitMaxPerFile(),
+                        unitExcerptLines: resolveGrepUnitExcerptLines(),
                         ...(result.routing ? { routing: result.routing } : {}),
                         elapsedMs: result.elapsedMs,
                         ...(result.degradation ? { degradation: result.degradation } : {}),
