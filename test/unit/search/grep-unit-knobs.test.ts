@@ -1,5 +1,5 @@
 /** Experimental M/E knobs for symbol unit mode (D34): resolvers + per-file/excerpt behavior. */
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     GREP_UNIT_EXCERPT_LINES,
     GREP_UNIT_MAX_PER_FILE,
@@ -58,6 +58,18 @@ describe("resolveGrepUnitExcerptLines", () => {
 });
 
 describe("M/E knobs in buildSymbolUnitHits", () => {
+    // buildSymbolUnitHits falls back to process.env when no overrides are
+    // passed, so clear the ambient unit knobs for these tests.
+    beforeEach(() => {
+        vi.stubEnv(MAX_VAR, "");
+        vi.stubEnv(EXCERPT_VAR, "");
+        vi.stubEnv("PI_SMARTREAD_GREP_UNIT_MODE", "");
+    });
+
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
     it("caps units per file at M from the environment", () => {
         const withDefault = buildSymbolUnitHits(baseInput(multiFnContent()));
         expect(withDefault).not.toBeNull();
