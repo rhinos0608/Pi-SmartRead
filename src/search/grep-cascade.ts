@@ -18,6 +18,7 @@ import { getSemanticIndex } from "../indexing/semantic-index-registry.js";
 import { pathPrefixForDirectory } from "../indexing/semantic-index.js";
 import { recordDegradation } from "../runtime/runtime-health.js";
 import { tokenize, compileBm25Corpus, type Bm25Corpus } from "../scoring.js";
+import { buildSymbolUnitHits, resolveGrepUnitMode, type GrepUnitMode } from "./grep-units.js";
 import { findCodeFiles } from "../file-discovery.js";
 import { LruCache } from "../utils.js";
 import type { StructuralSearchMatch } from "../structural/structural-search.js";
@@ -55,6 +56,8 @@ export interface GrepExecutionResult {
     graphFilterNotes: string[];
     degradation?: GrepDegradation[];
     structuralSearch?: StructuralDetails;
+    /** Active BM25 result-unit mode (D31 seam; additive for reports). */
+    unitMode?: GrepUnitMode;
 }
 
 export interface StructuralDetails {
@@ -414,7 +417,8 @@ async function runIndexedCascade(
 
 export async function runSmartCascade(
     input: GrepCascadeInput,
-): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[] }> {
+): Promise<{ hits: GrepHit[]; engines: string[]; degradation?: GrepDegradation[]; unitMode: GrepUnitMode }> {
+    const unitMode = resolveGrepUnitMode();
     const {
         pattern,
         searchDir,
@@ -438,18 +442,20 @@ export async function runSmartCascade(
     if (!semanticIndex?.isAvailable()) {
         degradation.push({ backend: "semantic", code: "index_unavailable" });
         recordDegradation("index_unavailable", "semantic");
-        return runNoIndexCascade({
+        const noIndex = await runNoIndexCascade({
             pattern, searchDir, bigK, contextLines, caseSensitive, cwd, signal,
             scopedFile, fileGlob, opts, allowExactShortCircuit, root,
             degradation, exactHits: exactResult.hits,
         });
+        return { ...noIndex, unitMode };
     }
 
-    return runIndexedCascade({
+    const indexed = await runIndexedCascade({
         pattern, searchDir, bigK, contextLines, caseSensitive, cwd, signal,
         scopedFile, fileGlob, opts, allowExactShortCircuit, root,
         degradation, semanticIndex, exactHits: exactResult.hits,
     });
+    return { ...indexed, unitMode };
 }
 
 // ── Literal grep passthrough ────────────────────────────────────────
@@ -764,6 +770,23 @@ export async function runFallbackBm25(
     for (const item of ranked.slice(0, topK)) {
         const absPath = tryCanonical(item.file);
         const lines = item.content.split(/\r?\n/);
+        if (resolveGrepUnitMode() === "symbol") {
+            const unitHits = buildSymbolUnitHits({
+                absPath,
+                relFile: relToDisplayRoot(cwd, absPath),
+                content: item.content,
+                filePathForLang: absPath,
+                pattern,
+                fileScore: item.score,
+                contextLines,
+            });
+            if (unitHits) {
+                for (const hit of unitHits) {
+                    hits.set(`${absPath}:${hit.line}:${hit.endLine}`, hit);
+                }
+                continue;
+            }
+        }
         const bestLine = findBestLine(lines, queryTokens);
         hits.set(`${absPath}:${bestLine}`, {
             file: absPath,
