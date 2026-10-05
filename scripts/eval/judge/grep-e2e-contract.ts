@@ -214,6 +214,11 @@ export interface PairedReport {
         inventoryHashBefore?: string;
         queryCount?: number;
         engineSourceHash?: string;
+        sourceRef?: string | null;
+        corpusKind?: string;
+        gateConstants?: Record<string, number>;
+        retrievalConditions?: Record<string, unknown>;
+        params?: Record<string, unknown>;
     };
     queries?: PairedReportQuery[];
 }
@@ -253,12 +258,22 @@ function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
 export function pairReports(baseline: PairedReport, variant: PairedReport, names?: { baseline: string; variant: string }): PairedComparison {
     const bManifest = baseline.manifest ?? {};
     const vManifest = variant.manifest ?? {};
-    if (bManifest.fixtureSha !== vManifest.fixtureSha) {
-        throw new Error(`refuses-pair: fixtureSha mismatch (${bManifest.fixtureSha} vs ${vManifest.fixtureSha})`);
-    }
-    if (bManifest.inventoryHashBefore !== vManifest.inventoryHashBefore) {
-        throw new Error("refuses-pair: corpus inventory hash mismatch");
-    }
+    // Complete matching identity: presence AND equality. Missing on either
+    // side refuses. engineSourceHash is the variable under comparison.
+    const requireIdentity = (field: string, b: unknown, v: unknown): void => {
+        if (b === undefined || v === undefined) {
+            throw new Error(`refuses-pair: ${field} missing (${String(b)} vs ${String(v)})`);
+        }
+        if (stableStringify(b) !== stableStringify(v)) {
+            throw new Error(`refuses-pair: ${field} mismatch (${stableStringify(b)} vs ${stableStringify(v)})`);
+        }
+    };
+    requireIdentity("fixtureSha", bManifest.fixtureSha, vManifest.fixtureSha);
+    requireIdentity("corpus inventory hash", bManifest.inventoryHashBefore, vManifest.inventoryHashBefore);
+    requireIdentity("sourceRef", bManifest.sourceRef, vManifest.sourceRef);
+    requireIdentity("corpusKind", bManifest.corpusKind, vManifest.corpusKind);
+    requireIdentity("gateConstants", bManifest.gateConstants, vManifest.gateConstants);
+    requireIdentity("retrieval params", bManifest.retrievalConditions ?? bManifest.params, vManifest.retrievalConditions ?? vManifest.params);
     const bQueries = baseline.queries ?? [];
     const vQueries = variant.queries ?? [];
     const bQids = bQueries.map((q) => q.qid);

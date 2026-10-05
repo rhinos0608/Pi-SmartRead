@@ -259,10 +259,14 @@ describe("hashEngineSources (temp git fixture)", () => {
 });
 
 describe("pairReports", () => {
-    const manifest = (overrides: Record<string, string | number> = {}): PairedReport["manifest"] => ({
+    const manifest = (overrides: Record<string, unknown> = {}): PairedReport["manifest"] => ({
         fixtureSha: "aaa",
         inventoryHashBefore: "bbb",
         queryCount: 2,
+        sourceRef: "abc123",
+        corpusKind: "frozen-git-archive-snapshot",
+        gateConstants: { keep: 3, pointer: 1, exists: 5, find: 0 },
+        retrievalConditions: { perQueryLimit: 40, contextLines: 2 },
         ...overrides,
     });
     const report = (engine: string, rows: PairedReport["queries"]): PairedReport => ({
@@ -286,6 +290,12 @@ describe("pairReports", () => {
         expect(paired.abstention).toEqual({ wins: 0, losses: 1, ties: 1 });
         expect(paired.meanTokenDelta).toBe(25);
         expect(paired.deltas.map((d) => d.qid)).toEqual(["q01", "q02"]);
+    });
+    it("RED: refuses pairing when identity is missing on either side", () => {
+        const rows: PairedReport["queries"] = [{ qid: "q01" }];
+        expect(() => pairReports({ queries: rows }, { queries: rows })).toThrow(/refuses-pair/);
+        expect(() => pairReports({ manifest: {}, queries: rows }, { manifest: {}, queries: rows }))
+            .toThrow(/refuses-pair/);
     });
     it("tolerates engineSourceHash differences but refuses other identity mismatches", () => {
         expect(() => pairReports(base, variant)).not.toThrow();

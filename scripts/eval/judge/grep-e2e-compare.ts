@@ -5,8 +5,9 @@
  *
  *   npx tsx scripts/eval/judge/grep-e2e-compare.ts --baseline A.json --variant B.json [--json]
  *
- * Refuses to pair unless fixture/corpus identity matches (fixtureSha,
- * corpus inventory hash, ordered qid set); engineSourceHash may differ.
+ * Refuses to pair unless complete run identity matches (fixtureSha,
+* corpus inventory hash, sourceRef, corpusKind, gate constants, retrieval
+* params, ordered qid set); engineSourceHash may differ.
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
