@@ -284,12 +284,30 @@ describe("pairReports", () => {
     it("emits per-query wins/losses/ties and token deltas", () => {
         const paired = pairReports(base, variant);
         expect(paired.queryCount).toBe(2);
-        expect(paired.readReady).toEqual({ wins: 1, losses: 1, ties: 0 });
+        expect(paired.readReady).toEqual({ wins: 1, losses: 1, ties: 0, unavailable: 0 });
         expect(paired.fileHit).toEqual({ wins: 1, losses: 1, ties: 0 });
         // q02 stopped abstaining: recorded as an abstention "loss".
         expect(paired.abstention).toEqual({ wins: 0, losses: 1, ties: 1 });
         expect(paired.meanTokenDelta).toBe(25);
         expect(paired.deltas.map((d) => d.qid)).toEqual(["q01", "q02"]);
+    });
+    it("never coerces missing readReady to failure: unavailable per query, other metrics still pair", () => {
+        const oldBase = report("sha256:base", [
+            { qid: "q01", fileHit: true, covered: true, abstained: false, renderedTokens: 100 },
+        ]);
+        const newVariant = report("sha256:variant", [
+            { qid: "q01", fileHit: false, covered: false, abstained: false, renderedTokens: 150, readReady: true },
+        ]);
+        const paired = pairReports(oldBase, newVariant);
+        expect(paired.deltas[0]!.readReady).toBe("unavailable");
+        expect(paired.readReady).toEqual({ wins: 0, losses: 0, ties: 0, unavailable: 1 });
+        // Other metrics still pair for the same query.
+        expect(paired.deltas[0]!.fileHit).toBe("loss");
+        expect(paired.fileHit).toEqual({ wins: 0, losses: 1, ties: 0 });
+    });
+    it("--recompute refuses fail-closed without captured text on both sides", () => {
+        expect(() => pairReports(base, variant, undefined, { recompute: true }))
+            .toThrow(/refuses-recompute/);
     });
     it("RED: refuses pairing when identity is missing on either side", () => {
         const rows: PairedReport["queries"] = [{ qid: "q01" }];
