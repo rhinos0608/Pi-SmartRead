@@ -15,10 +15,19 @@ import {
     RENDERED_TOKEN_CAP,
     summarizeMetrics,
 } from "../../../scripts/eval/external/grep/metrics.js";
-import { assertMultiSweBenchLicense } from "../../../scripts/eval/external/grep/multi-swe-bench.js";
+import { assertMultiSweBenchLicense, msbRowsToInstances } from "../../../scripts/eval/external/grep/multi-swe-bench.js";
 import { classifyPatchFile, deriveGold, parseUnifiedDiff } from "../../../scripts/eval/external/grep/patch.js";
 import { materializeInstance, snapshotDir } from "../../../scripts/eval/external/grep/repos.js";
-import { freezeManifest, seededShuffle, selectPilot } from "../../../scripts/eval/external/grep/sampling.js";
+import {
+    buildDevHoldoutManifest,
+    computeDevHoldoutSha,
+    freezeManifest,
+    pickHoldoutRepos,
+    seededShuffle,
+    selectDevHoldout,
+    selectPilot,
+    verifyDevHoldoutManifest,
+} from "../../../scripts/eval/external/grep/sampling.js";
 import { rowsToInstances } from "../../../scripts/eval/external/grep/swebench-multilingual.js";
 import { toReportOutcome, type AdapterResult } from "../../../scripts/eval/external/grep/adapter.js";
 
@@ -419,5 +428,123 @@ describe("gold-at-base with a temp git fixture", () => {
 
         rmSync(snapshotDir(`test-ext-grep-present-${process.pid}`), { recursive: true, force: true });
         rmSync(snapshotDir(`test-ext-grep-absent-${process.pid}`), { recursive: true, force: true });
+    });
+});
+
+describe("msbRowsToInstances", () => {
+    const row = (overrides: Record<string, unknown> = {}) => ({
+        instance_id: "mui__material-ui-39962",
+        org: "mui",
+        repo: "material-ui",
+        number: 39962,
+        base: { sha: "553cf822f6500075d374f3e89ad04b8308cd9f47" },
+        title: "PR title",
+        body: "PR body",
+        resolved_issues: [{ title: "Issue title", body: "Issue body text" }],
+        fix_patch:
+            "diff --git a/packages/a.ts b/packages/a.ts\n" +
+            "--- a/packages/a.ts\n+++ b/packages/a.ts\n" +
+            "@@ -1,2 +1,3 @@\n x\n+y\n z\n",
+        ...overrides,
+    });
+
+    it("converts rows with the linked issue as query text", () => {
+        const { instances, skipped } = msbRowsToInstances([row() as never]);
+        expect(skipped).toEqual([]);
+        expect(instances).toHaveLength(1);
+        const inst = instances[0] as BenchmarkInstance;
+        expect(inst.dataset).toBe("multi-swe-bench");
+        expect(inst.repo).toBe("mui/material-ui");
+        expect(inst.title).toBe("Issue title");
+        expect(inst.body).toBe("Issue body text");
+        expect(inst.goldFiles).toEqual(["packages/a.ts"]);
+    });
+
+    it("skips rows with no production gold or missing base", () => {
+        const { instances, skipped } = msbRowsToInstances([
+            row({ instance_id: "x-1", fix_patch: "" }) as never,
+            row({ instance_id: "x-2", base: {} }) as never,
+        ]);
+        expect(instances).toEqual([]);
+        expect(skipped.map((s) => s.reason)).toEqual(["missing-title-patch-or-base", "missing-title-patch-or-base"]);
+    });
+});
+
+describe("dev/holdout freeze (D15)", () => {
+    const synth = (id: string, repo: string, language: "ts" | "js" = "ts"): BenchmarkInstance => ({
+        instanceId: id,
+        dataset: "swe-bench-multilingual",
+        repo,
+        baseCommit: "0".repeat(40),
+        title: `title ${id}`,
+        body: `body ${id}`,
+        goldFiles: [`src/${id}.ts`],
+        goldHunks: [{ file: `src/${id}.ts`, ranges: [{ start: 1, end: 2 }] }],
+        excludedFiles: [],
+        language,
+        split: "dev",
+        license: "MIT",
+    });
+
+    const pool = [
+        ...["a-1", "a-2", "a-3", "a-4"].map((id) => synth(id, "org/deep")),
+        ...["b-1", "b-2", "b-3"].map((id) => synth(id, "org/mid")),
+        synth("c-1", "org/pilot-repo"),
+        synth("p-1", "org/pilot-repo"),
+    ];
+    const pilot = new Set(["p-1"]);
+
+    it("picks non-pilot repos first and reports spillover", () => {
+        const { repos, spillover } = pickHoldoutRepos(
+            pool.filter((i) => !pilot.has(i.instanceId)),
+            new Set(["org/pilot-repo"]),
+            "seed",
+            4,
+            2,
+        );
+        expect(spillover).toEqual([]);
+        expect(repos).not.toContain("org/pilot-repo");
+        // Ascending by count: mid(3) before deep(4).
+        expect(repos[0]).toBe("org/mid");
+    });
+
+    it("selects disjoint splits deterministically", () => {
+        const opts = { devSize: 3, holdoutSize: 2, devCapPerRepo: 2, holdoutCapPerRepo: 2, minTsFraction: 0 };
+        const first = selectDevHoldout(pool, pilot, "seed", opts);
+        const second = selectDevHoldout(pool, [...pilot], "seed", opts);
+        expect(first.dev.map((i) => i.instanceId)).toEqual(second.dev.map((i) => i.instanceId));
+        expect(first.holdout.map((i) => i.instanceId)).toEqual(second.holdout.map((i) => i.instanceId));
+        expect(first.dev).toHaveLength(3);
+        expect(first.holdout).toHaveLength(2);
+        const devRepos = new Set(first.dev.map((i) => i.repo));
+        for (const h of first.holdout) expect(devRepos.has(h.repo)).toBe(false);
+        for (const h of first.holdout) expect(h.repo).not.toBe("org/pilot-repo");
+    });
+
+    it("fails loudly on duplicate ids and shortfalls", () => {
+        const opts = { devSize: 3, holdoutSize: 2, devCapPerRepo: 2, holdoutCapPerRepo: 2, minTsFraction: 0 };
+        expect(() => selectDevHoldout([...pool, synth("a-1", "org/deep")], pilot, "seed", opts)).toThrow(
+            /duplicate instance ids/,
+        );
+        expect(() => selectDevHoldout(pool, pilot, "seed", { ...opts, devSize: 99 })).toThrow(/shortfall/);
+    });
+
+    it("manifest integrity detects any modification", () => {
+        const manifest = buildDevHoldoutManifest({
+            seed: "seed",
+            datasets: [{ name: "d", revision: "r", license: "l" }],
+            pilot: [synth("p-1", "org/pilot-repo")],
+            dev: [synth("a-1", "org/deep")],
+            holdout: [synth("b-1", "org/mid")],
+            exclusions: [],
+            holdoutRepoNote: "note",
+        });
+        expect(verifyDevHoldoutManifest(manifest)).toBe(true);
+        expect(computeDevHoldoutSha(manifest)).toBe(manifest.sha256);
+        const tampered = { ...manifest, dev: [synth("a-2", "org/deep")] };
+        expect(verifyDevHoldoutManifest(tampered as unknown as typeof manifest)).toBe(false);
+        const retitled = JSON.parse(JSON.stringify(manifest)) as typeof manifest;
+        retitled.dev[0]!.baseCommit = "1".repeat(40);
+        expect(verifyDevHoldoutManifest(retitled)).toBe(false);
     });
 });
