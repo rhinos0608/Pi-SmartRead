@@ -20,6 +20,7 @@ import { classifyPatchFile, deriveGold, parseUnifiedDiff } from "../../../script
 import { materializeInstance, snapshotDir } from "../../../scripts/eval/external/grep/repos.js";
 import { freezeManifest, seededShuffle, selectPilot } from "../../../scripts/eval/external/grep/sampling.js";
 import { rowsToInstances } from "../../../scripts/eval/external/grep/swebench-multilingual.js";
+import { toReportOutcome, type AdapterResult } from "../../../scripts/eval/external/grep/adapter.js";
 
 const tmpRoots: string[] = [];
 afterEach(() => {
@@ -263,6 +264,70 @@ describe("metrics", () => {
         const s = summarizeMetrics([ok, err]);
         expect(s.successAt5).toBe("1/2");
         expect(s.errors).toBe(1);
+    });
+    it("records the top-1 engine from the first shown card", () => {
+        const m = computeInstanceMetrics({
+            instance: makeInstance(),
+            formulation: "title",
+            shown: [
+                { relFile: "src/a.ts", line: 10, endLine: 14, name: "y", engines: ["symbol", "lexical"], score: 3.5, kind: "Function" },
+            ],
+            renderedText: "ok",
+            elapsedMs: 5,
+            status: "ok",
+        });
+        expect(m.topEngine).toBe("symbol");
+    });
+
+    it("top-1 engine is null when nothing is shown", () => {
+        const m = computeInstanceMetrics({
+            instance: makeInstance(),
+            formulation: "title",
+            shown: [],
+            renderedText: "",
+            elapsedMs: 1,
+            status: "error:x",
+        });
+        expect(m.topEngine).toBeNull();
+    });
+});
+
+describe("report outcome shaping", () => {
+    it("retains shown cards and routing while dropping rendered text", () => {
+        const full: AdapterResult = {
+            instanceId: "test__repo-1",
+            formulation: "title",
+            rankedFiles: ["src/a.ts"],
+            goldRanks: [{ file: "src/a.ts", rank: 1 }],
+            successAt5: true,
+            recallAt5: 1,
+            mrr: 1,
+            hunkOverlapAt5: 1,
+            overTokenCap: false,
+            renderedTokens: 3,
+            elapsedMs: 5,
+            status: "ok",
+            topEngine: "symbol",
+            renderedText: " ruch rendered text (tool output) ",
+            shownCards: [
+                { relFile: "src/a.ts", line: 10, endLine: 14, engines: ["symbol"], score: 3.5, name: "y", kind: "Function" },
+            ],
+            routing: { mode: "smart", reason: "auto_literal" },
+        };
+        const outcome = toReportOutcome(full);
+        expect(outcome.shownCards).toHaveLength(1);
+        expect(outcome.shownCards[0]).toMatchObject({
+            relFile: "src/a.ts",
+            line: 10,
+            endLine: 14,
+            engines: ["symbol"],
+            score: 3.5,
+            name: "y",
+            kind: "Function",
+        });
+        expect(outcome.routing).toMatchObject({ mode: "smart", reason: "auto_literal" });
+        expect(outcome.topEngine).toBe("symbol");
+        expect("renderedText" in outcome).toBe(false);
     });
 });
 

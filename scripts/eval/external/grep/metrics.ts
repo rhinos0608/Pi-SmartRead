@@ -19,6 +19,10 @@ export interface ShownUnit {
     line: number;
     endLine: number;
     name: string;
+    /** Engines that produced this card (first entry = top-1 engine). */
+    engines?: string[];
+    score?: number;
+    kind?: string;
 }
 
 export interface InstanceMetrics {
@@ -37,6 +41,8 @@ export interface InstanceMetrics {
     renderedTokens: number;
     elapsedMs: number;
     status: string;
+    /** First engine of the first shown card (null when nothing shown). */
+    topEngine: string | null;
 }
 
 export function dedupeFilesByFirstAppearance(units: Array<Pick<ShownUnit, "relFile">>): string[] {
@@ -84,6 +90,7 @@ export function computeInstanceMetrics(input: {
         if (overlap) hunkOverlapAt5++;
     }
     const presentRanks = goldRanks.filter((g) => g.rank !== null).map((g) => g.rank as number);
+    const topEngine = shown.length > 0 ? (shown[0]!.engines?.[0] ?? null) : null;
     return {
         instanceId: instance.instanceId,
         formulation,
@@ -97,6 +104,7 @@ export function computeInstanceMetrics(input: {
         renderedTokens,
         elapsedMs,
         status: overTokenCap && !failed ? "over_token_cap" : status,
+        topEngine,
     };
 }
 

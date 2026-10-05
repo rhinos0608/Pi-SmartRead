@@ -20,9 +20,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { disposeSemanticIndexes } from "../../../../src/indexing/semantic-index-registry.js";
 import { resetLSPBridge, shutdownAllManagers } from "../../../../src/lsp/lsp-bridge.js";
-import { runOwnGrep } from "./adapter.js";
+import { runOwnGrep, toReportOutcome, type ReportOutcome } from "./adapter.js";
 import type { BenchmarkInstance, Formulation } from "./instance.js";
-import { summarizeMetrics, type InstanceMetrics } from "./metrics.js";
+import { summarizeMetrics } from "./metrics.js";
 import { assertMultiSweBenchLicense } from "./multi-swe-bench.js";
 import { ensureBareClone, materializeInstance } from "./repos.js";
 import { freezeManifest, selectPilot, writeManifest, type FrozenManifest } from "./sampling.js";
@@ -87,7 +87,7 @@ try {
     let selected = splitIds.map((id) => byId.get(id)).filter((i): i is BenchmarkInstance => i !== undefined);
     if (args.limit !== null) selected = selected.slice(0, args.limit);
 
-    const outcomes: InstanceMetrics[] = [];
+    const outcomes: ReportOutcome[] = [];
     const excluded: Array<Record<string, unknown>> = [...skipped.map((s) => ({ ...s, stage: "loader" }))];
     for (const instance of selected) {
         let root: string;
@@ -110,12 +110,11 @@ try {
         for (const formulation of args.formulations) {
             process.stdout.write(`[${instance.instanceId}] ${formulation} ... `);
             const result = await runOwnGrep(instance, root, formulation, args.timeoutMs);
-            const { renderedText: _text, shownCards, ...metrics } = result;
-            void _text;
-            outcomes.push({ ...metrics, rankedFiles: [...metrics.rankedFiles] });
+            const outcome = toReportOutcome(result);
+            outcomes.push({ ...outcome, rankedFiles: [...outcome.rankedFiles] });
             console.log(
                 `${result.status} success@5=${result.successAt5} recall@5=${result.recallAt5.toFixed(2)} ` +
-                `cards=${shownCards.length} tok=${result.renderedTokens} ${Math.round(result.elapsedMs)}ms`,
+                `cards=${result.shownCards.length} tok=${result.renderedTokens} ${Math.round(result.elapsedMs)}ms`,
             );
         }
     }

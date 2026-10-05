@@ -17,8 +17,37 @@ import { computeInstanceMetrics, type InstanceMetrics, type ShownUnit } from "./
 export interface AdapterResult extends InstanceMetrics {
     /** Exact guarded rendered text (headers/notes included). */
     renderedText: string;
-    /** Full shown hit cards (all fields preserved). */
-    shownCards: Array<Record<string, unknown>>;
+    /** Curated shown hit cards: tool-rendered fields only (no dataset text). */
+    shownCards: ShownCard[];
+    /** Routing details from the tool result (null when the call failed). */
+    routing: AdapterRouting | null;
+}
+
+export interface ShownCard {
+    relFile: string;
+    line: number;
+    endLine: number;
+    engines: string[];
+    score: number;
+    name: string;
+    kind: string;
+}
+
+export interface AdapterRouting {
+    mode: string;
+    reason: string;
+}
+
+export interface ReportOutcome extends InstanceMetrics {
+    shownCards: ShownCard[];
+    routing: AdapterRouting | null;
+}
+
+/** Per-query report row: metrics plus shown cards and routing, without rendered text. */
+export function toReportOutcome(result: AdapterResult): ReportOutcome {
+    const { renderedText: _dropped, ...rest } = result;
+    void _dropped;
+    return { ...rest, shownCards: result.shownCards.map((c) => ({ ...c, engines: [...c.engines] })) };
 }
 
 function errorStatus(error: unknown): string {
@@ -42,6 +71,7 @@ export async function runOwnGrep(
     const started = performance.now();
     let status = "ok";
     let fallbackText = "";
+    let routing: AdapterRouting | null = null;
     try {
         const tool = createGrepTool({
             getWorkspaceRevision: () => 0,
@@ -59,6 +89,10 @@ export async function runOwnGrep(
         );
         const first = result.content[0] as { text?: string } | undefined;
         fallbackText = typeof first?.text === "string" ? first.text : "";
+        const details = result.details as { routing?: { mode?: unknown; reason?: unknown } } | undefined;
+        if (typeof details?.routing?.mode === "string" && typeof details?.routing?.reason === "string") {
+            routing = { mode: details.routing.mode, reason: details.routing.reason };
+        }
     } catch (error) {
         status = errorStatus(error);
     }
@@ -72,6 +106,18 @@ export async function runOwnGrep(
         line: h.line,
         endLine: h.endLine,
         name: h.name,
+        engines: [...h.engines],
+        score: h.score,
+        kind: h.kind,
+    }));
+    const shownCards: ShownCard[] = shownHits.map((h) => ({
+        relFile: h.relFile,
+        line: h.line,
+        endLine: h.endLine,
+        engines: [...h.engines],
+        score: h.score,
+        name: h.name,
+        kind: h.kind,
     }));
     const metrics = computeInstanceMetrics({
         instance,
@@ -84,6 +130,7 @@ export async function runOwnGrep(
     return {
         ...metrics,
         renderedText,
-        shownCards: shownHits.map((h) => ({ ...h, engines: [...h.engines] })),
+        shownCards,
+        routing,
     };
 }
