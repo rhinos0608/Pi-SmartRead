@@ -117,14 +117,15 @@ describe("symbol scan equivalence", () => {
     ]);
   });
 
-  it("memoizes uncompilable-language and unsupported files as empty", async () => {
-    // The bundled javascript query uses aider-only predicates (#strip!)
-    // that the installed tree-sitter binding rejects, so .js files
-    // contribute nothing; .txt has no language at all. Both paths must
-    // stay empty (and cheap) after the per-language reuse.
+  it("extracts JavaScript symbols now that the bundled query compiles", async () => {
+    // The bundled javascript query previously used aider-only predicates
+    // (#strip!) that the installed tree-sitter binding rejects, so .js
+    // files contributed nothing. With the query fixed, d.js contributes
+    // its definition; .txt still has no language and stays empty.
     const handleSymbol = await load();
     const js = await handleSymbol("jsHelper", 30, false, workdir, workdir);
-    expect(js.matches).toEqual([]);
+    expect(js.matches).toHaveLength(1);
+    expect(js.matches[0]).toMatchObject({ name: "jsHelper", relative_path: "d.js", line: 1 });
     // Unsupported .txt contributes no definitions.
     const txt = await handleSymbol("notes", 30, false, workdir, workdir);
     expect(txt.matches).toEqual([]);
