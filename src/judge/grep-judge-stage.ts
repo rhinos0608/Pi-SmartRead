@@ -48,6 +48,27 @@ export const GREP_JUDGE_EXISTS_ABSENT = 0.35;
 export const GREP_JUDGE_POINTER_THRESHOLD = 0.45;
 /** Judge at most this many units per query (top of the fused order). */
 export const GREP_JUDGE_MAX_UNITS = 40;
+/** Env override for the per-query unit cap. Non-network knob. */
+export const GREP_JUDGE_MAX_UNITS_ENV_VAR = "PI_SMARTREAD_JUDGE_MAX_UNITS";
+/** Bounds for the env unit-cap override; out-of-range falls back to default. */
+export const GREP_JUDGE_MAX_UNITS_MIN = 10;
+export const GREP_JUDGE_MAX_UNITS_MAX = 120;
+
+/**
+ * Resolve the effective per-query unit cap: an integer inside
+ * [GREP_JUDGE_MAX_UNITS_MIN, GREP_JUDGE_MAX_UNITS_MAX] from the
+ * environment wins; anything absent or invalid falls back
+ * to GREP_JUDGE_MAX_UNITS (fail-closed).
+ */
+export function resolveGrepJudgeMaxUnits(env: Record<string, string | undefined> = process.env): number {
+    const raw = env[GREP_JUDGE_MAX_UNITS_ENV_VAR];
+    if (raw === undefined || raw.trim() === "") return GREP_JUDGE_MAX_UNITS;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < GREP_JUDGE_MAX_UNITS_MIN || parsed > GREP_JUDGE_MAX_UNITS_MAX) {
+        return GREP_JUDGE_MAX_UNITS;
+    }
+    return parsed;
+}
 /** Graph-neighbour pointer candidates per query. */
 export const GREP_JUDGE_MAX_POINTER_CANDIDATES = 12;
 /** Emitted `next:` pointers per query. */
@@ -89,6 +110,11 @@ export interface GrepJudgeStageInput {
      * (env override, fail-closed to GREP_JUDGE_THRESHOLD).
      */
     threshold?: number;
+    /**
+     * Unit-cap override. Absent → resolveGrepJudgeMaxUnits()
+     * (env override, fail-closed to GREP_JUDGE_MAX_UNITS).
+     */
+    maxUnits?: number;
 }
 
 export interface JudgedGrepHit extends GrepHit {
@@ -118,6 +144,8 @@ export interface GrepJudgeDetails {
     unitMode: "anchor" | "symbol";
     /** Units the provider left unscored (reported in `unjudged` or with no probability). */
     unjudged: { count: number; ids: string[] };
+    /** Fused-order hits past the unit cap, left unscored and appended after kept hits. */
+    "unscored_beyond_cap": number;
 }
 
 export interface GrepJudgeStageResult {
@@ -189,7 +217,12 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     const judge = resolved.judge;
     const threshold = input.threshold ?? resolveGrepJudgeThreshold();
 
-    const units = await buildJudgeUnits(input.hits.slice(0, GREP_JUDGE_MAX_UNITS), input.contextLines, input.provider.readFile ?? defaultReadFile);
+    const maxUnits = input.maxUnits ?? resolveGrepJudgeMaxUnits();
+    const cappedHits = input.hits.slice(0, maxUnits);
+    // Hits past the cap are never judged; they stay visible as unscored
+    // fallbacks after the kept hits, in fused order — never vanishing.
+    const beyondCapHits = input.hits.slice(maxUnits);
+    const units = await buildJudgeUnits(cappedHits, input.contextLines, input.provider.readFile ?? defaultReadFile);
     if (units.length === 0) return idle(input.hits);
 
     let unitProbs: Map<string, number>;
@@ -249,7 +282,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     const belowThreshold = units.length - new Set(ranked.map((r) => r.unit.id)).size - unjudgedIds.size;
     const unjudgedDetail = { count: unjudgedIds.size, ids: [...unjudgedIds] };
 
-    if (merged.length === 0 && unjudgedUnits.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
+    if (merged.length === 0 && unjudgedUnits.length === 0 && beyondCapHits.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
         return {
             judged: true,
             hits: [],
@@ -271,6 +304,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
                 hits: [],
                 unitMode: resolveGrepUnitMode(),
                 unjudged: unjudgedDetail,
+                "unscored_beyond_cap": beyondCapHits.length,
             },
         };
     }
@@ -278,6 +312,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     const judgedHits: JudgedGrepHit[] = [
         ...merged.map((m) => ({ ...m.hit, judgeP: m.p })),
         ...unjudgedUnits.map(({ unit }) => ({ ...unit.hit })),
+        ...beyondCapHits,
     ];
     const pointers = await judgePointers(judge, input, judgedHits, input.hits);
     if (pointers.result) {
@@ -303,6 +338,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
             hits: merged.map((m) => ({ path: m.hit.relFile, line: m.hit.line, endLine: m.hit.endLine, p: m.p })),
             unitMode: resolveGrepUnitMode(),
             unjudged: unjudgedDetail,
+            "unscored_beyond_cap": beyondCapHits.length,
         },
     };
 }
