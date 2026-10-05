@@ -38,8 +38,15 @@ export interface GrepHit {
     matchedQueries?: string[];
 }
 
+export interface GrepRouting {
+    mode: "regex" | "literal" | "smart";
+    reason: "forced_regex" | "forced_literal" | "auto_regex" | "auto_literal" | "auto_declined_newline" | "auto_declined_prose_group" | "auto_declined_prose_wildcard" | "auto_declined_invalid_regex";
+    note?: string;
+}
+
 export interface GrepExecutionResult {
     pattern: string;
+    routing?: GrepRouting;
     shown: GrepHit[];
     totalHits: number;
     engines: string[];
