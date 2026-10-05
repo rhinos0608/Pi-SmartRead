@@ -179,6 +179,76 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }>
   return { value, ms: Date.now() - t0 };
 }
 
+export type LatencyOperation = "definition" | "references" | "hover";
+
+export interface PositionLatency {
+  reference: Record<LatencyOperation, number>;
+  system: Record<LatencyOperation, number>;
+  /** Reference workspace/symbol time: setup, not answer latency. */
+  setupMs: number;
+}
+
+export interface LatencySummary {
+  p50: number;
+  p95: number;
+  n: number;
+}
+
+export interface LatencyReport {
+  reference: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
+  system: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
+  /** Labeled separately: index/setup time, not comparable answer latency. */
+  setup: LatencySummary;
+}
+
+function summarize(values: number[]): LatencySummary {
+  if (values.length === 0) return { p50: 0, p95: 0, n: 0 };
+  return { p50: percentile(values, 50), p95: percentile(values, 95), n: values.length };
+}
+
+/**
+ * Aggregate per-operation latency in matching units for both sides.
+ * Reference and system each get definition/references/hover distributions
+ * plus a per-position total (def+refs+hov); workspace/symbol time is
+ * reported separately as setup so it never mixes with answer latency.
+ */
+export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
+  const ops: LatencyOperation[] = ["definition", "references", "hover"];
+  const ref: Record<LatencyOperation, number[]> = { definition: [], references: [], hover: [] };
+  const sys: Record<LatencyOperation, number[]> = { definition: [], references: [], hover: [] };
+  const refTotals: number[] = [];
+  const sysTotals: number[] = [];
+  const setup: number[] = [];
+  for (const p of positions) {
+    let refTotal = 0;
+    let sysTotal = 0;
+    for (const op of ops) {
+      ref[op].push(p.reference[op]);
+      sys[op].push(p.system[op]);
+      refTotal += p.reference[op];
+      sysTotal += p.system[op];
+    }
+    refTotals.push(refTotal);
+    sysTotals.push(sysTotal);
+    setup.push(p.setupMs);
+  }
+  return {
+    reference: {
+      definition: summarize(ref.definition),
+      references: summarize(ref.references),
+      hover: summarize(ref.hover),
+      perPositionTotal: summarize(refTotals),
+    },
+    system: {
+      definition: summarize(sys.definition),
+      references: summarize(sys.references),
+      hover: summarize(sys.hover),
+      perPositionTotal: summarize(sysTotals),
+    },
+    setup: summarize(setup),
+  };
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.system !== "pi-lsp" && args.system !== "mcp-language-server") {
@@ -194,8 +264,7 @@ async function main(): Promise<void> {
   for (const p of positions) stratumCounts.set(p.stratum, (stratumCounts.get(p.stratum) ?? 0) + 1);
 
   const refConn = new LSPConnection();
-  const sysLat: number[] = [];
-  const refLat: number[] = [];
+  const posLatencies: PositionLatency[] = [];
   const results: PositionResult[] = [];
   const statusCounts = new Map<string, number>();
   const tokenSums = new Map<string, number>();
@@ -229,7 +298,13 @@ async function main(): Promise<void> {
       );
       const hov = await timed(() => refConn.request("textDocument/hover", { textDocument: { uri }, position }));
       const sym = await timed(() => refConn.request("workspace/symbol", { query: pos.name }));
-      refLat.push(def.ms + refsIncl.ms + hov.ms);
+      posLatencies.push({
+        // Reference per-position timing is captured below once the system
+        // calls complete; setup (workspace/symbol) is labeled separately.
+        reference: { definition: def.ms, references: refsIncl.ms, hover: hov.ms },
+        system: { definition: 0, references: 0, hover: 0 },
+        setupMs: sym.ms,
+      });
 
       const refDefs = rawToLocs(def.value);
       const refRefs = rawToLocs(refsIncl.value);
@@ -242,7 +317,10 @@ async function main(): Promise<void> {
         sys[key] = { status: call.status, ms: call.ms, tokens: call.tokens };
         raw[key] = capRaw(call.raw);
         bumpStatus(call.status);
-        sysLat.push(call.ms);
+        if (key === "definition" || key === "references" || key === "hover") {
+          const current = posLatencies[posLatencies.length - 1];
+          if (current) current.system[key] = call.ms;
+        }
         tokenSums.set(key, (tokenSums.get(key) ?? 0) + call.tokens);
         tokenNs.set(key, (tokenNs.get(key) ?? 0) + 1);
       };
@@ -321,8 +399,7 @@ async function main(): Promise<void> {
     await shutdownAllManagers().catch(() => {});
   }
 
-  const refLatSafe = refLat.length > 0 ? refLat : [0];
-  const sysLatSafe = sysLat.length > 0 ? sysLat : [0];
+  const latency = summarizeLatency(posLatencies);
   const meanTokens: Record<string, number> = {};
   for (const [k, sum] of tokenSums) {
     const n = tokenNs.get(k) ?? 1;
@@ -363,10 +440,7 @@ async function main(): Promise<void> {
       signatureRate: hoverAnswered === 0 ? null : hoverSig / hoverAnswered,
     },
     statusCounts: Object.fromEntries(statusCounts),
-    latencyMs: {
-      reference: { p50: percentile(refLatSafe, 50), p95: percentile(refLatSafe, 95) },
-      system: { p50: percentile(sysLatSafe, 50), p95: percentile(sysLatSafe, 95) },
-    },
+    latencyMs: latency,
     meanOutputTokens: meanTokens,
     results,
   };
