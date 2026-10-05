@@ -20,7 +20,7 @@ import { resolve } from "node:path";
 import { pairReports, type PairedReport } from "./grep-e2e-contract.js";
 
 function usage(): never {
-    console.log("Usage: npx tsx scripts/eval/judge/grep-e2e-compare.ts --baseline A.json --variant B.json [--json]");
+    console.log("Usage: npx tsx scripts/eval/judge/grep-e2e-compare.ts --baseline A.json --variant B.json [--json] [--recompute]");
     process.exit(1);
 }
 
