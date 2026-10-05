@@ -142,6 +142,41 @@ describe("runRipgrep", () => {
         expect(out.status).toBe("empty-query");
         expect(out.units).toEqual([]);
     });
+
+    it("continues past a no-match term (rg exit 1) to later terms", async () => {
+        const seen: string[] = [];
+        const hit =
+            '{"type":"match","data":{"path":{"text":"/root/src/hit.ts"},"line_number":2,"submatches":[{"match":{"text":"present"}}]}}';
+        const out = await runRipgrep(stubInstance(), "/root", "title", { timeoutMs: 30000 }, {
+            runTerm: (term: string) => {
+                seen.push(term);
+                if (seen.length === 1) {
+                    // First term has no matches: rg exits 1. Must not abort.
+                    throw Object.assign(new Error("no matches"), { status: 1 });
+                }
+                return hit;
+            },
+        });
+        expect(seen.length).toBeGreaterThan(1);
+        expect(out.status).toBe("ok");
+        expect(out.units.map((u) => u.relFile)).toContain("src/hit.ts");
+    });
+
+    it("records an error but continues when a term fails with exit >= 2", async () => {
+        const hit =
+            '{"type":"match","data":{"path":{"text":"/root/src/hit.ts"},"line_number":2,"submatches":[{"match":{"text":"present"}}]}}';
+        let calls = 0;
+        const out = await runRipgrep(stubInstance(), "/root", "title", { timeoutMs: 30000 }, {
+            runTerm: () => {
+                calls += 1;
+                if (calls === 1) throw Object.assign(new Error("rg crashed"), { status: 2 });
+                return hit;
+            },
+        });
+        expect(calls).toBeGreaterThan(1);
+        expect(out.status).toContain("error");
+        expect(out.units.map((u) => u.relFile)).toContain("src/hit.ts");
+    });
 });
 
 describe("parseProbeJson", () => {

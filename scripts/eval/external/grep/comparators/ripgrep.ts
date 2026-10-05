@@ -144,12 +144,18 @@ function errorStatus(error: unknown): string {
     return "error:unknown";
 }
 
+/** Optional seam for unit tests: override per-term rg execution. */
+export interface RipgrepDeps {
+    runTerm?: (term: string) => string;
+}
+
 /** Run the ripgrep floor for one instance+formulation (rg must be on PATH). */
 export async function runRipgrep(
     instance: BenchmarkInstance,
     snapshotRoot: string,
     formulation: Formulation,
     options: ComparatorOptions,
+    deps: RipgrepDeps = {},
 ): Promise<ComparatorOutput> {
     void instance;
     const terms = tokenizeForRipgrep(formulationText(instance, formulation));
@@ -159,13 +165,16 @@ export async function runRipgrep(
     const started = performance.now();
     let status = "ok";
     const files = new Map<string, FileMatch>();
-    try {
-        for (const term of terms) {
-            const out: Buffer = execFileSync("rg", ["--json", "-i", "-F", "-e", term, "--", snapshotRoot], {
-                timeout: options.timeoutMs,
-                maxBuffer: 256 * 1024 * 1024,
-            });
-            for (const [rel, m] of parseRipgrepJson(out.toString("utf8"), snapshotRoot)) {
+    for (const term of terms) {
+        try {
+            const out: Buffer | string = deps.runTerm
+                ? deps.runTerm(term)
+                : execFileSync("rg", ["--json", "-i", "-F", "-e", term, "--", snapshotRoot], {
+                    timeout: options.timeoutMs,
+                    maxBuffer: 256 * 1024 * 1024,
+                });
+            const stdout = typeof out === "string" ? out : out.toString("utf8");
+            for (const [rel, m] of parseRipgrepJson(stdout, snapshotRoot)) {
                 const entry = files.get(rel);
                 if (entry) {
                     entry.count += m.count;
@@ -177,11 +186,13 @@ export async function runRipgrep(
                     files.set(rel, { ...m });
                 }
             }
+        } catch (error) {
+            // rg exits 1 when a term has no matches: treat as empty for that
+            // term and continue with the remaining terms. Exit >= 2 is a
+            // real error and is recorded while still continuing the loop.
+            const code = (error as { status?: unknown })?.status;
+            if (code !== 1) status = errorStatus(error);
         }
-    } catch (error) {
-        // rg exits 1 on no matches: treat as empty, not failure.
-        const code = (error as { status?: unknown })?.status;
-        if (code !== 1) status = errorStatus(error);
     }
     const elapsedMs = performance.now() - started;
     const units = rankRipgrepFiles(files);
