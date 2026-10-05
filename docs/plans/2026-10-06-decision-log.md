@@ -32,10 +32,17 @@ VERIFIED (directly observed this session), REPORTED (subagent/artifact, not re-r
 | D16 | 10-06 | LSP reference = the same pinned language server called directly; ts.LanguageService + scip-typescript snapshots as independent cross-check where semantics match. Unsupported/unavailable/timeout/proposal-only scored separately from wrong locations. | Oracle: shared TS semantics is not an independent oracle. | Yes |
 | D17 | 10-06 | Comparators round 1: grep — ripgrep (floor), Probe, Codanna; LSP — @spences10/pi-lsp and mcp-language-server on common operations with the same pinned server. Zoekt and ast-grep MCP deferred. Tools installed under a cache tools dir, not globally. | Oracle consult (agreed). | Yes |
 | D18 | 10-06 | Sequence: finish R1 matrix → external baselines → R2 fixes one at a time with paired reruns. LSP-child retention fixed in harness teardown only as a termination prerequisite; product lifecycle decision separate. | Oracle consult (agreed). | — |
+| D19 | 10-06 | R1 matrix (off, t035) **voided**: 0/78 was a path bug, not retrieval. grep computed `relFile` against a non-canonical cwd while hits were realpath'd; on macOS `/var→/private/var` every path became `../../../../../../private/var/...`. Also a **product defect** (rendered output + judge input) for any symlinked cwd. Fixed test-first (`e015bdd`), harness root realpath (`1ffae2a`), harness LSP teardown (`76e4de2`). | VERIFIED: B13 gold `doom-loop.ts` was rank 1 under the broken path. | Yes |
+| D20 | 10-06 | Multi-SWE-bench licence resolved: dataset CC0 (card §License), harness Apache-2.0, upstream content per-repo licences. SWE-bench Multilingual MIT; LocBench Apache-2.0. Local use OK; never vendor. | License researcher with verbatim quotes (REPORTED). | — |
+| D21 | 10-06 | Pilot labels adequate: 2/21 gold files questionable (9.5%), 2/12 instances → below the 20% threshold; no full dev adjudication (D14 holds). | Reviewer adjudication (REPORTED). | Yes |
+| D22 | 10-06 | Regex routing fix: no auto-regex on newline; whitespace-containing parenthetical alone does not trigger; isolated prose `.*` ambiguous; new optional `regex:true` (per-line, exclusive with `literal`, invalid = caller error, no fallback); routing reason in details + rendered note, batch included. Rejected: zero-hit fallback (changes a valid regex's meaningful no-match) and length cutoff (arbitrary). | VERIFIED source `grep-tool.ts:566`; probe: 5/12 issue bodies 0 cards via `regex`, one `[` flips 0→40. Oracle consult `7dc372da` (agreed). | Yes (additive schema) |
+| D23 | 10-06 | Observation to measure, not yet acted on: each smart grep spawns ~5 processes (typescript-language-server, vscode-langservers-extracted, 3× tsserver); candidate latency contributor. | VERIFIED process tree during cleanup. | — |
 
 ## Round ledger
 
 | Round | Changed | Benchmark | Outcome |
 |---|---|---|---|
 | R0 | audits only | historical off/.35/.40/.45 (pre-fix, diagnostic only) | known-gold 3/78 off, 5/78 judged |
-| R1 | eval fidelity harness/metrics/contract | four-config matrix pending (workflow `9a6e2cf9`) | — |
+| R1 | eval fidelity harness/metrics/contract | off + t035 run, then voided (D19) | invalid — path bug |
+| R1b | canonical cwd/root + harness teardown | four-config rerun in workflow `c2e3b1b9` | pending |
+| X0 | external pipelines (grep SWE-bench Multilingual pilot; LSP ref vs ours) | grep pilot ours: success@5 4/24, recall@5 .115, MRR .088, 4 babel timeouts (pre-fix, path bug n/a: cache root not symlinked); LSP ours vs same-server ref: defExact .993–1.0, refs F1 .987–1.0 | baseline only |
