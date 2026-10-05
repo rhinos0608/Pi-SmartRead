@@ -31,6 +31,7 @@ import {
     resolveGrepUnitExcerptLines,
     resolveGrepUnitMaxPerFile,
     resolveGrepUnitMode,
+    type GrepUnitMode,
 } from "./grep-units.js";
 import { executeStructuralQuery } from "./grep-structural-executor.js";
 export { GREP_STRUCTURAL_FETCH_SIZE, GREP_STRUCTURAL_MAX_ITERATIONS } from "./grep-structural-executor.js";
@@ -288,6 +289,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         unitExcerptLines: resolveGrepUnitExcerptLines(),
                         ...(result.routing ? { routing: result.routing } : {}),
                         ...(result.degradation ? { degradation: result.degradation } : {}),
+                        ...(result.rankingKnobs && result.rankingKnobs.length > 0 ? { rankingKnobs: result.rankingKnobs } : {}),
                         ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
                         ...("judge" in result && result.judge ? { judge: result.judge } : {}),
                     },
@@ -321,6 +323,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         ...(result.routing ? { routing: result.routing } : {}),
                         elapsedMs: result.elapsedMs,
                         ...(result.degradation ? { degradation: result.degradation } : {}),
+                        ...(result.rankingKnobs && result.rankingKnobs.length > 0 ? { rankingKnobs: result.rankingKnobs } : {}),
                         ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
                     })),
                 },
@@ -447,6 +450,8 @@ async function executeGrepQuery(
     let engines: string[] = [];
     let degradation: GrepDegradation[] | undefined;
     let graphFilterNotes: string[] = [];
+    let unitMode: GrepUnitMode | undefined;
+    let rankingKnobs: string[] | undefined;
     for (;;) {
         const textInput = { pattern: params.pattern, searchDir, topK: gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob };
         const searchResult = routing.mode === "regex"
@@ -474,6 +479,9 @@ async function executeGrepQuery(
         let current = searchResult.hits;
         engines = searchResult.engines;
         degradation = searchResult.degradation;
+        const cascadeExtras = searchResult as Partial<Pick<GrepExecutionResult, "unitMode" | "rankingKnobs">>;
+        if (cascadeExtras.unitMode !== undefined) unitMode = cascadeExtras.unitMode;
+        if (cascadeExtras.rankingKnobs !== undefined) rankingKnobs = cascadeExtras.rankingKnobs;
 
         if (params.glob) {
             const { minimatch } = await import("minimatch");
@@ -534,6 +542,8 @@ async function executeGrepQuery(
         truncated: finalHits.length > topK,
         elapsedMs: Date.now() - startTime,
         graphFilterNotes,
+        ...(unitMode ? { unitMode } : {}),
+        ...(rankingKnobs && rankingKnobs.length > 0 ? { rankingKnobs } : {}),
         ...(degradation ? { degradation } : {}),
         ...(staged.details ? { judge: staged.details } : {}),
         ...(staged.abstainMessage ? { judgeNote: staged.abstainMessage } : {}),
