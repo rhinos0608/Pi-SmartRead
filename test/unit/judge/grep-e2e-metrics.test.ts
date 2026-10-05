@@ -224,12 +224,21 @@ describe("legacy wrong-span alias", () => {
 });
 
 describe("parseRenderedSpan", () => {
-    it("parses the min/max gutter numbers actually shown", () => {
-        expect(parseRenderedSpan("      20 | code\n      22 | more\n      24 | end\n"))
-            .toEqual({ start: 20, end: 24 });
+    it("parses the exact SET of gutter numbers actually shown", () => {
+        expect(parseRenderedSpan("      20 | code\n      22 | more\n      24 | end\n")?.lines)
+            .toEqual(new Set([20, 22, 24]));
     });
     it("returns null when the snippet has no gutter numbers", () => {
         expect(parseRenderedSpan("no line numbers here")).toBeNull();
+    });
+    it("RED: a gap in displayed lines is not covered (gold 21, shown 20+22)", () => {
+        const gold = { file: "src/a.ts", startLine: 21, endLine: 21 };
+        const units = [{ relFile: "src/a.ts", line: 20, endLine: 22, snippet: "      20 | a\n      22 | b\n" }];
+        expect(scoreReadReadySpan(gold, units).success).toBe(false);
+    });
+    it("RED: a card with no parseable gutter lines contributes no coverage", () => {
+        const gold = { file: "src/a.ts", startLine: 100, endLine: 105 };
+        expect(scoreReadReadySpan(gold, [{ relFile: "src/a.ts", line: 100, endLine: 105, snippet: "plain snippet" }]).success).toBe(false);
     });
 });
 
@@ -239,16 +248,18 @@ describe("scoreReadReadySpan", () => {
         relFile: string; line: number; endLine: number; snippet: string;
     } => ({ relFile: file, line, endLine, snippet });
     it("scores overlap from RENDERED lines, not metadata ranges", () => {
-        // Metadata claims lines 1-2 but the rendered card actually shows 100-105.
+        // Metadata claims lines 1-2 but the rendered card shows gutters 100 and 105.
         const hit = scoreReadReadySpan(gold, [card(1, 2, "     100 | hit\n     105 | hit\n")]);
         expect(hit.success).toBe(true);
         expect(hit.unitIndex).toBe(0);
-        expect(hit.spanLength).toBe(6);
+        expect(hit.spanLength).toBe(2);
         expect(hit.precision).toBeCloseTo(1, 6);
-        expect(hit.iou).toBeCloseTo(6 / 11, 6);
+        expect(hit.iou).toBeCloseTo(2 / 11, 6);
     });
-    it("falls back to metadata when the card has no gutter numbers", () => {
-        expect(scoreReadReadySpan(gold, [card(100, 105, "plain snippet")]).success).toBe(true);
+    it("counts gutter-less cards as no coverage, never metadata fallback", () => {
+        const r = scoreReadReadySpan(gold, [card(100, 105, "plain snippet")]);
+        expect(r.success).toBe(false);
+        expect(r.noGutterUnits).toBe(1);
     });
     it("fails when the gold file is absent from the first K units", () => {
         expect(scoreReadReadySpan(gold, [card(100, 110, "     100 | hit\n", "src/other.ts")]).success)

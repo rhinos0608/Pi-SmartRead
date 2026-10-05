@@ -311,24 +311,24 @@ export const READ_READY_DEFAULT_BUDGET = 1500;
 export const READ_READY_K = 5;
 
 export interface RenderedSpan {
-    start: number;
-    end: number;
+    lines: Set<number>;
 }
 
 /**
  * Parse the RENDERED line numbers from a captured card snippet (the
- * line-numbered text actually shown, e.g. "  20 | code"). Metadata
- * line/endLine ranges are NOT trusted here. Returns null when no gutter
- * numbers are present (caller falls back to metadata).
+ * line-numbered text actually shown, e.g. "  20 | code") as the exact
+ * SET of displayed gutter numbers. Metadata line/endLine ranges are NOT
+ * trusted here. Returns null when no gutter numbers are present (the
+ * card then contributes no rendered coverage).
  */
 export function parseRenderedSpan(snippet: string): RenderedSpan | null {
-    const nums: number[] = [];
+    const lines = new Set<number>();
     for (const line of snippet.split(/\r?\n/)) {
         const m = /^\s*(\d+)\s*[|:]/.exec(line);
-        if (m) nums.push(Number(m[1]));
+        if (m) lines.add(Number(m[1]));
     }
-    if (nums.length === 0) return null;
-    return { start: Math.min(...nums), end: Math.max(...nums) };
+    if (lines.size === 0) return null;
+    return { lines };
 }
 
 export interface ReadReadyUnit {
@@ -346,6 +346,10 @@ export interface ReadReadyResult {
     spanLength: number | null;
     precision: number | null;
     iou: number | null;
+    /** Rendered cards in the window with no parseable gutter lines. */
+    noGutterUnits: number;
+    /** True when unit blocks could not be located in captured text. */
+    unmeasurable?: boolean;
 }
 
 function unitRenderedChars(unit: ReadReadyUnit): number {
@@ -355,8 +359,11 @@ function unitRenderedChars(unit: ReadReadyUnit): number {
 function spanOverlapMetrics(gold: Pick<EvalRow, "startLine" | "endLine">, span: RenderedSpan): {
     precision: number; iou: number; length: number;
 } {
-    const overlap = Math.max(0, Math.min(span.end, gold.endLine) - Math.max(span.start, gold.startLine) + 1);
-    const unitLen = span.end - span.start + 1;
+    let overlap = 0;
+    for (let line = gold.startLine; line <= gold.endLine; line++) {
+        if (span.lines.has(line)) overlap++;
+    }
+    const unitLen = span.lines.size;
     const goldLen = gold.endLine - gold.startLine + 1;
     const union = unitLen + goldLen - overlap;
     return {
@@ -380,19 +387,28 @@ export function scoreReadReadySpan(
     k = READ_READY_K,
 ): ReadReadyResult {
     let spent = 0;
+    let noGutterUnits = 0;
     for (let i = 0; i < Math.min(k, units.length); i++) {
         const unit = units[i]!;
         const cost = Math.ceil(unitRenderedChars(unit) / 4);
         if (spent + cost > budget) break;
         spent += cost;
         if (unit.relFile !== gold.file) continue;
-        const span = parseRenderedSpan(unit.snippet) ?? { start: unit.line, end: unit.endLine };
-        if (span.start <= gold.endLine && span.end >= gold.startLine) {
+        const span = parseRenderedSpan(unit.snippet);
+        if (!span) {
+            noGutterUnits++;
+            continue;
+        }
+        let hitsGold = false;
+        for (let line = gold.startLine; line <= gold.endLine; line++) {
+            if (span.lines.has(line)) { hitsGold = true; break; }
+        }
+        if (hitsGold) {
             const m = spanOverlapMetrics(gold, span);
-            return { success: true, unitIndex: i, tokensUsed: spent, spanLength: m.length, precision: m.precision, iou: m.iou };
+            return { success: true, unitIndex: i, tokensUsed: spent, spanLength: m.length, precision: m.precision, iou: m.iou, noGutterUnits };
         }
     }
-    return { success: false, unitIndex: null, tokensUsed: spent, spanLength: null, precision: null, iou: null };
+    return { success: false, unitIndex: null, tokensUsed: spent, spanLength: null, precision: null, iou: null, noGutterUnits };
 }
 
 export interface ReadReadySummary {
