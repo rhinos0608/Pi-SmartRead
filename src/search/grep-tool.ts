@@ -602,6 +602,14 @@ export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; 
     return { mode: "smart", reason: "auto_literal", note: "No regex syntax detected; using smart cascade." };
 }
 
+/** A trailing `$` is an end anchor only with even backslash parity (odd = escaped). */
+function hasUnescapedTerminalDollar(pattern: string): boolean {
+    if (!pattern.endsWith("$")) return false;
+    let backslashes = 0;
+    for (let i = pattern.length - 2; i >= 0 && pattern[i] === "\\"; i--) backslashes++;
+    return backslashes % 2 === 0;
+}
+
 function hasUnescapedGrep(text: string, char: string): boolean {
     for (let i = 0; i < text.length; i++) {
         if (text[i] !== char) continue;
@@ -614,7 +622,7 @@ function hasUnescapedGrep(text: string, char: string): boolean {
 
 function hasStrongRegexSyntax(pattern: string): boolean {
     if (hasUnescapedGrep(pattern, "|")) return true;
-    if (pattern.startsWith("^") || (pattern.endsWith("$") && !pattern.endsWith("\\$"))) return true;
+    if (pattern.startsWith("^") || hasUnescapedTerminalDollar(pattern)) return true;
     if (/\[[^\]]+\]/.test(pattern)) return true;
     if (/\{\d+(,\d*)?\}/.test(pattern)) return true;
     if (/\\[bBdDsSwW.]/.test(pattern)) return true;
