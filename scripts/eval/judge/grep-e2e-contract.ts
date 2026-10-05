@@ -242,6 +242,23 @@ export interface PairedComparison {
     deltas: PairedQueryDelta[];
 }
 
+/**
+ * Symbol-unit result settings carried in retrievalConditions/manifest
+ * params. These describe HOW results were rendered (anchor window vs
+ * enclosing-symbol units, units per file, excerpt length), not WHAT was
+ * retrieved: paired comparison intentionally tolerates differences here
+ * (cross-unit-mode pairing is the point of the comparison), exactly like
+ * engineSourceHash. The run fingerprint still binds them, so
+ * differently-configured runs never resume into each other.
+ */
+export const UNIT_SETTING_KEYS = ["unitMode", "maxPerFile", "excerptLines"] as const;
+
+function withoutUnitSettings(params: Record<string, unknown>): Record<string, unknown> {
+    const copy = { ...params };
+    for (const key of UNIT_SETTING_KEYS) delete copy[key];
+    return copy;
+}
+
 function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
     if (base === change) return "tie";
     return change ? "win" : "loss";
@@ -252,7 +269,9 @@ function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
  * Pairing requires identical fixture/corpus identity: fixtureSha,
  * corpus inventory hash, and the ordered qid set must all match.
  * engineSourceHash is the ONLY identity field allowed to differ (it is
- * the point of the comparison). Throws on any other mismatch.
+ * the point of the comparison). Symbol-unit rendering settings
+ * (UNIT_SETTING_KEYS) are stripped from the retrieval-params comparison:
+ * cross-unit-mode pairing is intended. Throws on any other mismatch.
  * Abstention "win" means the variant abstained where baseline did not.
  */
 export function pairReports(baseline: PairedReport, variant: PairedReport, names?: { baseline: string; variant: string }, options?: { recompute?: boolean }): PairedComparison {
@@ -273,7 +292,7 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
     requireIdentity("sourceRef", bManifest.sourceRef, vManifest.sourceRef);
     requireIdentity("corpusKind", bManifest.corpusKind, vManifest.corpusKind);
     requireIdentity("gateConstants", bManifest.gateConstants, vManifest.gateConstants);
-    requireIdentity("retrieval params", bManifest.retrievalConditions ?? bManifest.params, vManifest.retrievalConditions ?? vManifest.params);
+    requireIdentity("retrieval params", withoutUnitSettings(bManifest.retrievalConditions ?? bManifest.params ?? {}), withoutUnitSettings(vManifest.retrievalConditions ?? vManifest.params ?? {}));
     if (options?.recompute) {
         throw new Error("refuses-recompute: --recompute requires captured rendered text plus a pinned scorer version on BOTH sides; reports carry neither, so rescoring cannot run");
     }

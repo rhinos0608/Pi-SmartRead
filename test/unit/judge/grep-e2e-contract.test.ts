@@ -83,8 +83,13 @@ describe("computeRunFingerprint", () => {
         const b = identity({ params: { y: 2, x: 1 } });
         expect(computeRunFingerprint(a)).toBe(computeRunFingerprint(b));
     });
+    it("changes when unit-mode settings change (differently-configured runs never resume together)", () => {
+        const base = computeRunFingerprint(identity());
+        expect(computeRunFingerprint(identity({
+            params: { perQueryLimit: 20, topKWindow: 20, contextLines: 2, unitMode: "symbol" },
+        }))).not.toBe(base);
+    });
 });
-
 describe("validateCheckpointRow", () => {
     const known = new Set(["q01", "q02"]);
     it("accepts a matching versioned row", () => {
@@ -317,6 +322,18 @@ describe("pairReports", () => {
     });
     it("tolerates engineSourceHash differences but refuses other identity mismatches", () => {
         expect(() => pairReports(base, variant)).not.toThrow();
+        expect(() => pairReports(base, {
+            ...variant,
+            manifest: manifest({
+                retrievalConditions: { perQueryLimit: 40, contextLines: 2, unitMode: "symbol", maxPerFile: 2, excerptLines: 12 },
+            }),
+        })).not.toThrow();
+        expect(() => pairReports(base, {
+            ...variant,
+            manifest: manifest({
+                retrievalConditions: { perQueryLimit: 10, contextLines: 2, unitMode: "anchor" },
+            }),
+        })).toThrow(/retrieval params/);
         expect(() => pairReports(
             { ...base, manifest: manifest({ fixtureSha: "zzz" }) },
             variant,

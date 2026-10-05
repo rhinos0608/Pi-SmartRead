@@ -57,6 +57,11 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
 import { GREP_JUDGE_THRESHOLD_ENV_VAR } from "../../../src/judge/grep-judge-stage.js";
+import {
+    resolveGrepUnitExcerptLines,
+    resolveGrepUnitMaxPerFile,
+    resolveGrepUnitMode,
+} from "../../../src/search/grep-units.js";
 import type { GrepJudgeProvider } from "../../../src/judge/grep-judge-stage.js";
 import type {
     Judge,
@@ -722,6 +727,15 @@ const code = codeUnderTest();
 // never feeds identity (corpus content hash does); a runtime-alias version
 // limitation is explicit in retrievalConditions.
 const scriptGitRoot = gitRootFromScript();
+// Symbol-unit rendering settings, resolved by the product's own resolver
+// functions (never duplicated here). Bound into the run fingerprint so
+// differently-configured runs never resume into each other; paired
+// comparison intentionally still pairs across them (UNIT_SETTING_KEYS).
+const unitSettings = {
+    unitMode: resolveGrepUnitMode(),
+    maxPerFile: resolveGrepUnitMaxPerFile(),
+    excerptLines: resolveGrepUnitExcerptLines(),
+};
 const manifest = {
     sourceRef: managedCorpus ? SOURCE_REF : null,
     corpusKind: managedCorpus ? "frozen-git-archive-snapshot" : "explicit-mutable-root",
@@ -751,6 +765,7 @@ const manifest = {
         topKMetricWindow: 5,
         contextLines: 2,
         workspaceRevision: "frozen 0 within process",
+        ...unitSettings,
     },
     nodeVersion: process.version,
     gateConstants: { ...GATE_CONSTANTS },
@@ -790,6 +805,7 @@ function fingerprintFor(config: ConfigName): string {
             queryCount: qids.length,
             tokenBudget: args.tokenBudget,
             readReadyK: 5,
+            ...unitSettings,
         },
         timeoutMs: args.timeoutMs,
     };
