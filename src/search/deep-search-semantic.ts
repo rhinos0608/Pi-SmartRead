@@ -12,6 +12,7 @@ import {
   relevanceClassWeight,
 } from "../ranking/classifiers.js";
 import { tokenize } from "../scoring.js";
+import { canonicalDisplayRoot, tryCanonical } from "./grep-cascade.js";
 
 import type { DeepSearchCandidate } from "./deep-search.js";
 
@@ -86,8 +87,8 @@ function parseSemanticCandidates(cwd: string, result: unknown): DeepSearchCandid
   return candidates;
 }
 
-function toRelativePath(cwd: string, path: string): string {
-  const rel = relative(cwd, resolve(cwd, path));
+export function toRelativePath(cwd: string, path: string): string {
+  const rel = relative(canonicalDisplayRoot(cwd), tryCanonical(resolve(cwd, path)));
   return rel && !rel.startsWith("..") ? rel.replace(/\\/g, "/") : path.replace(/\\/g, "/");
 }
 

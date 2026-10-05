@@ -3,6 +3,7 @@
 
 import { resolve, relative } from "node:path";
 import { EdgeStore, findDirectImportNeighbours, isReadableWorkspaceFile } from "../context-graph.js";
+import { canonicalDisplayRoot, tryCanonical } from "./grep-cascade.js";
 
 import { RRF_K } from "./deep-search-constants.js";
 import type { DeepSearchCandidate } from "./deep-search.js";
@@ -13,8 +14,8 @@ export const MAX_GRAPH_REVERSE_IMPORT_SCAN = 500;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function toRelativePath(cwd: string, path: string): string {
-  const rel = relative(cwd, resolve(cwd, path));
+export function toRelativePath(cwd: string, path: string): string {
+  const rel = relative(canonicalDisplayRoot(cwd), tryCanonical(resolve(cwd, path)));
   return rel && !rel.startsWith("..") ? rel.replace(/\\/g, "/") : path.replace(/\\/g, "/");
 }
 

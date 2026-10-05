@@ -31,7 +31,7 @@ describe("deep-search symlinked cwd", () => {
     const canonical = join(realDir, "src", "a.ts");
     for (const [label, fn] of Object.entries({ lsp: lsp.toRelativePath, core: core.toRelativePath, semantic: semantic.toRelativePath, graph: graph.toRelativePath })) {
       expect(typeof fn, `${label} exports toRelativePath`).toBe("function");
-      expect(fn(linkDir, canonical), `${label}`).toBe("src/a.ts");
+      expect(fn?.(linkDir, canonical), `${label}`).toBe("src/a.ts");
     }
   });
 });
