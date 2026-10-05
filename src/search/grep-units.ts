@@ -16,6 +16,8 @@ import { tokenize } from "../scoring.js";
 import type { GrepHit } from "./grep-cascade.js";
 
 export const GREP_UNIT_MODE_ENV_VAR = "PI_SMARTREAD_GREP_UNIT_MODE";
+export const GREP_UNIT_MAX_PER_FILE_ENV_VAR = "PI_SMARTREAD_GREP_UNIT_MAX_PER_FILE";
+export const GREP_UNIT_EXCERPT_LINES_ENV_VAR = "PI_SMARTREAD_GREP_UNIT_EXCERPT_LINES";
 
 export type GrepUnitMode = "anchor" | "symbol";
 
@@ -30,6 +32,30 @@ export function resolveGrepUnitMode(
     env: Record<string, string | undefined> = process.env,
 ): GrepUnitMode {
     return env[GREP_UNIT_MODE_ENV_VAR] === "symbol" ? "symbol" : "anchor";
+}
+
+/** Distinct symbol units per file (M): integer in 1..4, else the default. */
+export function resolveGrepUnitMaxPerFile(
+    env: Record<string, string | undefined> = process.env,
+): number {
+    const raw = env[GREP_UNIT_MAX_PER_FILE_ENV_VAR];
+    if (raw !== undefined && /^\d+$/.test(raw)) {
+        const n = Number(raw);
+        if (n >= 1 && n <= 4) return n;
+    }
+    return GREP_UNIT_MAX_PER_FILE;
+}
+
+/** Rendered excerpt lines per unit (E): integer in 4..40, else the default. */
+export function resolveGrepUnitExcerptLines(
+    env: Record<string, string | undefined> = process.env,
+): number {
+    const raw = env[GREP_UNIT_EXCERPT_LINES_ENV_VAR];
+    if (raw !== undefined && /^\d+$/.test(raw)) {
+        const n = Number(raw);
+        if (n >= 4 && n <= 40) return n;
+    }
+    return GREP_UNIT_EXCERPT_LINES;
 }
 
 export interface EnclosingSymbolUnit {
@@ -182,8 +208,15 @@ export interface SymbolUnitHitInput {
  * keeping fileScore on each hit). Returns null when symbol units are
  * unavailable — the caller must use the anchor window instead.
  */
-export function buildSymbolUnitHits(input: SymbolUnitHitInput): GrepHit[] | null {
+export interface SymbolUnitHitOptions {
+    maxPerFile?: number;
+    excerptLines?: number;
+}
+
+export function buildSymbolUnitHits(input: SymbolUnitHitInput, overrides: SymbolUnitHitOptions = {}): GrepHit[] | null {
     const { absPath, relFile, content, filePathForLang, pattern, fileScore } = input;
+    const maxPerFile = overrides.maxPerFile ?? resolveGrepUnitMaxPerFile();
+    const excerptLines = overrides.excerptLines ?? resolveGrepUnitExcerptLines();
     const lines = content.split(/\r?\n/);
     const queryTokens = tokenize(pattern);
     if (queryTokens.length === 0) return null;
@@ -215,7 +248,7 @@ export function buildSymbolUnitHits(input: SymbolUnitHitInput): GrepHit[] | null
     });
 
     const hits: GrepHit[] = [];
-    for (const { unit } of scored.slice(0, GREP_UNIT_MAX_PER_FILE)) {
+    for (const { unit } of scored.slice(0, maxPerFile)) {
         const center = bestLineInRange(lines, unit.startLine, unit.endLine, queryTokens);
         hits.push({
             file: absPath,
@@ -224,7 +257,7 @@ export function buildSymbolUnitHits(input: SymbolUnitHitInput): GrepHit[] | null
             endLine: unit.endLine,
             name: unit.name,
             kind: "bm25",
-            snippet: formatUnitSnippet(lines, unit.startLine, unit.endLine, center),
+            snippet: formatUnitSnippet(lines, unit.startLine, unit.endLine, center, excerptLines),
             engines: ["bm25"],
             score: fileScore,
         });
