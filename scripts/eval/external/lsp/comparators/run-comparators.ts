@@ -184,7 +184,9 @@ export type LatencyOperation = "definition" | "references" | "hover";
 export interface PositionLatency {
   reference: Record<LatencyOperation, number>;
   system: Record<LatencyOperation, number>;
-  /** Reference workspace/symbol time: setup, not answer latency. */
+  /** Reference workspace/symbol time: its own series, not setup/index time. */
+  workspaceSymbolMs: number;
+  /** Actual startup/index work; workspace/symbol no longer lands here. */
   setupMs: number;
 }
 
@@ -197,6 +199,8 @@ export interface LatencySummary {
 export interface LatencyReport {
   reference: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
   system: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
+  /** Reference workspace/symbol latency, kept apart from answer latency. */
+  workspaceSymbol: LatencySummary;
   /** Labeled separately: index/setup time, not comparable answer latency. */
   setup: LatencySummary;
 }
@@ -210,7 +214,8 @@ function summarize(values: number[]): LatencySummary {
  * Aggregate per-operation latency in matching units for both sides.
  * Reference and system each get definition/references/hover distributions
  * plus a per-position total (def+refs+hov); workspace/symbol time is
- * reported separately as setup so it never mixes with answer latency.
+ * reported separately as workspaceSymbol and setup so neither mixes with
+ * answer latency.
  */
 export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
   const ops: LatencyOperation[] = ["definition", "references", "hover"];
@@ -218,6 +223,7 @@ export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
   const sys: Record<LatencyOperation, number[]> = { definition: [], references: [], hover: [] };
   const refTotals: number[] = [];
   const sysTotals: number[] = [];
+  const workspaceSymbol: number[] = [];
   const setup: number[] = [];
   for (const p of positions) {
     let refTotal = 0;
@@ -230,6 +236,7 @@ export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
     }
     refTotals.push(refTotal);
     sysTotals.push(sysTotal);
+    workspaceSymbol.push(p.workspaceSymbolMs);
     setup.push(p.setupMs);
   }
   return {
@@ -245,6 +252,7 @@ export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
       hover: summarize(sys.hover),
       perPositionTotal: summarize(sysTotals),
     },
+    workspaceSymbol: summarize(workspaceSymbol),
     setup: summarize(setup),
   };
 }
@@ -300,10 +308,12 @@ async function main(): Promise<void> {
       const sym = await timed(() => refConn.request("workspace/symbol", { query: pos.name }));
       posLatencies.push({
         // Reference per-position timing is captured below once the system
-        // calls complete; setup (workspace/symbol) is labeled separately.
+        // calls complete; workspace/symbol is its own series, setup tracks
+        // actual startup/index work.
         reference: { definition: def.ms, references: refsIncl.ms, hover: hov.ms },
         system: { definition: 0, references: 0, hover: 0 },
-        setupMs: sym.ms,
+        workspaceSymbolMs: sym.ms,
+        setupMs: 0,
       });
 
       const refDefs = rawToLocs(def.value);
@@ -467,7 +477,19 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
-main().catch((err) => {
-  process.stderr.write(`comparator benchmark failed: ${String((err as Error)?.message ?? err)}\n`);
-  process.exitCode = 1;
-});
+function isDirectExecution(): boolean {
+  const invoked = process.argv[1];
+  if (!invoked) return false;
+  try {
+    return pathToFileURL(realpathSync(invoked)).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExecution()) {
+  main().catch((err) => {
+    process.stderr.write(`comparator benchmark failed: ${String((err as Error)?.message ?? err)}\n`);
+    process.exitCode = 1;
+  });
+}
