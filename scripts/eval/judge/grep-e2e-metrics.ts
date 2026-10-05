@@ -385,14 +385,35 @@ export function scoreReadReadySpan(
     units: ReadReadyUnit[],
     budget = READ_READY_DEFAULT_BUDGET,
     k = READ_READY_K,
+    renderedText?: string,
 ): ReadReadyResult {
+    // Measured-cost path: locate each unit's rendered block in the exact
+    // captured guarded text in order (headers/notes before the first unit
+    // count toward the budget). Unlocatable blocks are unmeasurable.
+    let blockEnds: number[] | null = null;
+    if (renderedText !== undefined) {
+        blockEnds = [];
+        let cursor = 0;
+        for (let i = 0; i < Math.min(k, units.length); i++) {
+            const snippet = units[i]!.snippet;
+            if (snippet.length === 0) {
+                return { success: false, unitIndex: null, tokensUsed: 0, spanLength: null, precision: null, iou: null, noGutterUnits: 0, unmeasurable: true };
+            }
+            const idx = renderedText.indexOf(snippet, cursor);
+            if (idx === -1) {
+                return { success: false, unitIndex: null, tokensUsed: 0, spanLength: null, precision: null, iou: null, noGutterUnits: 0, unmeasurable: true };
+            }
+            blockEnds.push(idx + snippet.length);
+            cursor = idx + snippet.length;
+        }
+    }
     let spent = 0;
     let noGutterUnits = 0;
     for (let i = 0; i < Math.min(k, units.length); i++) {
         const unit = units[i]!;
-        const cost = Math.ceil(unitRenderedChars(unit) / 4);
-        if (spent + cost > budget) break;
-        spent += cost;
+        const cumulative = blockEnds ? Math.ceil(blockEnds[i]! / 4) : spent + Math.ceil(unitRenderedChars(unit) / 4);
+        if (cumulative > budget) break;
+        spent = cumulative;
         if (unit.relFile !== gold.file) continue;
         const span = parseRenderedSpan(unit.snippet);
         if (!span) {
@@ -405,10 +426,10 @@ export function scoreReadReadySpan(
         }
         if (hitsGold) {
             const m = spanOverlapMetrics(gold, span);
-            return { success: true, unitIndex: i, tokensUsed: spent, spanLength: m.length, precision: m.precision, iou: m.iou, noGutterUnits };
+            return { success: true, unitIndex: i, tokensUsed: spent, spanLength: m.length, precision: m.precision, iou: m.iou, noGutterUnits, unmeasurable: false };
         }
     }
-    return { success: false, unitIndex: null, tokensUsed: spent, spanLength: null, precision: null, iou: null, noGutterUnits };
+    return { success: false, unitIndex: null, tokensUsed: spent, spanLength: null, precision: null, iou: null, noGutterUnits, unmeasurable: false };
 }
 
 export interface ReadReadySummary {

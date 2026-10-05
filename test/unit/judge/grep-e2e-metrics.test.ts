@@ -236,7 +236,31 @@ describe("parseRenderedSpan", () => {
         const units = [{ relFile: "src/a.ts", line: 20, endLine: 22, snippet: "      20 | a\n      22 | b\n" }];
         expect(scoreReadReadySpan(gold, units).success).toBe(false);
     });
-    it("RED: a card with no parseable gutter lines contributes no coverage", () => {
+    it("RED: budget is measured from the captured rendered text in order", () => {
+        const gold = { file: "src/a.ts", startLine: 100, endLine: 100 };
+        const s1 = "     100 | hit\n";
+        const s2 = "     200 | hit\n";
+        const text = `HEADER\n${s1}${s2}`;
+        const units = [
+            { relFile: "src/a.ts", line: 100, endLine: 100, snippet: s1 },
+            { relFile: "src/a.ts", line: 200, endLine: 200, snippet: s2 },
+        ];
+        const end1 = text.indexOf(s1) + s1.length;
+        const over = Math.ceil(end1 / 4);
+        // Budget below the cumulative cost through unit 0: no success.
+        expect(scoreReadReadySpan(gold, units, over - 1, 5, text).success).toBe(false);
+        // Exact cumulative cost through unit 0: success with exact tokens.
+        const ok = scoreReadReadySpan(gold, units, over, 5, text);
+        expect(ok.success).toBe(true);
+        expect(ok.tokensUsed).toBe(over);
+    });
+    it("RED: unlocatable blocks are unmeasurable, never synthetic", () => {
+        const gold = { file: "src/a.ts", startLine: 100, endLine: 100 };
+        const r = scoreReadReadySpan(gold, [{ relFile: "src/a.ts", line: 100, endLine: 100, snippet: "     100 | hit\n" }], 1500, 5, "unrelated text");
+        expect(r.success).toBe(false);
+        expect(r.unmeasurable).toBe(true);
+    });
+    it("RED: a gap in displayed lines is not covered (gold 21, shown 20+22)", () => {
         const gold = { file: "src/a.ts", startLine: 100, endLine: 105 };
         expect(scoreReadReadySpan(gold, [{ relFile: "src/a.ts", line: 100, endLine: 105, snippet: "plain snippet" }]).success).toBe(false);
     });

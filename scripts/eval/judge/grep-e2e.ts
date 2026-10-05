@@ -507,7 +507,10 @@ async function runQuery(input: {
               : "mixed";
     // Read-ready span@5 under the fixed rendered-token budget: per-gold scoring
     // over the rendered top-5 units (rendered gutter lines, not metadata).
-    const readReadyRows = golds.map((g) => scoreReadReadySpan(g, top5, tokenBudget));
+    // Cost is measured from the exact captured guarded text: each unit's
+    // block is located in order, so headers/notes count toward the budget.
+    // Unlocatable blocks make the query unmeasurable (never synthetic).
+    const readReadyRows = golds.map((g) => scoreReadReadySpan(g, top5, tokenBudget, 5, renderedText));
     const readReady = golds.length > 0 && readReadyRows.some((r) => r.success);
     const readReadyTokens = readReady
         ? Math.min(...readReadyRows.filter((r) => r.success).map((r) => r.tokensUsed))
@@ -897,14 +900,14 @@ try {
                 readReadySpanAt5: `query succeeds if, within the first 5 rendered units AND within ${args.tokenBudget} rendered tokens, some unit's RENDERED gutter lines (parsed from the shown snippet, not metadata ranges) overlap a gold range`,
                 renderedTokens: "ceil(renderedChars/4) over the EXACT guarded tool text (headers, notes, pointers, degradation lines included)",
                 legacyTop5Tokens: "ceil(chars/4) over concatenated top-5 units rendered as '<relFile>:<line>-<endLine> <name>\\n<snippet>' (prior-harness scope, kept for comparison)",
-                overlap: "same repo-relative file AND unit.line <= gold.endLine && unit.endLine >= gold.startLine",
+                overlap: "same repo-relative file AND at least one gold line in the unit's exact SET of displayed gutter lines (no metadata fallback)",
                 knownGoldRecallAt5: "known-fixture diagnostic: sum(covered known gold rows)/sum(known gold rows) over evaluable answerable queries (q02 has no gold rows). NOT a lower bound of true recall.",
                 declaredQueryCoverage: "answerable qids with >=1 covered gold / ALL declared answerable qids (incl. q02, errors count as uncovered)",
                 evaluableQueryCoverage: "answerable qids with >=1 covered gold / answerable qids with >=1 gold row (errors count as uncovered)",
                 fileHitAt5: "evaluable qids with >=1 same-file top-5 hit / evaluable qids",
                 abstentionCorrect: "unanswerable qids with (abstained || top-5 empty) / unanswerable qids",
             },
-            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage, tokenBudget: args.tokenBudget, readReady: summarizeReadReady(outcomes, traces.flatMap((t) => (t.goldOutcomes as Array<{ file: string; startLine: number; endLine: number }>).map((g) => scoreReadReadySpan(g, (t.shown ?? []) as Array<{ relFile: string; line: number; endLine: number; name?: string; snippet: string }>, args.tokenBudget)))) },
+            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage, tokenBudget: args.tokenBudget, readReady: summarizeReadReady(outcomes, traces.flatMap((t) => (t.goldOutcomes as Array<{ file: string; startLine: number; endLine: number }>).map((g) => scoreReadReadySpan(g, (t.shown ?? []) as Array<{ relFile: string; line: number; endLine: number; name?: string; snippet: string }>, args.tokenBudget, 5, t.text as string)))) },
             queries: traces,
         };
         if (drifted) {
