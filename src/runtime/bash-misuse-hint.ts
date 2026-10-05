@@ -246,6 +246,14 @@ function stripWrapper(argv: string[]): string[] | null {
   return tokens;
 }
 
+function findHint(args: string[]): string {
+  const nameIdx = args.indexOf("-name");
+  const candidate = nameIdx >= 0 ? args[nameIdx + 1] : undefined;
+  const call = candidate !== undefined && /^[A-Za-z0-9_.*?!\-[\]{}!/]+$/.test(candidate) && candidate.length <= 60
+    ? `find({ pattern: "${candidate}" })`
+    : `find({ pattern: "*.ts" })`;
+  return `\n\n[SmartRead hint] Use ${call} instead of shell find. find locates files and directories by glob, name fragment, or natural-language description; use grep for line-level content search.`;
+}
 function firstPattern(argv: string[]): string | undefined {
   for (const token of argv.slice(1)) {
     if (token.startsWith("-")) continue;
@@ -423,10 +431,13 @@ export function detectBashMisuseHint(
       return `\n\n[SmartRead hint] Use read({ path: "file" }) instead of awk line printing.`;
     }
 
+    if (exe === "find" && (args.includes("-name") || args.includes("-type"))) {
+      return findHint(args);
+    }
+
     if (
       (exe === "ls" && (args.includes("-R") || args.includes("-r"))) ||
-      (exe === "tree") ||
-      (exe === "find" && (args.includes("-name") || args.includes("-type")))
+      (exe === "tree")
     ) {
       return `\n\n[SmartRead hint] Use inspect({ mode: "directory", path: "." }) for repo scans. Shell listing is fine when an exhaustive listing is needed.`;
     }

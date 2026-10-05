@@ -24,12 +24,16 @@ import {
 import type { ContextGraph } from "./context-graph.js";
 import { getSharedLspInspectionProvider } from "./lsp/lsp-inspection.js";
 import { createGrepTool, GREP_DESCRIPTION } from "./search/grep-tool.js";
+import { createFindTool } from "./search/find-tool.js";
 import { createLspTool } from "./lsp/lsp-tool.js";
 import { createReadTool } from "./read/unified-read.js";
 import { getLSPBridge } from "./lsp/lsp-bridge.js";
 import { registerRepositoryIntelligence } from "./repository/repository-intelligence-registry.js";
 import { createRepositoryIntelligenceService } from "./repository/repository-intelligence.js";
 import { registerLanguageIntelligenceCommand } from "./language-intelligence/language-intelligence-command.js";
+import { registerJudgeCommand } from "./judge/judge-command.js";
+import { getSharedVonSidecarManager } from "./judge/von-sidecar.js";
+import { resolvePiJudge } from "./judge/judge-runtime.js";
 import { createLanguageIntelligenceProvider } from "./language-intelligence/language-intelligence-provider.js";
 import { setWorkspaceEditBus } from "./lsp/lsp-workspace-edit.js";
 import { resetDoomLoopState } from "./runtime/doom-loop.js";
@@ -138,6 +142,10 @@ export function registerGrepTool(state: ActivationState): void {
     getSessionFilePath: () => null,
     getWorkspaceRevision,
     getSharedContextGraphIfBuilt,
+    judge: {
+      resolveJudge: (root, runtimeContext) => resolvePiJudge(root ?? process.cwd(), runtimeContext),
+      getGraphIfBuilt: getSharedContextGraphIfBuilt,
+    },
   });
   ToolRegistry.getInstance().registerOrReplace({
     name: "grep",
@@ -190,6 +198,25 @@ export function registerReadTool(pi: ExtensionAPI, state: ActivationState): void
   );
 }
 
+/**
+ * Register SmartRead's `find` AFTER registerCoreTools so the same-name
+ * registration overrides pi's builtin `find` (same pattern as
+ * registerReadTool overriding `read`). Resolver wiring mirrors grep:
+ * best-effort publish, envelope in details stays authoritative.
+ */
+export function registerFindTool(pi: ExtensionAPI): void {
+  const def = createFindTool({
+    resolver: {
+      publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
+        getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
+      },
+    },
+    getSessionFilePath: () => null,
+    resolveJudge: (root, runtimeContext, signal) => resolvePiJudge(root, runtimeContext, signal),
+  });
+  pi.registerTool(def as any);
+}
+
 export function registerRepositoryIntelligenceBestEffort(): void {
   try {
     registerRepositoryIntelligence(createRepositoryIntelligenceService());
@@ -200,6 +227,26 @@ export function registerRepositoryIntelligenceBestEffort(): void {
 
 export function registerLanguageIntelligenceCommandStep(pi: ExtensionAPI): void {
   registerLanguageIntelligenceCommand(pi as any);
+}
+
+/**
+ * Register the `/judge` command and wire von sidecar shutdown into the
+ * activation state. Registration performs no network or process work;
+ * the sidecar starts lazily on the first judged query.
+ */
+export function registerJudgeCommandStep(pi: ExtensionAPI, state: ActivationState): void {
+  try {
+    registerJudgeCommand(pi as any);
+    state.judgeSidecarDispose = () => {
+      try {
+        getSharedVonSidecarManager().dispose();
+      } catch {
+        /* ignore */
+      }
+    };
+  } catch {
+    /* non-fatal: judging stays off */
+  }
 }
 
 export function installResolverAndProviderBestEffort(pi: ExtensionAPI, state: ActivationState): void {

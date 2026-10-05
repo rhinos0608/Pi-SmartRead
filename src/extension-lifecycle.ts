@@ -34,6 +34,8 @@ export interface ActivationState {
   watchState: { stop: (() => void) | undefined };
   freshGraphGetter: (root?: string) => Promise<ContextGraph>;
   languageIntelligenceDispose: (() => void) | null;
+  /** von judge sidecar shutdown; set by registerJudgeCommandStep, run on session_shutdown. */
+  judgeSidecarDispose: (() => unknown) | null;
   /** Set true once the runtime grep tool is registered; read at event time. */
   grepRegisteredRef: { current: boolean };
   /** Edit dialect resolved once at activation; threaded to all render code. */
@@ -52,6 +54,7 @@ export function createActivationState(): ActivationState {
     // mcp-registry rather than a boolean flag; concurrent calls coalesce.
     freshGraphGetter: async (root = process.cwd()) => getSharedContextGraphAsync(root),
     languageIntelligenceDispose: null,
+    judgeSidecarDispose: null,
     grepRegisteredRef: { current: false },
     editMode: resolveEditMode(process.env).mode,
   };
@@ -107,7 +110,7 @@ export function startFileWatcher(state: ActivationState): void {
   }
 }
 
-/** Language servers are long-lived; stop them on session_shutdown. */
+/** Language servers and the von sidecar are long-lived; stop them on session_shutdown. */
 export function registerShutdownHandler(
   pi: ExtensionAPI,
   state: ActivationState,
@@ -119,6 +122,12 @@ export function registerShutdownHandler(
       /* ignore */
     }
     state.languageIntelligenceDispose = null;
+    try {
+      await state.judgeSidecarDispose?.();
+    } catch {
+      /* ignore */
+    }
+    state.judgeSidecarDispose = null;
     state.watchState.stop?.();
     state.watchState.stop = undefined;
     try {

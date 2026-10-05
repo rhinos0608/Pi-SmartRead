@@ -38,6 +38,7 @@ import { coerceText } from "./utils.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toExtensionContext } from "./types.js";
 import { renderSmartReadToolGuide } from "./runtime/tool-guidance.js";
+import { getSharedVonSidecarManager } from "./judge/von-sidecar.js";
 
 // Capture cwd once at server start.
 const SERVER_CWD = process.cwd();
@@ -55,6 +56,7 @@ function cleanupMcpSession(): void {
   try { rmSync(MCP_SESSION_DIR, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 process.once("exit", cleanupMcpSession);
+process.once("exit", () => getSharedVonSidecarManager().dispose());
 
 // ── Build Registry ─────────────────────────────────────────────────
 

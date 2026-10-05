@@ -18,6 +18,8 @@ import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition, toToolDefinitions } from "./types.js";
 import { createInspectTool } from "./inspect/inspect-tool.js";
 import { createGrepTool } from "./search/grep-tool.js";
+import { createFindTool } from "./search/find-tool.js";
+import { resolveMcpJudge } from "./judge/judge-runtime.js";
 import { createLspTool } from "./lsp/lsp-tool.js";
 import { createEvidenceResolver } from "./evidence/workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
@@ -152,7 +154,12 @@ reg("grep", () => createGrepTool({
     contextGraph: (root) => getSharedContextGraphAsync(root),
     getWorkspaceRevision,
     getSharedContextGraphIfBuilt,
+    judge: {
+        resolveJudge: (root) => resolveMcpJudge(root ?? process.cwd()),
+        getGraphIfBuilt: getSharedContextGraphIfBuilt,
+    },
 }), ToolCategory.READ);
+reg("find", () => createFindTool({ resolveJudge: (root, _ctx, signal) => resolveMcpJudge(root, signal) }), ToolCategory.READ);
 reg("LSP", () => createLspTool(), ToolCategory.READ);
 
 // Inspect tool is registered at extension activation time so it can use

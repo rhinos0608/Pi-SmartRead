@@ -16,9 +16,11 @@ import {
   initInternalUrlHandlers,
   installResolverAndProviderBestEffort,
   registerCoreTools,
+  registerFindTool,
   registerGrepTool,
   registerInspectTool,
   registerLanguageIntelligenceCommandStep,
+  registerJudgeCommandStep,
   registerLspTool,
   registerReadTool,
   registerRepositoryIntelligenceBestEffort,
@@ -110,6 +112,9 @@ export default async function (pi: ExtensionAPI) {
   // 3.5 Read: override the builtin read with the enriched wrapper.
   registerReadTool(pi, state);
 
+  // 3.55 Find: override the builtin find with SmartRead ranked find.
+  registerFindTool(pi);
+
   // 3.6 Grep and inspect cover workspace discovery; shell remains available for exceptional cases.
   // Deferred to session_start: the host loader invokes the extension factory
   // before getActiveTools/setActiveTools bind, so factory-time filtering
@@ -119,7 +124,7 @@ export default async function (pi: ExtensionAPI) {
   pi.on("session_start", () => {
     try {
       if (typeof pi.getActiveTools === "function" && typeof pi.setActiveTools === "function") {
-        pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "find" && name !== "ls"));
+        pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "ls"));
       }
     } catch {
       // Host APIs unavailable or throwing pre-bind — leave tools unchanged.
@@ -131,5 +136,6 @@ export default async function (pi: ExtensionAPI) {
 
   // 4. Versioned evidence RPC resolver install (best-effort, background).
   registerLanguageIntelligenceCommandStep(pi);
+  registerJudgeCommandStep(pi, state);
   installResolverAndProviderBestEffort(pi, state);
 }
