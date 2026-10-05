@@ -66,6 +66,8 @@ import type {
 } from "../../../src/judge/types.js";
 import { createGrepTool, type GrepTraceEvent } from "../../../src/search/grep-tool.js";
 import { disposeSemanticIndexes } from "../../../src/indexing/semantic-index-registry.js";
+import { shutdownAllManagers } from "../../../src/lsp/lsp-manager.js";
+import { resetLSPBridge } from "../../../src/lsp/lsp-bridge.js";
 import {
     GATE_CONSTANTS,
     classifyGoldRow,
@@ -892,6 +894,17 @@ try {
     console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
     failed = true;
 } finally {
+    // Tear down language-server processes before leaving: without this
+    // the harness hangs on live LSP child handles after the report.
+    // Harness-only cleanup; production manager lifecycle is untouched.
+    await shutdownAllManagers().catch((error) => {
+        console.error(`warning: lsp shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    try {
+        resetLSPBridge();
+    } catch (error) {
+        console.error(`warning: lsp bridge reset failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     disposeSemanticIndexes();
 }
 
