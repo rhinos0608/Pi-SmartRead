@@ -116,6 +116,8 @@ export interface GrepJudgeDetails {
     hits: Array<{ path: string; line: number; endLine: number; p: number }>;
     /** Active BM25 result-unit mode (D31 seam; additive for reports). */
     unitMode: "anchor" | "symbol";
+    /** Units the provider left unscored (reported in `unjudged` or with no probability). */
+    unjudged: { count: number; ids: string[] };
 }
 
 export interface GrepJudgeStageResult {
@@ -191,6 +193,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     if (units.length === 0) return idle(input.hits);
 
     let unitProbs: Map<string, number>;
+    let unitUnjudgedIds: string[] = [];
     let cacheHits = 0;
     let costUsd: number | undefined;
     try {
@@ -203,6 +206,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
             })),
         });
         unitProbs = unitResult.p;
+        unitUnjudgedIds = unitResult.unjudged.map((entry) => entry.id);
         cacheHits += unitResult.cacheHits ?? 0;
         costUsd = addCost(costUsd, unitResult.usage.costUsd);
     } catch (err) {
@@ -226,14 +230,26 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
         costUsd = addCost(costUsd, existsResult.usage.costUsd);
     } catch { existsP = undefined; }
 
+    // Units the provider left unscored — reported in `unjudged` or with no
+    // probability — must never be silently dropped as p=0. They stay visible
+    // as unjudged fallback hits after the kept hits, in fused order.
+    const unjudgedIds = new Set<string>([
+        ...unitUnjudgedIds,
+        ...units.filter((u) => unitProbs.get(u.id) === undefined).map((u) => u.id),
+    ]);
+    const unjudgedUnits = units
+        .map((u, fusedRank) => ({ unit: u, fusedRank }))
+        .filter(({ unit }) => unjudgedIds.has(unit.id))
+        .sort((a, b) => a.fusedRank - b.fusedRank);
     const ranked = units
         .map((u, fusedRank) => ({ unit: u, p: unitProbs.get(u.id) ?? 0, fusedRank }))
-        .filter((r) => r.p >= threshold)
+        .filter((r) => !unjudgedIds.has(r.unit.id) && r.p >= threshold)
         .sort((a, b) => b.p - a.p || a.fusedRank - b.fusedRank);
     const merged = mergeKeptRanges(ranked.map((r) => ({ hit: r.unit.hit, p: r.p })));
-    const belowThreshold = units.length - new Set(ranked.map((r) => r.unit.id)).size;
+    const belowThreshold = units.length - new Set(ranked.map((r) => r.unit.id)).size - unjudgedIds.size;
+    const unjudgedDetail = { count: unjudgedIds.size, ids: [...unjudgedIds] };
 
-    if (merged.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
+    if (merged.length === 0 && unjudgedUnits.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
         return {
             judged: true,
             hits: [],
@@ -254,11 +270,15 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
                 pointers: [],
                 hits: [],
                 unitMode: resolveGrepUnitMode(),
+                unjudged: unjudgedDetail,
             },
         };
     }
 
-    const judgedHits: JudgedGrepHit[] = merged.map((m) => ({ ...m.hit, judgeP: m.p }));
+    const judgedHits: JudgedGrepHit[] = [
+        ...merged.map((m) => ({ ...m.hit, judgeP: m.p })),
+        ...unjudgedUnits.map(({ unit }) => ({ ...unit.hit })),
+    ];
     const pointers = await judgePointers(judge, input, judgedHits, input.hits);
     if (pointers.result) {
         cacheHits += pointers.cacheHits;
@@ -273,15 +293,16 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
             backend: judge.info.backend,
             model: judge.info.model,
             judged: units.length,
-            kept: judgedHits.length,
+            kept: merged.length,
             belowThreshold,
             threshold,
             cacheHits,
             ...(costUsd !== undefined ? { costUsd } : {}),
             abstained: false,
             pointers: pointers.pointers,
-            hits: judgedHits.map((h) => ({ path: h.relFile, line: h.line, endLine: h.endLine, p: h.judgeP ?? 0 })),
+            hits: merged.map((m) => ({ path: m.hit.relFile, line: m.hit.line, endLine: m.hit.endLine, p: m.p })),
             unitMode: resolveGrepUnitMode(),
+            unjudged: unjudgedDetail,
         },
     };
 }
