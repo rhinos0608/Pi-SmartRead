@@ -92,6 +92,7 @@ import {
     isHardError,
     isKnownSourceHash,
     validateCheckpointRow,
+    canonicalizeCorpusRoot,
     type CheckpointRow,
     type RunIdentityInput,
 } from "./grep-e2e-contract.js";
@@ -181,7 +182,7 @@ function parseArgs(argv: string[]): {
         if (arg === "--config") configArg = argv[++i] ?? "";
         else if (arg === "--queries") queriesArg = argv[++i] ?? "";
         else if (arg === "--limit" || arg === "--limit-queries") limitArg = argv[++i] ?? "";
-        else if (arg === "--root") root = resolve(argv[++i] ?? "");
+        else if (arg === "--root") root = canonicalizeCorpusRoot(resolve(argv[++i] ?? ""));
         else if (arg === "--data-dir") dataDir = resolve(argv[++i] ?? "");
         else if (arg === "--timeout-ms") timeoutMs = Number(argv[++i] ?? "");
         else if (arg === "--resume") resume = true;
@@ -289,7 +290,10 @@ function createSnapshotCorpus(ref: string): string {
     const repoRoot = gitRootFromScript() ?? resolve(process.cwd());
     const archive: Buffer = execFileSync("git", ["archive", ref], { cwd: repoRoot, maxBuffer: 256 * 1024 * 1024 });
     execFileSync("tar", ["-x", "-C", dir], { input: archive });
-    return dir;
+    // mkdtemp on macOS lands under symlinked /var: canonicalize so hit
+    // display paths and gold matching share one root (defense in depth
+    // with the production canonical-display-root fix).
+    return canonicalizeCorpusRoot(dir);
 }
 
 function codeUnderTest(): { head: string; dirty: string[] } {
