@@ -38,6 +38,7 @@ pi -e ./src/index.ts
 |---|---:|---:|---|
 | `read` | ✓ | — | Strong-evidence reads for already-known files or symbols |
 | `inspect` | ✓ | ✓ | Structural/architectural file/directory analysis and bounded script composition |
+| `find` | ✓ | ✓ | File and directory discovery by glob, name, or natural-language description |
 | `grep` | ✓ | ✓ | Broad text, symbol, semantic, structural, and graph-filtered code discovery |
 | `LSP` | ✓ | ✓ | Strict compiler/language-server semantic operations (read-only except applyProposal) |
 | `skill` | ✓ | ✓ | Discover and read procedural agent skills |
@@ -50,7 +51,8 @@ The Pi extension also installs runtime hooks for context hygiene, repo-map/tool 
 ## Which tool should I use?
 
 - **Know the file and need its source?** Use `read`.
-- **Need to discover text, names, concepts, or candidate files?** Use `grep`.
+- **Need to discover candidate files or directories by name or description?** Use `find`.
+- **Need to locate text or symbols inside files?** Use `grep`.
 - **Need aggregate structure, architecture, blast radius, graph, routes, or quality signals?** Use `inspect` in `file` or `directory` mode.
 - **Need exact compiler-backed semantics such as definitions, references, hover, symbols, hierarchy, or diagnostics?** Use strict `LSP`.
 - **Need a dependent multi-hop chase?** Use `inspect { mode: "script", ... }`.
@@ -178,6 +180,22 @@ Without `literal: true`, the cascade combines:
 | `skip` | Structural pagination shortcut |
 
 Every rendered hit gets search-match evidence, not full-file evidence.
+
+---
+
+## `find`
+
+Pi-SmartRead replaces Pi's built-in `find` with file/directory discovery. Its exact schema remains `{pattern, path?, limit?}`:
+
+```json
+{"pattern":"files that configure the embedding endpoint","path":"src","limit":20}
+```
+
+Patterns select glob, fuzzy-name, or natural-language discovery. Results are grouped by directory and carry discovery-only evidence; `find` does not locate matching lines. Use `grep` for content and `read` for source. Natural-language results are optionally relevance-judged when `/judge` is enabled; glob and fuzzy-name results are never sent to a judge.
+
+## Optional relevance judge
+
+Judging is off by default. In Pi, use `/judge off|local|cloud|status|install`. Cloud mode uses the OpenRouter key from Pi's auth store; cloud requests are restricted to OpenRouter and credentials are never sent to custom endpoints. Local mode uses a managed von sidecar on loopback; installing it requires an explicit UI confirmation for the ~3 GB first download. Standalone MCP reads `PI_SMARTREAD_JUDGE_MODE` and user-environment credentials. A judge failure falls back to the unjudged search results.
 
 ---
 

@@ -70,8 +70,8 @@ grep (smart cascade path only)
 |---|---|
 | `types.ts` | Wire types (`NoulQuestion`, `ChoiceQuestion`, `JudgeRequest`, `JudgeAnswers`), `Judge` interface, `JudgeBackendInfo`. |
 | `systemone-client.ts` | HTTP client for the shared wire shape: route, bearer key, 10 s per-attempt timeout, 3 attempts, backoff honoring `retry-after`, retries 408/429/5xx. Never logs or returns the key; errors are redacted codes. |
-| `cloud-judge.ts` | OpenRouter backend: base URL, model id, shared-state batching under a token budget (≤ 28k tokens state + longest question). |
-| `local-judge.ts` | von backend: per-unit small states (one passage per question) so sequential passes stay cheap; refuses units over the 8k window (pre-measured by char budget) instead of silent truncation. |
+| `cloud-judge.ts` | OpenRouter backend: base URL, model id, shared-state batching under a token budget (~24k tokens state + longest question). |
+| `local-judge.ts` | von backend: per-unit small states (one passage per question) so sequential passes stay cheap; refuses units over ~7k estimated tokens (pre-measured by char budget) instead of silent truncation. |
 | `von-sidecar.ts` | Managed install + lifecycle (see below). |
 | `judge-settings.ts` | User-level mode file `~/.pi/agent/smartread-judge.json` (`{mode, updatedAt}`), atomic tmp+rename write, mirroring `language-intelligence-config.ts`. |
 | `judge-resolver.ts` | Resolves the active backend: pi path (settings file + auth store) or MCP path (env vars). |
@@ -91,9 +91,9 @@ grep (smart cascade path only)
 Optional user-environment overrides (both surfaces): `PI_SMARTREAD_JUDGE_BASE_URL`,
 `PI_SMARTREAD_JUDGE_MODEL`. Per AGENTS.md, network destinations and keys come only from the
 user environment, pi's auth store, or the user-level settings file — never from
-`pi-smartread.config.json`. The OpenRouter key is sent only to the OpenRouter base URL; if
-`PI_SMARTREAD_JUDGE_BASE_URL` points elsewhere, the auth-store key is not attached (an
-explicit `PI_SMARTREAD_JUDGE_API_KEY` is required).
+`pi-smartread.config.json`. Cloud resolution is restricted to the OpenRouter origin; it
+refuses custom origins even when `PI_SMARTREAD_JUDGE_API_KEY` is set. The base-URL override
+remains available to local mode for a user-run sidecar.
 
 ### von sidecar lifecycle
 
@@ -147,12 +147,16 @@ negatives, strip irrelevant fields from state.
 
 ### Decisions on results
 
-- Keep units with p ≥ τ = 0.20; order by p desc, tie-break by fused rank; merge adjacent or
-  overlapping kept ranges (max p wins); then apply the existing `topK`/`maxResults` caps.
+- Keep units with p ≥ τ = 0.40; order by p desc, tie-break by fused rank; merge adjacent or
+  overlapping kept ranges (max p wins); then apply the existing `topK`/`maxResults` caps. The
+  2026-10-05 four-run cloud sweep selected 0.40 as the recall-biased operating point: pooled
+  precision/recall 0.6055/0.9936 versus 0.4952/1.0000 at 0.20, with zero query-level misses in
+  every run. Moving 0.40 → 0.45 saves 17 additional false positives but adds 3 false negatives
+  pooled, so 0.40 is preferred when one dropped relevant unit costs >5.7 irrelevant units.
 - Exact lexical hits that the judge drops are still dropped. Rationale: NL queries only;
   the drop count is reported.
 - Abstain when no unit passes **and** `exists` < 0.35: output
-  `no confident match for "<query>" (judge <backend>, τ 0.20)` plus the top 3 unjudged
+  `no confident match for "<query>" (judge <backend>, τ 0.40)` plus the top 3 unjudged
   candidates as one-line pointers, so the agent is never left with nothing.
 - Failure handling: any judge error, timeout, missing key, or sidecar failure → return the
   unjudged results unchanged, with `degraded: judge_<code>` on grep's existing degradation
@@ -164,7 +168,11 @@ After filtering, take kept hits' graph neighbours from the shared context graph 
 callers, importers; ≤ 12 total, excluding files already shown). Judge them in one batch
 using signature-only cards (name, signature, path). Emit those with p ≥ 0.45 as
 `next: <path>:<line> <symbol> (p)`, max 3. Skipped when the graph is not built — never
-triggers a graph build.
+triggers a graph build. Measured 2026-10-05: von AUROC ≈ 0.51 with all scores ≥ 0.51,
+so the 0.45 pointer threshold and 0.40 keep threshold currently only discriminate under
+the cloud backend; von stays experimental pending better quality. The unit benchmark directly
+validates only the full-text grep keep gate; pointer signature cards, `find` file cards, and
+the separate `exists` noul need task-specific evaluation before their thresholds are retuned.
 
 ## Output
 
@@ -176,7 +184,7 @@ Text (per hit line gains a probability; footer summarises the stage):
 src/net/client.ts  L42-71  executeWithRetry  p=0.91
 <snippet>
 ...
-judge: cloud jev · 24 judged · 19 below τ 0.20 · cache 6/24 · $0.0004
+judge: cloud jev · 24 judged · 19 below τ 0.40 · cache 6/24 · $0.0004
 next: src/net/backoff.ts:12 computeBackoff (0.78) · src/net/errors.ts:30 isRetryable (0.66)
 ```
 
@@ -201,7 +209,7 @@ candidates and pointers produce none.
    ≥ 40 behavioural queries; per query gold implementing units, hard negatives (call sites,
    imports, tests of the same symbols) and easy negatives. Labels produced by a subagent
    and audited by a second one; ambiguous pairs dropped. Metrics: AUROC, ECE, precision /
-   recall at τ 0.20 and 0.45, p50/p95 latency per query, cost per query.
+   recall at τ 0.20, 0.40, and 0.45, p50/p95 latency per query, cost per query.
 2. **Grep end-to-end** — same queries through grep with judge off / local / cloud: file and
    unit Recall@5, tokens returned, abstention correctness on deliberately unanswerable
    queries (≥ 8).

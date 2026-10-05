@@ -31,14 +31,16 @@ Before finishing source changes, run the narrowest relevant tests plus `npm run 
 
 - `read`: already-known source content only; exactly one selector per call: `path`, `paths`, or `symbol`. Natural-language query mode does not exist.
 - `inspect`: explicit `mode: "file" | "directory" | "script"`; structural/architectural analysis only, never LSP navigation.
-- `grep`: broad text/symbol/concept discovery, batch queries, structural options, graph filters.
+- `find`: replaces Pi's builtin `find`; exact schema `{pattern, path?, limit?}`. Discovers files/directories by glob, fuzzy name, or natural-language description; discovery evidence only.
+- `grep`: broad text/symbol/concept discovery, batch queries, structural options, graph filters. Optional judging applies only to natural-language smart-cascade queries and falls back to unjudged results on failure.
+- `/judge`: user-level `off|local|cloud|status|install`; off by default. Cloud auth uses Pi's OpenRouter auth store; von install requires explicit UI confirmation.
 - `LSP`: strict compiler/language-server semantics (read-only except applyProposal). Tool name is uppercase `LSP`.
 - `skill`: discovers project/package/global skills.
 - Experimental: `graph_mutate`, `git_notes_read`, `git_notes_write` only when enabled.
 
 ### Standalone MCP
 
-The MCP registry exposes `inspect`, `grep`, `LSP`, `skill`, plus enabled experimental registry tools. It does **not** expose the Pi-only wrapped `read` tool.
+The MCP registry exposes `inspect`, `find`, `grep`, `LSP`, `skill`, plus enabled experimental registry tools. It does **not** expose the Pi-only wrapped `read` tool. Natural-language judge mode is controlled by user environment settings.
 
 MCP also exposes prompts from `src/mcp/mcp-prompts.ts` and `smartread://` resources from `src/mcp/mcp-resources.ts`.
 
@@ -58,7 +60,8 @@ Do not port examples between the strict tool and script host helpers without con
 | Extension bootstrap/lifecycle | `src/index.ts`, `src/extension-lifecycle.ts`, `src/extension-registration.ts` |
 | Wrapped reads/evidence/enrichment | `src/hook.ts`, `src/read/`, `src/evidence/` |
 | Inspect modes | `src/inspect/inspect-tool.ts`, `src/inspect/inspect.ts`, `src/script-mode/` |
-| Grep/search | `src/search/grep-tool.ts`, `src/search/grep-cascade.ts`, `src/search/grep-structural-executor.ts` |
+| Grep/search | `src/search/grep-tool.ts`, `src/search/grep-cascade.ts`, `src/search/grep-structural-executor.ts`, `src/search/find-tool.ts` |
+| Optional relevance judge | `src/judge/`, `src/search/grep-judge-stage.ts` |
 | Strict LSP | `src/lsp/lsp-tool.ts`, `src/lsp/lsp-strict-contract.ts`, `src/lsp/lsp-operation-registry.ts`, `src/lsp/lsp-executor.ts` |
 | LSP runtime/install/trust | `src/language-intelligence/`, `src/lsp/lsp-manager.ts`, `src/lsp/lsp-connection.ts` |
 | Repository intelligence | `src/repository/`, `src/graph/`, `src/indexing/`, `src/retrieval/` |
@@ -71,7 +74,7 @@ Do not port examples between the strict tool and script host helpers without con
 
 - `read` produces strong evidence only for content actually rendered. Complete file blocks can authorize patching; omitted/partial packed blocks cannot.
 - Large-file AST outlines produce line-range evidence, not full-file authority.
-- `inspect` and `grep` produce discovery/search-match evidence. Read the relevant file/range before mutation.
+- `inspect`, `find`, and `grep` produce discovery/search-match evidence. Read the relevant file/range before mutation.
 - `details.workspaceEvidence` on tool results is the durable source of truth. The in-memory resolver cache is derived from tool-result events.
 - Evidence-producing canonical paths must use real paths with symlinks resolved. Follow the existing `tryCanonical`/realpath pattern; do not replace it with bare `path.resolve`.
 - SmartRead publishes evidence and semantic proposals. **SmartEdit owns file mutation.** SmartRead never applies LSP WorkspaceEdits directly; `applyProposal` is the only mutating operation and it applies a staged proposal through SmartEdit's evidence-checked edit path.
@@ -107,6 +110,7 @@ Network destinations and credentials are user-environment trust decisions:
 - Embeddings endpoint: `PI_SMARTREAD_EMBEDDING_BASE_URL`; key: `PI_SMARTREAD_EMBEDDING_API_KEY`.
 - External reranker endpoint: `PI_SMARTREAD_RERANKER_BASE_URL`; key: `PI_SMARTREAD_RERANKER_API_KEY`.
 - Repo-level `baseUrl` / API-key fields must not become trusted network configuration.
+- Judge mode/model/endpoint overrides are user environment or user-level settings only; Pi cloud credentials come from the auth store and attach only to OpenRouter. von binds to `127.0.0.1` with overflow refused; installation requires UI confirmation.
 
 Non-network knobs such as model names, chunk sizes, HyDE/rerank flags, reranker model/timeouts, git context, search enrichment, and experimental flags may come from the config file.
 
