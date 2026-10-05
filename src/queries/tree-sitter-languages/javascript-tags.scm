@@ -3,10 +3,7 @@
   .
   (method_definition
     name: (property_identifier) @name.definition.method) @definition.method
-  (#not-eq? @name.definition.method "constructor")
-  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
-  (#select-adjacent! @doc @definition.method)
-)
+  (#not-eq? @name.definition.method "constructor"))
 
 (
   (comment)* @doc
@@ -16,16 +13,13 @@
       name: (_) @name.definition.class)
     (class_declaration
       name: (_) @name.definition.class)
-  ] @definition.class
-  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
-  (#select-adjacent! @doc @definition.class)
-)
+  ] @definition.class)
 
 (
   (comment)* @doc
   .
   [
-    (function
+    (function_expression
       name: (identifier) @name.definition.function)
     (function_declaration
       name: (identifier) @name.definition.function)
@@ -33,10 +27,7 @@
       name: (identifier) @name.definition.function)
     (generator_function_declaration
       name: (identifier) @name.definition.function)
-  ] @definition.function
-  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
-  (#select-adjacent! @doc @definition.function)
-)
+  ] @definition.function)
 
 (
   (comment)* @doc
@@ -44,10 +35,7 @@
   (lexical_declaration
     (variable_declarator
       name: (identifier) @name.definition.function
-      value: [(arrow_function) (function)]) @definition.function)
-  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
-  (#select-adjacent! @doc @definition.function)
-)
+      value: [(arrow_function) (function_expression)]) @definition.function))
 
 (
   (comment)* @doc
@@ -55,10 +43,7 @@
   (variable_declaration
     (variable_declarator
       name: (identifier) @name.definition.function
-      value: [(arrow_function) (function)]) @definition.function)
-  (#strip! @doc "^[\\s\\*/]+|[\\s\\*/]+$")
-  (#select-adjacent! @doc @definition.function)
-)
+      value: [(arrow_function) (function_expression)]) @definition.function))
 
 (assignment_expression
   left: [
@@ -66,12 +51,12 @@
     (member_expression
       property: (property_identifier) @name.definition.function)
   ]
-  right: [(arrow_function) (function)]
+  right: [(arrow_function) (function_expression)]
 ) @definition.function
 
 (pair
   key: (property_identifier) @name.definition.function
-  value: [(arrow_function) (function)]) @definition.function
+  value: [(arrow_function) (function_expression)]) @definition.function
 
 (
   (call_expression
