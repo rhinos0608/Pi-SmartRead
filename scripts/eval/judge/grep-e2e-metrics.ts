@@ -94,13 +94,44 @@ export function renderedTokenEstimate(renderedText: string): number {
     return Math.ceil(renderedText.length / 4);
 }
 
+export interface CoverableUnit {
+    relFile: string;
+    line: number;
+    endLine: number;
+    /** Rendered card text when available; gutter lines are the coverage truth. */
+    snippet?: string;
+}
+
+/**
+ * Single coverage predicate for one gold row against one result card.
+ * When the card carries rendered text with parseable gutter line numbers,
+ * coverage is the overlap of DISPLAYED lines with the gold range — a
+ * symbol-unit excerpt (e.g. class 17-54 showing only lines 17-28) must not
+ * claim coverage for gold lines the reader never saw. Cards without
+ * parseable gutters fall back to metadata range overlap.
+ */
+export function unitCoversGold(
+    gold: Pick<EvalRow, "file" | "startLine" | "endLine">,
+    unit: CoverableUnit,
+): boolean {
+    if (unit.relFile !== gold.file) return false;
+    if (unit.snippet !== undefined) {
+        const span = parseRenderedSpan(unit.snippet);
+        if (span) {
+            for (let line = gold.startLine; line <= gold.endLine; line++) {
+                if (span.lines.has(line)) return true;
+            }
+            return false;
+        }
+    }
+    return unit.line <= gold.endLine && unit.endLine >= gold.startLine;
+}
+
 export function goldCovered(
     gold: Pick<EvalRow, "file" | "startLine" | "endLine">,
-    units: Array<Pick<Top5Unit, "relFile" | "line" | "endLine">>,
+    units: CoverableUnit[],
 ): boolean {
-    return units.some(
-        (h) => h.relFile === gold.file && h.line <= gold.endLine && h.endLine >= gold.startLine,
-    );
+    return units.some((h) => unitCoversGold(gold, h));
 }
 
 export function goldFileHit(
@@ -138,7 +169,7 @@ export interface ClassifyEvidence {
  */
 export function classifyGoldRow(
     gold: Pick<EvalRow, "file" | "startLine" | "endLine">,
-    top5: Array<Pick<Top5Unit, "relFile" | "line" | "endLine">>,
+    top5: CoverableUnit[],
     evidence: ClassifyEvidence,
 ): GoldOutcome {
     if (evidence.executionStatus?.startsWith("error:")) return "execution_error";

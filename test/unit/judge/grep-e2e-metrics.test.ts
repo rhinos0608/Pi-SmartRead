@@ -9,6 +9,7 @@ import {
     GATE_CONSTANTS,
     READ_READY_DEFAULT_BUDGET,
     classifyGoldRow,
+    goldCovered,
     isWrongSpanOutcome,
     legacyTop5TokenEstimate,
     parseRenderedSpan,
@@ -348,5 +349,41 @@ describe("fixture validation completeness", () => {
         const report = validateFixture([row({ startLine: 20, endLine: 10 })], new Set(["src/auth.ts"]));
         expect(report.errors.length).toBeGreaterThan(0);
         expect(report.totalRows).toBe(1);
+    });
+});
+
+describe("rendered-lines coverage consistency", () => {
+    // q16 shape from the M1E8 off report: a symbol-unit card whose metadata
+    // range (whole class, 17-54) covers gold 37-45, but whose rendered
+    // excerpt only displays lines 17-28. Metadata claims coverage; the
+    // reader never saw the gold lines.
+    const excerptSnippet = [
+        "      17 | export class LspAffinity {",
+        "      18 |   private readonly scopes = new Map();",
+        "      19 | ",
+        "      20 |   noteSuccess(scopeKey: string): void {",
+        "      21 |     if (!scopeKey) return;",
+        "      22 |     const existing = this.scopes.get(scopeKey);",
+        "      23 |     if (existing !== undefined) {",
+        "      24 |       // Refresh scope recency.",
+        "      25 |     }",
+        "      26 |   }",
+        "      27 | ",
+        "      28 |   noteFailure(scopeKey: string): void {",
+    ].join("\n");
+    const gold = { file: "src/lsp/lsp-affinity.ts", startLine: 37, endLine: 45 };
+    const card = { relFile: gold.file, line: 17, endLine: 54, snippet: excerptSnippet };
+    it("goldCovered uses displayed gutter lines when a snippet is present", () => {
+        expect(goldCovered(gold, [card])).toBe(false);
+    });
+    it("goldCovered still covers when rendered lines overlap the gold range", () => {
+        const shown = { ...card, snippet: "      40 |   needle();\n      41 |   more();" };
+        expect(goldCovered(gold, [shown])).toBe(true);
+    });
+    it("classifyGoldRow agrees with goldCovered on excerpt cards (no double counting)", () => {
+        expect(classifyGoldRow(gold, [card], { judged: false, abstained: false })).toBe("top5_wrong_span");
+    });
+    it("scoreReadReadySpan agrees with goldCovered on excerpt cards", () => {
+        expect(goldCovered(gold, [card])).toBe(scoreReadReadySpan(gold, [card]).success);
     });
 });

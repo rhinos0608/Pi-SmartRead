@@ -466,7 +466,7 @@ async function runQuery(input: {
         snippet: h.snippet,
     }));
     const preJudgeFiles = preJudge?.stage === "pre-judge" ? preJudge.candidates.map((c) => c.relFile) : undefined;
-    const shownRest = shownCards.slice(5).map((h) => ({ relFile: h.relFile, line: h.line, endLine: h.endLine }));
+    const shownRest = shownCards.slice(5).map((h) => ({ relFile: h.relFile, line: h.line, endLine: h.endLine, snippet: h.snippet }));
     const judged = postJudge?.stage === "post-judge" ? postJudge.judged : false;
     const abstained = postJudge?.stage === "post-judge" ? postJudge.abstained : false;
     const judgeDetails = postJudge?.stage === "post-judge" ? (postJudge.judge ?? null) : null;
@@ -482,7 +482,7 @@ async function runQuery(input: {
                 ? {
                     preJudgeCovered: goldCovered(
                         g,
-                        preJudge.candidates.map((c) => ({ relFile: c.relFile, line: c.line, endLine: c.endLine })),
+                        preJudge.candidates.map((c) => ({ relFile: c.relFile, line: c.line, endLine: c.endLine, snippet: c.snippet })),
                     ),
                 }
                 : {}),
@@ -923,7 +923,7 @@ try {
                 fileHitAt5: "evaluable qids with >=1 same-file top-5 hit / evaluable qids",
                 abstentionCorrect: "unanswerable qids with (abstained || top-5 empty) / unanswerable qids",
             },
-            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage, tokenBudget: args.tokenBudget, readReady: summarizeReadReady(outcomes, traces.flatMap((t) => (t.goldOutcomes as Array<{ file: string; startLine: number; endLine: number }>).map((g) => scoreReadReadySpan(g, (t.shown ?? []) as Array<{ relFile: string; line: number; endLine: number; name?: string; snippet: string }>, args.tokenBudget, 5, t.text as string)))) },
+            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage, tokenBudget: args.tokenBudget, readReady: summarizeReadReady(outcomes, traces.flatMap((t) => (t.goldOutcomes as Array<{ file: string; startLine: number; endLine: number }>).map((g) => scoreReadReadySpan(g, t.top5 as Array<{ relFile: string; line: number; endLine: number; name?: string; snippet: string }>, args.tokenBudget, 5, t.text as string)))) },
             queries: traces,
         };
         if (drifted) {
