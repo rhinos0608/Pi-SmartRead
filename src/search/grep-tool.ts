@@ -557,7 +557,10 @@ function resolveSearchScope(cwd: string, inputPath: string | undefined): { searc
             return { searchDir: dirname(scopedFile), scopedFile };
         }
     } catch { /* missing paths fall through to directory discovery */ }
-    return { searchDir: target };
+    // Canonicalize so hit files (canonicalized via tryCanonical/realpath)
+    // and the search dir share one root: a symlinked cwd otherwise breaks
+    // relative display paths and the glob pre-filter.
+    return { searchDir: tryCanonical(target) };
 }
 
 const REGEX_SYNTAX = /(^|[^\\])(?:\||\^|\$|\.\*|\.\+|\[[^\]]+\]|\([^)]*\)|\{\d+(?:,\d*)?\}|\\[bBdDsSwW]|\\\.)/;

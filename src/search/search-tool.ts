@@ -5,7 +5,7 @@
  * results into a single response. depth: "deep" retains those channels and
  * adds fused semantic, symbol, graph, and LSP evidence with provenance.
  */
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { relative, resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
@@ -25,6 +25,10 @@ import { bm25Scores, computeRrfScores, cosineSimilarity } from "../scoring.js";
 import { fetchEmbeddings } from "../indexing/embedding.js";
 import { getGraphifyEnricher } from "../graph/graphify-enricher.js";
 import { classifyRelevanceByScore, classifySimilarity } from "../ranking/classifiers.js";
+
+function tryCanonical(filePath: string): string {
+    try { return realpathSync(filePath); } catch { return filePath; }
+}
 import { expandToMonorepoRoots } from "../workspace/monorepo-detector.js";
 import { getLSPBridge } from "../lsp/lsp-bridge.js";
 import { recordSparse, resolveSessionKey } from "../read/file-read-cache.js";
@@ -411,14 +415,16 @@ async function resolveGrepFiles(
   if (options?.fileGlob) {
     const { minimatch } = await import("minimatch");
     const glob = options.fileGlob;
-    files = files.filter((filePath) => minimatch(relative(cwd, filePath).replace(/\\/g, "/"), glob));
+    files = files.filter((filePath) => minimatch(relative(tryCanonical(cwd), tryCanonical(filePath)).replace(/\\/g, "/"), glob));
   }
   return { files, summary };
 }
 
-/** Repo-relative path with posix separators for display and evidence keys. */
+/** Repo-relative path with posix separators for display and evidence keys.
+ * The root is canonicalized: hit files resolve through symlinks, so a
+ * symlinked cwd would otherwise render '../../..' escapes. */
 function toRelPath(cwd: string, filePath: string): string {
-  return relative(cwd, filePath).replace(/\\/g, "/");
+  return relative(tryCanonical(cwd), tryCanonical(filePath)).replace(/\\/g, "/");
 }
 
 /** Pooled tree-sitter parser per language; avoids rebuilding parsers per file. */
@@ -807,7 +813,7 @@ async function rankDefinitions(
 function toLspDefinition(symbol: { name: string; kind: number; location: { uri: string; range: { start: { line: number }; end: { line: number } } } }, cwd: string): CodeDefinition {
   const uri = symbol.location.uri;
   const filePath = uri.startsWith("file://") ? uri.slice(7) : uri;
-  const relFile = relative(cwd, filePath).replace(/\\/g, "/");
+  const relFile = relative(tryCanonical(cwd), tryCanonical(filePath)).replace(/\\/g, "/");
   return {
     file: filePath,
     relFile,

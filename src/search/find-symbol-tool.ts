@@ -1,4 +1,4 @@
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, promises as fs, realpathSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import Parser from "tree-sitter";
 import { initParser, loadLanguage, getQueryPath } from "../structural/tags.js";
@@ -8,6 +8,17 @@ import { expandToMonorepoRoots } from "../workspace/monorepo-detector.js";
 import { getLSPBridge, type LSPBridge } from "../lsp/lsp-bridge.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+function tryCanonical(filePath: string): string {
+    try { return realpathSync(filePath); } catch { return filePath; }
+}
+
+/** Canonical root for relative-path rendering: hit files may resolve
+ * through symlinks, so the cwd they are made relative to must be
+ * canonical too (see canonicalDisplayRoot in grep-cascade). */
+function displayRoot(cwd: string): string {
+    return tryCanonical(cwd);
+}
 
 export interface SymbolEntry {
   name: string;
@@ -85,7 +96,7 @@ function searchWorkspaceSymbolsWithLsp(query: string, root: string, cwd: string)
       return symbols.map((s) => ({
         name: s.name,
         kind: symbolKindToString(s.kind),
-        relative_path: relative(cwd, decodeURIComponent(s.location.uri.replace(/^file:\/\//, ""))),
+        relative_path: relative(displayRoot(cwd), tryCanonical(decodeURIComponent(s.location.uri.replace(/^file:\/\//, "")))),
         line: s.location.range.start.line + 1,
         name_path: s.containerName ? `${s.containerName}.${s.name}` : s.name,
       }));
@@ -128,7 +139,7 @@ async function discoverAndFilterSymbolFiles(
           // LSP results already carry cwd-relative paths and must be matched
           // directly (feeding them back through relative(cwd, ...) would
           // resolve against process.cwd() and produce wrong paths).
-          const rel = isAbsolute(filePath) ? relative(cwd, filePath) : filePath;
+          const rel = isAbsolute(filePath) ? relative(displayRoot(cwd), tryCanonical(filePath)) : filePath;
           return minimatch(rel.replace(/\\/g, "/"), fileGlob as string);
         };
   if (matchesGlob) {
@@ -204,7 +215,7 @@ async function scanSingleFile(
     tsQuery = new Parser.Query(grammar, querySource);
   } catch { return empty; }
 
-  return extractQueryMatches(tsQuery.matches(tree.rootNode), queryLower, queryParts, includeBody, relative(cwd, filePath));
+  return extractQueryMatches(tsQuery.matches(tree.rootNode), queryLower, queryParts, includeBody, relative(displayRoot(cwd), tryCanonical(filePath)));
 }
 
 /** Pull (name, definition) captures out of raw query matches and keep query hits. */
