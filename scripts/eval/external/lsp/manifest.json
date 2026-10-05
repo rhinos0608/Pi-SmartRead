@@ -1,0 +1,42 @@
+{
+  "tool": "external-lsp-benchmark",
+  "pinned": {
+    "typescript-language-server": {
+      "version": "6.0.0",
+      "integrity": "sha512-LXtzY3UZGfghWA5eRU6/T5j1+YiGRgy14mR3GOKyTKlE1op1TYKQnLVxwBsmnXeDhGLuvzZyIHBAqvrekAITYQ==",
+      "bin": "~/.cache/pi-smartread-bench/tools/lsp-pinned/node_modules/.bin/typescript-language-server",
+      "note": "matches managed-install version in src/language-intelligence/language-server-catalog.ts (typescript descriptor)"
+    },
+    "typescript": {
+      "version": "5.9.2",
+      "integrity": "sha512-CWBzXQrc/qOkhidw1OzBTQuYRbfyxDXJMVJ1XNwUHGROVmuaeiEm3OslpZ1RV96d7SKKjZKrSJu3+t/xlw3R9A==",
+      "libSha256": "aa2ab5a5d765774cbdfdd53cb188d6a6a5749d6f65629bf7c411a3cef6902e79",
+      "note": "sibling install beside typescript-language-server so the server resolves this TS build"
+    }
+  },
+  "corpora": {
+    "self": {
+      "path": "~/.cache/pi-smartread-bench/corpora/pi-smartread-18f6463",
+      "source": "git archive 18f6463 of this repository",
+      "license": "repo LICENSE"
+    },
+    "mitt": {
+      "repo": "https://github.com/developit/mitt",
+      "commit": "6b41670516ed8e8b738612f60491995470aa63b3",
+      "path": "~/.cache/pi-smartread-bench/corpora/mitt",
+      "license": "MIT",
+      "note": "tiny TS event-emitter; src/index.ts + tsconfig.json, no install-time network needs"
+    }
+  },
+  "sampling": {
+    "seed": 20261005,
+    "perCorpus": 150,
+    "positions": "0-based UTF-16 line/character",
+    "strata": ["function-name", "method-name", "imported-alias", "type-reference", "property-access", "re-export", "declaration", "use"]
+  },
+  "operations": {
+    "reference": ["textDocument/definition", "textDocument/references includeDeclaration=true|false", "textDocument/hover", "workspace/symbol"],
+    "ours": ["goToDefinition", "findReferences", "hover", "workspaceSymbols"],
+    "crosscheck": "ts.LanguageService getDefinitionAtPosition/getReferencesAtPosition (pinned TS 5.9.2)"
+  }
+}
