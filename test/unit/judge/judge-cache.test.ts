@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { JUDGE_CACHE_CANONICAL_REF, JudgeCache, judgeCacheKey, stableStringify } from "../../../src/judge/judge-cache.js";
+import { JUDGE_CACHE_CANONICAL_REF, JudgeCache, judgeCacheKey, resolveJudgeCacheMaxAgeMs, stableStringify } from "../../../src/judge/judge-cache.js";
 
 const q = { type: "noul" as const, instructions: "i" };
 
@@ -34,19 +34,21 @@ describe("judge-cache", () => {
         expect(readFileSync(join(dir, "verdicts.jsonl"), "utf-8").trim().split("\n")).toHaveLength(1);
     });
 
-    it("tolerates corrupt lines", () => {
+    it("tolerates corrupt lines and old-format entries without timestamps", () => {
         const dir = mkdtempSync(join(tmpdir(), "judge-cache-"));
         writeFileSync(join(dir, "verdicts.jsonl"), "not json\n{\"key\":\"k\",\"p\":0.5}\n[broken\n", "utf-8");
         const c = new JudgeCache(dir);
-        expect(c.get("k")).toBe(0.5);
-        expect(c.size()).toBe(1);
+        // Old-format entries without a timestamp are misses, never errors.
+        expect(c.get("k")).toBeUndefined();
+        expect(c.size()).toBe(0);
     });
 
     it("ignores cached values outside the probability range", () => {
         const dir = mkdtempSync(join(tmpdir(), "judge-cache-"));
+        const ts = Date.now();
         writeFileSync(
             join(dir, "verdicts.jsonl"),
-            '{"key":"below","p":-0.1}\n{"key":"above","p":1.1}\n{"key":"valid","p":0.5}\n',
+            `{"key":"below","p":-0.1,"ts":${ts}}\n{"key":"above","p":1.1,"ts":${ts}}\n{"key":"valid","p":0.5,"ts":${ts}}\n`,
             "utf-8",
         );
         const cache = new JudgeCache(dir);
@@ -116,5 +118,55 @@ describe("judge-cache", () => {
             .toBe(judgeCacheKey(keyArgs({ baseUrl: "https://judge.test/" })));
         expect(judgeCacheKey(keyArgs()))
             .toBe(judgeCacheKey(keyArgs({ baseUrl: "HTTPS://JUDGE.test" })));
+    });
+
+    it("never includes secrets in the key input", () => {
+        const key = judgeCacheKey(keyArgs());
+        expect(key).not.toContain("secret");
+        expect(key).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("treats entries older than max age as misses", () => {
+        const dir = mkdtempSync(join(tmpdir(), "judge-cache-"));
+        let now = 1_000_000;
+        const cache = new JudgeCache(dir, 1000, { now: () => now, maxAgeMs: 1000 });
+        const key = judgeCacheKey(keyArgs());
+        cache.set(key, 0.5);
+        expect(cache.get(key)).toBe(0.5);
+        now += 1001;
+        expect(cache.get(key)).toBeUndefined();
+    });
+
+    it("expired entries stay expired after reload", () => {
+        const dir = mkdtempSync(join(tmpdir(), "judge-cache-"));
+        let now = 1_000_000;
+        new JudgeCache(dir, 1000, { now: () => now, maxAgeMs: 1000 })
+            .set(judgeCacheKey(keyArgs()), 0.5);
+        now += 10_000;
+        const reloaded = new JudgeCache(dir, 1000, { now: () => now, maxAgeMs: 1000 });
+        expect(reloaded.get(judgeCacheKey(keyArgs()))).toBeUndefined();
+    });
+
+    it("old-format entries without a timestamp are misses, never errors", () => {
+        const dir = mkdtempSync(join(tmpdir(), "judge-cache-"));
+        writeFileSync(
+            join(dir, "verdicts.jsonl"),
+            `${JSON.stringify({ key: judgeCacheKey(keyArgs()), p: 0.9 })}\n` +
+            "not json at all\n",
+        );
+        const cache = new JudgeCache(dir);
+        expect(cache.get(judgeCacheKey(keyArgs()))).toBeUndefined();
+        expect(cache.size()).toBe(0);
+    });
+
+    it("resolves max age from env, defaulting to 7 days on missing/invalid", () => {
+        const sevenDays = 7 * 24 * 60 * 60 * 1000;
+        expect(resolveJudgeCacheMaxAgeMs({})).toBe(sevenDays);
+        expect(resolveJudgeCacheMaxAgeMs({ PI_SMARTREAD_JUDGE_CACHE_MAX_AGE_DAYS: "1" }))
+            .toBe(24 * 60 * 60 * 1000);
+        for (const bad of ["0", "-3", "nope", "", "NaN", "Infinity"]) {
+            expect(resolveJudgeCacheMaxAgeMs({ PI_SMARTREAD_JUDGE_CACHE_MAX_AGE_DAYS: bad }))
+                .toBe(sevenDays);
+        }
     });
 });
