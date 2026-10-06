@@ -9,7 +9,7 @@
  *
  * Knobs (each independent, read via resolveGrepRankingOptions):
  * - PI_SMARTREAD_GREP_RANK_TEST_DEMOTE: score multiplier factor applied
- *   to test/spec/fixture/__tests__ paths and docs/*.md. Unset defaults to
+ *   to test/spec/fixture/__tests__ paths and every *.md file. Unset defaults to
  *   0.7; `off`/`0`/`false`/`no` disables demotion; a valid factor in (0,1)
  *   overrides; any other value falls back to 0.7.
  * - PI_SMARTREAD_GREP_RANK_FILENAME: on/off — prepend a synthetic

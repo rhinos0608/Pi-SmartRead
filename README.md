@@ -184,7 +184,7 @@ Every rendered hit gets search-match evidence, not full-file evidence. When auto
 
 ### Ranking knobs
 
-BM25 ranking demotes test/spec/doc files by default: `PI_SMARTREAD_GREP_RANK_TEST_DEMOTE` multiplies the score of test/spec/fixture/`__tests__` paths and `docs/*.md` by 0.7. Set it to `off` (also `0`, `false`, `no`) to disable demotion, or to a factor in (0,1) to override; any other value falls back to 0.7. All other ranking knobs stay default-off. Active knobs are reported in `details.rankingKnobs`.
+BM25 ranking demotes test/spec/doc files by default: `PI_SMARTREAD_GREP_RANK_TEST_DEMOTE` multiplies the score of test/spec/fixture/`__tests__` paths, `*.test.*` / `*.spec.*` / `test_*` / `*_test.*` files, and every Markdown file (`*.md`, including READMEs) by 0.7. Set it to `off` (also `0`, `false`, `no`) to disable demotion, or to a factor in (0,1) to override; any other value falls back to 0.7. All other ranking knobs stay default-off. Active knobs are reported in `details.rankingKnobs`.
 
 ---
 
