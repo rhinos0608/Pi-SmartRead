@@ -207,24 +207,56 @@ export function isCleanPorcelain(porcelain: string): boolean {
 }
 
 /**
- * Cold start: delete every runtime-cache directory inside realpath(checkout).
- * Never follows symlinks; a cache-name symlink whose resolved target lies
- * outside the checkout (or is unreadable) is refused, not deleted.
+ * Cold start, phase 1 (no deletion): walk realpath(checkout) and classify
+ * every runtime-cache directory as either deletable or tracked-skipped.
+ * Never follows symlinks. Any filesystem or git failure yields `error`
+ * with NOTHING deleted (callers must not delete on error).
  */
-export function coldStartRuntimeCaches(checkoutDir: string): {
-    deleted: string[];
+export function planColdStartRuntimeCaches(
+    checkoutDir: string,
+    git: ColdStartGit = {},
+): {
+    root: string;
+    toDelete: string[];
     skippedTracked: string[];
     error: string | null;
 } {
-    const deleted: string[] = [];
-    const skippedTracked: string[] = [];
     let root: string;
     try {
         root = realpathSync(checkoutDir);
     } catch {
-        return { deleted, skippedTracked, error: `cannot resolve checkout: ${checkoutDir}` };
+        return { root: checkoutDir, toDelete: [], skippedTracked: [], error: `cannot resolve checkout: ${checkoutDir}` };
     }
+    const lsFiles = git.lsFiles ?? defaultLsFiles;
     const cacheNames = new Set<string>(SMARTREAD_RUNTIME_CACHE_DIRS as readonly string[]);
+    const candidates: string[] = [];
+    const walkError = walkCacheCandidates(root, cacheNames, candidates);
+    if (walkError) return { root, toDelete: [], skippedTracked: [], error: walkError };
+    // Classify EVERY candidate before deleting any: a git failure here
+    // (fail-closed) aborts with nothing deleted.
+    const skippedTracked: string[] = [];
+    const toDelete: string[] = [];
+    for (const full of candidates) {
+        let tracked: boolean;
+        try {
+            tracked = dirHasTrackedFilesOrThrow(root, full, lsFiles);
+        } catch {
+            return { root, toDelete: [], skippedTracked: [], error: `cannot list tracked files under ${full}` };
+        }
+        // A cache-named dir holding tracked content is legitimate and skipped.
+        (tracked ? skippedTracked : toDelete).push(full.slice(root.length + 1));
+    }
+    toDelete.sort();
+    skippedTracked.sort();
+    return { root, toDelete, skippedTracked, error: null };
+}
+
+/**
+ * Walk root (never following symlinks) and collect cache-named directories.
+ * Returns a sanitized error string on refusal/failure, or null when the
+ * walk completed and `out` holds every candidate.
+ */
+function walkCacheCandidates(root: string, cacheNames: Set<string>, out: string[]): string | null {
     const stack: string[] = [root];
     try {
         while (stack.length > 0) {
@@ -233,57 +265,92 @@ export function coldStartRuntimeCaches(checkoutDir: string): {
             try {
                 entries = readdirSync(dir, { withFileTypes: true });
             } catch {
-                return { deleted, skippedTracked, error: `cannot list directory: ${dir}` };
+                return `cannot list directory: ${dir}`;
             }
             for (const entry of entries) {
                 const full = join(dir, entry.name);
-                if (entry.isSymbolicLink()) {
-                    if (!cacheNames.has(entry.name)) continue;
-                    // Symlinked cache dir: resolve without following beyond readlink.
-                    let target: string;
-                    try {
-                        target = realpathSync(full);
-                    } catch {
-                        return { deleted, skippedTracked, error: `refuses-symlink: ${full} is not resolvable` };
+                if (!entry.isSymbolicLink()) {
+                    if (entry.isDirectory()) {
+                        if (cacheNames.has(entry.name)) out.push(full);
+                        else stack.push(full);
                     }
-                    if (target !== root && !target.startsWith(`${root}/`)) {
-                        return { deleted, skippedTracked, error: `refuses-symlink: ${full} points outside the checkout` };
-                    }
-                    // Inside-checkout symlink: leave it in place, do not follow/delete.
-                    return { deleted, skippedTracked, error: `refuses-symlink: ${full} is a symlink` };
+                    continue;
                 }
-                if (entry.isDirectory()) {
-                    if (cacheNames.has(entry.name)) {
-                        // Never delete tracked files: a cache-named dir holding
-                        // tracked content is legitimate and skipped entirely.
-                        if (dirHasTrackedFiles(root, full)) {
-                            skippedTracked.push(full.slice(root.length + 1));
-                        } else {
-                            rmSync(full, { recursive: true, force: true });
-                            deleted.push(full.slice(root.length + 1));
-                        }
-                    } else {
-                        stack.push(full);
-                    }
+                if (!cacheNames.has(entry.name)) continue;
+                // Symlinked cache dir: resolve without following beyond readlink.
+                let target: string;
+                try {
+                    target = realpathSync(full);
+                } catch {
+                    return `refuses-symlink: ${full} is not resolvable`;
                 }
+                if (target !== root && !target.startsWith(`${root}/`)) {
+                    return `refuses-symlink: ${full} points outside the checkout`;
+                }
+                // Inside-checkout symlink: leave it in place, do not follow/delete.
+                return `refuses-symlink: ${full} is a symlink`;
             }
         }
     } catch (error) {
-        return { deleted, skippedTracked, error: error instanceof Error ? error.message : String(error) };
+        return error instanceof Error ? error.message : String(error);
     }
-    deleted.sort();
-    skippedTracked.sort();
-    return { deleted, skippedTracked, error: null };
+    return null;
 }
 
-/** True when `git ls-files` reports any tracked file at or under dir. */
-function dirHasTrackedFiles(gitDir: string, dir: string): boolean {
+/**
+ * Cold start, phase 2: delete the runtime-cache directories classified by
+ * {@link planColdStartRuntimeCaches}. Callers must plan every checkout
+ * first and only delete when all plans are error-free.
+ */
+export function coldStartRuntimeCaches(
+    checkoutDir: string,
+    git: ColdStartGit = {},
+): {
+    deleted: string[];
+    skippedTracked: string[];
+    error: string | null;
+} {
+    const plan = planColdStartRuntimeCaches(checkoutDir, git);
+    if (plan.error) return { deleted: [], skippedTracked: [], error: plan.error };
+    const deleted: string[] = [];
     try {
-        const out = execFileSync("git", ["-C", gitDir, "ls-files", "--", dir], { encoding: "utf8" });
-        return out.trim().length > 0;
-    } catch {
-        return false;
+        for (const rel of plan.toDelete) {
+            rmSync(join(plan.root, rel), { recursive: true, force: true });
+            deleted.push(rel);
+        }
+    } catch (error) {
+        return { deleted, skippedTracked: [], error: error instanceof Error ? error.message : String(error) };
     }
+    return { deleted, skippedTracked: plan.skippedTracked, error: null };
+}
+
+/** Injectable git access for the cold-start path (tests stub failures). */
+export interface ColdStartGit {
+    lsFiles?: (gitDir: string, dir: string) => string;
+}
+
+function defaultLsFiles(gitDir: string, dir: string): string {
+    return execFileSync("git", ["-C", gitDir, "ls-files", "--", dir], { encoding: "utf8" }) as string;
+}
+
+/**
+ * True when `git ls-files` reports any tracked file at or under dir.
+ * Fail-closed: any git failure (non-zero exit, spawn error) or non-string
+ * output throws, so callers can never read an error as 'no tracked files'.
+ */
+function dirHasTrackedFilesOrThrow(
+    gitDir: string,
+    dir: string,
+    lsFiles: (gitDir: string, dir: string) => string,
+): boolean {
+    let out: unknown;
+    try {
+        out = lsFiles(gitDir, dir);
+    } catch {
+        throw new Error(`cannot list tracked files under ${dir}`);
+    }
+    if (typeof out !== "string") throw new Error(`cannot list tracked files under ${dir}`);
+    return out.trim().length > 0;
 }
 
 /** Check each pinned checkout: HEAD equals the pinned sha and the tree is clean. */
@@ -577,20 +644,40 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
     const coldDeleted: string[] = [];
     const coldSkippedTracked: string[] = [];
     {
+        // Two phases: plan EVERY checkout (full cleanliness re-check + full
+        // tracked classification, no deletion) before deleting anything.
         const seen = new Set<string>();
+        const plans: { root: string; toDelete: string[]; skippedTracked: string[] }[] = [];
         for (const q of queries) {
             const pin = repoManifest.repos.find((p) => `${p.owner}/${p.name}` === q.repo);
             if (!pin) continue;
-            const dir = realpathSync(join(reposRoot, `${pin.owner}__${pin.name}`));
-            if (seen.has(dir)) continue;
-            seen.add(dir);
-            const cold = coldStartRuntimeCaches(dir);
-            if (cold.error) {
-                console.error(`error: ${cold.error}`);
+            let dir: string;
+            try {
+                dir = realpathSync(join(reposRoot, `${pin.owner}__${pin.name}`));
+            } catch {
+                console.error(`error: cannot resolve checkout: ${q.repo}`);
                 return 2;
             }
-            for (const p of cold.deleted) coldDeleted.push(`${dir}/${p}`);
-            for (const p of cold.skippedTracked) coldSkippedTracked.push(`${dir}/${p}`);
+            if (seen.has(dir)) continue;
+            seen.add(dir);
+            const plan = planColdStartRuntimeCaches(dir);
+            if (plan.error) {
+                console.error(`error: ${plan.error}`);
+                return 2;
+            }
+            plans.push({ root: plan.root, toDelete: plan.toDelete, skippedTracked: plan.skippedTracked });
+        }
+        for (const plan of plans) {
+            for (const p of plan.toDelete) {
+                try {
+                    rmSync(join(plan.root, p), { recursive: true, force: true });
+                } catch {
+                    console.error(`error: cannot delete runtime cache: ${p}`);
+                    return 2;
+                }
+                coldDeleted.push(`${plan.root}/${p}`);
+            }
+            for (const p of plan.skippedTracked) coldSkippedTracked.push(`${plan.root}/${p}`);
         }
         coldDeleted.sort();
         coldSkippedTracked.sort();

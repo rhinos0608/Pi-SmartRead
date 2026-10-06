@@ -123,6 +123,23 @@ describe("verifyCheckoutPins refusals", () => {
         expect(errors.some((e) => e.includes("not clean"))).toBe(true);
     });
 
+    it("refuses when git HEAD or status reads fail (fail-closed, never 'clean' on error)", () => {
+        const headFails = verifyCheckoutPins(q("honojs/hono"), pins, "/tmp", {
+            head: () => {
+                throw new Error("fatal: index file corrupt");
+            },
+            clean: () => true,
+        });
+        expect(headFails.some((e) => e.includes("cannot read HEAD"))).toBe(true);
+        const statusFails = verifyCheckoutPins(q("honojs/hono"), pins, "/tmp", {
+            head: () => "abc",
+            status: () => {
+                throw new Error("spawn git ENOENT");
+            },
+        });
+        expect(statusFails.some((e) => e.includes("cannot check tree cleanliness"))).toBe(true);
+    });
+
     it("refuses unpinned repos and passes a clean pin", () => {
         expect(
             verifyCheckoutPins(q("other/repo"), pins, "/tmp", { head: () => "abc", clean: () => true }).length,
@@ -305,5 +322,56 @@ describe("D62 SmartRead runtime caches", () => {
         expect(cold.error).toMatch(/refuse/);
         expect(cold.deleted).toEqual([]);
         expect(existsSync(join(outside, "secret.txt"))).toBe(true);
+    });
+
+    it("refuses (no deletion) when git ls-files fails: corrupt-index repro", () => {
+        const dir = initRepo();
+        mkdirSync(join(dir, ".pi"), { recursive: true });
+        writeFileSync(join(dir, ".pi", "config.json"), "{}\n");
+        execFileSync("git", ["-C", dir, "add", "."]);
+        execFileSync("git", ["-C", dir, "commit", "-qm", "track pi"]);
+        // Corrupt the index so `git ls-files` exits non-zero; the tracked
+        // check must fail closed instead of treating the dir as untracked.
+        writeFileSync(join(dir, ".git", "index"), "CORRUPT!");
+        const cold = coldStartRuntimeCaches(dir);
+        expect(cold.error).toMatch(/cannot list tracked files/);
+        expect(cold.deleted).toEqual([]);
+        expect(existsSync(join(dir, ".pi", "config.json"))).toBe(true);
+    });
+
+    it("refuses (no deletion) when git is unavailable", () => {
+        const dir = initRepo();
+        mkdirSync(join(dir, ".pi-smartread.tags.cache"), { recursive: true });
+        writeFileSync(join(dir, ".pi-smartread.tags.cache", "t.json"), "{}\n");
+        const noGit = {
+            lsFiles: () => {
+                throw new Error("spawn git ENOENT");
+            },
+        };
+        const cold = coldStartRuntimeCaches(dir, noGit);
+        expect(cold.error).toMatch(/cannot list tracked files/);
+        expect(cold.deleted).toEqual([]);
+        expect(existsSync(join(dir, ".pi-smartread.tags.cache", "t.json"))).toBe(true);
+    });
+
+    it("checks every cache dir before deleting any (no interleaved check/delete)", () => {
+        const dir = initRepo();
+        mkdirSync(join(dir, ".pi"), { recursive: true });
+        writeFileSync(join(dir, ".pi", "a.json"), "{}\n");
+        mkdirSync(join(dir, ".pi-smartread"), { recursive: true });
+        writeFileSync(join(dir, ".pi-smartread", "b.json"), "{}\n");
+        let calls = 0;
+        const flakyGit = {
+            lsFiles: () => {
+                calls += 1;
+                if (calls === 1) return "";
+                throw new Error("fatal: index file corrupt");
+            },
+        };
+        const cold = coldStartRuntimeCaches(dir, flakyGit);
+        expect(cold.error).toMatch(/cannot list tracked files/);
+        expect(cold.deleted).toEqual([]);
+        expect(existsSync(join(dir, ".pi", "a.json"))).toBe(true);
+        expect(existsSync(join(dir, ".pi-smartread", "b.json"))).toBe(true);
     });
 });
