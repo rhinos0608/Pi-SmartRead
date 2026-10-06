@@ -41,7 +41,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
@@ -164,20 +164,117 @@ function sha256OfFile(path: string): string {
     return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+/** SmartRead runtime-cache directory names (AGENTS.md 'Generated/runtime state').
+ * Untouched caches created by SmartRead itself inside a searched tree must not
+ * fail the runner's clean-checkout check, and are cold-started (deleted)
+ * before running queries for a repo. */
+export const SMARTREAD_RUNTIME_CACHE_DIRS = [
+    ".pi",
+    ".pi-smartread",
+    ".pi-smartread.tags.cache",
+    ".pi-smartread.embeddings.cache",
+    ".pi-subagents",
+    "graphify-out",
+    ".smart-edit-undo",
+    ".subagent-work",
+] as const;
+
+/** True when any full '/'-separated path segment is a runtime-cache dir name. */
+export function isRuntimeCachePath(path: string): boolean {
+    const normalized = path.replace(/\\/g, "/").replace(/^\"|\"$/g, "");
+    const segments = normalized.split("/").filter((s) => s.length > 0 && s !== ".");
+    return segments.some((s) => (SMARTREAD_RUNTIME_CACHE_DIRS as readonly string[]).includes(s));
+}
+
+/**
+ * Cleanliness over `git status --porcelain --untracked-files=all` output:
+ * no tracked modifications and no untracked path except runtime-cache paths.
+ */
+export function isCleanPorcelain(porcelain: string): boolean {
+    for (const line of porcelain.split("\n")) {
+        if (line.trim().length === 0) continue;
+        const raw = line.length > 3 ? line.slice(3) : "";
+        // Renames/copies: 'old -> new'; ignore only when every side is a cache path.
+        const sides = raw.includes(" -> ") ? raw.split(" -> ") : [raw];
+        const allCache = sides.length > 0 && sides.every((s) => s.trim().length > 0 && isRuntimeCachePath(s.trim()));
+        if (allCache) continue;
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Cold start: delete every runtime-cache directory inside realpath(checkout).
+ * Never follows symlinks; a cache-name symlink whose resolved target lies
+ * outside the checkout (or is unreadable) is refused, not deleted.
+ */
+export function coldStartRuntimeCaches(checkoutDir: string): { deleted: string[]; error: string | null } {
+    const deleted: string[] = [];
+    let root: string;
+    try {
+        root = realpathSync(checkoutDir);
+    } catch {
+        return { deleted, error: `cannot resolve checkout: ${checkoutDir}` };
+    }
+    const cacheNames = new Set<string>(SMARTREAD_RUNTIME_CACHE_DIRS as readonly string[]);
+    const stack: string[] = [root];
+    try {
+        while (stack.length > 0) {
+            const dir = stack.pop() as string;
+            let entries: import("node:fs").Dirent[];
+            try {
+                entries = readdirSync(dir, { withFileTypes: true });
+            } catch {
+                return { deleted, error: `cannot list directory: ${dir}` };
+            }
+            for (const entry of entries) {
+                const full = join(dir, entry.name);
+                if (entry.isSymbolicLink()) {
+                    if (!cacheNames.has(entry.name)) continue;
+                    // Symlinked cache dir: resolve without following beyond readlink.
+                    let target: string;
+                    try {
+                        target = realpathSync(full);
+                    } catch {
+                        return { deleted, error: `refuses-symlink: ${full} is not resolvable` };
+                    }
+                    if (target !== root && !target.startsWith(`${root}/`)) {
+                        return { deleted, error: `refuses-symlink: ${full} points outside the checkout` };
+                    }
+                    // Inside-checkout symlink: leave it in place, do not follow/delete.
+                    return { deleted, error: `refuses-symlink: ${full} is a symlink` };
+                }
+                if (entry.isDirectory()) {
+                    if (cacheNames.has(entry.name)) {
+                        rmSync(full, { recursive: true, force: true });
+                        deleted.push(full.slice(root.length + 1));
+                    } else {
+                        stack.push(full);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        return { deleted, error: error instanceof Error ? error.message : String(error) };
+    }
+    deleted.sort();
+    return { deleted, error: null };
+}
+
 /** Check each pinned checkout: HEAD equals the pinned sha and the tree is clean. */
 export function verifyCheckoutPins(
     queries: D46Query[],
     pins: ReturnType<typeof loadRepoManifest>["repos"],
     reposRoot: string,
-    git?: { head(dir: string): string; clean(dir: string): boolean },
+    git?: { head(dir: string): string; status?(dir: string): string; clean?(dir: string): boolean },
 ): string[] {
     const errors: string[] = [];
     const byRepo = new Map(pins.map((p) => [`${p.owner}/${p.name}`, p]));
     const needed = [...new Set(queries.map((q) => q.repo))].sort();
     const run = git ?? {
         head: (dir: string) => execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
-        clean: (dir: string) =>
-            execFileSync("git", ["-C", dir, "status", "--porcelain"], { encoding: "utf8" }).trim().length === 0,
+        status: (dir: string) =>
+            execFileSync("git", ["-C", dir, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" }),
     };
     for (const repo of needed) {
         const pin = byRepo.get(repo);
@@ -198,7 +295,8 @@ export function verifyCheckoutPins(
             continue;
         }
         try {
-            if (!run.clean(dir)) errors.push(`${repo}: working tree is not clean`);
+            const clean = run.status ? isCleanPorcelain(run.status(dir)) : run.clean!(dir);
+            if (!clean) errors.push(`${repo}: working tree is not clean`);
         } catch {
             errors.push(`${repo}: cannot check tree cleanliness of ${dir}`);
         }
@@ -451,6 +549,24 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         for (const e of pinErrors) console.error(`error: ${e}`);
         return 2;
     }
+    const coldDeleted: string[] = [];
+    {
+        const seen = new Set<string>();
+        for (const q of queries) {
+            const pin = repoManifest.repos.find((p) => `${p.owner}/${p.name}` === q.repo);
+            if (!pin) continue;
+            const dir = realpathSync(join(reposRoot, `${pin.owner}__${pin.name}`));
+            if (seen.has(dir)) continue;
+            seen.add(dir);
+            const cold = coldStartRuntimeCaches(dir);
+            if (cold.error) {
+                console.error(`error: ${cold.error}`);
+                return 2;
+            }
+            for (const p of cold.deleted) coldDeleted.push(`${dir}/${p}`);
+        }
+        coldDeleted.sort();
+    }
 
     const ranking = toRankReportSettings(resolveGrepRankingOptions());
     const engineSourceHash = hashEngineSources(gitRootFromScript() ?? resolve("."));
@@ -582,6 +698,7 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         config: args.config,
         status: "complete",
         replicate: args.replicate,
+        coldStart: { deleted: coldDeleted, count: coldDeleted.length },
         threshold: args.config === "off" ? null : CONFIG_THRESHOLD[args.config],
         model: {
             alias: args.config === "off" ? "off" : (process.env.PI_SMARTREAD_JUDGE_MODEL ?? CLOUD_JUDGE_DEFAULT_MODEL),

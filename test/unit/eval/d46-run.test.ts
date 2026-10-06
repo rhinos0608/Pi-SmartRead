@@ -5,15 +5,19 @@
  * without --open-holdout/--freeze, freeze arm mismatch, freeze
  * engine-hash mismatch, and holdout redaction (no query text or gold).
  */
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, existsSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
     checkHoldoutGuard,
+    coldStartRuntimeCaches,
+    isCleanPorcelain,
     parseD46RunArgs,
     redactForHoldout,
+    SMARTREAD_RUNTIME_CACHE_DIRS,
     verifyCheckoutPins,
     verifySplitManifest,
 } from "../../../scripts/eval/d46/run.js";
@@ -177,5 +181,103 @@ describe("redactForHoldout", () => {
         expect(redacted["gold"]).toEqual([]);
         expect(redacted["covered"]).toBe(true);
         expect(redactForHoldout(row, false)).toEqual(row);
+    });
+});
+
+describe("D62 SmartRead runtime caches", () => {
+    it("defines the AGENTS.md generated/runtime-state dir names once", () => {
+        expect([...SMARTREAD_RUNTIME_CACHE_DIRS].sort()).toEqual(
+            [
+                ".pi",
+                ".pi-smartread",
+                ".pi-smartread.tags.cache",
+                ".pi-smartread.embeddings.cache",
+                ".pi-subagents",
+                "graphify-out",
+                ".smart-edit-undo",
+                ".subagent-work",
+            ].sort(),
+        );
+    });
+
+    it("treats only full-segment cache paths as clean", () => {
+        expect(isCleanPorcelain("")).toBe(true);
+        expect(isCleanPorcelain("?? .pi-smartread.tags.cache/\n?? src/.pi/x\n")).toBe(true);
+        expect(isCleanPorcelain("?? notes.txt\n")).toBe(false);
+        expect(isCleanPorcelain(" M src/a.ts\n")).toBe(false);
+        expect(isCleanPorcelain("?? notes.txt\n?? .pi/\n")).toBe(false);
+        expect(isCleanPorcelain("?? .pi-smartread.tags.cache.bak/x\n")).toBe(false);
+    });
+
+    function initRepo(): string {
+        const dir = realpathSync(mkdtempSync(join(tmpdir(), "d46-d62-")));
+        execFileSync("git", ["init", "-q", dir]);
+        execFileSync("git", ["-C", dir, "config", "user.email", "d62@test.invalid"]);
+        execFileSync("git", ["-C", dir, "config", "user.name", "d62"]);
+        writeFileSync(join(dir, "a.txt"), "a\n");
+        execFileSync("git", ["-C", dir, "add", "."]);
+        execFileSync("git", ["-C", dir, "commit", "-qm", "init"]);
+        return dir;
+    }
+
+    function headOf(dir: string): string {
+        return (execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }) as string).trim();
+    }
+
+    function gitStatus(dir: string): string {
+        return execFileSync("git", ["-C", dir, "status", "--porcelain", "--untracked-files=all"], {
+            encoding: "utf8",
+        }) as string;
+    }
+
+    it("ignores root+nested cache dirs, cold-starts them, still refuses notes.txt/tracked drift", () => {
+        const reposRoot = realpathSync(mkdtempSync(join(tmpdir(), "d46-d62-roots-")));
+        const dir = join(reposRoot, "o__r");
+        mkdirSync(dir, { recursive: true });
+        execFileSync("git", ["init", "-q", dir]);
+        execFileSync("git", ["-C", dir, "config", "user.email", "d62@test.invalid"]);
+        execFileSync("git", ["-C", dir, "config", "user.name", "d62"]);
+        writeFileSync(join(dir, "a.txt"), "a\n");
+        execFileSync("git", ["-C", dir, "add", "."]);
+        execFileSync("git", ["-C", dir, "commit", "-qm", "init"]);
+        mkdirSync(join(dir, ".pi-smartread.tags.cache"), { recursive: true });
+        writeFileSync(join(dir, ".pi-smartread.tags.cache", "t.json"), "{}\n");
+        mkdirSync(join(dir, "sub", ".pi"), { recursive: true });
+        writeFileSync(join(dir, "sub", ".pi", "x.json"), "{}\n");
+        expect(isCleanPorcelain(gitStatus(dir))).toBe(true);
+        const queries = [
+            { id: "q1", repo: "o/r", answerable: true, gold: [] },
+        ] as unknown as Parameters<typeof verifyCheckoutPins>[0];
+        const pins = [{ owner: "o", name: "r", sha: headOf(dir) }] as unknown as Parameters<
+            typeof verifyCheckoutPins
+        >[1];
+        expect(verifyCheckoutPins(queries, pins, reposRoot)).toEqual([]);
+        const cold = coldStartRuntimeCaches(dir);
+        expect(cold.error).toBeNull();
+        expect(cold.deleted).toEqual([".pi-smartread.tags.cache", "sub/.pi"]);
+        expect(existsSync(join(dir, ".pi-smartread.tags.cache"))).toBe(false);
+        expect(existsSync(join(dir, "sub", ".pi"))).toBe(false);
+        writeFileSync(join(dir, "notes.txt"), "n\n");
+        expect(isCleanPorcelain(gitStatus(dir))).toBe(false);
+        const errors = verifyCheckoutPins(queries, pins, reposRoot);
+        expect(errors.some((e) => e.includes("not clean"))).toBe(true);
+    });
+
+    it("refuses tracked modifications even with caches present", () => {
+        const dir = initRepo();
+        mkdirSync(join(dir, ".pi"), { recursive: true });
+        writeFileSync(join(dir, "a.txt"), "changed\n");
+        expect(isCleanPorcelain(gitStatus(dir))).toBe(false);
+    });
+
+    it("does not follow a symlinked cache dir pointing outside the checkout", () => {
+        const dir = initRepo();
+        const outside = realpathSync(mkdtempSync(join(tmpdir(), "d46-d62-out-")));
+        writeFileSync(join(outside, "secret.txt"), "s\n");
+        symlinkSync(outside, join(dir, ".pi"));
+        const cold = coldStartRuntimeCaches(dir);
+        expect(cold.error).toMatch(/refuse/);
+        expect(cold.deleted).toEqual([]);
+        expect(existsSync(join(outside, "secret.txt"))).toBe(true);
     });
 });
