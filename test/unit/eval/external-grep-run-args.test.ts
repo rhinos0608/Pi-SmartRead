@@ -6,7 +6,7 @@
  * temp HOME so the real cache cannot be touched.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,7 @@ afterEach(() => {
 
 function runCli(extraArgs: string[], home: string): { status: number | null; stderr: string } {
     try {
-        execFileSync("npx", ["tsx", "scripts/eval/external/grep/run.ts", ...extraArgs], {
+        execFileSync(TSX_BIN, ["scripts/eval/external/grep/run.ts", ...extraArgs], {
             cwd: REPO_ROOT,
             env: { ...process.env, HOME: home },
             encoding: "utf8",
@@ -34,8 +34,10 @@ function runCli(extraArgs: string[], home: string): { status: number | null; std
     }
 }
 
+const TSX_BIN = join(REPO_ROOT, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+
 function cacheIsUntouched(home: string): boolean {
-    return readdirSync(home, { withFileTypes: true }).length === 0;
+    return !existsSync(join(home, ".cache", "pi-smartread-bench", "manifests"));
 }
 
 describe("run.ts value-taking flags", () => {
