@@ -46,7 +46,14 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
-import { GREP_JUDGE_THRESHOLD_ENV_VAR } from "../../../src/judge/grep-judge-stage.js";
+import {
+    GREP_JUDGE_EXISTS_EVIDENCE_ENV_VAR,
+    GREP_JUDGE_EXISTS_THRESHOLD_ENV_VAR,
+    GREP_JUDGE_THRESHOLD_ENV_VAR,
+    isExistsExcerptMode,
+    resolveExistsThreshold,
+    resolveGrepJudgeThreshold,
+} from "../../../src/judge/grep-judge-stage.js";
 import type { GrepJudgeProvider } from "../../../src/judge/grep-judge-stage.js";
 import type { Judge, JudgeNoulInput, JudgeNoulResult, JudgeUsage } from "../../../src/judge/types.js";
 import { resolveGrepRankingOptions } from "../../../src/search/grep-ranking.js";
@@ -93,6 +100,11 @@ export function resolveD46ReportsDir(reportsDirArg: string | null): string {
 export type D46RunConfig = "off" | "t040";
 const CONFIG_THRESHOLD: Record<Exclude<D46RunConfig, "off">, string> = { t040: "0.40" };
 
+export type D46ExistsEvidence = "excerpts" | "count" | "off";
+
+/** Bounded per-query unit probabilities in the D46 judge report. */
+export const D46_JUDGE_UNIT_CAP = 12;
+
 export interface D46RunArgs {
     split: D46Split;
     repo: string | null;
@@ -101,6 +113,75 @@ export interface D46RunArgs {
     freeze: string | null;
     openHoldout: boolean;
     reportsDir: string | null;
+    existsEvidence: D46ExistsEvidence | null;
+}
+
+export interface D46JudgeUnitProb {
+    path: string;
+    line: number;
+    p: number;
+}
+
+export interface D46JudgeReport {
+    judged: boolean;
+    existsP: number | null;
+    existsExcerptMode: boolean | null;
+    threshold: number | null;
+    existsThreshold: number | null;
+    kept: number | null;
+    dropped: number | null;
+    judgedUnits: number | null;
+    units: D46JudgeUnitProb[];
+}
+
+/**
+ * Build the per-query judge report from grep tool result details.
+ * Picks only known numeric/boolean fields (never provider/key material).
+ * When config=off (or no judge details) records `{ judged: false, ...nulls }`.
+ */
+export function buildD46JudgeReport(detailsJudge: unknown, config: D46RunConfig): D46JudgeReport {
+    const idle: D46JudgeReport = {
+        judged: false,
+        existsP: null,
+        existsExcerptMode: null,
+        threshold: null,
+        existsThreshold: null,
+        kept: null,
+        dropped: null,
+        judgedUnits: null,
+        units: [],
+    };
+    if (config === "off") return idle;
+    if (detailsJudge === null || typeof detailsJudge !== "object") return idle;
+    const j = detailsJudge as Record<string, unknown>;
+    const hits = Array.isArray(j["hits"]) ? (j["hits"] as Array<Record<string, unknown>>) : [];
+    const units: D46JudgeUnitProb[] = hits.slice(0, D46_JUDGE_UNIT_CAP).map((h) => ({
+        path: typeof h["path"] === "string" ? (h["path"] as string) : "",
+        line: typeof h["line"] === "number" ? (h["line"] as number) : 0,
+        p: typeof h["p"] === "number" ? (h["p"] as number) : 0,
+    }));
+    return {
+        judged: true,
+        existsP: typeof j["existsP"] === "number" ? (j["existsP"] as number) : null,
+        existsExcerptMode: typeof j["existsExcerptMode"] === "boolean" ? (j["existsExcerptMode"] as boolean) : null,
+        threshold: typeof j["threshold"] === "number" ? (j["threshold"] as number) : resolveGrepJudgeThreshold(),
+        existsThreshold: resolveExistsThreshold(),
+        kept: typeof j["kept"] === "number" ? (j["kept"] as number) : null,
+        dropped: typeof j["belowThreshold"] === "number" ? (j["belowThreshold"] as number) : null,
+        judgedUnits: typeof j["judged"] === "number" ? (j["judged"] as number) : null,
+        units,
+    };
+}
+
+/**
+ * Apply --exists-evidence to the process env. Returns the resolved excerpt
+ * mode. `null` (flag absent) leaves the env untouched and inherits it.
+ * `PI_SMARTREAD_JUDGE_EXISTS_THRESHOLD` is always forwarded from the env.
+ */
+export function applyExistsEvidenceFlag(flag: D46ExistsEvidence | null): boolean {
+    if (flag === "excerpts") process.env[GREP_JUDGE_EXISTS_EVIDENCE_ENV_VAR] = "excerpts";
+    else if (flag === "count" || flag === "off") delete process.env[GREP_JUDGE_EXISTS_EVIDENCE_ENV_VAR];
+    return isExistsExcerptMode();
 }
 
 export function parseD46RunArgs(argv: string[]): D46RunArgs {
@@ -111,6 +192,7 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
     let freeze: string | null = null;
     let openHoldout = false;
     let reportsDir: string | null = null;
+    let existsEvidence: D46ExistsEvidence | null = null;
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i] as string;
         if (arg === "--split") split = argv[++i];
@@ -120,9 +202,10 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
         else if (arg === "--freeze") freeze = argv[++i] ?? "";
         else if (arg === "--open-holdout") openHoldout = true;
         else if (arg === "--reports-dir") reportsDir = argv[++i] ?? "";
+        else if (arg === "--exists-evidence") existsEvidence = (argv[++i] ?? "") as D46ExistsEvidence;
         else if (arg === "--help" || arg === "-h") {
             console.log(
-                "Usage: npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout] [--reports-dir <dir>]",
+                "Usage: npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout] [--reports-dir <dir>] [--exists-evidence excerpts|count|off]",
             );
             process.exit(0);
         } else {
@@ -132,7 +215,10 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
     if (split !== "dev" && split !== "holdout") throw new Error("--split must be dev|holdout");
     if (config !== "off" && config !== "t040") throw new Error("--config must be off|t040");
     if (!Number.isInteger(replicate) || replicate < 1) throw new Error("--replicate must be a positive integer");
-    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout, reportsDir };
+    if (existsEvidence !== null && existsEvidence !== "excerpts" && existsEvidence !== "count" && existsEvidence !== "off") {
+        throw new Error("--exists-evidence must be excerpts|count|off");
+    }
+    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout, reportsDir, existsEvidence };
 }
 
 /** Re-verify the sealed manifest against current split-dir files. Returns error strings. */
@@ -519,6 +605,7 @@ interface RunTrace {
     routingMode: string;
     judgeInvoked: boolean;
     cost: JudgeUsage;
+    judge: D46JudgeReport;
 }
 
 async function runD46Query(input: {
@@ -526,6 +613,7 @@ async function runD46Query(input: {
     root: string;
     judge: GrepJudgeProvider | undefined;
     timeoutMs: number;
+    config: D46RunConfig;
 }): Promise<{ trace: RunTrace; status: string; elapsedMs: number }> {
     const started = performance.now();
     const events: GrepTraceEvent[] = [];
@@ -547,6 +635,7 @@ async function runD46Query(input: {
     };
     let status = "ok";
     let routingMode = "unknown";
+    let detailsJudge: unknown = null;
     try {
         const tool = createGrepTool(opts);
         const signal = AbortSignal.timeout(input.timeoutMs);
@@ -561,9 +650,10 @@ async function runD46Query(input: {
         // snapshot carries no routing); read it structurally so the
         // runner never duplicates the product's routing logic.
         const details = (result as { details?: unknown }).details as
-            | { routing?: { mode?: unknown } }
+            | { routing?: { mode?: unknown }; judge?: unknown }
             | undefined;
         if (typeof details?.routing?.mode === "string") routingMode = details.routing.mode;
+        detailsJudge = details?.judge ?? null;
     } catch (error) {
         status = errorStatus(error);
     }
@@ -587,6 +677,7 @@ async function runD46Query(input: {
             abstained: postJudge?.stage === "post-judge" ? postJudge.abstained : false,
             routingMode,
             judgeInvoked,
+            judge: buildD46JudgeReport(detailsJudge, input.config),
             cost: {
                 inputTokens: costs.reduce((a, c) => a + c.inputTokens, 0),
                 requests: costs.reduce((a, c) => a + c.requests, 0),
@@ -744,6 +835,11 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
 
     if (args.config === "off") delete process.env[GREP_JUDGE_THRESHOLD_ENV_VAR];
     else process.env[GREP_JUDGE_THRESHOLD_ENV_VAR] = CONFIG_THRESHOLD[args.config];
+    // --exists-evidence sets PI_SMARTREAD_JUDGE_EXISTS_EVIDENCE before any
+    // query runs; absent leaves the env untouched. The exists threshold env
+    // (PI_SMARTREAD_JUDGE_EXISTS_THRESHOLD) is always forwarded from the env.
+    const existsExcerptMode = applyExistsEvidenceFlag(args.existsEvidence);
+    const existsThresholdEnv = process.env[GREP_JUDGE_EXISTS_THRESHOLD_ENV_VAR] ?? null;
 
     const pins = new Map(repoManifest.repos.map((p) => [`${p.owner}/${p.name}`, p]));
     const rows: Array<Record<string, unknown>> = [];
@@ -757,6 +853,7 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
                     root,
                     judge: provider,
                     timeoutMs: 60000,
+                    config: args.config,
                 });
                 const scored = scoreD46Query({
                     query: q,
@@ -783,6 +880,7 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
                     latencyMs: elapsedMs,
                     routing: trace.routingMode,
                     judged: trace.judged,
+                    judge: trace.judge,
                     cost: trace.cost,
                     manifestSha256: manifest.queriesSha256,
                     engineSourceHash: engineSourceHash,
@@ -867,6 +965,10 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
             config: args.config,
             model: args.config === "off" ? "off" : (process.env.PI_SMARTREAD_JUDGE_MODEL ?? CLOUD_JUDGE_DEFAULT_MODEL),
             origin: args.config === "off" ? "off" : "cloud-openrouter",
+            existsEvidence: args.existsEvidence ?? "(env)",
+            existsExcerptMode,
+            existsThreshold: resolveExistsThreshold(),
+            existsThresholdEnv,
         },
         metricDefinitions: {
             successAt5: "answerable query with any gold file among the first five distinct rendered files in rank order",

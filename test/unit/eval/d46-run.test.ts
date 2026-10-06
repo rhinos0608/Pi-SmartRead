@@ -98,10 +98,10 @@ describe("parseD46RunArgs", () => {
     it("parses the documented CLI surface", () => {
         expect(
             parseD46RunArgs(["--split", "dev", "--config", "off", "--replicate", "2"]),
-        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false, reportsDir: null });
+        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false, reportsDir: null, existsEvidence: null });
         expect(
             parseD46RunArgs(["--split", "holdout", "--repo", "a__b", "--freeze", "f", "--open-holdout"]),
-        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true, reportsDir: null });
+        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true, reportsDir: null, existsEvidence: null });
     });
 
     it("rejects bad split/config/replicate", () => {
