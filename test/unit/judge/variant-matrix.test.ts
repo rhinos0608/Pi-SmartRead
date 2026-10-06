@@ -98,6 +98,27 @@ describe("variant-matrix", () => {
         expect(comp.annotatedWins).toEqual([{ id: "q1", stability: "stable" }]);
     });
 
+    it("reports missing metrics as unavailable instead of dropping queries", () => {
+        const qids = ["q1", "q2"];
+        const b = writeTmp(internalReport(qids, { q1: { fileHit: true }, q2: { fileHit: false } }));
+        const v = writeTmp(internalReport(qids, { q1: { fileHit: true }, q2: { fileHit: true } }));
+        const res = buildMatrix({
+            baseline: "b",
+            variants: { b: { internalOff: b }, v: { internalOff: v } },
+            bootstrap: { seed: 1, iterations: 20 },
+        });
+        const rr = res.comparisons.find((c) => c.cohort === "internal-off-read-ready")!;
+        expect(rr.queryCount).toBe(2);
+        expect(rr.unavailable).toBe(2);
+        expect(rr.unavailableIds).toEqual(["q1", "q2"]);
+        expect(rr.wins).toEqual([]);
+        expect(rr.losses).toEqual([]);
+        expect(rr.net).toBe(0);
+        const fh = res.comparisons.find((c) => c.cohort === "internal-off-file-hit")!;
+        expect(fh.queryCount).toBe(2);
+        expect(fh.unavailable).toBe(0);
+    });
+
     it("classifies leave-one-out contributions", () => {
         expect(classifyContribution(2, 2)).toBe("additive");
         expect(classifyContribution(5, 2)).toBe("synergistic");

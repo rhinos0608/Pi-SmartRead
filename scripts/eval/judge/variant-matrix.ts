@@ -72,6 +72,7 @@ export interface CohortComparison {
     variant: string;
     queryCount: number;
     unavailable: number;
+    unavailableIds: string[];
     wins: string[];
     losses: string[];
     net: number;
@@ -135,6 +136,26 @@ export function internalOutcomeMap(report: unknown, key: "fileHit" | "readReady"
     return out;
 }
 
+/** Every query id in an internal report, whether or not the metric is present. */
+export function internalQueryIds(report: unknown): Set<string> {
+    const queries = asRecord(report).queries;
+    if (!Array.isArray(queries)) throw new Error("malformed-report: missing queries array");
+    return new Set(queries.map((q) => String(asRecord(q).qid)));
+}
+
+/** Every instance id in an external report for one formulation. */
+export function externalInstanceIds(report: unknown, formulation: string): Set<string> {
+    const outcomes = asRecord(report).outcomes;
+    if (!Array.isArray(outcomes)) throw new Error("malformed-report: missing outcomes array");
+    const out = new Set<string>();
+    for (const o of outcomes) {
+        const row = asRecord(o);
+        if (row.formulation !== formulation) continue;
+        out.add(String(row.instanceId));
+    }
+    return out;
+}
+
 /** External per-instance success map for one formulation. */
 export function externalOutcomeMap(report: unknown, formulation: string): Map<string, boolean> {
     const outcomes = asRecord(report).outcomes;
@@ -167,21 +188,32 @@ export function compareCohort(args: {
     iterations: number;
     clusters?: Map<string, string>;
     noiseProne?: Set<string>;
+    baseIds?: Iterable<string>;
+    varIds?: Iterable<string>;
 }): CohortComparison {
     const { baseMap, varMap } = args;
-    const ids = [...baseMap.keys()].filter((id) => varMap.has(id)).sort();
+    // Paired universe: every query id present in both reports, even when the
+    // metric value itself is absent on one or both sides. Without explicit
+    // universes, fall back to the metric-present map keys.
+    const paired = args.baseIds !== undefined && args.varIds !== undefined
+        ? [...new Set(args.baseIds)].filter((id) => new Set(args.varIds).has(id)).sort()
+        : [...baseMap.keys()].filter((id) => varMap.has(id)).sort();
+    const ids = paired.filter((id) => baseMap.has(id) && varMap.has(id));
+    const unavailableIds = paired.filter((id) => !baseMap.has(id) || !varMap.has(id));
+    if (args.baseIds === undefined || args.varIds === undefined) {
+        for (const [id, v] of varMap) {
+            if (!baseMap.has(id)) unavailableIds.push(id);
+            void v;
+        }
+        for (const [id, v] of baseMap) {
+            if (!varMap.has(id)) unavailableIds.push(id);
+            void v;
+        }
+    }
+    unavailableIds.sort();
     const wins: string[] = [];
     const losses: string[] = [];
     const pairs: Array<{ id: string; baseline: number; variant: number }> = [];
-    let unavailable = 0;
-    for (const [id, v] of varMap) {
-        if (!baseMap.has(id)) unavailable++;
-        void v;
-    }
-    for (const [id, v] of baseMap) {
-        if (!varMap.has(id)) unavailable++;
-        void v;
-    }
     for (const id of ids) {
         const b = baseMap.get(id)!;
         const v = varMap.get(id)!;
@@ -204,8 +236,9 @@ export function compareCohort(args: {
         cohort: args.cohort,
         baseline: args.baseline,
         variant: args.variant,
-        queryCount: ids.length,
-        unavailable,
+        queryCount: paired.length,
+        unavailable: unavailableIds.length,
+        unavailableIds,
         wins: [...wins].sort(),
         losses: [...losses].sort(),
         net: wins.length - losses.length,
@@ -311,6 +344,17 @@ export function buildMatrix(spec: MatrixSpec, load: (path: string) => unknown = 
         if (!p) return null;
         return internalOutcomeMap(get(p), def.metric as "fileHit" | "readReady");
     };
+    const resolveIds = (variantName: string, def: { kind: string; metric: string }): Set<string> | null => {
+        const paths = (spec.variants[variantName] ?? spec.replicates?.[variantName]) as VariantPaths | undefined;
+        if (!paths) return null;
+        if (def.kind === "external") {
+            if (!paths.external) return null;
+            return externalInstanceIds(get(paths.external), def.metric);
+        }
+        const p = paths[def.kind as "internalOff" | "internalT040"];
+        if (!p) return null;
+        return internalQueryIds(get(p));
+    };
 
     // Replication first: noise-prone ids per cohort.
     const noiseProneByCohort = new Map<string, Set<string>>();
@@ -348,6 +392,8 @@ export function buildMatrix(spec: MatrixSpec, load: (path: string) => unknown = 
             const baseMap = resolveMap(spec.baseline, def);
             const varMap = resolveMap(name, def);
             if (!baseMap || !varMap) continue;
+            const baseIds = resolveIds(spec.baseline, def);
+            const varIds = resolveIds(name, def);
             const clusters = def.kind === "external"
                 ? new Map<string, string>([...varMap.keys()].map((id) => [id, repoOf(id)]))
                 : undefined;
@@ -361,6 +407,7 @@ export function buildMatrix(spec: MatrixSpec, load: (path: string) => unknown = 
                 iterations,
                 clusters,
                 noiseProne: noiseProneByCohort.get(def.cohort),
+                ...(baseIds && varIds ? { baseIds, varIds } : {}),
             });
             comparisons.push(comp);
             netOf.set(`${name}\0${def.cohort}`, comp.net);
@@ -422,6 +469,7 @@ export function renderMarkdown(result: MatrixResult): string {
     for (const c of result.comparisons) {
         lines.push(`### ${c.variant} — ${c.cohort}`);
         lines.push(`net ${c.net} (+${c.wins.length}/-${c.losses.length}, n=${c.queryCount}, unavailable=${c.unavailable}) 95% CI [${c.ci95.lower.toFixed(3)}, ${c.ci95.upper.toFixed(3)}]`);
+        if (c.unavailableIds.length > 0) lines.push(`unavailable: ${c.unavailableIds.join(" ")}`);
         lines.push(`wins: ${c.annotatedWins.map((w) => `${w.id}(${w.stability})`).join(" ") || "(none)"}`);
         lines.push(`losses: ${c.annotatedLosses.map((w) => `${w.id}(${w.stability})`).join(" ") || "(none)"}`);
         lines.push("");
