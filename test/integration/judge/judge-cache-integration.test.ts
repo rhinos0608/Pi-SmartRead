@@ -60,8 +60,8 @@ function fakeFetch(counter: { calls: number }, prob: number): FetchFn {
     }) as FetchFn;
 }
 
-function freshJudge(cacheDir: string, counter: { calls: number }, prob: number, model = MODEL): CloudJudge {
-    return new CloudJudge({ apiKey: "test-key", baseUrl: "https://judge.test", model, cacheDir, fetchFn: fakeFetch(counter, prob) });
+function freshJudge(cacheDir: string, counter: { calls: number }, prob: number, model = MODEL, baseUrl = "https://judge.test"): CloudJudge {
+    return new CloudJudge({ apiKey: "test-key", baseUrl, model, cacheDir, fetchFn: fakeFetch(counter, prob) });
 }
 
 function hit(line: number): GrepHit {
@@ -207,7 +207,7 @@ describe("workspace verdict cache integration", () => {
             // hit without network. The aborted signal proves no fetch happens:
             // a miss would throw "aborted" instead of hanging on the network.
             const seedCounter = { calls: 0 };
-            await freshJudge(workspaceCacheDir(root), seedCounter, 0.66, pi.judge.info.model)
+            await freshJudge(workspaceCacheDir(root), seedCounter, 0.66, pi.judge.info.model, pi.judge.info.baseUrl)
                 .judgeNouls(noulInput(QUERY, UNIT_TEXT));
             expect(seedCounter.calls).toBe(1);
             const aborted = new AbortController();
@@ -225,14 +225,18 @@ describe("workspace verdict cache integration", () => {
         }
     });
 
-    it("(6) cache key covers the model alias only — baseUrl and backend are NOT keyed (stale-verdict risk per D53)", async () => {
+    it("(6) cache key covers backend and base URL: different endpoint or backend → miss (D54 fix)", async () => {
+        // The key includes shared query, state and question; backend
+        // configuration (backend kind + normalized base URL) is keyed too,
+        // so verdicts never leak across backends or endpoints serving a
+        // different model version under one alias.
         const root = mkdtempSync(join(tmpdir(), "judge-int-"));
         const cacheDir = workspaceCacheDir(root);
         const counter = { calls: 0 };
         await freshJudge(cacheDir, counter, 0.75).judgeNouls(noulInput(QUERY, UNIT_TEXT));
 
-        // Same alias, different endpoint: still a hit — provider/baseUrl are
-        // not part of judgeCacheKey.
+        // Same alias, different endpoint: miss — baseUrl is part of
+        // judgeCacheKey.
         const otherEndpoint = new CloudJudge({
             apiKey: "test-key",
             baseUrl: "https://other-endpoint.test",
@@ -241,11 +245,11 @@ describe("workspace verdict cache integration", () => {
             fetchFn: fakeFetch(counter, 0.1),
         });
         const rEndpoint = await otherEndpoint.judgeNouls(noulInput(QUERY, UNIT_TEXT));
-        expect(rEndpoint.cacheHits).toBe(1);
-        expect(rEndpoint.p.get("u0")).toBe(0.75);
+        expect(rEndpoint.cacheHits).toBe(0);
+        expect(rEndpoint.p.get("u0")).toBe(0.1);
 
-        // Same model string, different backend (local): still a hit — the key
-        // carries no backend/provider discriminator either.
+        // Same model string, different backend (local): miss — the key
+        // carries a backend discriminator.
         const local = new LocalJudge({
             baseUrl: "http://127.0.0.1:1",
             model: MODEL,
@@ -253,8 +257,8 @@ describe("workspace verdict cache integration", () => {
             fetchFn: fakeFetch(counter, 0.1),
         });
         const rLocal = await local.judgeNouls(noulInput(QUERY, UNIT_TEXT));
-        expect(rLocal.cacheHits).toBe(1);
-        expect(rLocal.p.get("u0")).toBe(0.75);
-        expect(counter.calls).toBe(1);
+        expect(rLocal.cacheHits).toBe(0);
+        expect(rLocal.p.get("u0")).toBe(0.1);
+        expect(counter.calls).toBe(3);
     });
 });

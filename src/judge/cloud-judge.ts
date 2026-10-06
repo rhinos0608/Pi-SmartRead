@@ -86,6 +86,8 @@ export class CloudJudge implements Judge {
             const question = item.question(`units.${item.id}`);
             const key = this.cache
                 ? judgeCacheKey({
+                    backend: this.info.backend,
+                    baseUrl: this.info.baseUrl,
                     model: this.info.model,
                     shared: input.shared,
                     state: item.state,

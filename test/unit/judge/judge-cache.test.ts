@@ -6,6 +6,18 @@ import { JUDGE_CACHE_CANONICAL_REF, JudgeCache, judgeCacheKey, stableStringify }
 
 const q = { type: "noul" as const, instructions: "i" };
 
+function keyArgs(overrides: Record<string, unknown> = {}) {
+    return {
+        backend: "cloud" as const,
+        baseUrl: "https://judge.test",
+        model: "m",
+        shared: {},
+        state: { t: "x" },
+        question: q,
+        ...overrides,
+    };
+}
+
 describe("judge-cache", () => {
     it("stableStringify is key-order independent", () => {
         expect(stableStringify({ b: 1, a: 2 })).toBe(stableStringify({ a: 2, b: 1 }));
@@ -14,7 +26,7 @@ describe("judge-cache", () => {
     it("miss then hit persists across instances via JSONL", () => {
         const dir = mkdtempSync(join(tmpdir(), "judge-cache-"));
         const c1 = new JudgeCache(dir);
-        const key = judgeCacheKey({ model: "m", shared: {}, state: { t: "x" }, question: q });
+        const key = judgeCacheKey(keyArgs());
         expect(c1.get(key)).toBeUndefined();
         c1.set(key, 0.77);
         const c2 = new JudgeCache(dir);
@@ -82,10 +94,27 @@ describe("judge-cache", () => {
         expect(readFileSync(join(dir, "verdicts.jsonl"), "utf-8").trim().split("\n")).toHaveLength(3);
     });
 
-    it("canonical ref keeps cloud and local keys distinct only by model/state", () => {
-        const a = judgeCacheKey({ model: "m", shared: {}, state: { t: "x" }, question: { ...q, instructions: "Q ref" } });
-        const b = judgeCacheKey({ model: "m", shared: {}, state: { t: "x" }, question: { ...q, instructions: "Q ref" } });
+    it("canonical ref keeps identical backend/endpoint keys stable", () => {
+        const a = judgeCacheKey(keyArgs({ question: { ...q, instructions: "Q ref" } }));
+        const b = judgeCacheKey(keyArgs({ question: { ...q, instructions: "Q ref" } }));
         expect(a).toBe(b);
         expect(JUDGE_CACHE_CANONICAL_REF).toBe("ref");
+    });
+
+    it("keys differ across backend kind", () => {
+        expect(judgeCacheKey(keyArgs()))
+            .not.toBe(judgeCacheKey(keyArgs({ backend: "local" })));
+    });
+
+    it("keys differ across base URL", () => {
+        expect(judgeCacheKey(keyArgs()))
+            .not.toBe(judgeCacheKey(keyArgs({ baseUrl: "https://other.test" })));
+    });
+
+    it("normalizes equivalent base URLs to the same key", () => {
+        expect(judgeCacheKey(keyArgs()))
+            .toBe(judgeCacheKey(keyArgs({ baseUrl: "https://judge.test/" })));
+        expect(judgeCacheKey(keyArgs()))
+            .toBe(judgeCacheKey(keyArgs({ baseUrl: "HTTPS://JUDGE.test" })));
     });
 });

@@ -1,10 +1,14 @@
 /**
  * Content-addressed verdict cache for judge probabilities.
  *
- * Key = sha256(model + stableStringify(shared) + stableStringify(state) +
- * stableStringify(question)). Backed by an append-only JSONL file in a
- * caller-supplied directory; lazy-loaded, capped with compaction, tolerant
- * of corrupt lines. No new dependencies.
+ * Key = sha256(backend + normalized baseUrl + model +
+ * stableStringify(shared) + stableStringify(state) +
+ * stableStringify(question)). Backend kind and endpoint are part of the key
+ * so cloud and local verdicts (or two endpoints serving different model
+ * versions under one alias) never share entries. API keys and other
+ * secrets are never part of the key. Backed by an append-only JSONL file
+ * in a caller-supplied directory; lazy-loaded, capped with compaction,
+ * tolerant of corrupt lines. No new dependencies.
  */
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -23,13 +27,31 @@ export function stableStringify(value: JsonValue | NoulQuestion | unknown): stri
     return `{${entries.join(",")}}`;
 }
 
+/**
+ * Normalize a judge endpoint base URL for cache-key purposes: trim
+ * whitespace, lowercase scheme and host, drop trailing slashes. Never
+ * receives credentials — callers pass only the endpoint URL.
+ */
+export function normalizeJudgeBaseUrl(baseUrl: string): string {
+    const trimmed = baseUrl.trim().replace(/\/+$/, "");
+    const match = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/]*)(\/.*)?$/.exec(trimmed);
+    if (!match) return trimmed.toLowerCase();
+    return `${match[1]!.toLowerCase()}${match[2]!.toLowerCase()}${match[3] ?? ""}`;
+}
+
 export function judgeCacheKey(args: {
+    backend: "cloud" | "local";
+    baseUrl: string;
     model: string;
     shared: Record<string, JsonValue>;
     state: Record<string, JsonValue>;
     question: NoulQuestion;
 }): string {
     const h = createHash("sha256");
+    h.update(args.backend);
+    h.update("\0");
+    h.update(normalizeJudgeBaseUrl(args.baseUrl));
+    h.update("\0");
     h.update(args.model);
     h.update("\0");
     h.update(stableStringify(args.shared));
