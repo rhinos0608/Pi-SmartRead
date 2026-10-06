@@ -298,6 +298,39 @@ describe("VonSidecarManager", () => {
         expect(killed).toEqual(["SIGTERM"]);
     });
 
+    it("spawn defaults HF_HOME beneath the managed dir when unset", async () => {
+        seedInstalled();
+        const { spawned, spawnFn } = fakeSpawn();
+        const manager = new VonSidecarManager({
+            home,
+            spawnFn,
+            fetchFn: smokeFetch(),
+            pickPort: async () => 51990,
+            waitForPort: async () => true,
+        });
+        await manager.ensureEndpoint();
+        expect(spawned).toHaveLength(1);
+        expect(spawned[0]!.env?.HF_HOME).toBe(getVonHfDir(home));
+        manager.dispose();
+    });
+
+    it("spawn respects an explicit HF_HOME from deps env", async () => {
+        seedInstalled();
+        const { spawned, spawnFn } = fakeSpawn();
+        const manager = new VonSidecarManager({
+            home,
+            spawnFn,
+            fetchFn: smokeFetch(),
+            pickPort: async () => 51989,
+            waitForPort: async () => true,
+            env: { HF_HOME: "/custom/hf" },
+        });
+        await manager.ensureEndpoint();
+        expect(spawned).toHaveLength(1);
+        expect(spawned[0]!.env?.HF_HOME).toBe("/custom/hf");
+        manager.dispose();
+    });
+
     it("a user-run base URL skips management entirely", async () => {
         const { spawnFn } = fakeSpawn();
         const manager = new VonSidecarManager({
