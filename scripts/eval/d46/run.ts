@@ -557,6 +557,19 @@ export function checkHoldoutGuard(input: {
     return null;
 }
 
+/**
+ * Total-hits value the D46 scorer sees for a query (D67).
+ *
+ * Absence metrics (falseContent / correctAbstention) must be scored over
+ * RENDERED locations. An abstained trace reports the internal unjudged
+ * candidate count in totalHits (> 0) while rendering zero locations, so
+ * abstained rows score over the rendered unit count instead. Non-abstained
+ * rows pass through unchanged.
+ */
+export function resolveD46ScoringTotalHits(abstained: boolean, totalHits: number, renderedUnits: number): number {
+    return abstained ? renderedUnits : totalHits;
+}
+
 /** Strip query text and gold from per-query rows for holdout reports. */
 export function redactForHoldout(row: Record<string, unknown>, holdout: boolean): Record<string, unknown> {
     if (!holdout) return row;
@@ -858,7 +871,11 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
                 const scored = scoreD46Query({
                     query: q,
                     units: trace.units,
-                    totalHits: trace.totalHits,
+                    // D67: score absence metrics over RENDERED locations. On
+                    // abstain trace.totalHits carries the internal unjudged
+                    // candidate count (> 0) while the tool renders zero
+                    // locations, so feed the rendered unit count instead.
+                    totalHits: resolveD46ScoringTotalHits(trace.abstained, trace.totalHits, trace.units.length),
                     renderedChars: trace.text.length,
                     renderedText: trace.text,
                     routingMode: trace.routingMode,

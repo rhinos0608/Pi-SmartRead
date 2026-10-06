@@ -904,10 +904,10 @@ function formatOutput(
     }
 
     if (judgeExtra?.abstainMessage) {
+        // D67: an abstention renders ZERO location pointers. The abstain
+        // message stays; the former `maybe: file:line name` fallback lines
+        // are removed from rendered output in every format path.
         lines.push(judgeExtra.abstainMessage);
-        for (const hit of judgeExtra.abstainPointers ?? []) {
-            lines.push(`maybe: ${hit.relFile}:${hit.line} ${hit.name}`);
-        }
         lines.push("");
     }
 

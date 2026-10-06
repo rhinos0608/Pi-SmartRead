@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
+import type { D46Query } from "../../../scripts/eval/d46/schema.js";
 import {
     checkHoldoutGuard,
     coldStartRuntimeCaches,
@@ -19,6 +20,7 @@ import {
     parseD46RunArgs,
     redactForHoldout,
     resolveD46ReportsDir,
+    resolveD46ScoringTotalHits,
     runD46Cli,
     SMARTREAD_RUNTIME_CACHE_DIRS,
     verifyCheckoutPins,
@@ -496,5 +498,58 @@ describe("D62 SmartRead runtime caches", () => {
         expect(cold.deleted).toEqual([]);
         expect(existsSync(join(dir, ".pi", "a.json"))).toBe(true);
         expect(existsSync(join(dir, ".pi-smartread", "b.json"))).toBe(true);
+    });
+});
+
+describe("resolveD46ScoringTotalHits (D67: score absence over rendered locations)", () => {
+    const absenceQuery: D46Query = {
+        id: "tj-commander-dev-absence-01",
+        repo: "tj/commander.js",
+        split: "dev",
+        class: "absence",
+        query: "synthetic absence query",
+        gold: [],
+        rationale: "synthetic",
+        author: "test",
+        authoredAt: "2026-10-07T00:00:00Z",
+    };
+
+    it("passes through the trace count for non-abstained rows", () => {
+        expect(resolveD46ScoringTotalHits(false, 7, 5)).toBe(7);
+        expect(resolveD46ScoringTotalHits(false, 0, 0)).toBe(0);
+    });
+
+    it("scores an abstained row over rendered units: empty top5Files and no false content", async () => {
+        const { scoreD46Query } = await import("../../../scripts/eval/d46/score.js");
+        const scored = scoreD46Query({
+            // Abstained traces render zero locations: units [] and the
+            // rendered-unit count (0), not the internal unjudged count (7).
+            query: { ...absenceQuery },
+            units: [],
+            totalHits: resolveD46ScoringTotalHits(true, 7, 0),
+            renderedChars: 160,
+            routingMode: "smart",
+            judgeInvoked: true,
+            status: "ok",
+            elapsedMs: 1,
+        });
+        expect(scored.top5Files).toEqual([]);
+        expect(scored.falseContent).toBe(false);
+        expect(scored.correctAbstention).toBe(true);
+    });
+
+    it("documents the bug when the raw internal count is scored instead", async () => {
+        const { scoreD46Query } = await import("../../../scripts/eval/d46/score.js");
+        const scored = scoreD46Query({
+            query: { ...absenceQuery },
+            units: [],
+            totalHits: 7,
+            renderedChars: 160,
+            routingMode: "smart",
+            judgeInvoked: true,
+            status: "ok",
+            elapsedMs: 1,
+        });
+        expect(scored.falseContent).toBe(true);
     });
 });
