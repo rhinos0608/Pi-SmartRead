@@ -270,6 +270,32 @@ describe("D62 SmartRead runtime caches", () => {
         expect(isCleanPorcelain(gitStatus(dir))).toBe(false);
     });
 
+    it("refuses a modified tracked file inside a cache-named dir", () => {
+        const dir = initRepo();
+        mkdirSync(join(dir, ".pi"), { recursive: true });
+        writeFileSync(join(dir, ".pi", "config.json"), "{}\n");
+        execFileSync("git", ["-C", dir, "add", "."]);
+        execFileSync("git", ["-C", dir, "commit", "-qm", "track pi"]);
+        writeFileSync(join(dir, ".pi", "config.json"), "{\"x\":1}\n");
+        expect(isCleanPorcelain(gitStatus(dir))).toBe(false);
+    });
+
+    it("skips a cache-named dir containing tracked files, deletes untracked caches", () => {
+        const dir = initRepo();
+        mkdirSync(join(dir, ".pi"), { recursive: true });
+        writeFileSync(join(dir, ".pi", "config.json"), "{}\n");
+        execFileSync("git", ["-C", dir, "add", "."]);
+        execFileSync("git", ["-C", dir, "commit", "-qm", "track pi"]);
+        mkdirSync(join(dir, ".pi-smartread.tags.cache"), { recursive: true });
+        writeFileSync(join(dir, ".pi-smartread.tags.cache", "t.json"), "{}\n");
+        const cold = coldStartRuntimeCaches(dir);
+        expect(cold.error).toBeNull();
+        expect(cold.deleted).toEqual([".pi-smartread.tags.cache"]);
+        expect(cold.skippedTracked).toEqual([".pi"]);
+        expect(existsSync(join(dir, ".pi", "config.json"))).toBe(true);
+        expect(existsSync(join(dir, ".pi-smartread.tags.cache"))).toBe(false);
+    });
+
     it("does not follow a symlinked cache dir pointing outside the checkout", () => {
         const dir = initRepo();
         const outside = realpathSync(mkdtempSync(join(tmpdir(), "d46-d62-out-")));

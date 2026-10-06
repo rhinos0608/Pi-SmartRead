@@ -188,11 +188,14 @@ export function isRuntimeCachePath(path: string): boolean {
 
 /**
  * Cleanliness over `git status --porcelain --untracked-files=all` output:
- * no tracked modifications and no untracked path except runtime-cache paths.
+ * any tracked change (M/A/D/R/C/U/T in either XY column) anywhere refuses,
+ * including inside cache-named dirs; only untracked (`??`) cache paths
+ * are tolerated.
  */
 export function isCleanPorcelain(porcelain: string): boolean {
     for (const line of porcelain.split("\n")) {
         if (line.trim().length === 0) continue;
+        if (line.slice(0, 2) !== "??") return false;
         const raw = line.length > 3 ? line.slice(3) : "";
         // Renames/copies: 'old -> new'; ignore only when every side is a cache path.
         const sides = raw.includes(" -> ") ? raw.split(" -> ") : [raw];
@@ -208,13 +211,18 @@ export function isCleanPorcelain(porcelain: string): boolean {
  * Never follows symlinks; a cache-name symlink whose resolved target lies
  * outside the checkout (or is unreadable) is refused, not deleted.
  */
-export function coldStartRuntimeCaches(checkoutDir: string): { deleted: string[]; error: string | null } {
+export function coldStartRuntimeCaches(checkoutDir: string): {
+    deleted: string[];
+    skippedTracked: string[];
+    error: string | null;
+} {
     const deleted: string[] = [];
+    const skippedTracked: string[] = [];
     let root: string;
     try {
         root = realpathSync(checkoutDir);
     } catch {
-        return { deleted, error: `cannot resolve checkout: ${checkoutDir}` };
+        return { deleted, skippedTracked, error: `cannot resolve checkout: ${checkoutDir}` };
     }
     const cacheNames = new Set<string>(SMARTREAD_RUNTIME_CACHE_DIRS as readonly string[]);
     const stack: string[] = [root];
@@ -225,7 +233,7 @@ export function coldStartRuntimeCaches(checkoutDir: string): { deleted: string[]
             try {
                 entries = readdirSync(dir, { withFileTypes: true });
             } catch {
-                return { deleted, error: `cannot list directory: ${dir}` };
+                return { deleted, skippedTracked, error: `cannot list directory: ${dir}` };
             }
             for (const entry of entries) {
                 const full = join(dir, entry.name);
@@ -236,18 +244,24 @@ export function coldStartRuntimeCaches(checkoutDir: string): { deleted: string[]
                     try {
                         target = realpathSync(full);
                     } catch {
-                        return { deleted, error: `refuses-symlink: ${full} is not resolvable` };
+                        return { deleted, skippedTracked, error: `refuses-symlink: ${full} is not resolvable` };
                     }
                     if (target !== root && !target.startsWith(`${root}/`)) {
-                        return { deleted, error: `refuses-symlink: ${full} points outside the checkout` };
+                        return { deleted, skippedTracked, error: `refuses-symlink: ${full} points outside the checkout` };
                     }
                     // Inside-checkout symlink: leave it in place, do not follow/delete.
-                    return { deleted, error: `refuses-symlink: ${full} is a symlink` };
+                    return { deleted, skippedTracked, error: `refuses-symlink: ${full} is a symlink` };
                 }
                 if (entry.isDirectory()) {
                     if (cacheNames.has(entry.name)) {
-                        rmSync(full, { recursive: true, force: true });
-                        deleted.push(full.slice(root.length + 1));
+                        // Never delete tracked files: a cache-named dir holding
+                        // tracked content is legitimate and skipped entirely.
+                        if (dirHasTrackedFiles(root, full)) {
+                            skippedTracked.push(full.slice(root.length + 1));
+                        } else {
+                            rmSync(full, { recursive: true, force: true });
+                            deleted.push(full.slice(root.length + 1));
+                        }
                     } else {
                         stack.push(full);
                     }
@@ -255,10 +269,21 @@ export function coldStartRuntimeCaches(checkoutDir: string): { deleted: string[]
             }
         }
     } catch (error) {
-        return { deleted, error: error instanceof Error ? error.message : String(error) };
+        return { deleted, skippedTracked, error: error instanceof Error ? error.message : String(error) };
     }
     deleted.sort();
-    return { deleted, error: null };
+    skippedTracked.sort();
+    return { deleted, skippedTracked, error: null };
+}
+
+/** True when `git ls-files` reports any tracked file at or under dir. */
+function dirHasTrackedFiles(gitDir: string, dir: string): boolean {
+    try {
+        const out = execFileSync("git", ["-C", gitDir, "ls-files", "--", dir], { encoding: "utf8" });
+        return out.trim().length > 0;
+    } catch {
+        return false;
+    }
 }
 
 /** Check each pinned checkout: HEAD equals the pinned sha and the tree is clean. */
@@ -550,6 +575,7 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         return 2;
     }
     const coldDeleted: string[] = [];
+    const coldSkippedTracked: string[] = [];
     {
         const seen = new Set<string>();
         for (const q of queries) {
@@ -564,8 +590,10 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
                 return 2;
             }
             for (const p of cold.deleted) coldDeleted.push(`${dir}/${p}`);
+            for (const p of cold.skippedTracked) coldSkippedTracked.push(`${dir}/${p}`);
         }
         coldDeleted.sort();
+        coldSkippedTracked.sort();
     }
 
     const ranking = toRankReportSettings(resolveGrepRankingOptions());
@@ -698,7 +726,7 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         config: args.config,
         status: "complete",
         replicate: args.replicate,
-        coldStart: { deleted: coldDeleted, count: coldDeleted.length },
+        coldStart: { deleted: coldDeleted, skippedTracked: coldSkippedTracked, count: coldDeleted.length },
         threshold: args.config === "off" ? null : CONFIG_THRESHOLD[args.config],
         model: {
             alias: args.config === "off" ? "off" : (process.env.PI_SMARTREAD_JUDGE_MODEL ?? CLOUD_JUDGE_DEFAULT_MODEL),
