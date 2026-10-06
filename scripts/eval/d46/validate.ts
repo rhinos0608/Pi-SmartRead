@@ -7,8 +7,17 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import {
+    chmodSync,
+    existsSync,
+    readdirSync,
+    readFileSync,
+    realpathSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, sep } from "node:path";
 import {
     D46_CLASSES,
     DEV_QUOTA,
@@ -28,11 +37,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null;
 }
 
+/**
+ * Reject gold paths that cannot be contained in the pinned checkout:
+ * absolute paths and any `..` segment. Symlink escapes are caught by
+ * the realpath containment check in checkPathsAtCommit.
+ */
+export function checkGoldPathForm(path: string, where: string): string[] {
+    if (isAbsolute(path)) return [`${where}: absolute path escapes the corpus: ${path}`];
+    if (path.split("/").some((segment) => segment === "..")) {
+        return [`${where}: \`..\` segment escapes the corpus: ${path}`];
+    }
+    return [];
+}
+
 function checkGoldSpan(span: unknown, prefix: string, si: number): string[] {
     if (!isRecord(span)) return [`${prefix}.gold[${si}]: not an object`];
     const errors: string[] = [];
     if (typeof span["path"] !== "string" || (span["path"] as string).length === 0) {
         errors.push(`${prefix}.gold[${si}]: missing path`);
+    } else {
+        errors.push(...checkGoldPathForm(span["path"], `${prefix}.gold[${si}]`));
     }
     const start = span["startLine"];
     const end = span["endLine"];
@@ -241,6 +265,17 @@ export function checkPathsAtCommit(
                 errors.push(`${q.id}: missing file ${span.path} in ${q.repo}`);
                 continue;
             }
+            try {
+                const corpusReal = realpathSync(join(repoDir, pin.corpusRoot));
+                const targetReal = realpathSync(full);
+                if (targetReal !== corpusReal && !targetReal.startsWith(corpusReal + sep)) {
+                    errors.push(`${q.id}: gold path escapes the corpus checkout: ${span.path}`);
+                    continue;
+                }
+            } catch {
+                errors.push(`${q.id}: missing file ${span.path} in ${q.repo}`);
+                continue;
+            }
             const lines = countFileLines(full);
             if (span.endLine > lines) {
                 errors.push(`${q.id}: ${span.path} endLine ${span.endLine} beyond ${lines} lines`);
@@ -278,4 +313,179 @@ export function findRepoQueryFiles(repoRoot: string): string[] {
     };
     walk(repoRoot);
     return hits.sort();
+}
+
+// ---- CLI: validate sealed query files ------------------------------------
+
+export const D46_BENCH_ROOT = join(homedir(), ".cache", "pi-smartread-bench", "d46");
+
+export interface D46SplitFile {
+    file: string;
+    sha256: string;
+    queryCount: number;
+}
+
+export interface D46LoadedSplit {
+    queries: D46Query[];
+    files: D46SplitFile[];
+    errors: string[];
+}
+
+/**
+ * Load every `*.jsonl` query file in a split dir (one D46Query per
+ * non-blank line). Manifest and second-label files are never query files.
+ */
+export function loadSplitQueries(splitDir: string): D46LoadedSplit {
+    const queries: D46Query[] = [];
+    const files: D46SplitFile[] = [];
+    const errors: string[] = [];
+    let entries;
+    try {
+        entries = readdirSync(splitDir).sort();
+    } catch {
+        return { queries, files, errors: [`split dir not found: ${splitDir}`] };
+    }
+    for (const name of entries) {
+        if (!name.endsWith(".jsonl")) continue;
+        const full = join(splitDir, name);
+        const raw = readFileSync(full, "utf8");
+        files.push({
+            file: name,
+            sha256: createHash("sha256").update(raw).digest("hex"),
+            queryCount: 0,
+        });
+        const entry = files[files.length - 1] as D46SplitFile;
+        for (const [li, line] of raw.split("\n").entries()) {
+            if (line.trim().length === 0) continue;
+            try {
+                const parsed: unknown = JSON.parse(line);
+                if (!isRecord(parsed)) {
+                    errors.push(`${name}:${li + 1}: not an object`);
+                    continue;
+                }
+                queries.push(parsed as unknown as D46Query);
+                entry.queryCount += 1;
+            } catch {
+                errors.push(`${name}:${li + 1}: invalid JSON`);
+            }
+        }
+    }
+    if (files.length === 0) errors.push(`no .jsonl query files in ${splitDir}`);
+    return { queries, files, errors };
+}
+
+export interface D46SplitManifest {
+    version: 1;
+    split: D46Split;
+    createdAt: string;
+    files: D46SplitFile[];
+    countsByClass: Record<string, number>;
+    countsByRepo: Record<string, number>;
+    repos: D46RepoManifest["repos"];
+    queriesSha256: string;
+}
+
+function expandHome(path: string): string {
+    return path === "~" || path.startsWith("~/") ? join(homedir(), path.slice(1)) : path;
+}
+
+export function loadRepoManifest(benchRoot: string): D46RepoManifest {
+    const raw = readFileSync(join(benchRoot, "repos.json"), "utf8");
+    return JSON.parse(raw) as D46RepoManifest;
+}
+
+/** Write the sealed manifest for a split (mode 0600). Returns the path. */
+export function writeSplitManifest(
+    splitDir: string,
+    split: D46Split,
+    loaded: D46LoadedSplit,
+    pins: D46RepoManifest["repos"],
+): string {
+    const countsByClass: Record<string, number> = {};
+    const countsByRepo: Record<string, number> = {};
+    for (const cls of D46_CLASSES) countsByClass[cls] = 0;
+    for (const q of loaded.queries) {
+        countsByClass[q.class] = (countsByClass[q.class] ?? 0) + 1;
+        countsByRepo[q.repo] = (countsByRepo[q.repo] ?? 0) + 1;
+    }
+    const manifest: D46SplitManifest = {
+        version: 1,
+        split,
+        createdAt: new Date().toISOString(),
+        files: loaded.files,
+        countsByClass,
+        countsByRepo,
+        repos: pins,
+        queriesSha256: sealQueries(loaded.queries).sha256,
+    };
+    const out = join(splitDir, "MANIFEST.sha256.json");
+    writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`);
+    chmodSync(out, 0o600);
+    return out;
+}
+
+export function runValidateCli(argv: string[], benchRoot: string = D46_BENCH_ROOT): number {
+    let split: string | undefined;
+    let repo: string | undefined;
+    let seal = false;
+    for (let i = 0; i < argv.length; i++) {
+        const arg = argv[i] as string;
+        if (arg === "--split") split = argv[++i];
+        else if (arg === "--repo") repo = argv[++i];
+        else if (arg === "--seal") seal = true;
+        else {
+            console.error(`unknown argument: ${arg}`);
+            console.error("usage: validate.ts --split dev|holdout [--repo <owner__name>] [--seal]");
+            return 2;
+        }
+    }
+    if (split !== "dev" && split !== "holdout") {
+        console.error("usage: validate.ts --split dev|holdout [--repo <owner__name>] [--seal]");
+        return 2;
+    }
+    if (seal && repo !== undefined) {
+        console.error("--seal writes a split-wide manifest and cannot be combined with --repo");
+        return 2;
+    }
+    const splitDir = join(benchRoot, split);
+    const loaded = loadSplitQueries(splitDir);
+    const errors = [...loaded.errors];
+    let queries = loaded.queries;
+    if (repo !== undefined) {
+        const slug = repo.includes("__") ? repo.replace("__", "/") : repo;
+        queries = queries.filter((q) => q.repo === slug);
+        if (queries.length === 0) errors.push(`--repo ${repo}: no queries for ${slug}`);
+    }
+    errors.push(...validateQueryDoc(queries).errors);
+    if (repo === undefined) errors.push(...checkQuota(queries, split));
+    let manifest: D46RepoManifest;
+    try {
+        manifest = loadRepoManifest(benchRoot);
+    } catch {
+        console.error(`${benchRoot}/repos.json: cannot load repo pins`);
+        return 2;
+    }
+    const reposRoot = manifest.reposDir ? expandHome(manifest.reposDir) : join(benchRoot, "repos");
+    errors.push(...checkPathsAtCommit(queries, manifest, reposRoot));
+    if (errors.length > 0) {
+        for (const e of errors) console.error(`error: ${e}`);
+        console.error(`${split}: ${errors.length} error(s), ${queries.length} queries`);
+        return 2;
+    }
+    if (seal) {
+        const pins = manifest.repos.filter((p) => p.split === split);
+        const out = writeSplitManifest(splitDir, split, loaded, pins);
+        console.log(`${split}: ok, ${queries.length} queries, manifest ${out}`);
+    } else {
+        console.log(`${split}: ok, ${queries.length} queries in ${loaded.files.length} file(s)`);
+    }
+    return 0;
+}
+
+const invokedAsCli =
+    typeof process !== "undefined" &&
+    process.argv[1] !== undefined &&
+    (process.argv[1].endsWith("d46/validate.ts") || process.argv[1].endsWith("d46\\validate.ts"));
+if (invokedAsCli) {
+    process.exitCode = runValidateCli(process.argv.slice(2));
 }

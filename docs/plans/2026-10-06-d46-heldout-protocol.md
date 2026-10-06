@@ -23,10 +23,11 @@ TypeScript Apache-2.0. No exclusions were needed: none of the 10 repos
 appears in the frozen external manifest
 (`external-grep-dev64-holdout32.json` pilot/dev/holdout names).
 
-microsoft/TypeScript exceeds the size rule (67,140 files in the working
-tree): the corpus is restricted to `tsc/internal` (5,295 production
-source files; testdata/baselines excluded). Gold paths are relative to
-the corpus root.
+microsoft/TypeScript is pinned to tag `v5.9.2` (commit `5be3346`;
+HEAD has since moved to the Go port, which would silently put a Go
+corpus into a JS/TS set). The corpus is restricted to `src/`
+(735 files, 701 `.ts`, no Go; licence `LICENSE.txt` Apache-2.0 at
+that commit). Gold paths are relative to the corpus root.
 
 ## Gold-isolation rule (D55, binding on authors and labellers)
 
@@ -52,11 +53,27 @@ the corpus root.
    (searches run + synonyms checked). Absence must be verified
    exhaustively; report it as "verified absence under this scope".
 6. Fill `rationale`, `author`, `authoredAt` (UTC ISO-8601) for every query.
-7. Run the validator (`scripts/eval/d46/validate.ts`): structure, class
-   quotas, unique ids, required fields, paths-at-commit, line ranges.
+7. Run the validator (structure, class quotas, unique ids, required
+   fields, path containment, paths-at-commit, line ranges):
+   `npx tsx scripts/eval/d46/validate.ts --split dev|holdout`
+   (add `--repo <owner__name>` to check one repo; skips the quota).
+   Paths must be relative to the corpus root: absolute paths, any
+   `..` segment, and symlink escapes are rejected. Failures print to
+   stderr with exit 2.
 8. Store dev/holdout files ONLY under
    `~/.cache/pi-smartread-bench/d46/{dev,holdout}/` (mode 0600), never
-   in the repo. The validator writes the sha256 sealed manifest.
+   in the repo. Seal with
+   `npx tsx scripts/eval/d46/validate.ts --split dev|holdout --seal`,
+   which writes `MANIFEST.sha256.json` (0600: per-file sha256, query
+   counts per class/repo, repo pins) after a green validation.
+9. Draw the second-label sample with
+    `npx tsx scripts/eval/d46/sample-second-label.ts --split dev|holdout --seed <n> [--repo <owner__name>]`:
+   deterministically selects 25% of answerable queries per repo
+   (rounded up) plus ALL absence queries and writes the id list
+   (without gold) per repo to `second-label-<owner>__<name>.json`
+   (0600). Re-running with the same seed reuses the existing files
+   untouched; a different seed rewrites them. Record the seed with
+   the second-label files.
 
 ## Double-labelling and adjudication
 
