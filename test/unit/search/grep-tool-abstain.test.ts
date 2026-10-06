@@ -98,8 +98,12 @@ describe("grep abstention rendering (D67)", () => {
             makeCtx(workdir),
         );
         const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain("no confident match"); // D67: batch renders the abstain message.
         expect(text).not.toMatch(/^maybe:/m);
         expect(text).not.toMatch(/retry-[ab]\.ts.*L\d/m);
+        // Batch abstained entries expose zero hits in details.
+        const queryResults = (result.details as { queryResults: { shownHits: number }[] }).queryResults;
+        expect(queryResults[0]!.shownHits).toBe(0);
     });
 
     it("non-abstained judged output still renders kept hits and the judged footer", async () => {

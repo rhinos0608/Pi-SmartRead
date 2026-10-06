@@ -283,7 +283,7 @@ describe("grep judge abstention", () => {
         const result = await tool.execute("t-abstain", { pattern: NL_QUERY }, undefined, undefined, makeCtx(workdir));
         const text = (result.content[0] as { text: string }).text;
         expect(text).toContain("no confident match");
-        expect(text).toContain("maybe:");
+        expect(text).not.toMatch(/^maybe:/m); // D67: abstention renders zero location pointers.
         // Abstention produces no search-match evidence for judged drops.
         expect((result.details as { totalHits: number }).totalHits).toBeGreaterThan(0);
         expect((result.details as { judge: { abstained: boolean } }).judge.abstained).toBe(true);

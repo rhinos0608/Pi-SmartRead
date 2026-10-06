@@ -838,9 +838,30 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
         header.push(`Query ${i + 1}: "${result.pattern}" (${result.totalHits} hits, ${result.elapsedMs}ms, ${result.routing ? `${result.routing.mode}/${result.routing.reason}` : result.engines.join("+")})`);
     }
     header.push("");
+    // D67: batch abstentions render the abstain message and ZERO location
+    // pointers. Abstained per-query hits are already sliced to [] upstream;
+    // filter them here as well so merged provenance can never reintroduce
+    // an abstained query preserved candidates, and render each abstained
+    // query message before the merged view.
+    const abstainedPatterns = new Set(
+        results
+            .filter((r) => (r as GrepJudgeResultExtras).judge?.abstained)
+            .map((r) => r.pattern),
+    );
+    for (let i = 0; i < results.length; i++) {
+        const extras = results[i]! as GrepExecutionResult & GrepJudgeResultExtras;
+        if (extras.judge?.abstained && extras.judgeNote) {
+            header.push(`Query ${i + 1} abstained: ${extras.judgeNote}`);
+        }
+    }
+    if (abstainedPatterns.size > 0) header.push("");
     // Merged global view: duplicates render once with matched-query provenance.
-    const shown: GrepHit[] = (results as any).globalShown
+    // D67: drop any hit whose provenance is an abstained query.
+    const rawShown: GrepHit[] = (results as any).globalShown
         ?? dedupGrepHits(results.flatMap((r) => r.shown.map((h) => ({ ...h, matchedQueries: [r.pattern] }) as GrepHit)));
+    const shown: GrepHit[] = abstainedPatterns.size === 0
+        ? rawShown
+        : rawShown.filter((h) => !((h as { matchedQueries?: string[] }).matchedQueries ?? []).some((q) => abstainedPatterns.has(q)));
     const total: number = (results as any).globalTotal ?? shown.length;
     const totalIsLowerBound: boolean = (results as any).globalTotalIsLowerBound
         ?? results.some((r) => r.truncated);
