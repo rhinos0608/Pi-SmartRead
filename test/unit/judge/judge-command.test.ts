@@ -276,6 +276,12 @@ describe("holdout evidence note (D70)", () => {
         expect(text).toContain("D46 holdout");
         expect(text).toContain("false-empty");
         expect(text).toContain("precision");
+        // Pin the exact D70 figures so factual drift fails the test.
+        expect(text).toContain("210 queries / 8 repos");
+        expect(text).toContain("2.4%→17.3%");
+        expect(text).toContain("6:1 FN:FP utility");
+        expect(text).toContain("[+0.55,+1.06]");
+        expect(text).toContain("do not retune against this holdout");
     });
 
     it("status and off do not carry the holdout note", async () => {
