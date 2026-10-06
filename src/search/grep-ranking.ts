@@ -140,7 +140,6 @@ export function isTestOrDocPath(filePath: string): boolean {
     basename.includes(".spec.") ||
     basename.startsWith("test_") ||
     basename.startsWith("spec_") ||
-    basename.endsWith("_test.*") ||
     /_test\.[a-z0-9]+$/.test(basename)
   ) {
     return true;
