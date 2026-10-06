@@ -116,4 +116,31 @@ describe("grep abstention rendering (D67)", () => {
         expect(text).toMatch(/retry-[ab]\.ts\s+L\d/);
         expect((result.details as { judge: { abstained: boolean } }).judge.abstained).toBe(false);
     });
+
+    it("duplicate patterns do not cross-talk: abstained entry hides only its own hits", async () => {
+        // Reviewer repro: same NL pattern twice, once smart (judged, abstained)
+        // and once literal (judge bypassed, hits). The literal entry must
+        // render its hits; the abstained entry renders only its message.
+        writeFileSync(
+            join(workdir, "src", "retry-note.ts"),
+            "// retry failed requests here\nexport const note = 1;\n",
+            "utf8",
+        );
+        const dup = "retry failed requests";
+        const tool = createGrepTool(makeOpts({ judge: abstainProvider() }));
+        const result = await tool.execute(
+            "t-abstain-dup-pattern",
+            { queries: [{ pattern: dup }, { pattern: dup, literal: true }] },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        const text = (result.content[0] as { text: string }).text;
+        const queryResults = (result.details as { queryResults: { pattern: string; shownHits: number }[] }).queryResults;
+        expect(queryResults).toHaveLength(2);
+        expect(queryResults[1]!.shownHits).toBeGreaterThan(0);
+        expect(text).toContain("no confident match"); // abstained entry's message stays.
+        expect(text).not.toContain("(no matches for any query)");
+        expect(text).toMatch(/retry-note\.ts\s+L\d/);
+    });
 });

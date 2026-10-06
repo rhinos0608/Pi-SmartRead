@@ -244,9 +244,10 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                 // NOTE: per-query gather runs before the global merge (pre-render
                 // work is not budgeted); the cap bounds render + evidence only.
                 const candidates: GrepHit[] = [];
-                for (const result of queryResults) {
+                for (let i = 0; i < queryResults.length; i++) {
+                    const result = queryResults[i]!;
                     for (const hit of result.shown) {
-                        candidates.push({ ...hit, matchedQueries: [result.pattern] } as GrepHit);
+                        candidates.push({ ...hit, matchedQueries: [result.pattern], matchedQueryIndexes: [i] } as GrepHit);
                     }
                 }
                 const deduped = dedupGrepHits(candidates);
@@ -565,7 +566,7 @@ function unique<T>(items: T[]): T[] {
 
 /** Detached per-hit copies for the opt-in trace observer. */
 function copyGrepHits(hits: GrepHit[]): GrepHit[] {
-    return hits.map((h) => ({ ...h, engines: [...h.engines], ...(h.matchedQueries ? { matchedQueries: [...h.matchedQueries] } : {}) }));
+    return hits.map((h) => ({ ...h, engines: [...h.engines], ...(h.matchedQueries ? { matchedQueries: [...h.matchedQueries] } : {}), ...(h.matchedQueryIndexes ? { matchedQueryIndexes: [...h.matchedQueryIndexes] } : {}) }));
 }
 
 /** Detached judge-details copy for the opt-in trace observer. */
@@ -843,10 +844,10 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
     // filter them here as well so merged provenance can never reintroduce
     // an abstained query preserved candidates, and render each abstained
     // query message before the merged view.
-    const abstainedPatterns = new Set(
+    const abstainedIndexes = new Set(
         results
-            .filter((r) => (r as GrepJudgeResultExtras).judge?.abstained)
-            .map((r) => r.pattern),
+            .map((r, i) => ((r as GrepJudgeResultExtras).judge?.abstained ? i : -1))
+            .filter((i) => i >= 0),
     );
     for (let i = 0; i < results.length; i++) {
         const extras = results[i]! as GrepExecutionResult & GrepJudgeResultExtras;
@@ -854,14 +855,27 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
             header.push(`Query ${i + 1} abstained: ${extras.judgeNote}`);
         }
     }
-    if (abstainedPatterns.size > 0) header.push("");
+    if (abstainedIndexes.size > 0) header.push("");
     // Merged global view: duplicates render once with matched-query provenance.
-    // D67: drop any hit whose provenance is an abstained query.
+    // D67: drop only the abstained entries' provenance, keyed by batch entry
+    // index (never by pattern string: duplicate patterns in one batch must
+    // not cross-talk). A hit survives when any non-abstained entry produced
+    // it; its "matched queries" suffix lists only surviving entries.
     const rawShown: GrepHit[] = (results as any).globalShown
-        ?? dedupGrepHits(results.flatMap((r) => r.shown.map((h) => ({ ...h, matchedQueries: [r.pattern] }) as GrepHit)));
-    const shown: GrepHit[] = abstainedPatterns.size === 0
+        ?? dedupGrepHits(results.flatMap((r, i) => r.shown.map((h) => ({ ...h, matchedQueries: [r.pattern], matchedQueryIndexes: [i] }) as GrepHit)));
+    const shown: GrepHit[] = abstainedIndexes.size === 0
         ? rawShown
-        : rawShown.filter((h) => !((h as { matchedQueries?: string[] }).matchedQueries ?? []).some((q) => abstainedPatterns.has(q)));
+        : rawShown.flatMap((h) => {
+            const indexes = (h as { matchedQueryIndexes?: number[] }).matchedQueryIndexes;
+            if (indexes) {
+                const kept = indexes.filter((q) => !abstainedIndexes.has(q));
+                if (kept.length === 0) return [];
+                return [{ ...h, matchedQueries: kept.map((q) => results[q]!.pattern), matchedQueryIndexes: kept } as GrepHit];
+            }
+            // Legacy hits without index provenance: fall back to pattern match.
+            const abstainedPatterns = new Set([...abstainedIndexes].map((q) => results[q]!.pattern));
+            return ((h as { matchedQueries?: string[] }).matchedQueries ?? []).some((q) => abstainedPatterns.has(q)) ? [] : [h];
+        });
     const total: number = (results as any).globalTotal ?? shown.length;
     const totalIsLowerBound: boolean = (results as any).globalTotalIsLowerBound
         ?? results.some((r) => r.truncated);
@@ -1048,6 +1062,9 @@ export function dedupGrepHits(hits: GrepHit[]): GrepHit[] {
             const next = (hit as { matchedQueries?: string[] }).matchedQueries ?? [];
             const set = new Set([...prior, ...next]);
             (existing as { matchedQueries?: string[] }).matchedQueries = [...set];
+            const priorIdx = (existing as { matchedQueryIndexes?: number[] }).matchedQueryIndexes ?? [];
+            const nextIdx = (hit as { matchedQueryIndexes?: number[] }).matchedQueryIndexes ?? [];
+            (existing as { matchedQueryIndexes?: number[] }).matchedQueryIndexes = [...new Set([...priorIdx, ...nextIdx])];
             if (hit.score > existing.score) existing.score = hit.score;
         } else {
             merged.set(key, { ...hit, engines: [...hit.engines] });
