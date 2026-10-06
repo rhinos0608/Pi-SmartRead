@@ -9,7 +9,8 @@
  *
  * Usage:
  *   npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>]
- *     [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout]
+  *     [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout]
+  *     [--reports-dir <dir>] ($PI_SMARTREAD_D46_REPORTS_DIR overrides the default)
  *
  * Integrity (fail-closed, exit 2):
  * - the split's sealed MANIFEST.sha256.json is re-verified against current
@@ -79,6 +80,16 @@ import { aggregateD46, scoreD46Query, summarizeD46, type D46RenderedUnit } from 
 
 export const D46_REPORTS_DIR = join(homedir(), ".cache", "pi-smartread-bench", "reports");
 
+export const D46_REPORTS_DIR_ENV_VAR = "PI_SMARTREAD_D46_REPORTS_DIR";
+
+/** Reports dir: --reports-dir > $PI_SMARTREAD_D46_REPORTS_DIR > default. */
+export function resolveD46ReportsDir(reportsDirArg: string | null): string {
+    const env = process.env[D46_REPORTS_DIR_ENV_VAR];
+    if (reportsDirArg !== null && reportsDirArg.length > 0) return reportsDirArg;
+    if (env !== undefined && env.length > 0) return env;
+    return D46_REPORTS_DIR;
+}
+
 export type D46RunConfig = "off" | "t040";
 const CONFIG_THRESHOLD: Record<Exclude<D46RunConfig, "off">, string> = { t040: "0.40" };
 
@@ -89,6 +100,7 @@ export interface D46RunArgs {
     replicate: number;
     freeze: string | null;
     openHoldout: boolean;
+    reportsDir: string | null;
 }
 
 export function parseD46RunArgs(argv: string[]): D46RunArgs {
@@ -98,6 +110,7 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
     let replicate = 1;
     let freeze: string | null = null;
     let openHoldout = false;
+    let reportsDir: string | null = null;
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i] as string;
         if (arg === "--split") split = argv[++i];
@@ -106,9 +119,10 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
         else if (arg === "--replicate") replicate = Number(argv[++i] ?? "");
         else if (arg === "--freeze") freeze = argv[++i] ?? "";
         else if (arg === "--open-holdout") openHoldout = true;
+        else if (arg === "--reports-dir") reportsDir = argv[++i] ?? "";
         else if (arg === "--help" || arg === "-h") {
             console.log(
-                "Usage: npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout]",
+                "Usage: npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout] [--reports-dir <dir>]",
             );
             process.exit(0);
         } else {
@@ -118,7 +132,7 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
     if (split !== "dev" && split !== "holdout") throw new Error("--split must be dev|holdout");
     if (config !== "off" && config !== "t040") throw new Error("--config must be off|t040");
     if (!Number.isInteger(replicate) || replicate < 1) throw new Error("--replicate must be a positive integer");
-    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout };
+    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout, reportsDir };
 }
 
 /** Re-verify the sealed manifest against current split-dir files. Returns error strings. */
@@ -597,7 +611,7 @@ function gitRootFromScript(): string | null {
     }
 }
 
-export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_ROOT, overrides: { engineSourceHash?: string } = {}): Promise<number> {
+export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_ROOT, overrides: { engineSourceHash?: string; reportsDir?: string } = {}): Promise<number> {
     const args = parseD46RunArgs(argv);
     const holdout = args.split === "holdout";
     const splitDir = join(benchRoot, args.split);
@@ -643,8 +657,9 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
     }
     // Preflight ordering: plan cache deletions for every repo (no
     // deletion), then run every remaining preflight check (engine hash,
-    // freeze, holdout guard). Only after ALL checks pass are the planned
-    // deletions executed, so a refused run never deletes caches.
+    // freeze, holdout guard, judge provider construction). Only after ALL
+    // checks pass are the planned deletions executed, so a refused run
+    // never deletes caches.
     const ranking = toRankReportSettings(resolveGrepRankingOptions());
     const engineSourceHash = overrides.engineSourceHash ?? hashEngineSources(gitRootFromScript() ?? resolve("."));
     if (!isKnownSourceHash(engineSourceHash)) {
@@ -674,6 +689,15 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
     });
     if (guard) {
         console.error(`error: ${guard}`);
+        return 2;
+    }
+    // Judge provider construction can refuse (e.g. missing judge API key
+    // for a judge-backed config); construct BEFORE any cache deletion.
+    let provider: GrepJudgeProvider | undefined;
+    try {
+        provider = createProvider(args.config);
+    } catch (error) {
+        console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
         return 2;
     }
     const coldDeleted: string[] = [];
@@ -718,13 +742,6 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         coldSkippedTracked.sort();
     }
 
-    let provider: GrepJudgeProvider | undefined;
-    try {
-        provider = createProvider(args.config);
-    } catch (error) {
-        console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
-        return 2;
-    }
     if (args.config === "off") delete process.env[GREP_JUDGE_THRESHOLD_ENV_VAR];
     else process.env[GREP_JUDGE_THRESHOLD_ENV_VAR] = CONFIG_THRESHOLD[args.config];
 
@@ -867,9 +884,10 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         summary: { ...summary, overall: { ...summary.overall, ...aggregateD46(scoredRows) } },
         queries: rows,
     };
-    mkdirSync(D46_REPORTS_DIR, { recursive: true });
+    const reportsDir = resolveD46ReportsDir(args.reportsDir ?? overrides.reportsDir ?? null);
+    mkdirSync(reportsDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const out = join(D46_REPORTS_DIR, `d46-${args.split}-${args.config}-${stamp}-${randomBytes(4).toString("hex")}.json`);
+    const out = join(reportsDir, `d46-${args.split}-${args.config}-${stamp}-${randomBytes(4).toString("hex")}.json`);
     writeFileSync(out, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
     chmodSync(out, 0o600);
     console.log(`report: ${out} status=${report.status}`);
