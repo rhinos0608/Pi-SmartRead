@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { D46Query, D46RepoManifest } from "../../../scripts/eval/d46/schema.js";
 import {
     checkPathsAtCommit,
+    classifyArtifact,
     listSealedArtifacts,
     loadSplitQueries,
     validateQueryDoc,
@@ -272,5 +273,53 @@ describe("runSampleCli --repo and idempotency", () => {
         expect(runSampleCli(["--split", "dev", "--seed", "9"], bench)).toBe(0);
         expect(readFileSync(out, "utf8")).toBe(before);
         expect(statSync(out).mtimeMs).toBe(mtime);
+    });
+});
+
+describe("pinned query-file classification", () => {
+    let dir = "";
+    afterEach(() => {
+        if (dir !== "") rmSync(dir, { recursive: true, force: true });
+        dir = "";
+    });
+
+    it("does not parse per-repo adjudication and -rest variants as queries", () => {
+        dir = mkdtempSync(join(tmpdir(), "d46-pinned-"));
+        const pinned = new Set(["colinhacks__zod.jsonl"]);
+        const line = JSON.stringify(behaviourQuery());
+        writeFileSync(join(dir, "colinhacks__zod.jsonl"), `${line}\n`);
+        writeFileSync(join(dir, "adjudication-colinhacks__zod.jsonl"), `${line}\n`);
+        writeFileSync(join(dir, "adjudication-colinhacks__zod-rest.jsonl"), `${line}\n`);
+        writeFileSync(join(dir, "second-labels-colinhacks__zod-rest.jsonl"), "x\n");
+        writeFileSync(join(dir, "colinhacks__zod.jsonl.pre-adjudication-rest"), "x\n");
+        const loaded = loadSplitQueries(dir, pinned);
+        expect(loaded.errors).toEqual([]);
+        expect(loaded.files.map((f) => f.file)).toEqual(["colinhacks__zod.jsonl"]);
+        expect(loaded.queries).toHaveLength(1);
+    });
+
+    it("classifies per-repo artifact roles and seals unknown files as 'other'", () => {
+        const pinned = new Set(["colinhacks__zod.jsonl"]);
+        expect(classifyArtifact("colinhacks__zod.jsonl", pinned)).toBe("queries");
+        expect(classifyArtifact("adjudication-colinhacks__zod.jsonl", pinned)).toBe("adjudication");
+        expect(classifyArtifact("adjudication-colinhacks__zod-rest.jsonl", pinned)).toBe("adjudication");
+        expect(classifyArtifact("second-labels-colinhacks__zod-rest.jsonl", pinned)).toBe("second-labels");
+        expect(classifyArtifact("colinhacks__zod.jsonl.pre-adjudication-rest", pinned)).toBe("pre-adjudication");
+        expect(classifyArtifact("notes.txt", pinned)).toBe("other");
+        dir = mkdtempSync(join(tmpdir(), "d46-other-"));
+        writeFileSync(join(dir, "notes.txt"), "x\n");
+        const sealed = listSealedArtifacts(dir, pinned);
+        expect(sealed.map((a) => [a.file, a.role])).toEqual([["notes.txt", "other"]]);
+    });
+
+    it("errors on a stray foo.jsonl matching no pinned repo", () => {
+        dir = mkdtempSync(join(tmpdir(), "d46-stray-"));
+        const pinned = new Set(["colinhacks__zod.jsonl"]);
+        const line = JSON.stringify(behaviourQuery());
+        writeFileSync(join(dir, "colinhacks__zod.jsonl"), `${line}\n`);
+        writeFileSync(join(dir, "foo.jsonl"), `${line}\n`);
+        const loaded = loadSplitQueries(dir, pinned);
+        expect(loaded.errors.some((e) => e.includes("foo.jsonl"))).toBe(true);
+        expect(loaded.queries).toHaveLength(1);
     });
 });

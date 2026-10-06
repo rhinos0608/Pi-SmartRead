@@ -334,11 +334,16 @@ export interface D46LoadedSplit {
 /**
  * Second-label, adjudication, and pre-adjudication artifacts share the
  * split dir but are never query files; they are sealed, not parsed.
+ * Per-repo adjudication files use the `adjudication-<repo>.jsonl` form
+ * (plus `-rest` continuations), so both `adjudication.` and
+ * `adjudication-` prefixes count as artifacts.
  */
 export function isNonQueryArtifact(name: string): boolean {
     if (name === "MANIFEST.sha256.json") return true;
     if (name.startsWith("second-label-") || name.startsWith("second-labels-")) return true;
-    if (name === "adjudication.jsonl" || name.startsWith("adjudication.")) return true;
+    if (name === "adjudication.jsonl" || name.startsWith("adjudication.") || name.startsWith("adjudication-")) {
+        return true;
+    }
     if (name.includes(".pre-adjudication")) return true;
     return false;
 }
@@ -357,17 +362,29 @@ export interface D46SealedArtifact {
     sha256: string;
 }
 
-export function classifyArtifact(name: string): D46ArtifactRole {
+export function classifyArtifact(name: string, queryFiles?: ReadonlySet<string>): D46ArtifactRole {
     if (name.includes(".pre-adjudication")) return "pre-adjudication";
     if (name.startsWith("second-labels-")) return "second-labels";
     if (name.startsWith("second-label-")) return "second-label-sample";
-    if (name === "adjudication.jsonl" || name.startsWith("adjudication.")) return "adjudication";
+    if (
+        name === "adjudication.jsonl" ||
+        name.startsWith("adjudication-") ||
+        name.startsWith("adjudication.")
+    ) {
+        return "adjudication";
+    }
+    if (queryFiles !== undefined) return queryFiles.has(name) ? "queries" : "other";
     if (name.endsWith(".jsonl")) return "queries";
     return "other";
 }
 
+/** Exact query-file names for one split: `<owner>__<name>.jsonl` per pinned repo. */
+export function pinnedQueryFileNames(pins: D46RepoManifest["repos"], split: D46Split): Set<string> {
+    return new Set(pins.filter((p) => p.split === split).map((p) => `${p.owner}__${p.name}.jsonl`));
+}
+
 /** Hash every artifact file in the split dir, excluding the manifest itself. */
-export function listSealedArtifacts(splitDir: string): D46SealedArtifact[] {
+export function listSealedArtifacts(splitDir: string, queryFiles?: ReadonlySet<string>): D46SealedArtifact[] {
     let entries;
     try {
         entries = readdirSync(splitDir, { withFileTypes: true });
@@ -381,7 +398,7 @@ export function listSealedArtifacts(splitDir: string): D46SealedArtifact[] {
         const raw = readFileSync(join(splitDir, entry.name));
         out.push({
             file: entry.name,
-            role: classifyArtifact(entry.name),
+            role: classifyArtifact(entry.name, queryFiles),
             sha256: createHash("sha256").update(raw).digest("hex"),
         });
     }
@@ -389,11 +406,17 @@ export function listSealedArtifacts(splitDir: string): D46SealedArtifact[] {
 }
 
 /**
- * Load every `*.jsonl` query file in a split dir (one D46Query per
- * non-blank line). Manifest, second-label, adjudication, and
- * pre-adjudication files are never query files (matched by name).
+ * Load every query file in a split dir (one D46Query per non-blank
+ * line). A query file is exactly `<owner>__<name>.jsonl` for a repo
+ * pinned in repos.json for that split: pass those names as
+ * `queryFiles` (see `pinnedQueryFileNames`). Every other file is an
+ * artifact (second-label, adjudication, pre-adjudication backup, or
+ * `other`) and is never parsed; a stray `.jsonl` that matches neither
+ * a pinned query file nor a known artifact pattern is an error, not
+ * silently ignored. Without `queryFiles` the legacy name-pattern
+ * fallback applies (`isNonQueryArtifact`).
  */
-export function loadSplitQueries(splitDir: string): D46LoadedSplit {
+export function loadSplitQueries(splitDir: string, queryFiles?: ReadonlySet<string>): D46LoadedSplit {
     const queries: D46Query[] = [];
     const files: D46SplitFile[] = [];
     const errors: string[] = [];
@@ -404,8 +427,15 @@ export function loadSplitQueries(splitDir: string): D46LoadedSplit {
         return { queries, files, errors: [`split dir not found: ${splitDir}`] };
     }
     for (const name of entries) {
-        if (!name.endsWith(".jsonl")) continue;
-        if (isNonQueryArtifact(name)) continue;
+        if (name === "MANIFEST.sha256.json") continue;
+        const isQuery =
+            queryFiles !== undefined ? queryFiles.has(name) : name.endsWith(".jsonl") && !isNonQueryArtifact(name);
+        if (!isQuery) {
+            if (queryFiles !== undefined && name.endsWith(".jsonl") && !isNonQueryArtifact(name)) {
+                errors.push(`${name}: not a pinned repo query file for this split`);
+            }
+            continue;
+        }
         const full = join(splitDir, name);
         const raw = readFileSync(full, "utf8");
         files.push({
@@ -474,7 +504,7 @@ export function writeSplitManifest(
         split,
         createdAt: new Date().toISOString(),
         files: loaded.files,
-        artifacts: listSealedArtifacts(splitDir),
+        artifacts: listSealedArtifacts(splitDir, pinnedQueryFileNames(pins, split)),
         countsByClass,
         countsByRepo,
         repos: pins,
@@ -510,7 +540,14 @@ export function runValidateCli(argv: string[], benchRoot: string = D46_BENCH_ROO
         return 2;
     }
     const splitDir = join(benchRoot, split);
-    const loaded = loadSplitQueries(splitDir);
+    let manifest: D46RepoManifest;
+    try {
+        manifest = loadRepoManifest(benchRoot);
+    } catch {
+        console.error(`${benchRoot}/repos.json: cannot load repo pins`);
+        return 2;
+    }
+    const loaded = loadSplitQueries(splitDir, pinnedQueryFileNames(manifest.repos, split));
     const errors = [...loaded.errors];
     let queries = loaded.queries;
     if (repo !== undefined) {
@@ -520,13 +557,6 @@ export function runValidateCli(argv: string[], benchRoot: string = D46_BENCH_ROO
     }
     errors.push(...validateQueryDoc(queries).errors);
     if (repo === undefined) errors.push(...checkQuota(queries, split));
-    let manifest: D46RepoManifest;
-    try {
-        manifest = loadRepoManifest(benchRoot);
-    } catch {
-        console.error(`${benchRoot}/repos.json: cannot load repo pins`);
-        return 2;
-    }
     const reposRoot = manifest.reposDir ? expandHome(manifest.reposDir) : join(benchRoot, "repos");
     errors.push(...checkPathsAtCommit(queries, manifest, reposRoot));
     if (errors.length > 0) {

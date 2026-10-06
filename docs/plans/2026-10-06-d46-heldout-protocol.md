@@ -70,8 +70,14 @@ that commit). Gold paths are relative to the corpus root.
    seals every other artifact in the split dir by sha256 with role
    labels, excluding the manifest itself: query JSONL (`queries`),
    `second-label-<repo>.json` (`second-label-sample`), second-labels
-   JSONL (`second-labels`), `adjudication.jsonl` (`adjudication`), and
-   `.pre-adjudication` copies (`pre-adjudication`). Validation parses
+   JSONL (`second-labels`), `adjudication.jsonl` and per-repo
+   `adjudication-<repo>.jsonl` / `adjudication-<repo>-rest.jsonl`
+   (`adjudication`), `.pre-adjudication` copies including
+   `<repo>.jsonl.pre-adjudication-rest` (`pre-adjudication`), and any
+   other file (`other`, still hashed). A query file is exactly
+   `<owner>__<name>.jsonl` for a repo pinned in `repos.json` for that
+   split; a stray `.jsonl` matching no pinned repo is a validation
+   error, not silently ignored. Validation parses
    only query JSONL; second-label/adjudication/pre-adjudication files
    are matched by name and never parsed as queries.
 9. Draw the second-label sample with
