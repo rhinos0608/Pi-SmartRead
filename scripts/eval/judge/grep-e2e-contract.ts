@@ -234,6 +234,11 @@ export interface PairedQueryDelta {
 export interface PairedComparison {
     baseline: string;
     variant: string;
+    /** Resolved ranking knobs per side (cross-variant pairing is intended). */
+    rankingKnobs: {
+        baseline: Record<string, unknown>;
+        variant: Record<string, unknown>;
+    };
     queryCount: number;
     readReady: { wins: number; losses: number; ties: number; unavailable: number };
     fileHit: { wins: number; losses: number; ties: number };
@@ -253,10 +258,66 @@ export interface PairedComparison {
  */
 export const UNIT_SETTING_KEYS = ["unitMode", "maxPerFile", "excerptLines"] as const;
 
-function withoutUnitSettings(params: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Flat report keys for the resolved BM25 ranking knobs
+ * (src/search/grep-ranking.ts). Bound into the run fingerprint exactly
+ * like unit settings; pairing intentionally still pairs across them.
+ */
+export const RANK_SETTING_KEYS = [
+    "rankTestDemote",
+    "rankFilename",
+    "rankBm25k1",
+    "rankBm25b",
+    "rankCoverage",
+    "rankStopwords",
+] as const;
+
+export interface RankReportSettings {
+    rankTestDemote: number | null;
+    rankFilename: boolean;
+    rankBm25k1: number;
+    rankBm25b: number;
+    rankCoverage: boolean;
+    rankStopwords: boolean;
+}
+
+/**
+ * Map the product resolver output (resolveGrepRankingOptions) to flat
+ * report keys. Takes the resolved options structurally — env parsing
+ * stays in the product resolver, never duplicated here.
+ */
+export function toRankReportSettings(options: {
+    testDemoteFactor: number | null;
+    filenamePrepend: boolean;
+    bm25k1: number;
+    bm25b: number;
+    coverageBoost: boolean;
+    stopwords: boolean;
+}): RankReportSettings {
+    return {
+        rankTestDemote: options.testDemoteFactor,
+        rankFilename: options.filenamePrepend,
+        rankBm25k1: options.bm25k1,
+        rankBm25b: options.bm25b,
+        rankCoverage: options.coverageBoost,
+        rankStopwords: options.stopwords,
+    };
+}
+
+function withoutToleratedSettings(params: Record<string, unknown>): Record<string, unknown> {
     const copy = { ...params };
     for (const key of UNIT_SETTING_KEYS) delete copy[key];
+    for (const key of RANK_SETTING_KEYS) delete copy[key];
     return copy;
+}
+
+/** Ranking knobs present on one side, surfaced in the comparison output. */
+function extractRankSettings(params: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const key of RANK_SETTING_KEYS) {
+        if (key in params) out[key] = params[key];
+    }
+    return out;
 }
 
 function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
@@ -292,7 +353,9 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
     requireIdentity("sourceRef", bManifest.sourceRef, vManifest.sourceRef);
     requireIdentity("corpusKind", bManifest.corpusKind, vManifest.corpusKind);
     requireIdentity("gateConstants", bManifest.gateConstants, vManifest.gateConstants);
-    requireIdentity("retrieval params", withoutUnitSettings(bManifest.retrievalConditions ?? bManifest.params ?? {}), withoutUnitSettings(vManifest.retrievalConditions ?? vManifest.params ?? {}));
+    const bRetrieval = bManifest.retrievalConditions ?? bManifest.params ?? {};
+    const vRetrieval = vManifest.retrievalConditions ?? vManifest.params ?? {};
+    requireIdentity("retrieval params", withoutToleratedSettings(bRetrieval), withoutToleratedSettings(vRetrieval));
     if (options?.recompute) {
         throw new Error("refuses-recompute: --recompute requires captured rendered text plus a pinned scorer version on BOTH sides; reports carry neither, so rescoring cannot run");
     }
@@ -335,6 +398,10 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
     return {
         baseline: names?.baseline ?? "baseline",
         variant: names?.variant ?? "variant",
+        rankingKnobs: {
+            baseline: extractRankSettings(bRetrieval),
+            variant: extractRankSettings(vRetrieval),
+        },
         queryCount: deltas.length,
         readReady: tallyReadReady(),
         fileHit: tally((d) => d.fileHit),

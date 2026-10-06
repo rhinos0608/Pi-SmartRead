@@ -57,6 +57,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
 import { GREP_JUDGE_THRESHOLD_ENV_VAR } from "../../../src/judge/grep-judge-stage.js";
+import { resolveGrepRankingOptions } from "../../../src/search/grep-ranking.js";
 import {
     resolveGrepUnitExcerptLines,
     resolveGrepUnitMaxPerFile,
@@ -96,6 +97,7 @@ import {
     CHECKPOINT_SCHEMA_VERSION,
     checkPrivateExisting,
     computeRunFingerprint,
+    toRankReportSettings,
     errorStatus,
     hashEngineSources,
     isConsistentDuplicate,
@@ -736,6 +738,11 @@ const unitSettings = {
     maxPerFile: resolveGrepUnitMaxPerFile(),
     excerptLines: resolveGrepUnitExcerptLines(),
 };
+// BM25 ranking knobs, resolved by the product's own resolver (never
+// re-parsed here). Bound into the run fingerprint so
+// differently-configured runs never resume into each other; paired
+// comparison intentionally still pairs across them (RANK_SETTING_KEYS).
+const rankSettings = toRankReportSettings(resolveGrepRankingOptions());
 const manifest = {
     sourceRef: managedCorpus ? SOURCE_REF : null,
     corpusKind: managedCorpus ? "frozen-git-archive-snapshot" : "explicit-mutable-root",
@@ -766,6 +773,7 @@ const manifest = {
         contextLines: 2,
         workspaceRevision: "frozen 0 within process",
         ...unitSettings,
+        ...rankSettings,
     },
     nodeVersion: process.version,
     gateConstants: { ...GATE_CONSTANTS },
@@ -806,6 +814,7 @@ function fingerprintFor(config: ConfigName): string {
             tokenBudget: args.tokenBudget,
             readReadyK: 5,
             ...unitSettings,
+            ...rankSettings,
         },
         timeoutMs: args.timeoutMs,
     };
