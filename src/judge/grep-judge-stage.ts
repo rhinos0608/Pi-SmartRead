@@ -20,7 +20,7 @@ import type { GrepHit } from "../search/grep-cascade.js";
 import { resolveGrepUnitMode } from "../search/grep-units.js";
 import { isNaturalLanguageQuery } from "../search/query-intent.js";
 import type { ResolveJudgeResult } from "./judge-resolver.js";
-import { existsQuestion, unitRelevanceQuestion } from "./questions.js";
+import { existsQuestion, existsExcerptQuestion, unitRelevanceQuestion } from "./questions.js";
 import { JudgeError, type Judge } from "./types.js";
 
 // ── Thresholds / caps (spec §Decisions on results, §Units, §Pointers) ──
@@ -75,6 +75,104 @@ export const GREP_JUDGE_MAX_POINTER_CANDIDATES = 12;
 export const GREP_JUDGE_MAX_POINTERS = 3;
 /** Per-unit text cap (characters). */
 export const GREP_JUDGE_UNIT_MAX_CHARS = 3500;
+
+// ── Exists evidence (D42) ─────────────────────────────────────────────
+
+/** Env flag enabling excerpt-based exists evidence (`excerpts` = on). Default off = count-only behaviour, byte-identical. */
+export const GREP_JUDGE_EXISTS_EVIDENCE_ENV_VAR = "PI_SMARTREAD_JUDGE_EXISTS_EVIDENCE";
+/** Separate exists threshold env; applies only in excerpt mode. */
+export const GREP_JUDGE_EXISTS_THRESHOLD_ENV_VAR = "PI_SMARTREAD_JUDGE_EXISTS_THRESHOLD";
+/** Env override for the excerpt candidate cap. Non-network knob. */
+export const GREP_JUDGE_EXISTS_EXCERPT_COUNT_ENV_VAR = "PI_SMARTREAD_JUDGE_EXISTS_EXCERPT_COUNT";
+/** Env override for lines kept per excerpt. Non-network knob. */
+export const GREP_JUDGE_EXISTS_EXCERPT_LINES_ENV_VAR = "PI_SMARTREAD_JUDGE_EXISTS_EXCERPT_LINES";
+/** Default excerpt candidate count; bounded to [MIN, MAX]. */
+export const GREP_JUDGE_EXISTS_EXCERPT_COUNT_DEFAULT = 6;
+export const GREP_JUDGE_EXISTS_EXCERPT_COUNT_MIN = 5;
+export const GREP_JUDGE_EXISTS_EXCERPT_COUNT_MAX = 8;
+/** Default lines kept per excerpt. */
+export const GREP_JUDGE_EXISTS_EXCERPT_LINES_DEFAULT = 12;
+export const GREP_JUDGE_EXISTS_EXCERPT_LINES_MIN = 4;
+export const GREP_JUDGE_EXISTS_EXCERPT_LINES_MAX = 24;
+/** Total character budget across all excerpts; truncate deterministically (rank order, cut at the end). */
+export const GREP_JUDGE_EXISTS_EXCERPT_MAX_CHARS = 4000;
+
+/** True only when PI_SMARTREAD_JUDGE_EXISTS_EVIDENCE=excerpts (exact, case-sensitive). */
+export function isExistsExcerptMode(env: Record<string, string | undefined> = process.env): boolean {
+    return env[GREP_JUDGE_EXISTS_EVIDENCE_ENV_VAR] === "excerpts";
+}
+
+/** Resolve the excerpt candidate cap: integer inside [5, 8]; absent/invalid → default 6 (fail-closed). */
+export function resolveExistsExcerptCount(env: Record<string, string | undefined> = process.env): number {
+    const raw = env[GREP_JUDGE_EXISTS_EXCERPT_COUNT_ENV_VAR];
+    if (raw === undefined || raw.trim() === "") return GREP_JUDGE_EXISTS_EXCERPT_COUNT_DEFAULT;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < GREP_JUDGE_EXISTS_EXCERPT_COUNT_MIN || parsed > GREP_JUDGE_EXISTS_EXCERPT_COUNT_MAX) {
+        return GREP_JUDGE_EXISTS_EXCERPT_COUNT_DEFAULT;
+    }
+    return parsed;
+}
+
+/** Resolve lines kept per excerpt: integer inside [4, 24]; absent/invalid → default 12 (fail-closed). */
+export function resolveExistsExcerptLines(env: Record<string, string | undefined> = process.env): number {
+    const raw = env[GREP_JUDGE_EXISTS_EXCERPT_LINES_ENV_VAR];
+    if (raw === undefined || raw.trim() === "") return GREP_JUDGE_EXISTS_EXCERPT_LINES_DEFAULT;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < GREP_JUDGE_EXISTS_EXCERPT_LINES_MIN || parsed > GREP_JUDGE_EXISTS_EXCERPT_LINES_MAX) {
+        return GREP_JUDGE_EXISTS_EXCERPT_LINES_DEFAULT;
+    }
+    return parsed;
+}
+
+/**
+ * Resolve the exists threshold for excerpt mode: a finite value strictly
+ * inside (0, 1) from the environment wins; absent/invalid falls back to
+ * GREP_JUDGE_EXISTS_ABSENT. UNTUNED (D42: to be swept on dev data).
+ */
+export function resolveExistsThreshold(env: Record<string, string | undefined> = process.env): number {
+    const raw = env[GREP_JUDGE_EXISTS_THRESHOLD_ENV_VAR];
+    if (raw === undefined || raw.trim() === "") return GREP_JUDGE_EXISTS_ABSENT;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) return GREP_JUDGE_EXISTS_ABSENT;
+    return parsed;
+}
+
+/**
+ * Build the exists noul state. Count-only by default; excerpt mode (D42)
+ * embeds the bounded excerpt block so the cache key is content-sensitive.
+ */
+export function buildExistsState(
+    rankedUnits: Array<{ path: string; symbol: string; text: string }>,
+    excerptMode: boolean,
+    count: number,
+    linesPerExcerpt: number,
+): Record<string, import("./types.js").JsonValue> {
+    if (!excerptMode) return { candidateCount: rankedUnits.length };
+    return {
+        candidateCount: rankedUnits.length,
+        excerpts: buildExistsExcerpts(rankedUnits, count, linesPerExcerpt),
+    };
+}
+/**
+ * Build the bounded excerpt block for the exists noul: the top `count`
+ * units in rank (fused) order, each as `path` + line range + first
+ * `linesPerExcerpt` lines of unit text. Truncated deterministically to
+ * GREP_JUDGE_EXISTS_EXCERPT_MAX_CHARS total (rank order, cut at the end).
+ */
+export function buildExistsExcerpts(
+    rankedUnits: Array<{ path: string; symbol: string; text: string }>,
+    count: number,
+    linesPerExcerpt: number,
+): string {
+    const picked = rankedUnits.slice(0, Math.max(0, count));
+    const blocks = picked.map((u, i) => {
+        const excerptLines = u.text.split("\n").slice(0, Math.max(1, linesPerExcerpt)).join("\n");
+        return `[${i + 1}] ${u.path}${u.symbol ? ` (${u.symbol})` : ""}\n${excerptLines}`;
+    });
+    const joined = blocks.join("\n---\n");
+    if (joined.length <= GREP_JUDGE_EXISTS_EXCERPT_MAX_CHARS) return joined;
+    return joined.slice(0, GREP_JUDGE_EXISTS_EXCERPT_MAX_CHARS);
+}
 
 // ── Provider seam (injected by J2 runtime wiring) ─────────────────────
 
@@ -146,6 +244,10 @@ export interface GrepJudgeDetails {
     unjudged: { count: number; ids: string[] };
     /** Fused-order hits past the unit cap, left unscored and appended after kept hits. */
     "unscored_beyond_cap": number;
+    /** Exists probability from the per-query exists noul (D42: recorded in both count and excerpt modes). */
+    existsP?: number;
+    /** Whether the exists noul used excerpt evidence (D42) or the count-only state. */
+    existsExcerptMode?: boolean;
 }
 
 export interface GrepJudgeStageResult {
@@ -248,14 +350,26 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
 
     // Per-query existence noul. A failed exists check must not fail grep:
     // abstention simply stays disabled (existsP undefined).
+    // Default (flag off): count-only state — byte-identical to before.
+    // Excerpt mode (D42): top-N units in rank (fused) order as bounded
+    // excerpts, so the cache key is content-sensitive and count-only
+    // verdicts are never reused for excerpt verdicts.
     let existsP: number | undefined;
+    const existsExcerptMode = isExistsExcerptMode();
+    const existsThreshold = existsExcerptMode ? resolveExistsThreshold() : GREP_JUDGE_EXISTS_ABSENT;
     try {
+        const existsState = buildExistsState(
+            units.map((u) => ({ path: u.path, symbol: u.symbol, text: u.text })),
+            existsExcerptMode,
+            resolveExistsExcerptCount(),
+            resolveExistsExcerptLines(),
+        );
         const existsResult = await judge.judgeNouls({
             shared: { query: input.query },
             items: [{
                 id: "exists",
-                state: { candidateCount: units.length },
-                question: () => existsQuestion(input.query),
+                state: existsState,
+                question: () => existsExcerptMode ? existsExcerptQuestion(input.query) : existsQuestion(input.query),
             }],
         });
         existsP = existsResult.p.get("exists");
@@ -282,7 +396,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     const belowThreshold = units.length - new Set(ranked.map((r) => r.unit.id)).size - unjudgedIds.size;
     const unjudgedDetail = { count: unjudgedIds.size, ids: [...unjudgedIds] };
 
-    if (merged.length === 0 && unjudgedUnits.length === 0 && beyondCapHits.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
+    if (merged.length === 0 && unjudgedUnits.length === 0 && beyondCapHits.length === 0 && existsP !== undefined && existsP < existsThreshold) {
         return {
             judged: true,
             hits: [],
@@ -305,6 +419,8 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
                 unitMode: resolveGrepUnitMode(),
                 unjudged: unjudgedDetail,
                 "unscored_beyond_cap": beyondCapHits.length,
+                ...(existsP !== undefined ? { existsP } : {}),
+                existsExcerptMode,
             },
         };
     }
@@ -339,6 +455,8 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
             unitMode: resolveGrepUnitMode(),
             unjudged: unjudgedDetail,
             "unscored_beyond_cap": beyondCapHits.length,
+            ...(existsP !== undefined ? { existsP } : {}),
+            existsExcerptMode,
         },
     };
 }
