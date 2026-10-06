@@ -126,12 +126,35 @@ if (pilotIds.size !== 12) throw new Error(`expected 12 pilot ids, got ${pilotIds
 const devPool = all.filter((i) => !pilotIds.has(i.instanceId) && i.goldFiles.length > 0);
 // Pass the full pool (including pilot instances) so pilot repos are known;
 // selectDevHoldout excludes pilot ids from both splits internally.
-const selection = selectDevHoldout(
-    all.filter((i) => i.goldFiles.length > 0),
-    pilotIds,
-    args.seed,
-    DEV_HOLDOUT_DEFAULTS,
-);
+// The 40% TS floor is infeasible for the JS-dominated pool (see tsShareNote
+// below): on a floor miss, fall back to the TS-preferred ranking with no
+// floor, which greedily maximizes the TS share under the same caps, and
+// record the actual share plus the reason in the manifest.
+let selection: ReturnType<typeof selectDevHoldout>;
+let tsShareNote: string | undefined;
+try {
+    selection = selectDevHoldout(
+        all.filter((i) => i.goldFiles.length > 0),
+        pilotIds,
+        args.seed,
+        DEV_HOLDOUT_DEFAULTS,
+    );
+} catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("TS floor missed")) throw error;
+    selection = selectDevHoldout(all.filter((i) => i.goldFiles.length > 0), pilotIds, args.seed, {
+        ...DEV_HOLDOUT_DEFAULTS,
+        minTsFraction: 0,
+    });
+    const devTs = selection.dev.filter((i) => i.language === "ts").length;
+    const holdoutTs = selection.holdout.filter((i) => i.language === "ts").length;
+    tsShareNote =
+        `TS floor ${DEV_HOLDOUT_DEFAULTS.minTsFraction} infeasible for this pool ` +
+        `(gold classified by file extension: dev ts=${devTs}/${selection.dev.length}, ` +
+        `holdout ts=${holdoutTs}/${selection.holdout.length}); ` +
+        `kept the maximum TS-preferred selection under the same repo caps. ` +
+        `Supersedes manifest sha c884064c, whose TS labels came from the buggy patch-sniffing detector.`;
+    console.log(tsShareNote);
+}
 const holdoutRepoNote = selection.holdoutRepoNote;
 const holdoutRepoSet = new Set(selection.holdout.map((i) => i.repo));
 const devRepos = [...new Set(devPool.map((i) => i.repo))].filter((r) => !holdoutRepoSet.has(r)).sort();
@@ -224,6 +247,20 @@ const datasets: DevHoldoutDataset[] = [
     },
 ];
 
+const acceptedDevTs = acceptedDev.filter((i) => i.language === "ts").length;
+const acceptedHoldoutTs = acceptedHoldout.filter((i) => i.language === "ts").length;
+if (tsShareNote === undefined) {
+    tsShareNote =
+        `TS floor ${DEV_HOLDOUT_DEFAULTS.minTsFraction} met ` +
+        `(dev ts=${acceptedDevTs}/${acceptedDev.length}, ` +
+        `holdout ts=${acceptedHoldoutTs}/${acceptedHoldout.length}). ` +
+        `Supersedes manifest sha c884064c (buggy patch-sniffing language detector).`;
+} else {
+    tsShareNote +=
+        ` Materialized: dev ts=${acceptedDevTs}/${acceptedDev.length}, ` +
+        `holdout ts=${acceptedHoldoutTs}/${acceptedHoldout.length}.`;
+}
+
 const manifest = buildDevHoldoutManifest({
     seed: args.seed,
     datasets,
@@ -232,6 +269,7 @@ const manifest = buildDevHoldoutManifest({
     holdout: acceptedHoldout,
     exclusions: [...loaderExclusions, ...materializeExclusions],
     holdoutRepoNote,
+    tsShareNote,
 });
 if (!verifyDevHoldoutManifest(manifest)) throw new Error("manifest integrity self-check failed");
 const manifestPath = writeDevHoldoutManifest(manifest);

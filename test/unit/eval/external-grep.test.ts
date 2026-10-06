@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { formulationText, type BenchmarkInstance } from "../../../scripts/eval/external/grep/instance.js";
+import { classifyLanguageByGoldFiles, formulationText, type BenchmarkInstance } from "../../../scripts/eval/external/grep/instance.js";
 import {
     computeInstanceMetrics,
     dedupeFilesByFirstAppearance,
@@ -132,6 +132,27 @@ describe("deriveGold", () => {
     });
 });
 
+describe("classifyLanguageByGoldFiles", () => {
+    it.each([
+        [["src/a.ts"], "ts"],
+        [["src/a.tsx"], "ts"],
+        [["src/a.mts"], "ts"],
+        [["src/a.cts"], "ts"],
+        [["src/a.d.ts"], "ts"],
+        [["SRC/A.TS"], "ts"],
+        [["lib/a.js"], "js"],
+        [["lib/a.jsx"], "js"],
+        [["lib/a.mjs"], "js"],
+        [["lib/a.cjs"], "js"],
+        [["src/a.ts", "lib/b.js"], "mixed"],
+        [["src/a.js", "src/b.jsx"], "js"],
+        [["src/a.ts", "src/b.tsx"], "ts"],
+        [[], "js"],
+    ])("classifies %j as %s", (goldFiles, expected) => {
+        expect(classifyLanguageByGoldFiles(goldFiles as string[])).toBe(expected);
+    });
+});
+
 describe("rowsToInstances", () => {
     const row = (over: Record<string, unknown> = {}): Parameters<typeof rowsToInstances>[0][number] => ({
         instance_id: "preactjs__preact-1",
@@ -141,6 +162,31 @@ describe("rowsToInstances", () => {
         patch: FIX_PATCH,
         ...over,
     }) as Parameters<typeof rowsToInstances>[0][number];
+
+    it("classifies .js gold as js (not ts)", () => {
+        const { instances } = rowsToInstances([
+            row({
+                repo: "axios/axios",
+                patch: "diff --git a/lib/adapters/http.js b/lib/adapters/http.js\n" +
+                    "--- a/lib/adapters/http.js\n+++ b/lib/adapters/http.js\n" +
+                    "@@ -1 +1 @@\n-old\n+new\n",
+            }),
+        ]);
+        expect(instances[0]?.language).toBe("js");
+    });
+
+    it("classifies mixed js+ts gold as mixed", () => {
+        const { instances } = rowsToInstances([
+            row({
+                repo: "vuejs/core",
+                patch: "diff --git a/src/a.ts b/src/a.ts\n" +
+                    "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n" +
+                    "diff --git a/lib/b.js b/lib/b.js\n" +
+                    "--- a/lib/b.js\n+++ b/lib/b.js\n@@ -1 +1 @@\n-old\n+new\n",
+            }),
+        ]);
+        expect(instances[0]?.language).toBe("mixed");
+    });
 
     it("keeps JS/TS repos with production gold; title is the first line", () => {
         const { instances, skipped } = rowsToInstances([row()]);
@@ -541,6 +587,18 @@ describe("dev/holdout freeze (D15)", () => {
         });
         expect(verifyDevHoldoutManifest(manifest)).toBe(true);
         expect(computeDevHoldoutSha(manifest)).toBe(manifest.sha256);
+        const noted = buildDevHoldoutManifest({
+            seed: "s",
+            datasets: [],
+            pilot: [],
+            dev: Array.from({ length: 4 }, (_, i) => synth(`d${i}`, "r/a", "ts")),
+            holdout: Array.from({ length: 4 }, (_, i) => synth(`h${i}`, "r/b", "js")),
+            exclusions: [],
+            holdoutRepoNote: "note",
+            tsShareNote: "floor relaxed: reason",
+        });
+        expect(noted.tsShareNote).toBe("floor relaxed: reason");
+        expect(verifyDevHoldoutManifest(noted)).toBe(true);
         const tampered = { ...manifest, dev: [synth("a-2", "org/deep")] };
         expect(verifyDevHoldoutManifest(tampered as unknown as typeof manifest)).toBe(false);
         const retitled = JSON.parse(JSON.stringify(manifest)) as typeof manifest;

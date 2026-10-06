@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { deriveGold } from "./patch.js";
-import type { BenchmarkInstance, InstanceLanguage } from "./instance.js";
+import { classifyLanguageByGoldFiles, type BenchmarkInstance } from "./instance.js";
 
 export const SWE_BENCH_MULTILINGUAL_LICENSE = "MIT";
 export const SWE_BENCH_MULTILINGUAL_DATASET = "SWE-bench/SWE-bench_Multilingual";
@@ -89,9 +89,6 @@ export function datasetRevision(rows: DatasetRow[]): string {
     return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
 
-function detectLanguage(patch: string): InstanceLanguage {
-    return /\+\+\+ b\/.*\.m?[tj]sx?|\+\+\+ b\/.*\.[cm]?ts/.test(patch) ? "ts" : "js";
-}
 
 function splitTitleBody(problemStatement: string): { title: string; body: string } {
     const body = problemStatement.replace(/\r\n/g, "\n");
@@ -131,7 +128,7 @@ export function rowsToInstances(rows: DatasetRow[]): {
             goldFiles: gold.goldFiles,
             goldHunks: gold.goldHunks,
             excludedFiles: gold.excludedFiles,
-            language: detectLanguage(row.patch),
+            language: classifyLanguageByGoldFiles(gold.goldFiles),
             split: "dev",
             license: SWE_BENCH_MULTILINGUAL_LICENSE,
         });

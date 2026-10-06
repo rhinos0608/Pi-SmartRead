@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { BenchmarkInstance } from "./instance.js";
+import type { BenchmarkInstance, InstanceLanguage } from "./instance.js";
 
 export const PILOT_SIZE = 12;
 
@@ -85,7 +85,7 @@ export function selectPilot(instances: BenchmarkInstance[], seed: string, size =
     );
     for (const group of byRepo.values()) {
         group.sort((a, b) => {
-            const lang = (a.language === "ts" ? 0 : 1) - (b.language === "ts" ? 0 : 1);
+            const lang = langRank(a.language) - langRank(b.language);
             if (lang !== 0) return lang;
             return (orderKey.get(a.instanceId) ?? 0) - (orderKey.get(b.instanceId) ?? 0);
         });
@@ -174,7 +174,7 @@ export interface DevHoldoutEntry {
     repo: string;
     baseCommit: string;
     dataset: string;
-    language: "ts" | "js";
+    language: InstanceLanguage;
     goldFiles: string[];
 }
 
@@ -195,6 +195,8 @@ export interface DevHoldoutManifest {
     holdout: DevHoldoutEntry[];
     exclusions: Array<{ instanceId: string; stage: string; reason: string }>;
     holdoutRepoNote: string;
+    /** Present when the TS floor was relaxed: actual shares and the reason. */
+    tsShareNote?: string;
     sha256: string;
 }
 
@@ -254,7 +256,7 @@ export function rankForSplit(
     ).forEach((id, idx) => orderKey.set(id, idx));
     for (const group of byRepo.values()) {
         group.sort((a, b) => {
-            const lang = (a.language === "ts" ? 0 : 1) - (b.language === "ts" ? 0 : 1);
+            const lang = langRank(a.language) - langRank(b.language);
             if (lang !== 0) return lang;
             return (orderKey.get(a.instanceId) ?? 0) - (orderKey.get(b.instanceId) ?? 0);
         });
@@ -303,6 +305,11 @@ function takeWithCap(
         out.push(inst);
     }
     return out;
+}
+
+/** Rank languages for TS-preferred selection: ts first, then mixed, then js. */
+function langRank(language: InstanceLanguage): number {
+    return language === "ts" ? 0 : language === "mixed" ? 1 : 2;
 }
 
 function tsFraction(instances: BenchmarkInstance[]): number {
@@ -441,6 +448,7 @@ export function buildDevHoldoutManifest(args: {
     holdout: BenchmarkInstance[];
     exclusions: Array<{ instanceId: string; stage: string; reason: string }>;
     holdoutRepoNote: string;
+    tsShareNote?: string;
 }): DevHoldoutManifest {
     const body = {
         version: 2 as const,
@@ -452,6 +460,7 @@ export function buildDevHoldoutManifest(args: {
         holdout: args.holdout.map(entryOf).sort((a, b) => (a.id < b.id ? -1 : 1)),
         exclusions: [...args.exclusions],
         holdoutRepoNote: args.holdoutRepoNote,
+        ...(args.tsShareNote === undefined ? {} : { tsShareNote: args.tsShareNote }),
     };
     return { ...body, sha256: computeDevHoldoutSha(body) };
 }

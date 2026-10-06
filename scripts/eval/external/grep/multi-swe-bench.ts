@@ -22,7 +22,7 @@ import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { deriveGold } from "./patch.js";
-import type { BenchmarkInstance, InstanceLanguage } from "./instance.js";
+import { classifyLanguageByGoldFiles, type BenchmarkInstance } from "./instance.js";
 
 export const MULTI_SWE_BENCH_LICENSE_STATUS = "cleared (D20)";
 export const MULTI_SWE_BENCH_LICENSE_NOTE =
@@ -115,10 +115,6 @@ export async function cachedFileRevision(datasetFile: string): Promise<string> {
     return hash.digest("hex");
 }
 
-function detectLanguage(patch: string): InstanceLanguage {
-    return /\+\+\+ b\/.*\.m?[tj]sx?|\+\+\+ b\/.*\.[cm]?ts/.test(patch) ? "ts" : "js";
-}
-
 /**
  * Convert raw rows to benchmark instances, keeping only rows with at
  * least one locatable (production, base-side) gold file. The query text
@@ -157,7 +153,7 @@ export function msbRowsToInstances(rows: MultiSweBenchRow[]): {
             goldFiles: gold.goldFiles,
             goldHunks: gold.goldHunks,
             excludedFiles: gold.excludedFiles,
-            language: detectLanguage(row.fix_patch),
+            language: classifyLanguageByGoldFiles(gold.goldFiles),
             split: "dev",
             license: MULTI_SWE_BENCH_LICENSE_NOTE,
         });
