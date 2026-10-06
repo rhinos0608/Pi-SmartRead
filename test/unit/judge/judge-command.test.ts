@@ -81,6 +81,15 @@ describe("registerJudgeCommand", () => {
         expect(calls[0]!.options.handler).toBeTypeOf("function");
         expect(() => registerJudgeCommand({} as never)).not.toThrow();
     });
+    it("marks local mode experimental in the registered description", () => {
+        const calls: Array<{ name: string; options: { description: string } }> = [];
+        registerJudgeCommand(
+            { registerCommand: (name: string, options: { description: string }) => { calls.push({ name, options }); } },
+            makeDeps().deps,
+        );
+        expect(calls[0]!.options.description.toLowerCase()).toContain("local");
+        expect(calls[0]!.options.description.toLowerCase()).toContain("experimental");
+    });
 });
 
 describe("/judge off", () => {

@@ -283,7 +283,7 @@ export async function handleJudgeCommand(args: string, ctx: Ctx, deps: JudgeComm
 export function registerJudgeCommand(pi: { registerCommand?: unknown }, deps: JudgeCommandDeps = {}): void {
     if (typeof (pi as { registerCommand?: unknown }).registerCommand !== "function") return;
     (pi as { registerCommand: (name: string, options: { description: string; handler: (args: string, ctx: Ctx) => Promise<void> }) => void }).registerCommand("judge", {
-        description: "Relevance judge — off | local | cloud | status | install",
+        description: "Relevance judge — off | local (experimental) | cloud | status | install",
         handler: async (args: string, ctx: Ctx) => handleJudgeCommand(args, ctx, deps),
     });
 }
