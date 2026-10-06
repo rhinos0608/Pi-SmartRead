@@ -332,8 +332,66 @@ export interface D46LoadedSplit {
 }
 
 /**
+ * Second-label, adjudication, and pre-adjudication artifacts share the
+ * split dir but are never query files; they are sealed, not parsed.
+ */
+export function isNonQueryArtifact(name: string): boolean {
+    if (name === "MANIFEST.sha256.json") return true;
+    if (name.startsWith("second-label-") || name.startsWith("second-labels-")) return true;
+    if (name === "adjudication.jsonl" || name.startsWith("adjudication.")) return true;
+    if (name.includes(".pre-adjudication")) return true;
+    return false;
+}
+
+export type D46ArtifactRole =
+    | "queries"
+    | "second-label-sample"
+    | "second-labels"
+    | "adjudication"
+    | "pre-adjudication"
+    | "other";
+
+export interface D46SealedArtifact {
+    file: string;
+    role: D46ArtifactRole;
+    sha256: string;
+}
+
+export function classifyArtifact(name: string): D46ArtifactRole {
+    if (name.includes(".pre-adjudication")) return "pre-adjudication";
+    if (name.startsWith("second-labels-")) return "second-labels";
+    if (name.startsWith("second-label-")) return "second-label-sample";
+    if (name === "adjudication.jsonl" || name.startsWith("adjudication.")) return "adjudication";
+    if (name.endsWith(".jsonl")) return "queries";
+    return "other";
+}
+
+/** Hash every artifact file in the split dir, excluding the manifest itself. */
+export function listSealedArtifacts(splitDir: string): D46SealedArtifact[] {
+    let entries;
+    try {
+        entries = readdirSync(splitDir, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    const out: D46SealedArtifact[] = [];
+    for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (entry.name === "MANIFEST.sha256.json") continue;
+        const raw = readFileSync(join(splitDir, entry.name));
+        out.push({
+            file: entry.name,
+            role: classifyArtifact(entry.name),
+            sha256: createHash("sha256").update(raw).digest("hex"),
+        });
+    }
+    return out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+}
+
+/**
  * Load every `*.jsonl` query file in a split dir (one D46Query per
- * non-blank line). Manifest and second-label files are never query files.
+ * non-blank line). Manifest, second-label, adjudication, and
+ * pre-adjudication files are never query files (matched by name).
  */
 export function loadSplitQueries(splitDir: string): D46LoadedSplit {
     const queries: D46Query[] = [];
@@ -347,6 +405,7 @@ export function loadSplitQueries(splitDir: string): D46LoadedSplit {
     }
     for (const name of entries) {
         if (!name.endsWith(".jsonl")) continue;
+        if (isNonQueryArtifact(name)) continue;
         const full = join(splitDir, name);
         const raw = readFileSync(full, "utf8");
         files.push({
@@ -379,6 +438,8 @@ export interface D46SplitManifest {
     split: D46Split;
     createdAt: string;
     files: D46SplitFile[];
+    /** sha256 of every artifact in the split dir (excl. the manifest), with role labels. */
+    artifacts: D46SealedArtifact[];
     countsByClass: Record<string, number>;
     countsByRepo: Record<string, number>;
     repos: D46RepoManifest["repos"];
@@ -413,6 +474,7 @@ export function writeSplitManifest(
         split,
         createdAt: new Date().toISOString(),
         files: loaded.files,
+        artifacts: listSealedArtifacts(splitDir),
         countsByClass,
         countsByRepo,
         repos: pins,

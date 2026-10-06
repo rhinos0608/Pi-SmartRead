@@ -64,8 +64,16 @@ that commit). Gold paths are relative to the corpus root.
    `~/.cache/pi-smartread-bench/d46/{dev,holdout}/` (mode 0600), never
    in the repo. Seal with
    `npx tsx scripts/eval/d46/validate.ts --split dev|holdout --seal`,
-   which writes `MANIFEST.sha256.json` (0600: per-file sha256, query
-   counts per class/repo, repo pins) after a green validation.
+   which writes `MANIFEST.sha256.json` (0600) after a green validation.
+   The manifest's `files` section seals per-query-file sha256 plus
+   query counts per class/repo and repo pins; its `artifacts` section
+   seals every other artifact in the split dir by sha256 with role
+   labels, excluding the manifest itself: query JSONL (`queries`),
+   `second-label-<repo>.json` (`second-label-sample`), second-labels
+   JSONL (`second-labels`), `adjudication.jsonl` (`adjudication`), and
+   `.pre-adjudication` copies (`pre-adjudication`). Validation parses
+   only query JSONL; second-label/adjudication/pre-adjudication files
+   are matched by name and never parsed as queries.
 9. Draw the second-label sample with
     `npx tsx scripts/eval/d46/sample-second-label.ts --split dev|holdout --seed <n> [--repo <owner__name>]`:
    deterministically selects 25% of answerable queries per repo

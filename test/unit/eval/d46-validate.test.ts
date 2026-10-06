@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { D46Query, D46RepoManifest } from "../../../scripts/eval/d46/schema.js";
 import {
     checkPathsAtCommit,
+    listSealedArtifacts,
+    loadSplitQueries,
     validateQueryDoc,
 } from "../../../scripts/eval/d46/validate.js";
 import { runSampleCli, selectSecondLabelIds } from "../../../scripts/eval/d46/sample-second-label.js";
@@ -173,6 +175,58 @@ describe("selectSecondLabelIds", () => {
         const ids = selectSecondLabelIds(queries, 1);
         expect(ids.every((id) => typeof id === "string")).toBe(true);
         expect(JSON.stringify(ids)).not.toContain("startLine");
+    });
+});
+
+describe("loadSplitQueries ignores non-query artifacts", () => {
+    let bench = "";
+    afterEach(() => {
+        if (bench !== "") rmSync(bench, { recursive: true, force: true });
+        bench = "";
+    });
+
+    it("does not parse second-labels/adjudication/pre-adjudication files as queries", () => {
+        bench = mkdtempSync(join(tmpdir(), "d46-nonquery-"));
+        const q = behaviourQuery({ id: "h0", repo: "honojs/hono", split: "dev" });
+        writeFileSync(join(bench, "hono.jsonl"), `${JSON.stringify(q)}\n`);
+        writeFileSync(join(bench, "second-labels-honojs__hono.jsonl"), "not a query\n");
+        writeFileSync(join(bench, "adjudication.jsonl"), "not a query\n");
+        writeFileSync(join(bench, "hono.jsonl.pre-adjudication.bak"), "not a query\n");
+        const loaded = loadSplitQueries(bench);
+        expect(loaded.errors).toEqual([]);
+        expect(loaded.queries.map((x) => x.id)).toEqual(["h0"]);
+        expect(loaded.files.map((f) => f.file)).toEqual(["hono.jsonl"]);
+    });
+});
+
+describe("listSealedArtifacts", () => {
+    let bench = "";
+    afterEach(() => {
+        if (bench !== "") rmSync(bench, { recursive: true, force: true });
+        bench = "";
+    });
+
+    it("seals every artifact with role labels and excludes the manifest", () => {
+        bench = mkdtempSync(join(tmpdir(), "d46-seal-"));
+        const names = [
+            "hono.jsonl",
+            "second-label-honojs__hono.json",
+            "second-labels-honojs__hono.jsonl",
+            "adjudication.jsonl",
+            "hono.jsonl.pre-adjudication.2026-10-06.bak",
+        ];
+        for (const n of names) writeFileSync(join(bench, n), `${n}\n`);
+        writeFileSync(join(bench, "MANIFEST.sha256.json"), "{}\n");
+        const sealed = listSealedArtifacts(bench);
+        expect(sealed.map((a) => a.file).sort()).toEqual([...names].sort());
+        expect(Object.fromEntries(sealed.map((a) => [a.file, a.role]))).toEqual({
+            "hono.jsonl": "queries",
+            "second-label-honojs__hono.json": "second-label-sample",
+            "second-labels-honojs__hono.jsonl": "second-labels",
+            "adjudication.jsonl": "adjudication",
+            "hono.jsonl.pre-adjudication.2026-10-06.bak": "pre-adjudication",
+        });
+        for (const a of sealed) expect(a.sha256).toMatch(/^[0-9a-f]{64}$/);
     });
 });
 
