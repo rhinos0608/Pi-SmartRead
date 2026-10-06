@@ -46,6 +46,14 @@ import { ensureBareClone, materializeInstance } from "./repos.js";
 import { freezeManifest, selectPilot, writeManifest, type FrozenManifest } from "./sampling.js";
 import { datasetRevision, fetchAllRows, rowsToInstances } from "./swebench-multilingual.js";
 
+function takeValue(flag: string, argv: string[], i: number): string {
+    const value = argv[i];
+    if (value === undefined || value.startsWith("--")) {
+        throw new Error(`${flag} requires a value (got ${value ?? "nothing"})`);
+    }
+    return value;
+}
+
 function parseArgs(argv: string[]): {
     split: string;
     formulations: Formulation[];
@@ -68,14 +76,14 @@ function parseArgs(argv: string[]): {
     let openHoldout = false;
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
-        if (arg === "--split") split = argv[++i] ?? split;
-        else if (arg === "--formulation") formulationArg = argv[++i] ?? formulationArg;
-        else if (arg === "--limit") limit = Number(argv[++i]);
-        else if (arg === "--timeout-ms") timeoutMs = Number(argv[++i] ?? "");
-        else if (arg === "--seed") seed = argv[++i] ?? seed;
+        if (arg === "--split") split = takeValue(arg, argv, ++i);
+        else if (arg === "--formulation") formulationArg = takeValue(arg, argv, ++i);
+        else if (arg === "--limit") limit = Number(takeValue(arg, argv, ++i));
+        else if (arg === "--timeout-ms") timeoutMs = Number(takeValue(arg, argv, ++i));
+        else if (arg === "--seed") seed = takeValue(arg, argv, ++i);
         else if (arg === "--offline") offline = true;
         else if (arg === "--multi-swe-bench") multiSweBench = true;
-        else if (arg === "--manifest") manifestPath = argv[++i] ?? null;
+        else if (arg === "--manifest") manifestPath = takeValue(arg, argv, ++i);
         else if (arg === "--open-holdout") openHoldout = true;
         else if (arg === "--accept-license-review") continue;
         else if (arg === "--help" || arg === "-h") {
@@ -101,7 +109,13 @@ function reportsDir(): string {
     return join(homedir(), ".cache/pi-smartread-bench/reports");
 }
 
-const args = parseArgs(process.argv.slice(2));
+let args: ReturnType<typeof parseArgs>;
+try {
+    args = parseArgs(process.argv.slice(2));
+} catch (error) {
+    console.error(`error: ${(error as Error).message}`);
+    process.exit(2);
+}
 let failed = false;
 try {
     if (args.offline && !existsSync(join(homedir(), ".cache/pi-smartread-bench/datasets/swe-bench-multilingual"))) {
