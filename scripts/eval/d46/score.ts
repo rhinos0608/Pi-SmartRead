@@ -85,10 +85,20 @@ export interface D46ScoredQuery {
     elapsedMs: number;
 }
 
+/**
+ * First five distinct files in rendered rank order (same first-appearance
+ * semantics as dedupeFilesByFirstAppearance in the external grep harness:
+ * dedupe the FULL unit list, then cap at k — never truncate units first).
+ */
 function distinctTop5Files(units: D46RenderedUnit[], k = 5): string[] {
+    const seen = new Set<string>();
     const out: string[] = [];
-    for (const u of units.slice(0, k)) {
-        if (!out.includes(u.file)) out.push(u.file);
+    for (const u of units) {
+        if (out.length >= k) break;
+        if (!seen.has(u.file)) {
+            seen.add(u.file);
+            out.push(u.file);
+        }
     }
     return out;
 }

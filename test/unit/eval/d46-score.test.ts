@@ -119,6 +119,43 @@ describe("file-level scoring with TS-style corpusRoot paths", () => {
         expect(row.precisionAt5).toBe(1);
     });
 
+    it("counts a gold file at unit rank 6 when the first five units share one non-gold file", () => {
+        const dupes = [10, 11, 12, 13, 14].map((n) => gutterUnit("src/noise.ts", [n]));
+        const row = scoreD46Query(
+            input({
+                units: [...dupes, gutterUnit("src/app.ts", [10])],
+                totalHits: 6,
+                renderedChars: 300,
+                renderedText: "",
+            }),
+        );
+        expect(row.top5Files).toEqual(["src/noise.ts", "src/app.ts"]);
+        expect(row.successAt5).toBe(true);
+        expect(row.recallAt5).toBe(1);
+        expect(row.precisionAt5).toBe(0.5);
+        expect(row.mrr).toBe(0.5);
+    });
+
+    it("divides precision@5 by the distinct files shown when fewer than five", () => {
+        const row = scoreD46Query(
+            input({
+                units: [
+                    gutterUnit("src/a.ts", [1]),
+                    gutterUnit("src/b.ts", [1]),
+                    gutterUnit("src/c.ts", [1]),
+                ],
+                totalHits: 3,
+                renderedChars: 150,
+                renderedText: "",
+                query: query({
+                    gold: [{ path: "src/c.ts", startLine: 1, endLine: 5, grade: 1 }],
+                }),
+            }),
+        );
+        expect(row.top5Files).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+        expect(row.precisionAt5).toBeCloseTo(1 / 3);
+    });
+
     it("marks false-empty when an answerable query returns nothing", () => {
         const row = scoreD46Query(input());
         expect(row.successAt5).toBe(false);
