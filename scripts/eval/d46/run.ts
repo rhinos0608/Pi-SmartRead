@@ -597,7 +597,7 @@ function gitRootFromScript(): string | null {
     }
 }
 
-export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_ROOT): Promise<number> {
+export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_ROOT, overrides: { engineSourceHash?: string } = {}): Promise<number> {
     const args = parseD46RunArgs(argv);
     const holdout = args.split === "holdout";
     const splitDir = join(benchRoot, args.split);
@@ -641,6 +641,41 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         for (const e of pinErrors) console.error(`error: ${e}`);
         return 2;
     }
+    // Preflight ordering: plan cache deletions for every repo (no
+    // deletion), then run every remaining preflight check (engine hash,
+    // freeze, holdout guard). Only after ALL checks pass are the planned
+    // deletions executed, so a refused run never deletes caches.
+    const ranking = toRankReportSettings(resolveGrepRankingOptions());
+    const engineSourceHash = overrides.engineSourceHash ?? hashEngineSources(gitRootFromScript() ?? resolve("."));
+    if (!isKnownSourceHash(engineSourceHash)) {
+        console.error("error: unknown engine source hash; refusing to run");
+        return 2;
+    }
+    let freeze: D46FreezeFile | null = null;
+    let freezeSha256: string | null = null;
+    if (args.freeze) {
+        try {
+            const loadedFreeze = loadFreezeFile(args.freeze);
+            freeze = loadedFreeze.freeze;
+            freezeSha256 = loadedFreeze.sha256;
+        } catch (error) {
+            console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+            return 2;
+        }
+    }
+    const guard = checkHoldoutGuard({
+        split: args.split,
+        openHoldout: args.openHoldout,
+        freeze,
+        config: args.config,
+        replicate: args.replicate,
+        ranking,
+        engineSourceHash,
+    });
+    if (guard) {
+        console.error(`error: ${guard}`);
+        return 2;
+    }
     const coldDeleted: string[] = [];
     const coldSkippedTracked: string[] = [];
     {
@@ -681,38 +716,6 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         }
         coldDeleted.sort();
         coldSkippedTracked.sort();
-    }
-
-    const ranking = toRankReportSettings(resolveGrepRankingOptions());
-    const engineSourceHash = hashEngineSources(gitRootFromScript() ?? resolve("."));
-    if (!isKnownSourceHash(engineSourceHash)) {
-        console.error("error: unknown engine source hash; refusing to run");
-        return 2;
-    }
-    let freeze: D46FreezeFile | null = null;
-    let freezeSha256: string | null = null;
-    if (args.freeze) {
-        try {
-            const loadedFreeze = loadFreezeFile(args.freeze);
-            freeze = loadedFreeze.freeze;
-            freezeSha256 = loadedFreeze.sha256;
-        } catch (error) {
-            console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
-            return 2;
-        }
-    }
-    const guard = checkHoldoutGuard({
-        split: args.split,
-        openHoldout: args.openHoldout,
-        freeze,
-        config: args.config,
-        replicate: args.replicate,
-        ranking,
-        engineSourceHash,
-    });
-    if (guard) {
-        console.error(`error: ${guard}`);
-        return 2;
     }
 
     let provider: GrepJudgeProvider | undefined;

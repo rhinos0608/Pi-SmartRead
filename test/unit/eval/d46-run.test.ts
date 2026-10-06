@@ -17,10 +17,12 @@ import {
     isCleanPorcelain,
     parseD46RunArgs,
     redactForHoldout,
+    runD46Cli,
     SMARTREAD_RUNTIME_CACHE_DIRS,
     verifyCheckoutPins,
     verifySplitManifest,
 } from "../../../scripts/eval/d46/run.js";
+import { loadSplitQueries, writeSplitManifest } from "../../../scripts/eval/d46/validate.js";
 import type { D46SplitManifest } from "../../../scripts/eval/d46/validate.js";
 
 function sha(text: string): string {
@@ -187,6 +189,62 @@ describe("checkHoldoutGuard refusals", () => {
         expect(checkHoldoutGuard({ ...base, ranking: { ...ranking, rankFilename: true } })).toMatch(
             /not a listed freeze arm/,
         );
+    });
+});
+
+describe("runD46Cli cold-start preflight ordering", () => {
+    function makeBench(split: "dev" | "holdout") {
+        const bench = mkdtempSync(join(tmpdir(), "d46-order-"));
+        const checkout = join(bench, "repos", "o__r");
+        mkdirSync(checkout, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: checkout });
+        execFileSync("git", ["config", "user.email", "t@t"], { cwd: checkout });
+        execFileSync("git", ["config", "user.name", "t"], { cwd: checkout });
+        writeFileSync(join(checkout, "a.txt"), "hello world\n");
+        execFileSync("git", ["add", "."], { cwd: checkout });
+        execFileSync("git", ["commit", "-qm", "init"], { cwd: checkout });
+        const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: checkout, encoding: "utf8" }).trim();
+        const repos = [{
+            owner: "o", name: "r", url: "https://example.com/o/r.git", sha, branch: "main",
+            corpusRoot: ".", split, addedAt: "2026-01-01T00:00:00.000Z", license: "mit", source: "test",
+        }];
+        writeFileSync(join(bench, "repos.json"), JSON.stringify({ version: 1, reposDir: join(bench, "repos"), repos }));
+        const splitDir = join(bench, split);
+        mkdirSync(splitDir, { recursive: true });
+        const q = {
+            id: "q1", repo: "o/r", split, class: "exact_ish", exactForm: "literal",
+            query: "hello", rationale: "r", author: "t", authoredAt: "2026-01-01T00:00:00.000Z",
+            gold: [{ path: "a.txt", startLine: 1, endLine: 1, grade: 1 }],
+        };
+        writeFileSync(join(splitDir, "o__r.jsonl"), `${JSON.stringify(q)}\n`);
+        const loaded = loadSplitQueries(splitDir, new Set(["o__r.jsonl"]));
+        expect(loaded.errors).toEqual([]);
+        writeSplitManifest(splitDir, split, loaded, repos as never);
+        // Plant an untracked runtime cache that cold start would delete.
+        mkdirSync(join(checkout, ".pi-smartread", "cache"), { recursive: true });
+        writeFileSync(join(checkout, ".pi-smartread", "cache", "x.bin"), "x");
+        return { bench, cacheFile: join(checkout, ".pi-smartread", "cache", "x.bin") };
+    }
+
+    it("unknown engine hash refuses WITHOUT deleting the planted cache", async () => {
+        const { bench, cacheFile } = makeBench("dev");
+        const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "unknown:test" });
+        expect(code).toBe(2);
+        expect(existsSync(cacheFile)).toBe(true);
+    });
+
+    it("holdout guard refusal leaves the planted cache present", async () => {
+        const { bench, cacheFile } = makeBench("holdout");
+        const code = await runD46Cli(["--split", "holdout", "--config", "off"], bench, { engineSourceHash: "sha256:abc:1-files" });
+        expect(code).toBe(2);
+        expect(existsSync(cacheFile)).toBe(true);
+    });
+
+    it("happy path deletes the planted cache", async () => {
+        const { bench, cacheFile } = makeBench("dev");
+        const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "sha256:abc:1-files" });
+        expect(code).toBe(0);
+        expect(existsSync(cacheFile)).toBe(false);
     });
 });
 
