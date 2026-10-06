@@ -4,11 +4,14 @@
  * Each knob is adapted from a mechanism verified in probelabs/probe at
  * commit 10d4a76 (Apache-2.0; see audited mechanisms in
  * /tmp/smartread-ext/probe-ranking-audit.md). All knobs default OFF /
- * to current values, so default behaviour is byte-identical.
+ * to current values, except test/spec/doc demotion which defaults to 0.7
+ * (D51: confirmed on the frozen holdout).
  *
  * Knobs (each independent, read via resolveGrepRankingOptions):
- * - PI_SMARTREAD_GREP_RANK_TEST_DEMOTE: score multiplier factor (e.g. 0.7)
- *   applied to test/spec/fixture/__tests__ paths and docs/*.md.
+ * - PI_SMARTREAD_GREP_RANK_TEST_DEMOTE: score multiplier factor applied
+ *   to test/spec/fixture/__tests__ paths and docs/*.md. Unset defaults to
+ *   0.7; `off`/`0`/`false`/`no` disables demotion; a valid factor in (0,1)
+ *   overrides; any other value falls back to 0.7.
  * - PI_SMARTREAD_GREP_RANK_FILENAME: on/off — prepend a synthetic
  *   `// Filename: <relPath>` header to the BM25 document so path tokens
  *   participate in scoring.
@@ -22,6 +25,8 @@
 import { DEFAULT_BM25_B, DEFAULT_BM25_K1, tokenize } from "../scoring.js";
 
 export const GREP_RANK_TEST_DEMOTE_ENV_VAR = "PI_SMARTREAD_GREP_RANK_TEST_DEMOTE";
+/** Default test/spec/doc demotion factor (D51: confirmed on the frozen holdout). */
+export const DEFAULT_TEST_DEMOTE_FACTOR = 0.7;
 export const GREP_RANK_FILENAME_ENV_VAR = "PI_SMARTREAD_GREP_RANK_FILENAME";
 export const GREP_RANK_BM25_ENV_VAR = "PI_SMARTREAD_GREP_RANK_BM25";
 export const GREP_RANK_COVERAGE_ENV_VAR = "PI_SMARTREAD_GREP_RANK_COVERAGE";
@@ -46,11 +51,20 @@ function isOn(raw: string | undefined): boolean {
   return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
 }
 
-/** Parse a demotion factor: finite number strictly between 0 and 1, else null (off). */
+/** Values that explicitly disable test/spec/doc demotion (case-insensitive). */
+const DEMOTE_OFF_VALUES = new Set(["off", "0", "false", "no"]);
+
+/**
+ * Parse a demotion factor. Unset/blank defaults to 0.7 (D51); explicit off
+ * values (`off`/`0`/`false`/`no`) disable demotion (null); a finite number
+ * strictly between 0 and 1 is used as-is; anything else falls back to 0.7.
+ */
 export function parseDemoteFactor(raw: string | undefined): number | null {
-  if (raw === undefined || raw.trim() === "") return null;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_TEST_DEMOTE_FACTOR;
+  const normalized = raw.trim().toLowerCase();
+  if (DEMOTE_OFF_VALUES.has(normalized)) return null;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0 || n >= 1) return null;
+  if (!Number.isFinite(n) || n <= 0 || n >= 1) return DEFAULT_TEST_DEMOTE_FACTOR;
   return n;
 }
 
@@ -67,7 +81,7 @@ export function parseBm25Params(raw: string | undefined): { k1: number; b: numbe
   };
 }
 
-/** Single resolver for all ranking knobs. All default off / current values. */
+/** Single resolver for all ranking knobs. Only non-demotion knobs default off. */
 export function resolveGrepRankingOptions(
   env: Record<string, string | undefined> = process.env,
 ): GrepRankingOptions {
@@ -82,10 +96,10 @@ export function resolveGrepRankingOptions(
   };
 }
 
-/** True when every knob is off / at current values (default behaviour). */
+/** True when every knob is at default values (demote 0.7, rest off / current). */
 export function isDefaultRankingOptions(options: GrepRankingOptions): boolean {
   return (
-    options.testDemoteFactor === null &&
+    options.testDemoteFactor === DEFAULT_TEST_DEMOTE_FACTOR &&
     !options.filenamePrepend &&
     options.bm25k1 === DEFAULT_BM25_K1 &&
     options.bm25b === DEFAULT_BM25_B &&

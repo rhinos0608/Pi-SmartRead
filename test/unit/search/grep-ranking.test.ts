@@ -1,8 +1,9 @@
 /**
  * Experimental BM25 ranking knobs for the no-index grep fallback.
  *
- * Covers: default-off equivalence (byte-identical scores/behaviour),
- * env-knob resolvers, the explicit test/doc path classifier, stopword
+ * Covers: default-knob equivalence (byte-identical scores/behaviour for
+ * non-demotion knobs; demote defaults to 0.7), env-knob resolvers, the
+ * explicit test/doc path classifier, stopword
  * filtering, the filename header, the coverage boost, active-knob
  * reporting, and corpus-cache isolation across the filename knob.
  */
@@ -23,6 +24,7 @@ import {
     createGrepTool,
 } from "../../../src/search/grep-tool.js";
 import {
+    DEFAULT_TEST_DEMOTE_FACTOR,
     activeRankingKnobs,
     coverageBoostFactor,
     filterRankingStopwords,
@@ -57,10 +59,10 @@ const DOCS = [
 ];
 
 describe("grep ranking knobs default off (equivalence)", () => {
-    it("resolves every knob to off / current values with an empty env", () => {
+    it("resolves non-demotion knobs to off and demote to the 0.7 default", () => {
         const options = resolveGrepRankingOptions({});
         expect(options).toEqual({
-            testDemoteFactor: null,
+            testDemoteFactor: DEFAULT_TEST_DEMOTE_FACTOR,
             filenamePrepend: false,
             bm25k1: DEFAULT_BM25_K1,
             bm25b: DEFAULT_BM25_B,
@@ -68,8 +70,23 @@ describe("grep ranking knobs default off (equivalence)", () => {
             stopwords: false,
         });
         expect(isDefaultRankingOptions(options)).toBe(true);
-        expect(activeRankingKnobs(options)).toEqual([]);
+        expect(activeRankingKnobs(options)).toEqual(["testDemote=0.7"]);
         expect(rankingCorpusKeySegment(options)).toBe("");
+    });
+
+    it("disables demote only for explicit off values; other values fall back to 0.7", () => {
+        expect(parseDemoteFactor(undefined)).toBe(DEFAULT_TEST_DEMOTE_FACTOR);
+        expect(parseDemoteFactor("")).toBe(DEFAULT_TEST_DEMOTE_FACTOR);
+        for (const off of ["off", "OFF", "0", "false", "FALSE", "no", "No"]) {
+            expect(parseDemoteFactor(off)).toBeNull();
+        }
+        expect(parseDemoteFactor("0.7")).toBe(0.7);
+        expect(parseDemoteFactor("0.5")).toBe(0.5);
+        for (const fallback of ["abc", "2", "1", "-0.5", "NaN", "0.7x"]) {
+            expect(parseDemoteFactor(fallback)).toBe(DEFAULT_TEST_DEMOTE_FACTOR);
+        }
+        expect(resolveGrepRankingOptions({ [GREP_RANK_TEST_DEMOTE_ENV_VAR]: "off" }).testDemoteFactor).toBeNull();
+        expect(resolveGrepRankingOptions({ [GREP_RANK_TEST_DEMOTE_ENV_VAR]: "0.5" }).testDemoteFactor).toBe(0.5);
     });
 
     it("keeps canonical current BM25 defaults (k1=1.2, b=0.75)", () => {
@@ -88,20 +105,15 @@ describe("grep ranking knobs default off (equivalence)", () => {
         expect(tokenize("Where is the function")).toContain("where");
         expect(cosineSimilarity([1, 0], [1, 0])).toBe(1);
         expect(cosineSimilarity([1, 0], [0, 1])).toBe(0);
-        expect(tokenizeRankingQuery("Where is the function", resolveGrepRankingOptions({})))
+        expect(tokenizeRankingQuery("Where is the function", resolveGrepRankingOptions({ [GREP_RANK_TEST_DEMOTE_ENV_VAR]: "off" })))
             .toEqual(tokenize("Where is the function"));
     });
 });
 
 describe("grep ranking knob resolvers", () => {
-    it("parses the test-demote factor, rejecting out-of-range input", () => {
-        expect(parseDemoteFactor(undefined)).toBeNull();
-        expect(parseDemoteFactor("")).toBeNull();
-        expect(parseDemoteFactor("0.7")).toBe(0.7);
-        expect(parseDemoteFactor("1")).toBeNull();
-        expect(parseDemoteFactor("0")).toBeNull();
-        expect(parseDemoteFactor("2")).toBeNull();
-        expect(parseDemoteFactor("abc")).toBeNull();
+    it("marks explicitly-disabled demote as non-default", () => {
+        expect(isDefaultRankingOptions(resolveGrepRankingOptions({ [GREP_RANK_TEST_DEMOTE_ENV_VAR]: "off" }))).toBe(false);
+        expect(isDefaultRankingOptions(resolveGrepRankingOptions({ [GREP_RANK_TEST_DEMOTE_ENV_VAR]: "0.5" }))).toBe(false);
     });
 
     it("parses k1,b overrides, falling back per-field on invalid input", () => {
@@ -175,7 +187,7 @@ describe("stopword filtering", () => {
 
     it("applies only when the knob is on", () => {
         const pattern = "Where is the token";
-        expect(tokenizeRankingQuery(pattern, resolveGrepRankingOptions({})))
+        expect(tokenizeRankingQuery(pattern, resolveGrepRankingOptions({ [GREP_RANK_TEST_DEMOTE_ENV_VAR]: "off" })))
             .toEqual(tokenize(pattern));
         const on = resolveGrepRankingOptions({ [GREP_RANK_STOPWORDS_ENV_VAR]: "1" });
         const filtered = tokenizeRankingQuery(pattern, on);
@@ -224,7 +236,7 @@ describe("ranking knobs end to end (no-index fallback)", () => {
         rmSync(workdir, { recursive: true, force: true });
     });
 
-    it("reports no active knobs and identical order by default", async () => {
+    it("reuses the cached corpus and identical order across repeat queries", async () => {
         const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => 0 }));
         const first = await tool.execute(
             "r1", { pattern: "totalRevenue", path: "src" } as any, undefined, undefined, makeCtx(workdir),
@@ -270,11 +282,12 @@ describe("ranking knobs end to end (no-index fallback)", () => {
         expect(_bm25CorpusCacheForTests().builds).toBe(2);
     });
 
-    it("demotes test paths when the demote knob is on", async () => {
+    it("demotes test paths by default; explicit off restores the undemoted order", async () => {
         const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => 0 }));
         const params = { pattern: "totalRevenue", path: "src" } as any;
+        process.env[GREP_RANK_TEST_DEMOTE_ENV_VAR] = "off";
         const plain = await tool.execute("r1", params, undefined, undefined, makeCtx(workdir));
-        process.env[GREP_RANK_TEST_DEMOTE_ENV_VAR] = "0.7";
+        delete process.env[GREP_RANK_TEST_DEMOTE_ENV_VAR];
         const demoted = await tool.execute("r2", params, undefined, undefined, makeCtx(workdir));
         const textOf = (result: { content: Array<{ text: string }> }) =>
             (result.content[0] as { text: string }).text;

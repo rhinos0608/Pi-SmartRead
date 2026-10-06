@@ -1,8 +1,8 @@
 /**
  * Grep details report the active BM25 ranking knobs (additive).
  *
- * Covers: single-query details carry `rankingKnobs` when a knob is on and
- * omit it by default; batch `queryResults` entries carry per-query knobs.
+ * Covers: single-query details report the default demote knob and any knob
+ * that is on; batch `queryResults` entries carry per-query knobs.
  */
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,12 +44,12 @@ describe("grep details ranking knobs", () => {
         rmSync(workdir, { recursive: true, force: true });
     });
 
-    it("omits rankingKnobs from single-query details by default", async () => {
+    it("reports the default demote knob in single-query details", async () => {
         const tool = createGrepTool(makeOpts({ getWorkspaceRevision: () => 0 }));
         const result = await tool.execute(
             "r1", { pattern: "totalRevenue", path: "src" } as any, undefined, undefined, makeCtx(workdir),
         );
-        expect((result as any).details.rankingKnobs).toBeUndefined();
+        expect((result as any).details.rankingKnobs).toEqual(["testDemote=0.7"]);
     });
 
     it("reports active ranking knobs in single-query details", async () => {
@@ -58,7 +58,7 @@ describe("grep details ranking knobs", () => {
         const result = await tool.execute(
             "r1", { pattern: "totalRevenue", path: "src" } as any, undefined, undefined, makeCtx(workdir),
         );
-        expect((result as any).details.rankingKnobs).toEqual(["coverage"]);
+        expect((result as any).details.rankingKnobs).toEqual(["testDemote=0.7", "coverage"]);
     });
 
     it("reports per-query ranking knobs in batch queryResults", async () => {
@@ -73,6 +73,6 @@ describe("grep details ranking knobs", () => {
         );
         const queryResults = (result as any).details.queryResults;
         expect(queryResults).toHaveLength(1);
-        expect(queryResults[0].rankingKnobs).toEqual(["bm25=1.5,0.5"]);
+        expect(queryResults[0].rankingKnobs).toEqual(["testDemote=0.7", "bm25=1.5,0.5"]);
     });
 });
