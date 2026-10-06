@@ -158,7 +158,7 @@ read-only guarantees; PR12 abstention rendering fixtures. Leftovers: none.
 | `732b0bf..7e21d2d` | PR9 |
 | `547331f..998c258` | PR10 |
 | `2c20d08..9cf9d4e` | PR11 |
-| `baa24df..08fa6f3` (was `baa24df..1437a3c` at plan time, commit `344bfcf`) | PR12 |
+| `baa24df..HEAD` (was `baa24df..1437a3c` at plan time; endpoint is the branch tip — verify `git rev-parse stack/pr-12 HEAD` matches at push time) | PR12 |
 
 Ranges partition `18f6463..HEAD` with no gaps/overlaps (128 commits, 0 leftover).
 
@@ -177,4 +177,6 @@ commits. History is linear, so all four ride in PR12's cumulative range
 
 Verified per-PR counts against `git rev-list --count 18f6463..<end>`: PR1–PR11
 cumulative counts (3/5/6/10/22/27/40/61/80/91/112) all match the plan; no
-corrections needed. PR12 is now 16 commits cumulatively 128.
+corrections needed. PR12 ends at the branch tip (`HEAD`): 16+ commits,
+129 as of `51ebf3c` — re-verify with `git rev-list --count baa24df..HEAD`
+at push time, since every docs commit extends it.

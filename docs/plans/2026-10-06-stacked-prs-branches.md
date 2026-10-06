@@ -17,7 +17,7 @@ cumulative end SHA and contains exactly the commits up to that PR. Created with
 | `stack/pr-09` | `7e21d2d` | frozen manifests, IR metrics, demote-by-default | 80 | `git push -u origin stack/pr-09` |
 | `stack/pr-10` | `998c258` | variant matrix + judge hardening | 91 | `git push -u origin stack/pr-10` |
 | `stack/pr-11` | `9cf9d4e` | D46 held-out set + runner/scorer + freeze tooling | 112 | `git push -u origin stack/pr-11` |
-| `stack/pr-12` | `08fa6f3` (= HEAD) | abstention contract D67 + decision-log close-out (+ 4 post-plan commits, see plan appendix) | 128 | `git push -u origin stack/pr-12` |
+| `stack/pr-12` | `HEAD` at push time — this PR always equals the branch tip; verify with `git rev-parse stack/pr-12 HEAD` and expect a match (129 commits as of `51ebf3c`, +1 per docs commit) | abstention contract D67 + decision-log close-out (+ post-plan commits, see plan appendix) | see verify cmd | `git push -u origin stack/pr-12` |
 
 ## Verification
 
