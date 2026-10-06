@@ -257,3 +257,24 @@ describe("unknown subcommand", () => {
         expect(notified[0]!.message).toContain("Usage: /judge");
     });
 });
+
+describe("local experimental label (D48)", () => {
+    it("status for local mode states experimental, near chance, and recommends cloud", async () => {
+        const { ctx, notified } = makeCtx();
+        const { deps } = makeDeps({ mode: "local" });
+        await handleJudgeCommand("status", ctx, deps);
+        const text = notified.map((n) => n.message).join("\n").toLowerCase();
+        expect(text).toContain("experimental");
+        expect(text).toContain("near chance");
+        expect(text).toContain("cloud");
+    });
+
+    it("/judge local labels the mode experimental", async () => {
+        const { ctx, notified } = makeCtx();
+        const { deps } = makeDeps();
+        await handleJudgeCommand("local", ctx, deps);
+        const text = notified.map((n) => n.message).join("\n").toLowerCase();
+        expect(text).toContain("experimental");
+        expect(text).toContain("near chance");
+    });
+});

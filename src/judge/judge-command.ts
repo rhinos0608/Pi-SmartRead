@@ -24,6 +24,10 @@ import {
 
 const JUDGE_USAGE = "Usage: /judge off | local | cloud | status | install";
 
+/** Local von judge is experimental: measured near chance on the SmartRead relevance benchmark. */
+export const LOCAL_JUDGE_EXPERIMENTAL_NOTE =
+    "experimental: local mode measured near chance on the SmartRead relevance benchmark; cloud recommended";
+
 export interface JudgeCommandDeps {
     readSettings?: () => { mode: JudgeMode };
     writeSettings?: (mode: JudgeMode) => unknown;
@@ -140,6 +144,7 @@ async function handleStatus(ctx: Ctx, r: ResolvedDeps): Promise<void> {
     } else {
         const model = r.env.PI_SMARTREAD_JUDGE_MODEL ?? LOCAL_JUDGE_DEFAULT_MODEL;
         lines.push(`backend: local (von sidecar, model ${model})`);
+        lines.push(`note: ${LOCAL_JUDGE_EXPERIMENTAL_NOTE}.`);
         const override = r.env.PI_SMARTREAD_JUDGE_BASE_URL;
         if (override) {
             lines.push(`endpoint override: ${displayEndpoint(override)} (managed sidecar skipped)`);
@@ -214,7 +219,7 @@ async function handleLocal(ctx: Ctx, r: ResolvedDeps): Promise<void> {
     if ("unavailable" in endpoint) {
         if (endpoint.unavailable === "warming") {
             r.writeSettings("local");
-            notify(ctx, "Local judge enabled; sidecar is still warming up. Grep returns unjudged results until it is ready.", "warning");
+            notify(ctx, `Local judge enabled (${LOCAL_JUDGE_EXPERIMENTAL_NOTE}); sidecar is still warming up. Grep returns unjudged results until it is ready.`, "warning");
         } else {
             notify(ctx, `Local judge installed but the sidecar failed to start (${endpoint.unavailable}). Mode unchanged.`, "error");
         }
@@ -223,9 +228,9 @@ async function handleLocal(ctx: Ctx, r: ResolvedDeps): Promise<void> {
     const smoke = await r.getSidecar().smokeTest(endpoint.baseUrl);
     r.writeSettings("local");
     if (smoke.ok) {
-        notify(ctx, `Local judge enabled (von sidecar at ${displayEndpoint(endpoint.baseUrl)}).`, "info");
+        notify(ctx, `Local judge enabled (${LOCAL_JUDGE_EXPERIMENTAL_NOTE}; von sidecar at ${displayEndpoint(endpoint.baseUrl)}).`, "info");
     } else {
-        notify(ctx, `Local judge enabled; sidecar smoke test failed (${smoke.error}). Grep returns unjudged results until it is ready.`, "warning");
+        notify(ctx, `Local judge enabled (${LOCAL_JUDGE_EXPERIMENTAL_NOTE}); sidecar smoke test failed (${smoke.error}). Grep returns unjudged results until it is ready.`, "warning");
     }
 }
 

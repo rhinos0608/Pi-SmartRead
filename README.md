@@ -196,7 +196,7 @@ Patterns select glob, fuzzy-name, or natural-language discovery. Results are gro
 
 ## Optional relevance judge
 
-Judging is off by default. In Pi, use `/judge off|local|cloud|status|install`. Cloud mode uses the OpenRouter key from Pi's auth store; cloud requests are restricted to OpenRouter and credentials are never sent to custom endpoints. Local mode uses a managed von sidecar on loopback; installing it requires an explicit UI confirmation for the ~3 GB first download. Standalone MCP reads `PI_SMARTREAD_JUDGE_MODE` and user-environment credentials. A judge failure falls back to the unjudged search results.
+Judging is off by default. In Pi, use `/judge off|local|cloud|status|install`. Cloud mode uses the OpenRouter key from Pi's auth store; cloud requests are restricted to OpenRouter and credentials are never sent to custom endpoints. Local mode uses a managed von sidecar on loopback; installing it requires an explicit UI confirmation for the ~3 GB first download. Local mode is experimental: it measured near chance on the SmartRead relevance benchmark, so cloud is recommended where available. Standalone MCP reads `PI_SMARTREAD_JUDGE_MODE` and user-environment credentials. A judge failure falls back to the unjudged search results.
 
 ---
 
