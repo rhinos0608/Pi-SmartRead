@@ -5,18 +5,20 @@
  * without --open-holdout/--freeze, freeze arm mismatch, freeze
  * engine-hash mismatch, and holdout redaction (no query text or gold).
  */
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, existsSync, realpathSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import {
     checkHoldoutGuard,
     coldStartRuntimeCaches,
+    D46_REPORTS_DIR,
     isCleanPorcelain,
     parseD46RunArgs,
     redactForHoldout,
+    resolveD46ReportsDir,
     runD46Cli,
     SMARTREAD_RUNTIME_CACHE_DIRS,
     verifyCheckoutPins,
@@ -50,14 +52,56 @@ function manifestWith(files: Array<{ file: string; content: string }>): {
     return { dir, manifest };
 }
 
+// Guard: no test in this file may write a report into the real home
+// reports dir. Every runD46Cli call below injects a temp reports dir;
+// this snapshots the real dir and fails if any newcomer appears.
+let realReportsBefore = new Set<string>();
+beforeAll(() => {
+    try {
+        realReportsBefore = new Set(readdirSync(D46_REPORTS_DIR));
+    } catch {
+        realReportsBefore = new Set();
+    }
+});
+afterAll(() => {
+    let after: string[];
+    try {
+        after = readdirSync(D46_REPORTS_DIR);
+    } catch {
+        return;
+    }
+    const newcomers = after.filter((f) => !realReportsBefore.has(f) && !f.startsWith("quarantine"));
+    expect(newcomers).toEqual([]);
+});
+
+describe("resolveD46ReportsDir", () => {
+    it("prefers --reports-dir, then env, then the real default", () => {
+        const dir = mkdtempSync(join(tmpdir(), "d46-reports-resolve-"));
+        expect(resolveD46ReportsDir(null)).toBe(D46_REPORTS_DIR);
+        expect(resolveD46ReportsDir(dir)).toBe(dir);
+        const prev = process.env.PI_SMARTREAD_D46_REPORTS_DIR;
+        process.env.PI_SMARTREAD_D46_REPORTS_DIR = dir;
+        try {
+            expect(resolveD46ReportsDir(null)).toBe(dir);
+            expect(resolveD46ReportsDir(`${dir}-cli`)).toBe(`${dir}-cli`);
+        } finally {
+            if (prev === undefined) delete process.env.PI_SMARTREAD_D46_REPORTS_DIR;
+            else process.env.PI_SMARTREAD_D46_REPORTS_DIR = prev;
+        }
+    });
+});
+
 describe("parseD46RunArgs", () => {
+    it("parses --reports-dir", () => {
+        expect(parseD46RunArgs(["--split", "dev", "--reports-dir", "/tmp/r"]).reportsDir).toBe("/tmp/r");
+    });
     it("parses the documented CLI surface", () => {
         expect(
             parseD46RunArgs(["--split", "dev", "--config", "off", "--replicate", "2"]),
-        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false });
+        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false, reportsDir: null });
         expect(
             parseD46RunArgs(["--split", "holdout", "--repo", "a__b", "--freeze", "f", "--open-holdout"]),
-        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true });
+        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true, reportsDir: null });
     });
 
     it("rejects bad split/config/replicate", () => {
@@ -226,25 +270,46 @@ describe("runD46Cli cold-start preflight ordering", () => {
         return { bench, cacheFile: join(checkout, ".pi-smartread", "cache", "x.bin") };
     }
 
+    function runIsolated(argv: string[], bench: string): Promise<number> {
+        const reportsDir = mkdtempSync(join(tmpdir(), "d46-reports-"));
+        return runD46Cli(argv, bench, { engineSourceHash: "sha256:abc:1-files", reportsDir });
+    }
+
     it("unknown engine hash refuses WITHOUT deleting the planted cache", async () => {
         const { bench, cacheFile } = makeBench("dev");
-        const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "unknown:test" });
+        const reportsDir = mkdtempSync(join(tmpdir(), "d46-reports-"));
+        const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "unknown:test", reportsDir });
         expect(code).toBe(2);
         expect(existsSync(cacheFile)).toBe(true);
     });
 
     it("holdout guard refusal leaves the planted cache present", async () => {
         const { bench, cacheFile } = makeBench("holdout");
-        const code = await runD46Cli(["--split", "holdout", "--config", "off"], bench, { engineSourceHash: "sha256:abc:1-files" });
+        const code = await runIsolated(["--split", "holdout", "--config", "off"], bench);
         expect(code).toBe(2);
         expect(existsSync(cacheFile)).toBe(true);
     });
 
-    it("happy path deletes the planted cache", async () => {
+    it("t040 without a judge API key refuses WITHOUT deleting the planted cache", async () => {
         const { bench, cacheFile } = makeBench("dev");
-        const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "sha256:abc:1-files" });
+        const prev = process.env.PI_SMARTREAD_JUDGE_API_KEY;
+        delete process.env.PI_SMARTREAD_JUDGE_API_KEY;
+        try {
+            const code = await runIsolated(["--split", "dev", "--config", "t040"], bench);
+            expect(code).toBe(2);
+            expect(existsSync(cacheFile)).toBe(true);
+        } finally {
+            if (prev !== undefined) process.env.PI_SMARTREAD_JUDGE_API_KEY = prev;
+        }
+    });
+
+    it("happy path deletes the planted cache and writes the report into the injected dir", async () => {
+        const { bench, cacheFile } = makeBench("dev");
+        const reportsDir = mkdtempSync(join(tmpdir(), "d46-reports-"));
+        const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "sha256:abc:1-files", reportsDir });
         expect(code).toBe(0);
         expect(existsSync(cacheFile)).toBe(false);
+        expect(readdirSync(reportsDir).filter((f) => f.startsWith("d46-dev-off-"))).toHaveLength(1);
     });
 });
 
