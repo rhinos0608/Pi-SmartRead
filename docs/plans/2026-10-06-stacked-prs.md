@@ -158,6 +158,23 @@ read-only guarantees; PR12 abstention rendering fixtures. Leftovers: none.
 | `732b0bf..7e21d2d` | PR9 |
 | `547331f..998c258` | PR10 |
 | `2c20d08..9cf9d4e` | PR11 |
-| `baa24df..1437a3c` | PR12 |
+| `baa24df..08fa6f3` (was `baa24df..1437a3c` at plan time, commit `344bfcf`) | PR12 |
 
-Ranges partition `18f6463..HEAD` with no gaps/overlaps (123 commits, 0 leftover).
+Ranges partition `18f6463..HEAD` with no gaps/overlaps (128 commits, 0 leftover).
+
+## Post-plan commits (`344bfcf..HEAD`, 4 commits)
+
+The plan was written at `344bfcf` (this doc); HEAD has since advanced by 4
+commits. History is linear, so all four ride in PR12's cumulative range
+(`stack/pr-12` head == HEAD). Logical ownership:
+
+| Commit | Touches | Logical owner |
+|---|---|---|
+| `23bbb16` feat(judge): surface holdout evidence in /judge cloud activation | `src/judge/judge-command.ts` + test | PR10 (owns `judge-command.ts`) |
+| `af9a7a4` docs: final round ledger | `docs/plans/2026-10-06-grep-pipeline-overhaul.md` | PR12 (docs close-out) |
+| `9e7ebe4` test(judge): pin D70 holdout figures in activation note assertions | `test/unit/judge/judge-command.test.ts` | PR10 (owns `judge-command.ts`) |
+| `08fa6f3` docs: agent A/B pilot verdict (D71) | `docs/plans/2026-10-06-decision-log.md` | PR12 (docs close-out) |
+
+Verified per-PR counts against `git rev-list --count 18f6463..<end>`: PR1–PR11
+cumulative counts (3/5/6/10/22/27/40/61/80/91/112) all match the plan; no
+corrections needed. PR12 is now 16 commits cumulatively 128.
