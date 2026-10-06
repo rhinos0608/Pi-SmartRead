@@ -872,9 +872,12 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
                 if (kept.length === 0) return [];
                 return [{ ...h, matchedQueries: kept.map((q) => results[q]!.pattern), matchedQueryIndexes: kept } as GrepHit];
             }
-            // Legacy hits without index provenance: fall back to pattern match.
-            const abstainedPatterns = new Set([...abstainedIndexes].map((q) => results[q]!.pattern));
-            return ((h as { matchedQueries?: string[] }).matchedQueries ?? []).some((q) => abstainedPatterns.has(q)) ? [] : [h];
+            // Defensive: the batch path always attaches index provenance
+            // (createGrepOutput candidates and the flatMap above), so this
+            // should be unreachable. Without provenance a hit cannot be shown
+            // to belong to a non-abstained entry; under the D67 contract the
+            // safe direction is to drop it rather than leak abstained content.
+            return [];
         });
     const total: number = (results as any).globalTotal ?? shown.length;
     const totalIsLowerBound: boolean = (results as any).globalTotalIsLowerBound
