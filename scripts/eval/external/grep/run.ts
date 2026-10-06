@@ -23,14 +23,13 @@
  * resetLSPBridge) runs in a finally so the CLI exits on its own.
  */
 
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { disposeSemanticIndexes } from "../../../../src/indexing/semantic-index-registry.js";
 import { resetLSPBridge, shutdownAllManagers } from "../../../../src/lsp/lsp-bridge.js";
 import { resolveGrepRankingOptions } from "../../../../src/search/grep-ranking.js";
-import { toRankReportSettings } from "../../judge/grep-e2e-contract.js";
+import { hashEngineSources, isKnownSourceHash, toRankReportSettings } from "../../judge/grep-e2e-contract.js";
 import { runOwnGrep, toReportOutcome, type ReportOutcome } from "./adapter.js";
 import { frozenSplitIds, loadFrozenManifest } from "./frozen-manifest.js";
 import type { BenchmarkInstance, Formulation } from "./instance.js";
@@ -45,6 +44,10 @@ import {
 import { ensureBareClone, materializeInstance } from "./repos.js";
 import { freezeManifest, selectPilot, writeManifest, type FrozenManifest } from "./sampling.js";
 import { datasetRevision, fetchAllRows, rowsToInstances } from "./swebench-multilingual.js";
+import {
+    computeExternalRunDigest,
+    gitRootFromScript,
+} from "./run-identity.js";
 
 function takeValue(flag: string, argv: string[], i: number): string {
     const value = argv[i];
@@ -123,6 +126,13 @@ try {
     }
     // Resolved ranking knobs, recorded in every external report.
     const rankingKnobs = toRankReportSettings(resolveGrepRankingOptions());
+    // Engine source content identity (shared helper): ties this report to
+    // one code state. Unknown stays unknown and never claims an identity.
+    const gitRoot = gitRootFromScript(import.meta.url);
+    const engineSourceHash = gitRoot ? hashEngineSources(gitRoot) : "unknown:no-git-root";
+    if (!isKnownSourceHash(engineSourceHash)) {
+        console.warn(`warning: engine source identity unknown (${engineSourceHash}); report cannot be tied to a known code state`);
+    }
     const rows = await fetchAllRows();
     const revision = datasetRevision(rows);
     const { instances, skipped } = rowsToInstances(rows);
@@ -213,6 +223,7 @@ try {
         datasetRevision: revision,
         manifestPath,
         manifestSha256,
+        engineSourceHash,
         rankingKnobs,
         summary,
         excluded,
@@ -220,7 +231,13 @@ try {
         outcomes,
     };
     mkdirSync(reportsDir(), { recursive: true });
-    const digest = createHash("sha256").update(JSON.stringify(outcomes)).digest("hex").slice(0, 8);
+    const digest = computeExternalRunDigest({
+        engineSourceHash,
+        manifestSha256,
+        seed: args.seed,
+        rankingKnobs,
+        outcomesJson: JSON.stringify(outcomes),
+    });
     const reportPath = join(reportsDir(), `external-grep-${args.split}-${generatedAt.replace(/[:.]/g, "-")}-${digest}.json`);
     writeFileSync(reportPath, JSON.stringify(report, null, 2), { mode: 0o600 });
     console.log(`\nreport: ${reportPath}`);
