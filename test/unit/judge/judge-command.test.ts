@@ -267,6 +267,27 @@ describe("unknown subcommand", () => {
     });
 });
 
+describe("holdout evidence note (D70)", () => {
+    it("cloud activation surfaces the D46 holdout evidence note", async () => {
+        const { ctx, notified } = makeCtx({ key: SECRET });
+        const { deps } = makeDeps();
+        await handleJudgeCommand("cloud", ctx, deps);
+        const text = notified.map((n) => n.message).join("\n");
+        expect(text).toContain("D46 holdout");
+        expect(text).toContain("false-empty");
+        expect(text).toContain("precision");
+    });
+
+    it("status and off do not carry the holdout note", async () => {
+        const s = makeCtx({ key: SECRET });
+        await handleJudgeCommand("status", s.ctx, makeDeps({ mode: "cloud" }).deps);
+        expect(s.notified.map((n) => n.message).join("\n")).not.toContain("D46 holdout");
+        const o = makeCtx();
+        await handleJudgeCommand("off", o.ctx, makeDeps({ mode: "cloud" }).deps);
+        expect(o.notified.map((n) => n.message).join("\n")).not.toContain("D46 holdout");
+    });
+});
+
 describe("local experimental label (D48)", () => {
     it("status for local mode states experimental, near chance, and recommends cloud", async () => {
         const { ctx, notified } = makeCtx();

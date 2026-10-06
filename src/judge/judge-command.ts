@@ -161,6 +161,12 @@ async function handleStatus(ctx: Ctx, r: ResolvedDeps): Promise<void> {
     notify(ctx, lines.join("\n"), "info");
 }
 
+/** D46 holdout finding surfaced when enabling cloud (D70): concise evidence note. */
+export const CLOUD_JUDGE_HOLDOUT_NOTE =
+    "D46 holdout (210 queries / 8 repos): judge-on raised emptied answerable queries (false-empty ~2.4%→17.3%; net harms under 6:1 FN:FP utility, 95% CI [+0.55,+1.06]/query).\n" +
+    "Kept queries gained precision/read-ready; prefer judge where precision matters more than recall.\n" +
+    "Thresholds were dev-tuned — do not retune against this holdout.";
+
 async function handleCloud(ctx: Ctx, r: ResolvedDeps): Promise<void> {
     const baseUrl = r.env.PI_SMARTREAD_JUDGE_BASE_URL ?? CLOUD_JUDGE_DEFAULT_BASE_URL;
     const baseIsDefault = openRouterOrigin(baseUrl) === openRouterOrigin(CLOUD_JUDGE_DEFAULT_BASE_URL);
@@ -180,7 +186,7 @@ async function handleCloud(ctx: Ctx, r: ResolvedDeps): Promise<void> {
         return;
     }
     r.writeSettings("cloud");
-    notify(ctx, "Cloud judge enabled (TypeSafe Jev via OpenRouter). API key present.", "info");
+    notify(ctx, `Cloud judge enabled (TypeSafe Jev via OpenRouter). API key present.\n${CLOUD_JUDGE_HOLDOUT_NOTE}`, "info");
 }
 
 async function ensureInstalled(ctx: Ctx, r: ResolvedDeps): Promise<boolean> {
