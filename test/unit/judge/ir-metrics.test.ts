@@ -55,6 +55,21 @@ describe("nDCG@k", () => {
     it("is 0 when no gains exist", () => {
         expect(ndcgAtK([0, 0], 2)).toBe(0);
     });
+    it("uses the full ranking for the ideal, not the top-k slice", () => {
+        // Ideal@1 is gain 3 (elsewhere in the ranking), so nDCG = 1/3, not 1.
+        expect(ndcgAtK([1, 0, 3], 1)).toBeCloseTo(1 / 3);
+    });
+    it("counts relevant items that were not retrieved via idealGains", () => {
+        // Best relevant item (gain 3) was not retrieved: ideal@1 = 3.
+        expect(ndcgAtK([1], 1, [3, 1])).toBeCloseTo(1 / 3);
+        // Perfect retrieval against the same ideal scores 1.
+        expect(ndcgAtK([3, 1], 2, [3, 1])).toBeCloseTo(1);
+    });
+    it("rejects bad idealGains", () => {
+        expect(() => ndcgAtK([1], 1, [])).toThrow();
+        expect(() => ndcgAtK([1], 1, [Number.NaN])).toThrow();
+        expect(() => ndcgAtK([1], 1, [-1])).toThrow();
+    });
     it("rejects NaN gains and bad k", () => {
         expect(() => ndcgAtK([Number.NaN], 1)).toThrow();
         expect(() => ndcgAtK([1], 0)).toThrow();

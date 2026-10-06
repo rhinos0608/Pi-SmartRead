@@ -114,18 +114,28 @@ export function meanReciprocalRank(rankings: boolean[][]): number {
 
 /**
  * nDCG@k with graded or binary gains.
- * DCG = sum gain_i / log2(i+2) over the top-k window;
- * IDCG is the DCG of gains sorted descending; nDCG = DCG / IDCG (0 when IDCG = 0).
+ * DCG = sum gain_i / log2(i+2) over the retrieved top-k window;
+ * IDCG@k = DCG of the top-k gains from the ideal ranking, i.e. the k
+ * highest gains among ALL known relevant gains for the query (including
+ * relevant items that were not retrieved). Pass them via `idealGains`;
+ * when absent, the ideal ranking defaults to the full retrieved `gains`
+ * array sorted descending (not the top-k slice). nDCG = DCG / IDCG
+ * (0 when IDCG = 0, i.e. no relevant items are known).
  */
-export function ndcgAtK(gains: number[], k: number): number {
+export function ndcgAtK(gains: number[], k: number, idealGains?: number[]): number {
     if (gains.length === 0) throw new Error("gains must be non-empty");
     if (!Number.isInteger(k) || k <= 0) throw new Error("k must be a positive integer");
     for (const g of gains) {
         if (!Number.isFinite(g) || g < 0) throw new Error("gains must be finite non-negative numbers");
     }
+    const idealSource = idealGains ?? gains;
+    if (idealSource.length === 0) throw new Error("idealGains must be non-empty");
+    for (const g of idealSource) {
+        if (!Number.isFinite(g) || g < 0) throw new Error("idealGains must be finite non-negative numbers");
+    }
     const top = gains.slice(0, k);
     const dcg = top.reduce((sum, g, i) => sum + g / Math.log2(i + 2), 0);
-    const ideal = [...top].sort((a, b) => b - a)
+    const ideal = [...idealSource].sort((a, b) => b - a).slice(0, k)
         .reduce((sum, g, i) => sum + g / Math.log2(i + 2), 0);
     return ideal === 0 ? 0 : dcg / ideal;
 }
