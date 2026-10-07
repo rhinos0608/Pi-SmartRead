@@ -45,31 +45,96 @@ export function rejectUnknownOptions(bag: Record<string, unknown>, allowed: Read
 const boolKeys = ["compact", "deadCode", "impact", "graphSchema", "hotspots", "routes"] as const;
 const dirBoolKeys = ["compact", "deadCode", "graphSchema", "hotspots", "routes", "clusters", "layers", "boundaries"] as const;
 
-export function normalizeFileAnalysis(bag: Record<string, unknown>): Partial<InspectV4Input> {
+const SIGNAL_VALUES: ReadonlySet<string> = new Set([
+    "complexity", "public-api", "reuse", "recency", "tests", "deprecation",
+]);
+const CALL_DIRECTIONS: ReadonlySet<string> = new Set(["callers", "callees", "both"]);
+const DIFF_REFS: ReadonlySet<string> = new Set(["unstaged", "staged", "HEAD"]);
+
+function assertNoUnknownFileOptions(bag: Record<string, unknown>): void {
     const unknown = rejectUnknownOptions(bag, FILE_ANALYSIS_KEYS, 'mode "file" analysis');
     if (unknown) throw new Error(unknown);
-    if ("signals" in bag && (!Array.isArray(bag.signals) || bag.signals.some((v) => !["complexity", "public-api", "reuse", "recency", "tests", "deprecation"].includes(v as string)))) {
+}
+
+function assertValidSignals(bag: Record<string, unknown>): void {
+    if (!("signals" in bag)) return;
+    const signals = bag.signals;
+    if (!Array.isArray(signals) || signals.some((v) => !SIGNAL_VALUES.has(v as string))) {
         throw new Error('Error: inspect signals must be an array of "complexity" | "public-api" | "reuse" | "recency" | "tests" | "deprecation"');
     }
-    for (const key of boolKeys) {
+}
+
+function assertBooleanOptions(bag: Record<string, unknown>, keys: readonly string[]): void {
+    for (const key of keys) {
         if (key in bag && typeof bag[key] !== "boolean") throw new Error(`Error: inspect ${key} must be a boolean`);
     }
-    if ("callDepth" in bag && (!Number.isFinite(bag.callDepth) || (bag.callDepth as number) < 1 || (bag.callDepth as number) > 5)) throw new Error("Error: inspect callDepth must be 1..5");
-    if ("callDirection" in bag && !["callers", "callees", "both"].includes(bag.callDirection as string)) throw new Error('Error: inspect callDirection must be one of "callers" | "callees" | "both"');
-    if ("diff" in bag && !["unstaged", "staged", "HEAD"].includes(bag.diff as string)) throw new Error('Error: inspect diff must be one of "unstaged" | "staged" | "HEAD"');
-    if (bag.callDirection !== undefined && bag.callDepth === undefined) throw new Error("Error: inspect callDirection requires callDepth to be set");
+}
+
+function assertValidCallDepth(bag: Record<string, unknown>): void {
+    if (!("callDepth" in bag)) return;
+    const depth = bag.callDepth as number;
+    if (!Number.isFinite(depth)) throw new Error("Error: inspect callDepth must be 1..5");
+    if (depth < 1) throw new Error("Error: inspect callDepth must be 1..5");
+    if (depth > 5) throw new Error("Error: inspect callDepth must be 1..5");
+}
+
+function assertValidCallDirection(bag: Record<string, unknown>): void {
+    if (!("callDirection" in bag)) return;
+    if (!CALL_DIRECTIONS.has(bag.callDirection as string)) {
+        throw new Error('Error: inspect callDirection must be one of "callers" | "callees" | "both"');
+    }
+}
+
+function assertValidDiffOption(bag: Record<string, unknown>): void {
+    if (!("diff" in bag)) return;
+    if (!DIFF_REFS.has(bag.diff as string)) {
+        throw new Error('Error: inspect diff must be one of "unstaged" | "staged" | "HEAD"');
+    }
+}
+
+function assertCallDirectionNeedsDepth(bag: Record<string, unknown>): void {
+    if (bag.callDirection !== undefined && bag.callDepth === undefined) {
+        throw new Error("Error: inspect callDirection requires callDepth to be set");
+    }
+}
+
+export function normalizeFileAnalysis(bag: Record<string, unknown>): Partial<InspectV4Input> {
+    assertNoUnknownFileOptions(bag);
+    assertValidSignals(bag);
+    assertBooleanOptions(bag, boolKeys);
+    assertValidCallDepth(bag);
+    assertValidCallDirection(bag);
+    assertValidDiffOption(bag);
+    assertCallDirectionNeedsDepth(bag);
     return { ...bag } as Partial<InspectV4Input>;
 }
 
-export function normalizeDirectoryAnalysis(bag: Record<string, unknown>): Partial<InspectV4Input> {
+function assertNoUnknownDirectoryOptions(bag: Record<string, unknown>): void {
     const unknown = rejectUnknownOptions(bag, DIRECTORY_ANALYSIS_KEYS, 'mode "directory" analysis');
     if (unknown) throw new Error(unknown);
-    if ("mapTokens" in bag && (!Number.isFinite(bag.mapTokens) || (bag.mapTokens as number) < 256 || (bag.mapTokens as number) > 32768)) throw new Error("Error: inspect mapTokens must be 256..32768");
-    if ("focus" in bag && (!Array.isArray(bag.focus) || bag.focus.some((v) => typeof v !== "string"))) throw new Error("Error: inspect focus must be an array of strings");
-    for (const key of dirBoolKeys) {
-        if (key in bag && typeof bag[key] !== "boolean") throw new Error(`Error: inspect ${key} must be a boolean`);
+}
+
+function assertValidMapTokensOption(bag: Record<string, unknown>): void {
+    if (!("mapTokens" in bag)) return;
+    const value = bag.mapTokens as number;
+    if (!Number.isFinite(value)) throw new Error("Error: inspect mapTokens must be 256..32768");
+    if (value < 256) throw new Error("Error: inspect mapTokens must be 256..32768");
+    if (value > 32768) throw new Error("Error: inspect mapTokens must be 256..32768");
+}
+
+function assertValidFocusOption(bag: Record<string, unknown>): void {
+    if (!("focus" in bag)) return;
+    if (!Array.isArray(bag.focus) || bag.focus.some((v) => typeof v !== "string")) {
+        throw new Error("Error: inspect focus must be an array of strings");
     }
-    if ("diff" in bag && !["unstaged", "staged", "HEAD"].includes(bag.diff as string)) throw new Error('Error: inspect diff must be one of "unstaged" | "staged" | "HEAD"');
+}
+
+export function normalizeDirectoryAnalysis(bag: Record<string, unknown>): Partial<InspectV4Input> {
+    assertNoUnknownDirectoryOptions(bag);
+    assertValidMapTokensOption(bag);
+    assertValidFocusOption(bag);
+    assertBooleanOptions(bag, dirBoolKeys);
+    assertValidDiffOption(bag);
     return { ...bag } as Partial<InspectV4Input>;
 }
 

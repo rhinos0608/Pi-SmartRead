@@ -37,19 +37,23 @@ function memBus(): BusLike & { dispose(): void } {
   };
 }
 
+// OS-native scratch dir: POSIX-style "/tmp/..." literals are not absolute on
+// Windows (resolve() drive-prefixes them), so build every fixture path from
+// os.tmpdir() and file URIs via pathToFileURL. Absolute request paths must
+// still stage verbatim on every platform.
+const TEST_DIR = join(tmpdir(), "apply-proposal-test");
+const RENAME_FILE = join(TEST_DIR, "a.ts");
+const FORMAT_FILE = join(TEST_DIR, "b.ts");
+
 const CTX = {
-  cwd: join(tmpdir(), "apply-proposal-test"),
+  cwd: TEST_DIR,
   sessionManager: { getSessionFile: () => join(tmpdir(), "apply-proposal-test-session.jsonl") },
 } as never;
-
-const PROJ_DIR = join(tmpdir(), "apply-proposal-test");
-const PROJ_FILE_A = join(PROJ_DIR, "a.ts");
-const PROJ_FILE_B = join(PROJ_DIR, "b.ts");
 
 const RENAME_EDIT = {
   changes: [
     {
-      uri: pathToFileURL(PROJ_FILE_A).href,
+      uri: pathToFileURL(RENAME_FILE).href,
       edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "bbb" }],
     },
   ],
@@ -64,7 +68,7 @@ function executorReturning(value: unknown, status = "ok") {
       descriptorId: "ts",
       name: "ts",
       languageId: "typescript",
-      projectRoot: PROJ_DIR,
+      projectRoot: TEST_DIR,
       positionEncoding: "utf-16",
     },
     result: value,
@@ -281,7 +285,7 @@ describe("applyProposal", () => {
             descriptorId: "ts",
             name: "ts",
             languageId: "typescript",
-            projectRoot: PROJ_DIR,
+            projectRoot: TEST_DIR,
             positionEncoding: "utf-16",
           },
           result: FORMAT_EDITS,
@@ -291,12 +295,12 @@ describe("applyProposal", () => {
       });
       const res = await (tool.execute as Function)(
         "call-2",
-        { operation: "formatDocument", path: PROJ_FILE_B },
+        { operation: "formatDocument", path: FORMAT_FILE },
         undefined,
         undefined,
         CTX,
       );
-      expect(seenFilePath).toBe(PROJ_FILE_B);
+      expect(seenFilePath).toBe(FORMAT_FILE);
       expect(res.details.proposal.proposalId).toBe("prop-abs");
     } finally {
       server.dispose();
