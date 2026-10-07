@@ -178,6 +178,8 @@ export interface FindJudgeDetails {
     readonly threshold: number;
     readonly kept: number;
     readonly dropped: number;
+    /** Candidates the judge did not answer (missing probability), preserved without a score. */
+    readonly unjudged: number;
     readonly degraded: string[];
 }
 
@@ -363,11 +365,22 @@ async function judgeNaturalLanguage(input: JudgeWaveInput): Promise<NaturalLangu
     }
     const preferRaw = judge.info.backend === "local";
     const scored: Array<{ relPath: string; p: number }> = [];
+    const unjudgedCodes = new Map(judged.unjudged.map((entry) => [entry.id, entry.code]));
+    const unjudgedCards: FindJudgeCard[] = [];
     for (const card of cards) {
         const raw = judged.p.get(card.key);
-        if (raw === undefined) continue;
+        // A missing (or non-finite) probability is a per-item judge
+        // non-answer: preserve the candidate with degradation instead of
+        // silently dropping it. Only below-threshold answers are dropped.
+        if (raw === undefined) {
+            unjudgedCards.push(card);
+            continue;
+        }
         const p = answerProbability(raw, preferRaw) ?? raw;
-        if (!Number.isFinite(p)) continue;
+        if (!Number.isFinite(p)) {
+            unjudgedCards.push(card);
+            continue;
+        }
         scored.push({ relPath: card.relPath, p });
     }
     if (scored.length === 0) {
@@ -383,9 +396,20 @@ async function judgeNaturalLanguage(input: JudgeWaveInput): Promise<NaturalLangu
         dirty: byPath.get(entry.relPath)?.dirty,
     }));
     const dirEntries = buildJudgeDirectoryEntries(kept);
-    const total = fileEntries.length + dirEntries.length;
-    const entries = [...fileEntries, ...dirEntries].slice(0, limit);
-    const degraded = [...new Set(judged.unjudged.map((entry) => `judge_${entry.code}`))];
+    // Preserve judge-unanswered candidates after the kept entries in fused
+    // order, without a judge score, so a partial judge response degrades
+    // instead of silently dropping them. Below-threshold answers stay out.
+    const preservedEntries: FindEntry[] = unjudgedCards.map((card) => ({
+        path: card.relPath,
+        type: "file" as const,
+        dirty: byPath.get(card.relPath)?.dirty,
+    }));
+    const total = fileEntries.length + preservedEntries.length + dirEntries.length;
+    const entries = [...fileEntries, ...preservedEntries, ...dirEntries].slice(0, limit);
+    const degraded = [...new Set([
+        ...judged.unjudged.map((entry) => `judge_${entry.code}`),
+        ...unjudgedCards.map((card) => `judge_${unjudgedCodes.get(card.key) ?? "bad_response"}`),
+    ])];
     return {
         entries,
         total,
@@ -395,7 +419,8 @@ async function judgeNaturalLanguage(input: JudgeWaveInput): Promise<NaturalLangu
             model: judge.info.model,
             threshold: FIND_JUDGE_KEEP_PROBABILITY,
             kept: kept.length,
-            dropped: cards.length - kept.length,
+            dropped: scored.length - kept.length,
+            unjudged: unjudgedCards.length,
             degraded,
         },
         degraded,
@@ -443,6 +468,7 @@ function unjudgedFallback(
             threshold: FIND_JUDGE_KEEP_PROBABILITY,
             kept: 0,
             dropped: fused.length,
+            unjudged: fused.length,
             degraded,
         },
         degraded,
