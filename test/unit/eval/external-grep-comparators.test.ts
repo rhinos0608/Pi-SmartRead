@@ -156,6 +156,26 @@ describe("runRipgrep", () => {
         expect(out.status).toBe("empty-query");
         expect(out.units).toEqual([]);
     });
+
+    it("continues past a no-match term (rg exit 1) to later terms", async ({ skip }) => {
+        if (!rgAvailable()) {
+            skip("system rg not on PATH — no-match continuation unproven here, not a pass");
+            return;
+        }
+        // "zzzqqq" sorts first by frequency but matches nothing (rg exit 1);
+        // "focus" matches and must still be reported.
+        const root = tempDir("rg-nomatch-");
+        mkdirSync(join(root, "src"), { recursive: true });
+        writeFileSync(join(root, "src/focus.ts"), "focusTracker focus\n");
+        const out = await runRipgrep(
+            stubInstance({ title: "zzzqqq zzzqqq zzzqqq focus" }),
+            root,
+            "title",
+            { timeoutMs: 30000 },
+        );
+        expect(out.status).toBe("ok");
+        expect(out.units.map((u) => u.relFile)).toContain("src/focus.ts");
+    });
 });
 
 describe("parseProbeJson", () => {

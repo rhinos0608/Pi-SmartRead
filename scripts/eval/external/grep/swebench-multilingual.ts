@@ -48,12 +48,19 @@ function cacheKey(offset: number, length: number): string {
     return `rows-offset-${offset}-length-${length}.json`;
 }
 
-async function fetchRowsPage(offset: number, length: number): Promise<{ rows: DatasetRow[]; total: number }> {
+async function fetchRowsPage(
+    offset: number,
+    length: number,
+    options: { offline?: boolean } = {},
+): Promise<{ rows: DatasetRow[]; total: number }> {
     const dir = cacheDir();
     mkdirSync(dir, { recursive: true });
     const cached = join(dir, cacheKey(offset, length));
     if (existsSync(cached)) {
         return JSON.parse(readFileSync(cached, "utf8")) as { rows: DatasetRow[]; total: number };
+    }
+    if (options.offline) {
+        throw new Error(`--offline: missing cached dataset page offset ${offset} length ${length}; run once online first`);
     }
     const url =
         `${API_BASE}/rows?dataset=${encodeURIComponent(SWE_BENCH_MULTILINGUAL_DATASET)}` +
@@ -73,12 +80,12 @@ async function fetchRowsPage(offset: number, length: number): Promise<{ rows: Da
 }
 
 /** Fetch all rows (paginated, cached). Returns raw rows in dataset order. */
-export async function fetchAllRows(): Promise<DatasetRow[]> {
-    const first = await fetchRowsPage(0, 100);
+export async function fetchAllRows(options: { offline?: boolean } = {}): Promise<DatasetRow[]> {
+    const first = await fetchRowsPage(0, 100, options);
     const total = first.total > 0 ? first.total : 300;
     const all = [...first.rows];
     for (let offset = 100; offset < total; offset += 100) {
-        const page = await fetchRowsPage(offset, 100);
+        const page = await fetchRowsPage(offset, 100, options);
         all.push(...page.rows);
     }
     return all;

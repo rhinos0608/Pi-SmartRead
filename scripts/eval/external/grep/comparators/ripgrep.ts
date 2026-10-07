@@ -159,29 +159,32 @@ export async function runRipgrep(
     const started = performance.now();
     let status = "ok";
     const files = new Map<string, FileMatch>();
-    try {
-        for (const term of terms) {
-            const out: Buffer = execFileSync("rg", ["--json", "-i", "-F", "-e", term, "--", snapshotRoot], {
+    for (const term of terms) {
+        let out: Buffer;
+        try {
+            out = execFileSync("rg", ["--json", "-i", "-F", "-e", term, "--", snapshotRoot], {
                 timeout: options.timeoutMs,
                 maxBuffer: 256 * 1024 * 1024,
             });
-            for (const [rel, m] of parseRipgrepJson(out.toString("utf8"), snapshotRoot)) {
-                const entry = files.get(rel);
-                if (entry) {
-                    entry.count += m.count;
-                    if (m.firstLine < entry.firstLine) {
-                        entry.firstLine = m.firstLine;
-                        if (m.firstText) entry.firstText = m.firstText;
-                    }
-                } else {
-                    files.set(rel, { ...m });
+        } catch (error) {
+            // rg exits 1 on no matches: skip to the next term, not a failure.
+            const code = (error as { status?: unknown })?.status;
+            if (code === 1) continue;
+            status = errorStatus(error);
+            break;
+        }
+        for (const [rel, m] of parseRipgrepJson(out.toString("utf8"), snapshotRoot)) {
+            const entry = files.get(rel);
+            if (entry) {
+                entry.count += m.count;
+                if (m.firstLine < entry.firstLine) {
+                    entry.firstLine = m.firstLine;
+                    if (m.firstText) entry.firstText = m.firstText;
                 }
+            } else {
+                files.set(rel, { ...m });
             }
         }
-    } catch (error) {
-        // rg exits 1 on no matches: treat as empty, not failure.
-        const code = (error as { status?: unknown })?.status;
-        if (code !== 1) status = errorStatus(error);
     }
     const elapsedMs = performance.now() - started;
     const units = rankRipgrepFiles(files);

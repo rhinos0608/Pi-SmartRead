@@ -17,7 +17,7 @@ import {
 } from "../../../scripts/eval/external/grep/metrics.js";
 import { assertMultiSweBenchLicense } from "../../../scripts/eval/external/grep/multi-swe-bench.js";
 import { classifyPatchFile, deriveGold, parseUnifiedDiff } from "../../../scripts/eval/external/grep/patch.js";
-import { materializeInstance, snapshotDir } from "../../../scripts/eval/external/grep/repos.js";
+import { assertSafeInstanceId, materializeInstance, snapshotDir } from "../../../scripts/eval/external/grep/repos.js";
 import { freezeManifest, seededShuffle, selectPilot } from "../../../scripts/eval/external/grep/sampling.js";
 import { rowsToInstances } from "../../../scripts/eval/external/grep/swebench-multilingual.js";
 
@@ -122,6 +122,18 @@ describe("deriveGold", () => {
     });
 });
 
+describe("snapshotDir traversal guard", () => {
+    it.each(["../evil", "..", ".", "a/b", "a\\b", "", "evil;id"])("rejects %j", (id) => {
+        expect(() => snapshotDir(id)).toThrow(/unsafe instance_id/);
+        expect(() => assertSafeInstanceId(id)).toThrow(/unsafe instance_id/);
+    });
+
+    it("accepts dataset-shaped ids", () => {
+        expect(() => assertSafeInstanceId("django__django-12345")).not.toThrow();
+        expect(snapshotDir("django__django-12345")).toContain("django__django-12345");
+    });
+});
+
 describe("rowsToInstances", () => {
     const row = (over: Record<string, unknown> = {}): Parameters<typeof rowsToInstances>[0][number] => ({
         instance_id: "preactjs__preact-1",
@@ -213,6 +225,28 @@ describe("metrics", () => {
         expect(m.mrr).toBeCloseTo(0.5);
         expect(m.hunkOverlapAt5).toBe(1);
         expect(m.goldRanks).toEqual([{ file: "src/a.ts", rank: 2 }]);
+    });
+
+    it("counts hunk overlap from every top-5 file, not just the first five units", () => {
+        // src/a.ts ranks in the top 5 (its file is 5th) but its only unit
+        // sits past shown index 4 because src/b.ts contributes two units.
+        const m = computeInstanceMetrics({
+            instance: makeInstance(),
+            formulation: "title",
+            shown: [
+                { relFile: "src/b.ts", line: 1, endLine: 1, name: "b1" },
+                { relFile: "src/b.ts", line: 2, endLine: 2, name: "b2" },
+                { relFile: "src/c.ts", line: 3, endLine: 3, name: "c" },
+                { relFile: "src/d.ts", line: 4, endLine: 4, name: "d" },
+                { relFile: "src/e.ts", line: 5, endLine: 5, name: "e" },
+                { relFile: "src/a.ts", line: 11, endLine: 12, name: "a" },
+            ],
+            renderedText: "ok",
+            elapsedMs: 5,
+            status: "ok",
+        });
+        expect(m.successAt5).toBe(true);
+        expect(m.hunkOverlapAt5).toBe(1);
     });
 
     it("marks over-token-cap runs as failures, not successes", () => {
