@@ -132,7 +132,8 @@ describe("appendCheckpointLine", () => {
             appendCheckpointLine(path, '{"v":1}\n');
             appendCheckpointLine(path, '{"v":2}\n');
             expect(readFileSync(path, "utf8")).toBe('{"v":1}\n{"v":2}\n');
-            expect(statSync(path).mode & 0o777).toBe(0o600);
+            // Windows has no POSIX file modes; the 0600 assertion is POSIX-only.
+            if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
