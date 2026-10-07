@@ -95,6 +95,7 @@ describe("MCP parity — canonical tool split", () => {
     const names = tools.map((t: any) => t.name);
     expect(names).toContain("inspect");
     expect(names).toContain("grep");
+    expect(names).toContain("find");
     expect(names).toContain("LSP");
     expect(names).toContain("skill");
     expect(names).not.toContain("pilens_definition");

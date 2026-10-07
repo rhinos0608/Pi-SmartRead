@@ -13,10 +13,11 @@ describe("index extension registration", () => {
     const names = registered.map((t) => t.name);
     // v3: inspect + skill + read (re-registered for evidence + enrichment)
     // are registered. read_files/search/repo_map/symbol remain consolidated
-    // into inspect modes.
+    // into inspect modes. find overrides the pi builtin with ranked find.
     expect(names).toContain("inspect");
     expect(names).toContain("skill");
     expect(names).toContain("read");
+    expect(names).toContain("find");
     expect(names).not.toContain("read_files");
     expect(names).not.toContain("search");
     expect(names).not.toContain("repo_map");

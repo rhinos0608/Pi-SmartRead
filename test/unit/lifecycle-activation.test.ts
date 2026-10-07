@@ -108,6 +108,7 @@ describe("lifecycle activation (confirmed defects)", () => {
     const names = registered.map((t) => t.name);
     expect(names).toContain("inspect");
     expect(names).toContain("grep");
+    expect(names).toContain("find");
     expect(names).not.toContain("health");
     // The registered grep/inspect must be the Pi-runtime (dirty-aware) versions:
     // they must carry a lazy contextGraph getter, not a static instance.
@@ -117,7 +118,7 @@ describe("lifecycle activation (confirmed defects)", () => {
     expect(inspectDef.execute).toBeTypeOf("function");
   });
 
-  it("removes redundant ls and find tools on session_start, not at factory time", async () => {
+  it("removes redundant ls on session_start, not at factory time; find stays active", async () => {
     const { api, handlers } = makeApi();
     await registerExtension(api);
 
@@ -130,7 +131,7 @@ describe("lifecycle activation (confirmed defects)", () => {
     await handlers.session_start!({}, { cwd: workdir } as any);
 
     expect(api.getActiveTools()).not.toContain("ls");
-    expect(api.getActiveTools()).not.toContain("find");
+    expect(api.getActiveTools()).toContain("find");
     expect(api.getActiveTools()).toContain("custom");
   });
 
@@ -154,7 +155,7 @@ describe("lifecycle activation (confirmed defects)", () => {
     await handlers.session_start!({}, { cwd: workdir } as any);
 
     expect(activeTools).not.toContain("ls");
-    expect(activeTools).not.toContain("find");
+    expect(activeTools).toContain("find");
     expect(activeTools).toContain("custom");
   });
 

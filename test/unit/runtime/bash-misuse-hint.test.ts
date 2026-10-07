@@ -51,7 +51,13 @@ describe("detectBashMisuseHint", () => {
   it("suggests inspect directory for repo scans", () => {
     expect(detectBashMisuseHint("ls -R src")).toContain('inspect({ mode: "directory"');
     expect(detectBashMisuseHint("tree src")).toContain('inspect({ mode: "directory"');
-    expect(detectBashMisuseHint("find src -name '*.ts'")).toContain('inspect({ mode: "directory"');
+  });
+
+  it("suggests the find tool for shell find -name/-type", () => {
+    expect(detectBashMisuseHint("find src -name '*.ts'")).toContain("find({ pattern:");
+    expect(detectBashMisuseHint("find src -name '*.ts'")).toContain("*.ts");
+    expect(detectBashMisuseHint("find src -type f -name foo")).toContain("find({ pattern:");
+    expect(detectBashMisuseHint("find src -type d")).toContain("find({ pattern:");
   });
 
   it("suggests schema-valid LSP calls for symbol-decl search", () => {

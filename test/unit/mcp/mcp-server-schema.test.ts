@@ -21,6 +21,7 @@ describe("MCP tool registry schema (no subprocess)", () => {
     expect(toolNames).toContain("inspect");
     expect(toolNames).toContain("skill");
     expect(toolNames).toContain("grep");
+    expect(toolNames).toContain("find");
     expect(toolNames).not.toContain("read");
     expect(toolNames).not.toContain("read_files");
     expect(toolNames).not.toContain("search");
