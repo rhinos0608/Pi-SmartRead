@@ -246,12 +246,32 @@ export function getSnapshot(
 }
 
 /**
-	* Invalidate (remove) the cached snapshot for a single path.
-	*
-	* @param sessionId   Unique session/tool-call identifier
-	* @param absPath     Absolute file path
-	*/
-	export function invalidate(sessionId: string, absPath: string): void {
+* Invalidate cached snapshots for paths across all sessions.
+*
+* Used after an out-of-band mutation (e.g. an LSP applyProposal applied
+* through SmartEdit) so no session keeps serving stale content.
+*
+* @param absPaths Absolute file paths to drop from every session cache
+*/
+export function invalidatePaths(absPaths: readonly string[]): void {
+	for (const sessionId of _sessionCaches.keys()) {
+		for (const p of absPaths) {
+			try {
+				invalidate(sessionId, p);
+			} catch {
+				/* advisory */
+			}
+		}
+	}
+}
+
+/**
+ * Invalidate (remove) the cached snapshot for a single path.
+ *
+ * @param sessionId   Unique session/tool-call identifier
+ * @param absPath     Absolute file path
+ */
+export function invalidate(sessionId: string, absPath: string): void {
 	const cache = _sessionCaches.get(sessionId);
 	if (!cache) return;
 	// Only remove the snapshot if it exists; don't treat a false return from

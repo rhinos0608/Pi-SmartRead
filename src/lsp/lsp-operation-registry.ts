@@ -21,7 +21,8 @@ export type OperationRequiredField =
   | "codeAction"
   | "formatting"
   | "method"
-  | "params";
+  | "params"
+  | "proposalId";
 
 export interface OperationDef {
   readonly operation: StrictOperation;
@@ -362,6 +363,15 @@ const REGISTRY: Record<StrictOperation, OperationDef> = {
     capabilityExact: false,
     idempotent: false,
     summary: "Raw escape hatch: exact method + params per call. Raw policy gates, not capability. Never auto-retry.",
+  },
+  applyProposal: {
+    operation: "applyProposal",
+    method: null,
+    required: ["proposalId"],
+    capability: null,
+    capabilityExact: false,
+    idempotent: false,
+    summary: "Apply a staged SmartEdit proposal by proposalId. Only mutating operation; never auto-retry.",
   },
 };
 

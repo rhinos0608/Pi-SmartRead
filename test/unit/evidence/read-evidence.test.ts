@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import { createReadTool } from "../../../src/read/unified-read.js";
 import { shownMatchesAttested } from "../../../src/hook.js";
-import { disposeSemanticIndexes, getOrCreateSemanticIndex } from "../../../src/indexing/semantic-index-registry.js";
+import { disposeSemanticIndexes } from "../../../src/indexing/semantic-index-registry.js";
 import { createGrepTool } from "../../../src/search/grep-tool.js";
 
 function makeCtx(cwd: string, sessionFile: string | null) {
@@ -176,39 +176,26 @@ describe("extended read modes", () => {
     );
   });
 
-  it("returns strong evidence for shared hybrid query and grep+AST fallback query", async () => {
-    disposeSemanticIndexes();
-    const config = { baseUrl: "http://localhost:11434/v1", model: "test" };
-    const index = getOrCreateSemanticIndex(root, {
-      config,
-      discoverFiles: (async () => ({ files: [path.join(root, "a.ts"), path.join(root, "b.ts")], diagnostics: {} as never })) as never,
-      fetchEmbeddings: (async (request: { inputs: string[] }) => ({
-        vectors: request.inputs.map((input) => /auth|semanticNeedle/i.test(input) ? [1, 0, 0, 0, 0] : [0, 1, 0, 0, 0]),
-      })) as never,
-    });
-    await index.initialize();
-    await index.updateIndex();
-
+  it("removes query mode from the read schema and runtime contract", async () => {
     const tool = createReadTool();
-    const hybrid: any = await tool.execute("hybrid", { query: "semanticNeedle auth", topK: 1 }, undefined, undefined, makeCtx(root, session));
-    expect(hybrid.details.retrievalStrategy).toBe("hybrid");
-    expect(hybrid.details.workspaceEvidence.resources).toHaveLength(1);
-    expect(hybrid.content[0].text).toContain("semanticNeedle");
-    expect(hybrid.content[0].text).toContain("Recent commits:");
-
-    disposeSemanticIndexes();
-    const fallback: any = await tool.execute("fallback", { query: "semanticNeedle", topK: 1 }, undefined, undefined, makeCtx(root, session));
-    expect(fallback.details.retrievalStrategy).toBe("fallback");
-    expect(fallback.details.workspaceEvidence.resources).toHaveLength(1);
+    const schema = tool.parameters as any;
+    expect(schema.properties.query).toBeUndefined();
+    expect(schema.properties.directory).toBeUndefined();
+    expect(schema.properties.topK).toBeUndefined();
+    expect(schema.description).toMatch(/known file/i);
+    expect(tool.description).toMatch(/known file/i);
+    expect(tool.description).toMatch(/grep/i);
+    await expect(
+      tool.execute("removed-query", { query: "semanticNeedle auth", topK: 1 } as any, undefined, undefined, makeCtx(root, session)),
+    ).rejects.toThrow(/exactly one.*path.*paths.*symbol/i);
   });
 
   it("rejects conflicting and mode-invalid parameters", async () => {
     const tool = createReadTool();
     await expect(tool.execute("bad", { path: "a.ts", paths: [{ path: "b.ts" }] }, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/exactly one/i);
-    await expect(tool.execute("bad", { paths: [{ path: "a.ts" }], directory: "." }, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/not valid/i);
-    await expect(tool.execute("bad", { query: "auth", offset: 1 }, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/not valid/i);
+    await expect(tool.execute("bad", { paths: [{ path: "a.ts" }], directory: "." } as any, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/not valid/i);
+    await expect(tool.execute("bad", { path: "a.ts", query: "auth" } as any, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/not valid/i);
     await expect(tool.execute("fractional-batch", { paths: [{ path: "a.ts", limit: 2.5 }] } as any, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/paths\[0\]\.limit.*positive integer/i);
-    await expect(tool.execute("fractional-topk", { query: "auth", topK: 1.5 } as any, undefined, undefined, makeCtx(root, session))).rejects.toThrow(/topK.*positive integer/i);
   });
 
   it("does not authorize structurally summarized files", async () => {
@@ -473,13 +460,13 @@ describe("read tool schema (Console Go / provider compatibility)", () => {
     expect(properties).toBeDefined();
     expect(properties.path?.type).toBe("string");
     expect(properties.paths?.type).toBe("array");
-    expect(properties.query?.type).toBe("string");
     expect(properties.symbol?.type).toBe("string");
     expect(properties.offset?.type).toBe("integer");
     expect(properties.limit?.type).toBe("integer");
-    expect(properties.directory?.type).toBe("string");
-    expect(properties.topK?.type).toBe("integer");
     expect(properties.stopOnError?.type).toBe("boolean");
+    expect(properties.query).toBeUndefined();
+    expect(properties.directory).toBeUndefined();
+    expect(properties.topK).toBeUndefined();
   });
 });
 

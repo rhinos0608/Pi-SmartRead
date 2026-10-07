@@ -1,27 +1,12 @@
 /**
- * retrieval/runner.ts — generic kernel runner + minimal persistent-index channel.
+ * retrieval/runner.ts — generic retrieval-kernel fanout.
  *
- * runQueryChannels is the Phase 2 kernel fanout: parallel Promise.allSettled
- * over any RetrievalChannel list, fulfilled candidates concatenated, rejections
- * recorded as `${name} channel failed: ${reason}` (deep-search phase-1
- * convention). AbortSignal errors propagate (rethrow, never degraded).
- *
- * persistentIndexChannel exists because query-retrieval must NOT reuse the
- * kernel semanticChannel adapter: that adapter needs discoveredFiles (a full
- * corpus discovery query-retrieval deliberately skips) and falls back to
- * intent_read with DeepSearchCandidate shaping, which would change
- * query-retrieval's contract (QueryRetrievalHit shape, "hybrid" strategy,
- * scope filtering). This channel instead queries the already-resolved
- * persistent index directly — no discovery, no intent_read — and projects
- * each index hit losslessly onto RetrievalCandidate (file/line/endLine carry
- * the hit fields), so the caller-side hit mapping stays byte-identical.
- *
- * Layering: imports types only (plus node:path). No static import of
- * mcp-registry or src/read modules — the index handle is injected by the
- * caller, so this module stays cycle-free.
+ * runQueryChannels executes RetrievalChannel adapters in parallel, concatenates
+ * fulfilled candidates in channel order, records non-abort failures as degraded
+ * notes, and propagates cancellation. Public read-query retrieval was removed;
+ * this runner now serves active deep-search/retrieval workflows only.
  */
 
-import { resolve } from "node:path";
 import type {
   ChannelContext,
   ChannelResult,
@@ -83,47 +68,4 @@ export async function runQueryChannels(
     degraded.push(`${name} channel failed: ${reason}`);
   }
   return { candidates, degraded, results };
-}
-
-/** Minimal raw hit from a persistent semantic index search. */
-export interface PersistentIndexHit {
-  filePath: string;
-  lineStart: number;
-  lineEnd: number;
-  symbolKind: string;
-  codeSnippet: string;
-  score: number;
-}
-
-/** Structural minimum the index channel needs (real SemanticIndex satisfies this). */
-export interface PersistentIndexLike {
-  readonly root: string;
-  search(query: string, options: { topK: number; pathPrefix?: string }): Promise<PersistentIndexHit[]>;
-}
-
-export function persistentIndexChannel(
-  index: PersistentIndexLike,
-  options: { topK: number; pathPrefix?: string },
-): RetrievalChannel {
-  return {
-    name: "semantic",
-    async run(context: ChannelContext): Promise<ChannelResult> {
-      const results = await index.search(context.query, {
-        topK: options.topK,
-        pathPrefix: options.pathPrefix,
-      });
-      const candidates: RetrievalCandidate[] = results.map((result, position) => ({
-        file: resolve(index.root, result.filePath),
-        line: result.lineStart,
-        endLine: result.lineEnd,
-        name: result.symbolKind,
-        kind: result.symbolKind,
-        snippet: result.codeSnippet,
-        channel: "semantic",
-        rawScore: result.score,
-        rank: position + 1,
-      }));
-      return { channel: "semantic", candidates, inspected: candidates.length, strategy: "persistent-index" };
-    },
-  };
 }

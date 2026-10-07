@@ -31,6 +31,7 @@ import { registerRepositoryIntelligence } from "./repository/repository-intellig
 import { createRepositoryIntelligenceService } from "./repository/repository-intelligence.js";
 import { registerLanguageIntelligenceCommand } from "./language-intelligence/language-intelligence-command.js";
 import { createLanguageIntelligenceProvider } from "./language-intelligence/language-intelligence-provider.js";
+import { setWorkspaceEditBus } from "./lsp/lsp-workspace-edit.js";
 import { resetDoomLoopState } from "./runtime/doom-loop.js";
 import type { ActivationState } from "./extension-lifecycle.js";
 
@@ -184,6 +185,7 @@ export function registerReadTool(pi: ExtensionAPI, state: ActivationState): void
         getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
       },
       resolveSymbol: (s, cwd) => resolveSymbolForReadTool(s, cwd, state.freshGraphGetter),
+      editMode: state.editMode,
     }),
   );
 }
@@ -219,6 +221,18 @@ export function installResolverAndProviderBestEffort(pi: ExtensionAPI, state: Ac
       }
     }
   })();
+  // SmartEdit workspace-edit RPC bridge (Stage 4 option A): stage/apply
+  // proposals over the live event bus. MCP stdio has no bus, so the bridge
+  // stays null there and applyProposal returns unavailable.
+  try {
+    const editBus = pi.events as {
+      emit: (c: string, d: unknown) => void;
+      on: (c: string, h: (d: unknown) => void) => () => void;
+    };
+    if (editBus && typeof editBus.on === "function") setWorkspaceEditBus(editBus);
+  } catch {
+    /* non-fatal */
+  }
   // Language intelligence RPC provider (post-edit diagnostics)
   try {
     const liBus = pi.events as {

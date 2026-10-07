@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 import type { ReadToolDetails, ReadToolInput } from "@mariozechner/pi-coding-agent";
-import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import type { EditMode, WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
 import {
 	type FileCandidate,
 	ensureHashlineReady,
@@ -54,6 +54,7 @@ interface BatchReadArgs {
 	readonly cwd: string;
 	readonly readTool: BatchReadTool;
 	readonly stopOnError?: boolean;
+	readonly editMode?: EditMode;
 }
 
 interface SingleFileOutcome {
@@ -109,7 +110,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 	}
 }
 
-async function readInternalUrl(request: BatchFileRequest, index: number): Promise<SingleFileOutcome> {
+async function readInternalUrl(request: BatchFileRequest, index: number, editMode: EditMode = "hashline"): Promise<SingleFileOutcome> {
 	const { path: targetPath, selector } = splitPathAndSelector(request.path);
 	const selArgs = selectorToOffsetLimit(selector);
 	const startLine = selArgs.offset ?? request.offset ?? 1;
@@ -135,6 +136,7 @@ async function readInternalUrl(request: BatchFileRequest, index: number): Promis
 	const fullText = formatContentBlock(request.path, body, index + 1, {
 		anchorBody: true,
 		startLine,
+		editMode,
 	});
 	const candidate: FileCandidate = {
 		index,
@@ -218,7 +220,7 @@ function extractDiskParts(result: { content: Array<{ type: string; text?: string
 	return { details, displayText: displayContent?.text, startLineFromTool: displayContent?.startLine, contextFooter, evidence, imageCount, renderedBody };
 }
 
-async function readDiskFile(args: BatchReadArgs, request: BatchFileRequest, index: number): Promise<SingleFileOutcome> {
+async function readDiskFile(args: BatchReadArgs, request: BatchFileRequest, index: number, editMode: EditMode = "hashline"): Promise<SingleFileOutcome> {
 	const disk = buildDiskInput(args.cwd, request);
 	const result = await args.readTool.execute(
 		`${args.toolCallId}:${index}`,
@@ -240,6 +242,7 @@ async function readDiskFile(args: BatchReadArgs, request: BatchFileRequest, inde
 	const fullText = formatContentBlock(request.path, summarized.body, index + 1, {
 		anchorBody: disk.rawMode ? false : !alreadyAnchored,
 		startLine,
+		editMode,
 	}) + (disk.rawMode || !contextFooter ? "" : contextFooter);
 	const candidate: FileCandidate = {
 		index,
@@ -254,9 +257,17 @@ async function readDiskFile(args: BatchReadArgs, request: BatchFileRequest, inde
 	return { candidate, detail, evidence: perFileEvidence, summarized: summarized.summarized, resolvedPath: disk.resolvedPath, startLine, rawBody };
 }
 
-function readSingleFailure(request: BatchFileRequest, targetPath: string, index: number, error: unknown): SingleFileOutcome {
+interface SingleFailureParams {
+	readonly request: BatchFileRequest;
+	readonly targetPath: string;
+	readonly index: number;
+	readonly error: unknown;
+	readonly editMode?: EditMode;
+}
+
+function readSingleFailure({ request, targetPath, index, error, editMode = "hashline" }: SingleFailureParams): SingleFileOutcome {
 	const message = error instanceof Error ? error.message : String(error);
-	const fullText = formatContentBlock(request.path, `[Error: ${message}]`, index + 1);
+	const fullText = formatContentBlock(request.path, `[Error: ${message}]`, index + 1, { editMode });
 	const candidate: FileCandidate = {
 		index,
 		path: targetPath,
@@ -291,9 +302,41 @@ function commitOutcome(state: CommitState, outcome: SingleFileOutcome, index: nu
 	recordContiguous(resolveSessionKey(state.toolCallId), outcome.resolvedPath, outcome.startLine, outcome.rawBody.split("\n"));
 }
 
+/** Single-iteration state bundle for the batch loop (avoids excess-arity flags). */
+interface BatchIteration {
+	readonly args: BatchReadArgs;
+	readonly request: BatchFileRequest;
+	readonly index: number;
+	readonly editMode: EditMode;
+	readonly candidates: FileCandidate[];
+	readonly fileDetails: BatchFileDetail[];
+	readonly perFileEvidenceByIndex: Map<number, WorkspaceEvidenceEnvelope>;
+	readonly summarizedIndexes: Set<number>;
+}
+
+/** Process one disk-path request: read, commit, or record a failure outcome. */
+async function processDiskRequest(iter: BatchIteration): Promise<boolean> {
+	const { args, request, index, editMode } = iter;
+	const { path: targetPath } = splitPathAndSelector(request.path);
+	try {
+		const outcome = await readDiskFile(args, request, index, editMode);
+		commitOutcome({ toolCallId: args.toolCallId, candidates: iter.candidates, fileDetails: iter.fileDetails, perFileEvidenceByIndex: iter.perFileEvidenceByIndex, summarizedIndexes: iter.summarizedIndexes }, outcome, index);
+	} catch (error) {
+		if (args.signal?.aborted) throw error;
+		const failure = readSingleFailure({ request, targetPath, index, error, editMode });
+		iter.candidates.push(failure.candidate);
+		iter.fileDetails.push(failure.detail);
+		if (args.stopOnError) return false;
+	}
+	return true;
+}
+
 /** Read every requested file: internal URLs via router, disk paths via wrapped read tool. */
 export async function readBatchFiles(args: BatchReadArgs): Promise<BatchReadResult> {
-	await ensureHashlineReady();
+	const editMode = args.editMode ?? "hashline";
+	if (editMode !== "text") {
+		await ensureHashlineReady();
+	}
 	const fileDetails: BatchFileDetail[] = [];
 	const candidates: FileCandidate[] = [];
 	const perFileEvidenceByIndex = new Map<number, WorkspaceEvidenceEnvelope>();
@@ -304,22 +347,14 @@ export async function readBatchFiles(args: BatchReadArgs): Promise<BatchReadResu
 		const request = args.files[i]!;
 		const { path: targetPath } = splitPathAndSelector(request.path);
 		if (isInternalUrl(targetPath)) {
-			const outcome = await readInternalUrl(request, i);
+			const outcome = await readInternalUrl(request, i, editMode);
 			candidates.push(outcome.candidate);
 			fileDetails.push(outcome.detail);
 			if (args.stopOnError && !outcome.candidate.ok) break;
 			continue;
 		}
-		try {
-			const outcome = await readDiskFile(args, request, i);
-			commitOutcome({ toolCallId: args.toolCallId, candidates, fileDetails, perFileEvidenceByIndex, summarizedIndexes }, outcome, i);
-		} catch (error) {
-			if (args.signal?.aborted) throw error;
-			const failure = readSingleFailure(request, targetPath, i, error);
-			candidates.push(failure.candidate);
-			fileDetails.push(failure.detail);
-			if (args.stopOnError) break;
-		}
+		const keepGoing = await processDiskRequest({ args, request, index: i, editMode, candidates, fileDetails, perFileEvidenceByIndex, summarizedIndexes });
+		if (!keepGoing) break;
 	}
 	return { candidates, fileDetails, perFileEvidenceByIndex, summarizedIndexes };
 }

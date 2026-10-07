@@ -26,7 +26,7 @@ export interface InspectV4Input {
   callDirection?: CallDirection;
   /** Return zero-caller functions in scope. File or directory mode. */
   deadCode?: boolean;
-  /** Compute blast radius from target file. File or directory mode. */
+  /** Compute blast radius from target file. File mode only. */
   impact?: boolean;
   /** Map git diff to affected symbols with risk classification. */
   diff?: DiffTarget;
@@ -114,9 +114,7 @@ export interface DirectoryAnalysisOptions {
   mapTokens?: number;
   focus?: string[];
   compact?: boolean;
-  signals?: string[];
   deadCode?: boolean;
-  impact?: boolean;
   diff?: DiffTarget;
   graphSchema?: boolean;
   hotspots?: boolean;
@@ -125,11 +123,10 @@ export interface DirectoryAnalysisOptions {
   layers?: boolean;
   boundaries?: boolean;
 }
-/** Tool-layer params: four operations sharing one entry point. */
+/** Model-facing tool params: structural file/directory analysis or script composition. */
 export type InspectParams =
   | { mode: "file"; path: string; analysis?: FileAnalysisOptions }
   | { mode: "directory"; path: string; analysis?: DirectoryAnalysisOptions }
-  | { mode: "navigate"; path: string; navigation?: NavigationParams; diagnostics?: DiagnosticsParams }
   | { mode: "script"; path?: string; script: string };
 
 export interface InspectV4Result {

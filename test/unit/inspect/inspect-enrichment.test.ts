@@ -44,13 +44,13 @@ describe("read tool enrichment (replaces inspect path mode enrichment)", () => {
     expect(text).toContain("decision: keep a tiny");
   });
 
-  it("inspect navigation additive-friendly: unknown future status like needs-triage does not break consumer", async () => {
+  it("internal LSP enrichment is additive-friendly to unknown future statuses", async () => {
     // type-level guarantee: NavigationStatus / DiagnosticsStatus allow (string & {}) and renderers handle unknown via else path
     const unknownNavStatus: any = "needs-triage";
     expect(typeof unknownNavStatus).toBe("string");
   });
 
-  it("navigation URI-less documentSymbols use real symbol ranges", async () => {
+  it("internal LSP enrichment maps URI-less documentSymbols to real symbol ranges", async () => {
     const { mkdtempSync, writeFileSync: wfs, rmSync: rms, realpathSync: rps2 } = await import("node:fs");
     const { tmpdir: tmpdir2 } = await import("node:os");
     const { join: join2 } = await import("node:path");
@@ -66,10 +66,15 @@ describe("read tool enrichment (replaces inspect path mode enrichment)", () => {
       }),
       inspectDiagnostics: async () => ({ status: "empty", diagnostics: [], truncated: false }),
     };
-    const { createInspectV4Tool: mkTool } = await import("../../../src/inspect/inspect-tool.js");
-    const tool2 = mkTool({ getSessionFilePath: () => session, lspInspectionProvider: navProvider } as any);
-    const r2: any = await tool2.execute("enrich-doc-sym", { mode: "navigate", path: "a.ts", navigation: { operation: "documentSymbols" } }, undefined, undefined, { cwd: wd, sessionManager: { getSessionFile: () => session } } as any);
-    const res2 = (r2.details as any).workspaceEvidence.resources.find((x: any) => x.canonicalPath.includes("a.ts"));
+    const { executeFileInspect } = await import("../../../src/inspect/inspect.js");
+    const r2: any = await executeFileInspect({
+      path: "a.ts",
+      cwd: wd,
+      sessionFilePath: session,
+      navigation: { operation: "documentSymbols" as any },
+      lspInspectionProvider: navProvider,
+    } as any);
+    const res2 = r2.workspaceEvidence.resources.find((x: any) => x.canonicalPath.includes("a.ts"));
     expect(res2.allowedRanges).toEqual(expect.arrayContaining([{ startLine: 1, endLine: 3 }, { startLine: 6, endLine: 8 }]));
     expect(res2.allowedRanges.length).toBe(2);
     rms(wd, { recursive: true, force: true });

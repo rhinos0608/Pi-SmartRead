@@ -132,10 +132,12 @@ describe("inspect tool schema has new params", () => {
     const schema = tool.parameters as Record<string, any>;
     const fileAnalysis = analysisWith(schema, "callDepth");
     const dirAnalysis = analysisWith(schema, "clusters");
-    for (const param of ["deadCode", "impact", "diff", "graphSchema", "hotspots", "routes"]) {
+    for (const param of ["deadCode", "diff", "graphSchema", "hotspots", "routes"]) {
       expect(fileAnalysis.properties[param]).toBeDefined();
       expect(dirAnalysis.properties[param]).toBeDefined();
     }
+    expect(fileAnalysis.properties.impact).toBeDefined();
+    expect(dirAnalysis.properties.impact).toBeUndefined();
     for (const param of ["clusters", "boundaries", "routes", "layers"]) {
       expect(dirAnalysis.properties[param]).toBeDefined();
     }
@@ -483,7 +485,7 @@ describe("symbol read in hook", () => {
     const tool = createExtendedReadTool({
       resolveSymbol: async () => null,
     });
-    // Union design: symbol is the fourth XOR branch — combining selectors throws
+    // Union design: symbol is the third XOR branch — combining selectors throws
     await expect(
       tool.execute(
         "t4",
@@ -492,7 +494,7 @@ describe("symbol read in hook", () => {
         undefined,
         makeCtx(),
       ),
-    ).rejects.toThrow("Provide exactly one of: path, paths, query, or symbol");
+    ).rejects.toThrow("Provide exactly one of: path, paths, or symbol");
   });
 });
 

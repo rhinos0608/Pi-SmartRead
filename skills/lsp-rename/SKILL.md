@@ -1,6 +1,6 @@
 ---
 name: lsp-rename
-description: Scope and request a strict LSP rename proposal; SmartRead never applies it and SmartEdit owns mutation.
+description: Scope and request a strict LSP rename proposal; only applyProposal applies it, through SmartEdit.
 ---
 
 # lsp-rename
@@ -23,14 +23,14 @@ Propose a semantic rename without writing files.
 1. `prepareRename` on the anchor.
 2. `findReferences` to inspect scope.
 3. `rename` with `newName` to obtain a proposal.
-4. Hand the proposal and provenance to SmartEdit. Do not apply it here.
+4. Hand the proposal and provenance to SmartEdit, or apply it with applyProposal. Do not write files directly.
 
 ## Guardrails
 
 - `rename` is proposal-only and never auto-retries after a server crash.
 - Use only an `ok` envelope with `meta.freshness.state === "fresh"`.
 - Positions are 0-based in `server.positionEncoding`.
-- SmartRead never applies WorkspaceEdits.
+- Only applyProposal mutates, through SmartEdit's evidence-checked edit path.
 
 ## EXAMPLE
 

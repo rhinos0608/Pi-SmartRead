@@ -6,9 +6,10 @@
  * over stdio transport.
  *
  * Tools exposed by default:
- *   - inspect: Directory (repo map) and file (structural facts + signals) retrieval
- *   - grep:   Primary code search with BM25+symbol+semantic cascade
- *   - skill:   Run named SmartRead skills
+ *   - inspect: Structural/architectural file and directory analysis
+ *   - grep:   Primary broad/textual code discovery
+ *   - LSP:    Strict compiler/language-server semantics (read-only except applyProposal)
+ *   - skill:  Run named SmartRead skills
  * Experimental tools may be enabled through configuration.
  *
  * Usage:

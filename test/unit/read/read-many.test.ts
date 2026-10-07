@@ -209,49 +209,46 @@ describe("read_files: helper logic", () => {
 	});
 });
 
-describe("read_files: query (intent) mode", () => {
-	it("ranks and packs files by relevance when query is set", async () => {
+describe("read_files: strict batch-only contract", () => {
+	it("does not expose query, directory, or topK in the schema", () => {
+		const tool = createReadManyTool();
+		const schema = tool.parameters as any;
+		expect(schema.additionalProperties).toBe(false);
+		expect(schema.properties.query).toBeUndefined();
+		expect(schema.properties.directory).toBeUndefined();
+		expect(schema.properties.topK).toBeUndefined();
+		expect(schema.properties.files).toBeDefined();
+	});
+
+	it("rejects removed query-era parameters at runtime", async () => {
 		const tool = createToolWithMap({
 			"/alpha": { content: [{ type: "text", text: "authentication logic here" }] },
-			"/b": { content: [{ type: "text", text: "database schema" }] },
-		});
-
-		const result = await tool.execute(
-			"call-q1",
-			{ query: "authentication", files: [{ path: "/alpha" }, { path: "/b" }], topK: 1 },
-			undefined,
-			undefined,
-			{ cwd: "/" } as any,
-		);
-
-		const text = (result.content[0] as any).text as string;
-		const details = result.details as any;
-		expect(details.query).toBe("authentication");
-		expect(text).toContain("@/alpha");
-		expect(text).not.toContain("@/b");
-		expect(Array.isArray(details.files)).toBe(true);
-	});
-
-	it("throws when neither files nor query is provided", async () => {
-		const tool = createToolWithMap({});
-		await expect(
-			tool.execute("call-q2", {} as any, undefined, undefined, { cwd: "/" } as any),
-		).rejects.toThrow(/files|query/i);
-	});
-
-	it("throws when directory is provided without query", async () => {
-		const tool = createToolWithMap({
-			"/alpha": { content: [{ type: "text", text: "x" }] },
 		});
 		await expect(
 			tool.execute(
-				"call-q3",
+				"call-q1",
+				{ files: [{ path: "/alpha" }], query: "authentication" } as any,
+				undefined,
+				undefined,
+				{ cwd: "/" } as any,
+			),
+		).rejects.toThrow(/query.*not supported|unsupported.*query/i);
+		await expect(
+			tool.execute(
+				"call-q2",
 				{ files: [{ path: "/alpha" }], directory: "." } as any,
 				undefined,
 				undefined,
 				{ cwd: "/" } as any,
 			),
-		).rejects.toThrow(/query/i);
+		).rejects.toThrow(/directory.*not supported|unsupported.*directory/i);
+	});
+
+	it("requires an explicit files list", async () => {
+		const tool = createToolWithMap({});
+		await expect(
+			tool.execute("call-q3", {} as any, undefined, undefined, { cwd: "/" } as any),
+		).rejects.toThrow(/files/i);
 	});
 });
 

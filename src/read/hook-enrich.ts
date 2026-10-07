@@ -15,10 +15,11 @@
  * - Enrich preserved: displayContent snapshot, hashline anchors (skip when
  *   already anchored), contextFooter separate from appended text.
  */
+import type { EditMode } from "@rhinos0608/pi-workspace-protocol";
 import {
-   prefixLinesWithAnchors,
-   selectorToOffsetLimit,
-   splitPathAndSelector,
+  prefixLinesForEditMode,
+  selectorToOffsetLimit,
+  splitPathAndSelector,
 } from "../utils.js";
 import {
    attestPathRead,
@@ -148,14 +149,16 @@ export interface TextEnrichmentResult {
 }
 
 /**
- * Snapshot displayContent, embed hashline anchors (skip when already
- * anchored), stash contextFooter separately, append footer to text output.
- * Requires ensureHashlineReady() before calling (done by hook.ts).
+ * Snapshot displayContent, embed line anchors for the active edit dialect
+ * (skip when already anchored), stash contextFooter separately, append
+ * footer to text output. Hashline mode requires ensureHashlineReady()
+ * before calling (done by hook.ts); text mode never touches the engine.
  */
 export function applyTextEnrichment(
-   result: TextEnrichmentResult,
-   displayStartLine: number,
-   contextLines: string[],
+  result: TextEnrichmentResult,
+  displayStartLine: number,
+  contextLines: string[],
+  editMode: EditMode = "hashline",
 ): void {
    const textContent = result.content.find(
       (c: { type: string }) => c.type === "text",
@@ -173,7 +176,7 @@ export function applyTextEnrichment(
    const firstFewLines = textContent.text.split("\n", 5).join("\n");
    const alreadyAnchored = /^\d+[a-z]{0,2}\|/m.test(firstFewLines);
    if (!alreadyAnchored) {
-      textContent.text = prefixLinesWithAnchors(textContent.text, displayStartLine);
+      textContent.text = prefixLinesForEditMode(textContent.text, displayStartLine, editMode);
    }
 
    // Preserve footer separately for internal batch reads. Batch packing must

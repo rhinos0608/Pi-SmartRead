@@ -1,6 +1,7 @@
 /**
- * WP-SR5: lazy-start contract — plain inspect with no navigation/diagnostics
- * must never spawn an LSP server. Module load must not spawn either.
+ * Lazy-start contract: structural inspect must never spawn an LSP server.
+ * Public inspect no longer exposes navigation/diagnostics; strict LSP owns
+ * those semantics. Module load must not spawn either.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } from "node:fs";
@@ -78,9 +79,7 @@ describe("WP-SR5 lazy LSP start", () => {
     expect(provider.inspectDiagnostics).not.toHaveBeenCalled();
   });
 
-  it("inspect with navigation DOES attempt LSP (spawn or bridged)", async () => {
-    // This test proves the lazy gate is not over-blocked: navigation still reaches LSP.
-    // We provide an injected provider so no real spawn is needed — just verify the provider is called.
+  it("removed inspect navigate mode never reaches the injected LSP provider", async () => {
     const { createInspectV4Tool } = await import("../../../src/inspect/inspect-tool.js");
     const provider = {
       inspectNavigation: vi.fn(async () => ({ status: "empty" as const, operation: "documentSymbols" as const, items: [], truncated: false })),
@@ -91,8 +90,11 @@ describe("WP-SR5 lazy LSP start", () => {
       lspInspectionProvider: provider as any,
     });
     const ctx = { cwd: workdir, sessionManager: undefined } as any;
-    await tool.execute("c-nav", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, undefined, undefined, ctx);
-    expect(provider.inspectNavigation).toHaveBeenCalledTimes(1);
+    await expect(
+      tool.execute("c-nav", { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } } as any, undefined, undefined, ctx),
+    ).rejects.toThrow(/file.*directory.*script/i);
+    expect(provider.inspectNavigation).not.toHaveBeenCalled();
+    expect(provider.inspectDiagnostics).not.toHaveBeenCalled();
   });
 });
 

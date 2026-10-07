@@ -18,6 +18,7 @@ import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toToolDefinition, toToolDefinitions } from "./types.js";
 import { createInspectTool } from "./inspect/inspect-tool.js";
 import { createGrepTool } from "./search/grep-tool.js";
+import { createLspTool } from "./lsp/lsp-tool.js";
 import { createEvidenceResolver } from "./evidence/workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
 import { ContextGraph } from "./context-graph.js";
@@ -152,6 +153,7 @@ reg("grep", () => createGrepTool({
     getWorkspaceRevision,
     getSharedContextGraphIfBuilt,
 }), ToolCategory.READ);
+reg("LSP", () => createLspTool(), ToolCategory.READ);
 
 // Inspect tool is registered at extension activation time so it can use
 // the live event bus. We expose a helper that the extension calls to add

@@ -20,43 +20,47 @@ export type StrictStatus =
   | "error"
   | "ambiguous";
 
-export type StrictOperation =
-  | "goToDefinition"
-  | "goToDeclaration"
-  | "goToTypeDefinition"
-  | "goToImplementation"
-  | "findReferences"
-  | "hover"
-  | "documentHighlights"
-  | "documentSymbols"
-  | "workspaceSymbols"
-  | "prepareCallHierarchy"
-  | "incomingCalls"
-  | "outgoingCalls"
-  | "prepareTypeHierarchy"
-  | "supertypes"
-  | "subtypes"
-  | "diagnostics"
-  | "workspaceDiagnostics"
-  | "publishedDiagnostics"
-  | "capabilities"
-  | "sessionStatus"
-  | "prepareRename"
-  | "rename"
-  | "codeActions"
-  | "resolveCodeAction"
-  | "formatDocument"
-  | "formatRange"
-  | "formatOnType"
-  | "completion"
-  | "resolveCompletion"
-  | "signatureHelp"
-  | "inlayHints"
-  | "resolveInlayHint"
-  | "semanticTokens"
-  | "foldingRanges"
-  | "selectionRanges"
-  | "request";
+export const STRICT_LSP_OPERATIONS = [
+  "goToDefinition",
+  "goToDeclaration",
+  "goToTypeDefinition",
+  "goToImplementation",
+  "findReferences",
+  "hover",
+  "documentHighlights",
+  "documentSymbols",
+  "workspaceSymbols",
+  "prepareCallHierarchy",
+  "incomingCalls",
+  "outgoingCalls",
+  "prepareTypeHierarchy",
+  "supertypes",
+  "subtypes",
+  "diagnostics",
+  "workspaceDiagnostics",
+  "publishedDiagnostics",
+  "capabilities",
+  "sessionStatus",
+  "prepareRename",
+  "rename",
+  "codeActions",
+  "resolveCodeAction",
+  "formatDocument",
+  "formatRange",
+  "formatOnType",
+  "completion",
+  "resolveCompletion",
+  "signatureHelp",
+  "inlayHints",
+  "resolveInlayHint",
+  "semanticTokens",
+  "foldingRanges",
+  "selectionRanges",
+  "request",
+  "applyProposal",
+] as const;
+
+export type StrictOperation = (typeof STRICT_LSP_OPERATIONS)[number];
 
 export interface StrictPosition {
   readonly line: number;
@@ -88,6 +92,7 @@ export interface StrictRequest {
   readonly limit?: number;
   readonly cursor?: string;
   readonly timeoutMs?: number;
+  readonly proposalId?: string;
 }
 
 export type ReadinessState = "confirmed" | "settling" | "unknown";
@@ -146,44 +151,7 @@ export interface StrictEnvelope<T = unknown> {
   readonly error?: StrictError;
 }
 
-const OPERATIONS: ReadonlySet<string> = new Set([
-  "goToDefinition",
-  "goToDeclaration",
-  "goToTypeDefinition",
-  "goToImplementation",
-  "findReferences",
-  "hover",
-  "documentHighlights",
-  "documentSymbols",
-  "workspaceSymbols",
-  "prepareCallHierarchy",
-  "incomingCalls",
-  "outgoingCalls",
-  "prepareTypeHierarchy",
-  "supertypes",
-  "subtypes",
-  "diagnostics",
-  "workspaceDiagnostics",
-  "publishedDiagnostics",
-  "capabilities",
-  "sessionStatus",
-  "prepareRename",
-  "rename",
-  "codeActions",
-  "resolveCodeAction",
-  "formatDocument",
-  "formatRange",
-  "formatOnType",
-  "completion",
-  "resolveCompletion",
-  "signatureHelp",
-  "inlayHints",
-  "resolveInlayHint",
-  "semanticTokens",
-  "foldingRanges",
-  "selectionRanges",
-  "request",
-]);
+const OPERATIONS: ReadonlySet<string> = new Set(STRICT_LSP_OPERATIONS);
 
 /** Globally allowed on every operation (never foreign). */
 const GLOBAL_FIELDS: ReadonlySet<string> = new Set([
@@ -233,6 +201,7 @@ const FIELD_MATRIX: Readonly<Record<StrictOperation, ReadonlySet<string>>> = {
   foldingRanges: new Set(["path"]),
   selectionRanges: new Set(["path", "position"]),
   request: new Set(["method", "params"]),
+  applyProposal: new Set(["proposalId"]),
 };
 
 /** Required fields per operation (beyond `operation` itself). */
@@ -273,6 +242,7 @@ const REQUIRED_FIELDS: Readonly<Record<StrictOperation, readonly string[]>> = {
   foldingRanges: ["path"],
   selectionRanges: ["path", "position"],
   request: ["method"],
+  applyProposal: ["proposalId"],
 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -320,6 +290,92 @@ export type StrictRequestValidation =
   | { ok: true; value: StrictRequest }
   | { ok: false; error: string };
 
+function checkAllowedFields(req: Record<string, unknown>, op: StrictOperation): string | null {
+  const allowed = new Set<string>([...GLOBAL_FIELDS, ...FIELD_MATRIX[op]]);
+  for (const key of Object.keys(req)) {
+    if (!allowed.has(key)) return `foreign field "${key}" not allowed for operation "${op}"`;
+  }
+  return null;
+}
+
+function checkRequiredFields(req: Record<string, unknown>, op: StrictOperation): string | null {
+  for (const field of REQUIRED_FIELDS[op]) {
+    if (req[field] === undefined) return `operation "${op}" requires field "${field}"`;
+  }
+  return null;
+}
+
+function checkOptionalString(r: Record<string, unknown>, field: string, op: StrictOperation): string | null {
+  const v = r[field];
+  if (v === undefined) return null;
+  if (!isNonEmptyString(v)) return `operation "${op}": ${field} must be a non-empty string`;
+  return null;
+}
+
+function checkOptionalRecord(r: Record<string, unknown>, field: string, op: StrictOperation): string | null {
+  const v = r[field];
+  if (v === undefined) return null;
+  if (!isRecord(v)) return `operation "${op}": ${field} must be a record`;
+  return null;
+}
+
+function validateStringFields(r: Record<string, unknown>, op: StrictOperation): string | null {
+  for (const field of ["workspace", "server", "path", "cursor"] as const) {
+    const err = checkOptionalString(r, field, op);
+    if (err) return err;
+  }
+  if (r.includeDeclaration !== undefined && typeof r.includeDeclaration !== "boolean") {
+    return `operation "${op}": includeDeclaration must be a boolean`;
+  }
+  return null;
+}
+
+function validateRecordFields(r: Record<string, unknown>, op: StrictOperation): string | null {
+  for (const field of ["item", "context", "codeAction", "params"] as const) {
+    const err = checkOptionalRecord(r, field, op);
+    if (err) return err;
+  }
+  return null;
+}
+
+function validateShapeFields(r: Record<string, unknown>, op: StrictOperation): string | null {
+  if (r.formatting !== undefined && !isValidFormatting(r.formatting)) {
+    return `operation "${op}": invalid formatting {tabSize, insertSpaces}`;
+  }
+  if (r.position !== undefined && !isValidPosition(r.position)) {
+    return `operation "${op}": invalid 0-based position {line, character}`;
+  }
+  if (r.range !== undefined && !isValidRange(r.range)) {
+    return `operation "${op}": invalid range {start, end}`;
+  }
+  return null;
+}
+
+function validateNamedFields(r: Record<string, unknown>, op: StrictOperation): string | null {
+  for (const field of ["query", "method", "newName", "proposalId"] as const) {
+    const err = checkOptionalString(r, field, op);
+    if (err) return err;
+  }
+  if (r.identifier === undefined) return null;
+  if (!isNonEmptyString(r.identifier)) {
+    return `operation "${op}": identifier must be a non-empty string (diagnostic-provider identifier)`;
+  }
+  return null;
+}
+
+function isPositiveInteger(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && (v as number) > 0;
+}
+
+function validateNumericFields(r: Record<string, unknown>, op: StrictOperation): string | null {
+  for (const field of ["limit", "timeoutMs"] as const) {
+    const v = r[field];
+    if (v === undefined) continue;
+    if (!isPositiveInteger(v)) return `operation "${op}": ${field} must be a positive integer`;
+  }
+  return null;
+}
+
 export function validateStrictRequest(req: unknown): StrictRequestValidation {
   if (!isRecord(req)) return { ok: false, error: "request must be an object" };
   const { operation } = req as { operation?: unknown };
@@ -327,71 +383,14 @@ export function validateStrictRequest(req: unknown): StrictRequestValidation {
     return { ok: false, error: `unknown operation: ${String(operation)}` };
   }
   const op = operation as StrictOperation;
-  const allowed = new Set<string>([...GLOBAL_FIELDS, ...FIELD_MATRIX[op]]);
-  for (const key of Object.keys(req)) {
-    if (!allowed.has(key)) {
-      return { ok: false, error: `foreign field "${key}" not allowed for operation "${op}"` };
-    }
-  }
-  for (const field of REQUIRED_FIELDS[op]) {
-    if ((req as Record<string, unknown>)[field] === undefined) {
-      return { ok: false, error: `operation "${op}" requires field "${field}"` };
-    }
-  }
   const r = req as Record<string, unknown>;
-  if (r.workspace !== undefined && !isNonEmptyString(r.workspace)) {
-    return { ok: false, error: `operation "${op}": workspace must be a non-empty string` };
-  }
-  if (r.server !== undefined && !isNonEmptyString(r.server)) {
-    return { ok: false, error: `operation "${op}": server must be a non-empty string` };
-  }
-  if (r.path !== undefined && !isNonEmptyString(r.path)) {
-    return { ok: false, error: `operation "${op}": path must be a non-empty string` };
-  }
-  if (r.cursor !== undefined && !isNonEmptyString(r.cursor)) {
-    return { ok: false, error: `operation "${op}": cursor must be a non-empty string` };
-  }
-  if (r.includeDeclaration !== undefined && typeof r.includeDeclaration !== "boolean") {
-    return { ok: false, error: `operation "${op}": includeDeclaration must be a boolean` };
-  }
-  if (r.item !== undefined && !isRecord(r.item)) {
-    return { ok: false, error: `operation "${op}": item must be a record` };
-  }
-  if (r.context !== undefined && !isRecord(r.context)) {
-    return { ok: false, error: `operation "${op}": context must be a record` };
-  }
-  if (r.codeAction !== undefined && !isRecord(r.codeAction)) {
-    return { ok: false, error: `operation "${op}": codeAction must be a record` };
-  }
-  if (r.formatting !== undefined && !isValidFormatting(r.formatting)) {
-    return { ok: false, error: `operation "${op}": invalid formatting {tabSize, insertSpaces}` };
-  }
-  if (r.params !== undefined && !isRecord(r.params)) {
-    return { ok: false, error: `operation "${op}": params must be a record` };
-  }
-  if (r.position !== undefined && !isValidPosition(r.position)) {
-    return { ok: false, error: `operation "${op}": invalid 0-based position {line, character}` };
-  }
-  if (r.range !== undefined && !isValidRange(r.range)) {
-    return { ok: false, error: `operation "${op}": invalid range {start, end}` };
-  }
-  if (r.query !== undefined && (typeof r.query !== "string" || r.query.length === 0)) {
-    return { ok: false, error: `operation "${op}": query must be a non-empty string` };
-  }
-  if (r.identifier !== undefined && (typeof r.identifier !== "string" || r.identifier.length === 0)) {
-    return { ok: false, error: `operation "${op}": identifier must be a non-empty string (diagnostic-provider identifier)` };
-  }
-  if (r.method !== undefined && (typeof r.method !== "string" || r.method.length === 0)) {
-    return { ok: false, error: `operation "${op}": method must be a non-empty string` };
-  }
-  if (r.newName !== undefined && (typeof r.newName !== "string" || r.newName.length === 0)) {
-    return { ok: false, error: `operation "${op}": newName must be a non-empty string` };
-  }
-  if (r.limit !== undefined && (typeof r.limit !== "number" || !Number.isInteger(r.limit) || r.limit <= 0)) {
-    return { ok: false, error: `operation "${op}": limit must be a positive integer` };
-  }
-  if (r.timeoutMs !== undefined && (typeof r.timeoutMs !== "number" || !Number.isInteger(r.timeoutMs) || r.timeoutMs <= 0)) {
-    return { ok: false, error: `operation "${op}": timeoutMs must be a positive integer` };
+  const allowedErr = checkAllowedFields(r, op);
+  if (allowedErr) return { ok: false, error: allowedErr };
+  const requiredErr = checkRequiredFields(r, op);
+  if (requiredErr) return { ok: false, error: requiredErr };
+  for (const check of [validateStringFields, validateRecordFields, validateShapeFields, validateNamedFields, validateNumericFields] as const) {
+    const fieldErr = check(r, op);
+    if (fieldErr) return { ok: false, error: fieldErr };
   }
   return { ok: true, value: req as unknown as StrictRequest };
 }

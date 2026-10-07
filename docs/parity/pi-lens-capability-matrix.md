@@ -1,5 +1,7 @@
 # Capability Parity Matrix: apmantza/pi-lens vs Pi-SmartRead + Pi-SmartEdit
 
+> **Historical parity snapshot, not the current public contract.** Subsequent revisions made strict `LSP` the dedicated compiler/language-server semantic surface and removed public `inspect.navigate`/diagnostics plus `read` natural-language query mode. Current routing is: `grep` discovers, `read` opens known source, `inspect` analyzes aggregate structure/architecture, `LSP` answers exact semantic questions.
+
 > **Reference:** apmantza/pi-lens (TypeScript Pi extension, 363★, MIT) — real-time
 > LSP diagnostics, linters/formatters/autofix, ast-grep structural search/replace,
 > read-before-edit guard, security scanners, MCP mirror.

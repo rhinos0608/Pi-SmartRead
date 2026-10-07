@@ -1,16 +1,16 @@
 export const SMARTREAD_TOOL_GUIDE_TITLE = "SmartRead Tool Guide";
 
 const TOOL_GUIDE_LINES = [
-  "Use read for known paths and inspect for file/directory understanding. Only complete rendered read blocks provide strong evidence for patch:",
-  "- read { path }: exact file with contextual enrichment (imports, git history, git notes, graph, LSP) + strong evidence.",
-  "- read { paths: [...] }: multiple known files with batch evidence.",
-  "- read { query }: indexed BM25+embedding RRF, then reads selected files; falls back to grep+AST discovery.",
-  "- inspect { mode, path, ... }: mode file → structural facts (callers, parent, children, overrides, re-exports) + quality signals via analysis; mode directory → ranked repo map + architecture; mode navigate → LSP goto/symbol/hover via navigation {operation, line, character, query, maxResults} and fresh LSP diagnostics via diagnostics {waitMs, maxPerFile, maxFiles}. Inspect returns metadata evidence only — you must read a file before editing it.",
-  "- grep { pattern }: primary code search — BM25 ranking + symbol matching + semantic fallback. Default match is literal substring; |, .*, \\. and similar auto-detect as regex, but a bare '.' is not (foo.bar ≠ fooXbar). literal:true forces substring. Also accepts { queries: [...] } with 1-10 full search objects and grep.structural {language, skip, groupByFile} for ast-grep structural search. Grep returns search-match evidence only — you must read a file before editing it.",
-  "- LSP { operation, ... }: strict read-only language-server access. Positions are 0-based in the returned server.positionEncoding; proposal operations return edits but never write files.",
+  "Tool split: grep discovers candidates, read returns already-known source content, inspect analyzes aggregate structure/architecture, and LSP answers exact compiler/language-server semantic questions. Only complete rendered read blocks provide strong evidence for patch:",
+  "- read { path } / { paths: [...] }: read one or several known files with contextual/batch evidence. read has no natural-language query mode. { symbol } is for reading source around an already-known qualified symbol, not for semantic navigation.",
+  "- grep { pattern } or { queries: [...] }: primary broad/textual code discovery with lexical/BM25/symbol/semantic layers; use structural for ast-grep matching and graphFilter for graph-constrained discovery. Grep returns search-match evidence only, so read the source before editing it.",
+  "- inspect { mode: 'file', path, analysis? }: aggregate structural analysis of a known file: dependencies/dependents, call graph, impact, dead code, routes, diff mapping, and quality signals.",
+  "- inspect { mode: 'directory', path, analysis? }: repository/architecture analysis: ranked map, graph summary, clusters, layers, service boundaries, hotspots, routes, and related structural views. Inspect does not expose LSP navigation or diagnostics.",
+  "- LSP { operation, ... }: strict compiler/language-server semantics. Use it for definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion/signature/inlay information, semantic tokens, and refactor/code-action proposals. Positions are 0-based in server.positionEncoding. Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path.",
+  "- Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.",
+  "- inspect { mode: 'script', script }: compose a bounded dependent multi-hop investigation when later grep/read/LSP/graph calls depend on earlier results. Do not use script for a lookup that one direct tool call covers.",
   "- skill: discover and read reusable agent workflow skills.",
-  "Prefer narrow params. Large unbounded source reads may return a compact AST symbol outline instead of the full source body — use offset/limit or symbol for specific slices. After code changes, re-run reads/inspects that informed decisions.",
-  "- inspect { mode: 'script', script }: compose a multi-hop investigation (grep, then read/LSP/graph calls whose arguments depend on the previous result) in one bounded read-only call instead of N sequential round trips. See skill inspect-script-mode.",
+  "Prefer narrow params. Large unbounded source reads may return a compact AST outline instead of the full source body, so use offset/limit or symbol for specific slices. After code changes, re-run the reads/inspects/LSP checks that informed decisions.",
 ];
 
 export function renderSmartReadToolGuide(task?: string): string {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -196,5 +196,152 @@ describe("host bindings", () => {
         } finally {
             budget.dispose();
         }
+    });
+
+    describe("inspect opts validation", () => {
+        it("rejects navigation line 0", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { navigation: { operation: "definition", line: 0, character: 1 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects navigation line NaN", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { navigation: { operation: "definition", line: NaN, character: 1 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects non-number navigation line", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { navigation: { operation: "definition", line: "1", character: 1 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects non-string navigation query", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectDir(".", { navigation: { operation: "workspaceSymbols", query: 123 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects navigation character 0", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { navigation: { operation: "definition", line: 1, character: 0 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects unknown navigation operation", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectDir(".", { navigation: { operation: "bogusOperation" } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects unknown key inside navigation", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { navigation: { operation: "documentSymbols", extra: 1 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects out-of-range diagnostics", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectDir(".", { diagnostics: { maxFiles: -1, maxPerFile: 0, waitMs: -5 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects unknown key inside diagnostics", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectDir(".", { diagnostics: { extra: 1 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects maxFiles on a file target", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { diagnostics: { maxFiles: 5 } })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects empty navigation object", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { navigation: {} })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("rejects null navigation", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                await expect(api.inspectFile("package.json", { navigation: null })).rejects.toThrow();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("accepts empty diagnostics object with defaults", async () => {
+            const budget = budgetWith();
+            try {
+                const api = buildHostBindings({ budget, cwd, sessionFilePath });
+                const { value } = await api.inspectDir(".", { diagnostics: {} });
+                expect(value).toBeDefined();
+            } finally {
+                budget.dispose();
+            }
+        });
+
+        it("does not build ContextGraph before validation throws", async () => {
+            const budget = budgetWith();
+            try {
+                const graphGetter = vi.fn(async () => {
+                    throw new Error("graph getter should not have been called");
+                });
+                const api = buildHostBindings({ budget, cwd, sessionFilePath, contextGraph: graphGetter });
+                await expect(api.inspectFile("package.json", { impact: true, clusters: true })).rejects.toThrow();
+                expect(graphGetter).not.toHaveBeenCalled();
+            } finally {
+                budget.dispose();
+            }
+        });
     });
 });

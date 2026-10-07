@@ -128,19 +128,34 @@ describe("createInspectV4Tool (schema)", () => {
         expect(schema.anyOf).toBeUndefined();
         expect(schema.oneOf).toBeUndefined();
         const modes: any[] = schema.properties?.mode?.anyOf ?? schema.properties?.mode?.oneOf ?? [];
-        expect(modes.map((b) => b.const).sort()).toEqual(["directory", "file", "navigate", "script"]);
-        for (const k of ["path", "analysis", "navigation", "diagnostics", "script"]) {
+        expect(modes.map((b) => b.const).sort()).toEqual(["directory", "file", "script"]);
+        for (const k of ["path", "analysis", "script"]) {
             expect(schema.properties?.[k]).toBeDefined();
         }
-        for (const k of ["query", "symbol", "action"]) {
+        for (const k of ["query", "symbol", "action", "navigation", "diagnostics"]) {
             expect(schema.properties?.[k]).toBeUndefined();
         }
     });
 
-    it("description mentions structural facts and signals", () => {
+    it("description distinguishes structural inspection from LSP semantics", () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         expect(tool.description).toContain("structural facts");
         expect(tool.description).toContain("signals");
+        expect(tool.description).toMatch(/use LSP/i);
+        expect(tool.description).toMatch(/definitions|references|hover|diagnostics/i);
+    });
+
+    it("does not accept the removed navigate mode", async () => {
+        const tool = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
+        await expect(
+            tool.execute(
+                "removed-nav",
+                { mode: "navigate", path: "hello.ts", navigation: { operation: "documentSymbols" } } as any,
+                undefined,
+                undefined,
+                makeCtx(),
+            ),
+        ).rejects.toThrow(/file.*directory.*script/i);
     });
 
     it("execute() rejects when no session file is available", async () => {

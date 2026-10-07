@@ -185,6 +185,15 @@ describe("grep tool — per-hit engine provenance rendering", () => {
 // ── Batch queries ──────────────────────────────────────────────────
 
 describe("grep tool — batch queries", () => {
+    it("describes the schema surface and semantic LSP boundary", () => {
+        const tool = createGrepTool(makeOpts());
+        const schema = tool.parameters as any;
+        expect(schema.description).toMatch(/exactly one of pattern or queries/i);
+        expect(schema.properties.graphFilter.description).toContain("EDGE_TYPE->target");
+        expect(schema.properties.structural.description).toMatch(/ast-grep/i);
+        expect(tool.description).toMatch(/LSP/i);
+    });
+
     it("exposes a bounded queries array of full search objects", () => {
         const schema = createGrepTool(makeOpts()).parameters as any;
         expect(schema.properties.queries.type).toBe("array");

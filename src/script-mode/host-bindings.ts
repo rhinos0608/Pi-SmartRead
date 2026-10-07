@@ -48,6 +48,16 @@ import type {
     NavigationOperation,
 } from "../inspect/inspect-types.js";
 import { runGrepQueryWithEvidence } from "../search/grep-tool.js";
+import {
+    DIRECTORY_ANALYSIS_KEYS,
+    FILE_ANALYSIS_KEYS,
+    needsContextGraph,
+    normalizeFileAnalysis,
+    normalizeDirectoryAnalysis,
+    normalizeNavigation,
+    normalizeDiagnostics,
+    rejectUnknownOptions,
+} from "../inspect/inspect-mode-contract.js";
 import { computePathEvidence } from "../evidence/path-evidence.js";
 import type { ContextGraph } from "../context-graph.js";
 import type { LspInspectionProvider } from "../lsp/lsp-inspection.js";
@@ -188,16 +198,31 @@ function canonicalHint(ctx: BinderCtx, target: string | undefined): string | nul
     }
 }
 
-/** Resolve the graph source once and cache it; concurrent callers share one build. */
+/**
+ * Resolve the graph source once and cache it; concurrent callers share one build.
+ *
+ * A graph-source failure (e.g. the native tree-sitter/parser error that
+ * `getSharedContextGraphAsync` rethrows) settles the cached promise to
+ * `undefined` instead of rejecting, so `await resolveGraph(ctx)` degrades to
+ * "no graph" via `baseInput`'s `if (graph)` guard, and later callers in the
+ * same run reuse the degraded result without redundantly retrying the build.
+ * Cancellation (an aborted run budget signal or an `AbortError`) is rethrown
+ * so an aborted run terminates instead of degrading to a fake success.
+ */
 async function resolveGraph(ctx: BinderCtx): Promise<ContextGraph | undefined> {
     if (ctx.cachedGraph) return ctx.cachedGraph;
     const src = ctx.graphSource;
     if (!src) return undefined;
     if (!ctx.graphPromise) {
         ctx.graphPromise = (async () => {
-            const g = typeof src === "function" ? await src() : src;
-            ctx.cachedGraph = g;
-            return g;
+            try {
+                const g = typeof src === "function" ? await src() : src;
+                ctx.cachedGraph = g;
+                return g;
+            } catch (err) {
+                if (ctx.budget.signal.aborted || (err as { name?: string } | null)?.name === "AbortError") throw err;
+                return undefined;
+            }
         })();
     }
     return ctx.graphPromise;
@@ -293,69 +318,23 @@ function statKind(ctx: BinderCtx, target: string): "file" | "directory" {
 
 // ── inspect opts passthrough ──────────────────────────────────────────
 
-function pickCoreOpts(o: Record<string, unknown>): Partial<InspectV4Input> {
-    return {
-        ...(o.signals !== undefined ? { signals: o.signals as InspectV4Input["signals"] } : {}),
-        ...(asNumber(o.mapTokens) !== undefined ? { mapTokens: asNumber(o.mapTokens)! } : {}),
-        ...(Array.isArray(o.focus)
-            ? { focus: o.focus.filter((f): f is string => typeof f === "string") }
-            : {}),
-        ...(asBool(o.compact) !== undefined ? { compact: asBool(o.compact)! } : {}),
-        ...(asNumber(o.callDepth) !== undefined ? { callDepth: asNumber(o.callDepth)! } : {}),
-        ...(typeof o.callDirection === "string" ? { callDirection: o.callDirection as CallDirection } : {}),
-        ...(typeof o.diff === "string" ? { diff: o.diff as DiffTarget } : {}),
-    };
-}
-
-function pickFlagOpts(o: Record<string, unknown>): Partial<InspectV4Input> {
-    return {
-        ...(asBool(o.deadCode) !== undefined ? { deadCode: asBool(o.deadCode)! } : {}),
-        ...(asBool(o.impact) !== undefined ? { impact: asBool(o.impact)! } : {}),
-        ...(asBool(o.clusters) !== undefined ? { clusters: asBool(o.clusters)! } : {}),
-        ...(asBool(o.graphSchema) !== undefined ? { graphSchema: asBool(o.graphSchema)! } : {}),
-        ...(asBool(o.hotspots) !== undefined ? { hotspots: asBool(o.hotspots)! } : {}),
-        ...(asBool(o.boundaries) !== undefined ? { boundaries: asBool(o.boundaries)! } : {}),
-        ...(asBool(o.routes) !== undefined ? { routes: asBool(o.routes)! } : {}),
-        ...(asBool(o.layers) !== undefined ? { layers: asBool(o.layers)! } : {}),
-    };
-}
-
-function pickBaseOpts(raw: unknown): Partial<InspectV4Input> {
-    const o = asRecord(raw);
-    return { ...pickCoreOpts(o), ...pickFlagOpts(o) };
-}
+const INSPECT_OPT_KEYS: ReadonlySet<string> = new Set([...FILE_ANALYSIS_KEYS, ...DIRECTORY_ANALYSIS_KEYS, "navigation", "diagnostics"]);
 
 /** Whitelisted inspect opts (guest cannot override identity/signal/graph). */
-function pickInspectOpts(ctx: BinderCtx, raw: unknown): Partial<InspectV4Input> {
+function pickInspectOpts(ctx: BinderCtx, kind: "file" | "directory", raw: unknown): Partial<InspectV4Input> {
     const o = asRecord(raw);
-    const nav = asRecord(o.navigation);
-    const diag = asRecord(o.diagnostics);
-    const navigation: InspectV4Input["navigation"] | undefined =
-        typeof nav.operation === "string"
-            ? ({
-                  operation: nav.operation as NavigationOperation,
-                  ...(asNumber(nav.line) !== undefined ? { line: asNumber(nav.line)! } : {}),
-                  ...(asNumber(nav.character) !== undefined ? { character: asNumber(nav.character)! } : {}),
-                  ...(asString(nav.query) !== undefined ? { query: asString(nav.query)! } : {}),
-                  ...(asNumber(nav.maxResults) !== undefined ? { maxResults: asNumber(nav.maxResults)! } : {}),
-              } as InspectV4Input["navigation"])
-            : undefined;
+    const unknown = rejectUnknownOptions(o, INSPECT_OPT_KEYS, kind === "file" ? "inspectFile" : "inspectDir");
+    if (unknown) throw new Error(unknown);
+    const bag: Record<string, unknown> = {};
+    for (const k of INSPECT_OPT_KEYS) {
+        if (k !== "navigation" && k !== "diagnostics" && k in o) bag[k] = o[k];
+    }
+    const normalized = kind === "file" ? normalizeFileAnalysis(bag) : normalizeDirectoryAnalysis(bag);
+    const navigation = normalizeNavigation(o.navigation, kind);
+    const rawDiag = normalizeDiagnostics(o.diagnostics, kind);
     // Clamp diagnostics wait to the remaining run budget (§2).
-    const diagnostics: InspectV4Input["diagnostics"] | undefined =
-        Object.keys(diag).length > 0
-            ? ({
-                  ...(asNumber(diag.waitMs) !== undefined
-                      ? { waitMs: Math.min(asNumber(diag.waitMs)!, ctx.budget.remainingMs) }
-                      : {}),
-                  ...(asNumber(diag.maxPerFile) !== undefined ? { maxPerFile: asNumber(diag.maxPerFile)! } : {}),
-                  ...(asNumber(diag.maxFiles) !== undefined ? { maxFiles: asNumber(diag.maxFiles)! } : {}),
-              } as InspectV4Input["diagnostics"])
-            : undefined;
-    return {
-        ...pickBaseOpts(raw),
-        ...(navigation ? { navigation } : {}),
-        ...(diagnostics ? { diagnostics } : {}),
-    };
+    const diagnostics = rawDiag?.waitMs !== undefined ? { ...rawDiag, waitMs: Math.min(rawDiag.waitMs, ctx.budget.remainingMs) } : rawDiag;
+    return { ...normalized, ...(navigation ? { navigation } : {}), ...(diagnostics ? { diagnostics } : {}) };
 }
 
 // ── grep / read (outside executeInspectV4) ────────────────────────────
@@ -434,10 +413,11 @@ async function inspectFileBinding(ctx: BinderCtx, path: unknown, opts: unknown):
         if (typeof path !== "string" || path.length === 0) {
             throw new Error("inspectFile(path) requires a non-empty string");
         }
-        const needGraph = asRecord(opts).impact === true || asRecord(opts).graphSchema === true;
+        const normalizedOpts = pickInspectOpts(ctx, "file", opts);
+        const needGraph = needsContextGraph("file", normalizedOpts);
         const result = await executeInspectV4({
             ...(await baseInput(ctx, path, signal, { needGraph })),
-            ...pickInspectOpts(ctx, opts),
+            ...normalizedOpts,
         });
         return { value: projectInspectResult(result), evidence: result.workspaceEvidence };
     });
@@ -448,10 +428,11 @@ async function inspectDirBinding(ctx: BinderCtx, path: unknown, opts: unknown): 
         if (typeof path !== "string" || path.length === 0) {
             throw new Error("inspectDir(path) requires a non-empty string");
         }
-        const needGraph = asRecord(opts).impact === true || asRecord(opts).graphSchema === true;
+        const normalizedOpts = pickInspectOpts(ctx, "directory", opts);
+        const needGraph = needsContextGraph("directory", normalizedOpts);
         const result = await executeInspectV4({
             ...(await baseInput(ctx, path, signal, { needGraph })),
-            ...pickInspectOpts(ctx, opts),
+            ...normalizedOpts,
         });
         return { value: projectInspectResult(result), evidence: result.workspaceEvidence };
     });
@@ -507,12 +488,22 @@ async function lspWorkspaceSymbols(ctx: BinderCtx, params: unknown): Promise<Hos
 }
 
 // ── graph.* (via executeInspectV4 flags; see module deviation note) ───
+//
+// Per-op ContextGraph need, verified against the downstream consumers:
+// file impact reads input.contextGraph (inspect-file-sections.ts
+// buildImpactWithGraph path); file graphSchema appends graph lines when
+// present; directory clusters/layers derive edges via
+// buildImportEdges(input.contextGraph). Everything else —
+// deadCode/callGraph(callDepth)/hotspots/diff/routes on either kind, and
+// directory boundaries (detectServiceBoundaries takes cwd only) — is
+// driven by ensureCallGraph's separate callgraph build or a direct scan,
+// never by input.contextGraph, so those ops skip the shared graph build.
 
 function makeGraphOp(
     ctx: BinderCtx,
     op: string,
     apply: (params: Record<string, unknown>, input: InspectV4Input) => void,
-    opts?: { dirOnly?: boolean; fileOnly?: boolean },
+    opts?: { dirOnly?: boolean; fileOnly?: boolean; needGraph?: boolean },
 ): HostFn {
     return async (params: unknown) => {
         return guarded(ctx, `graph.${op}`, [params], asRecord(params).path as string | undefined, async (signal) => {
@@ -525,7 +516,7 @@ function makeGraphOp(
             if (opts?.fileOnly && kind !== "file") {
                 throw new Error(`Error: inspect graph.${op} requires a file target`);
             }
-            const input = await baseInput(ctx, target, signal, { needGraph: true });
+            const input = await baseInput(ctx, target, signal, { needGraph: opts?.needGraph === true });
             apply(p, input);
             const result = await executeInspectV4(input);
             return { value: projectInspectResult(result), evidence: result.workspaceEvidence };
@@ -593,27 +584,27 @@ export function buildHostBindings(opts: HostBindingsOptions): ScriptHostApi {
         graph: {
             impact: makeGraphOp(ctx, "impact", (_p, input) => {
                 input.impact = true;
-            }),
+            }, { fileOnly: true, needGraph: true }),
             deadCode: makeGraphOp(ctx, "deadCode", (_p, input) => {
                 input.deadCode = true;
-            }),
-            callGraph: makeGraphOp(ctx, "callGraph", applyCallGraph, { fileOnly: true }),
+            }, { needGraph: false }),
+            callGraph: makeGraphOp(ctx, "callGraph", applyCallGraph, { fileOnly: true, needGraph: false }),
             hotspots: makeGraphOp(ctx, "hotspots", (_p, input) => {
                 input.hotspots = true;
-            }),
+            }, { needGraph: false }),
             routes: makeGraphOp(ctx, "routes", (_p, input) => {
                 input.routes = true;
-            }),
-            diff: makeGraphOp(ctx, "diff", applyDiffTarget),
+            }, { needGraph: false }),
+            diff: makeGraphOp(ctx, "diff", applyDiffTarget, { needGraph: false }),
             clusters: makeGraphOp(ctx, "clusters", (_p, input) => {
                 input.clusters = true;
-            }, { dirOnly: true }),
+            }, { dirOnly: true, needGraph: true }),
             layers: makeGraphOp(ctx, "layers", (_p, input) => {
                 input.layers = true;
-            }, { dirOnly: true }),
+            }, { dirOnly: true, needGraph: true }),
             boundaries: makeGraphOp(ctx, "boundaries", (_p, input) => {
                 input.boundaries = true;
-            }, { dirOnly: true }),
+            }, { dirOnly: true, needGraph: false }),
         },
     };
 
