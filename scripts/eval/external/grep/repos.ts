@@ -103,7 +103,17 @@ export function materializeInstance(
     });
     rmSync(root, { recursive: true, force: true });
     mkdirSync(root, { recursive: true });
-    execFileSync("tar", ["-x", "-C", root], { input: archive });
+    // Extract from a temp file rather than stdin: piping the archive via
+    // spawnSync input races tar's exit on macOS (bsdtar), surfacing as
+    // `spawnSync tar EPIPE` in CI. -xf reads the same bytes deterministically.
+    const stageDir = tempSnapshotRoot("ext-grep-archive-");
+    try {
+        const tmpArchive = join(stageDir, "archive.tar");
+        writeFileSync(tmpArchive, archive);
+        execFileSync("tar", ["-xf", tmpArchive, "-C", root]);
+    } finally {
+        rmSync(stageDir, { recursive: true, force: true });
+    }
     writeFileSync(marker, instance.baseCommit);
     const files = listFiles(root);
     const missing = instance.goldFiles.filter((f) => !files.has(f));
