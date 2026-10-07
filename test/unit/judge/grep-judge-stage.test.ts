@@ -209,6 +209,71 @@ describe("grep judge filtering", () => {
     });
 });
 
+// ── Partial judge response ──────────────────────────────────────────
+
+describe("grep judge partial response", () => {
+    function partialJudge(probs: Record<string, number>, missingCodes: string[]): Judge {
+        return {
+            info: { backend: "cloud", model: "test-model", baseUrl: "http://judge.test" },
+            async judgeNouls(input: JudgeNoulInput) {
+                const p = new Map<string, number>();
+                const unjudged: Array<{ id: string; code: string }> = [];
+                for (const item of input.items) {
+                    if (item.id in probs) {
+                        p.set(item.id, probs[item.id]!);
+                    } else {
+                        unjudged.push({ id: item.id, code: missingCodes[0] ?? "bad_response" });
+                    }
+                }
+                return { p, unjudged, usage: { inputTokens: 1, requests: 1 }, cacheHits: 0 };
+            },
+        };
+    }
+
+    it("preserves units with missing probabilities with degradation instead of dropping them", async () => {
+        const hits = [hit("src/a.ts", 1, "aaa"), hit("src/b.ts", 2, "bbb"), hit("src/c.ts", 3, "ccc")];
+        const result = await runGrepJudgeStage({
+            query: NL_QUERY,
+            hits,
+            contextLines: 1,
+            literal: false,
+            regex: false,
+            structural: false,
+            cwd: workdir,
+            provider: providerFor(partialJudge({ u0: 0.9, exists: 0.8 }, ["bad_response"])),
+        });
+        expect(result.judged).toBe(true);
+        expect(result.abstained).toBe(false);
+        // The judged hit keeps its probability; unanswered units are
+        // preserved in fused order without a judgeP, not dropped as 0.
+        expect(result.hits.map((h) => h.name)).toEqual(["aaa", "bbb", "ccc"]);
+        expect(result.hits[0]?.judgeP).toBe(0.9);
+        expect(result.hits[1]?.judgeP).toBeUndefined();
+        expect(result.hits[2]?.judgeP).toBeUndefined();
+        expect(result.degradation).toEqual({ backend: "judge", code: "bad_response" });
+        expect(result.judge).toMatchObject({ kept: 1, belowThreshold: 0 });
+    });
+
+    it("does not abstain when unanswered units remain to preserve", async () => {
+        const hits = [hit("src/a.ts", 1), hit("src/b.ts", 2)];
+        const result = await runGrepJudgeStage({
+            query: NL_QUERY,
+            hits,
+            contextLines: 1,
+            literal: false,
+            regex: false,
+            structural: false,
+            cwd: workdir,
+            provider: providerFor(partialJudge({ exists: 0.1 }, ["bad_response"])),
+        });
+        expect(result.judged).toBe(true);
+        expect(result.abstained).toBe(false);
+        expect(result.abstainMessage).toBeUndefined();
+        expect(result.hits).toHaveLength(2);
+        expect(result.degradation).toEqual({ backend: "judge", code: "bad_response" });
+    });
+});
+
 // ── Failure ───────────────────────────────────────────────────────────
 
 describe("grep judge failure", () => {

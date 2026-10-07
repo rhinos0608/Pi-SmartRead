@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import type { JudgeNoulInput, JudgeUsage } from "../../../src/judge/types.js";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import type { D46Query } from "../../../scripts/eval/d46/schema.js";
 import {
@@ -25,6 +26,7 @@ import {
     SMARTREAD_RUNTIME_CACHE_DIRS,
     verifyCheckoutPins,
     verifySplitManifest,
+    wrapJudge,
 } from "../../../scripts/eval/d46/run.js";
 import { loadSplitQueries, writeSplitManifest } from "../../../scripts/eval/d46/validate.js";
 import type { D46SplitManifest } from "../../../scripts/eval/d46/validate.js";
@@ -551,5 +553,44 @@ describe("resolveD46ScoringTotalHits (D67: score absence over rendered locations
             elapsedMs: 1,
         });
         expect(scored.falseContent).toBe(true);
+    });
+});
+
+describe("wrapJudge", () => {
+    const info = { backend: "local" as const, model: "test-model", baseUrl: "http://127.0.0.1/" };
+    const input: JudgeNoulInput = { shared: {}, items: [] };
+    const usage: JudgeUsage = { inputTokens: 10, requests: 1 };
+
+    it("marks invocation and records usage on success", async () => {
+        let invoked = 0;
+        const calls: Array<typeof usage> = [];
+        const inner = {
+            info,
+            judgeNouls: async () => ({ p: new Map(), unjudged: [], usage, cacheHits: 0 }),
+        };
+        const wrapped = wrapJudge(inner, () => {
+            invoked += 1;
+        }, calls);
+        const result = await wrapped.judgeNouls(input);
+        expect(result.usage).toBe(usage);
+        expect(invoked).toBe(1);
+        expect(calls).toEqual([usage]);
+    });
+
+    it("marks invocation even when the judge call throws", async () => {
+        let invoked = 0;
+        const calls: Array<typeof usage> = [];
+        const inner = {
+            info,
+            judgeNouls: async (): Promise<never> => {
+                throw new Error("judge boom");
+            },
+        };
+        const wrapped = wrapJudge(inner, () => {
+            invoked += 1;
+        }, calls);
+        await expect(wrapped.judgeNouls(input)).rejects.toThrow("judge boom");
+        expect(invoked).toBe(1);
+        expect(calls).toEqual([]);
     });
 });

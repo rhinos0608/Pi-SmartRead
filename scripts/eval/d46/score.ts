@@ -15,7 +15,6 @@
  */
 import {
     ndcgAtK,
-    precisionAtK,
     recallAtK,
     reciprocalRank,
 } from "../judge/ir-metrics.js";
@@ -134,7 +133,11 @@ export function scoreD46Query(input: D46ScoreInput): D46ScoredQuery {
     const recallAt5 = hasGold ? recallAtK(ranked.length > 0 ? ranked : [false], 5, goldFiles.length) : null;
     const precisionAt5 = hasGold
         ? top5Files.length > 0
-            ? precisionAtK(ranked, 5)
+            // D46 column semantics: gold files in the first five distinct
+            // rendered files / distinct files shown (<=5). The shared
+            // precisionAtK divides by k per its contract, so D46 divides by
+            // the shown count directly instead of reusing that helper.
+            ? hitFiles.length / top5Files.length
             : 0
         : null;
     const mrr = hasGold ? reciprocalRank(ranked.length > 0 ? ranked : [false]) : 0;

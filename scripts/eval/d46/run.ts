@@ -581,12 +581,12 @@ export function redactForHoldout(row: Record<string, unknown>, holdout: boolean)
     return redacted;
 }
 
-function wrapJudge(inner: Judge, onCall: () => void, calls: JudgeUsage[]): Judge {
+export function wrapJudge(inner: Judge, onCall: () => void, calls: JudgeUsage[]): Judge {
     return {
         info: inner.info,
         judgeNouls: async (input: JudgeNoulInput, signal?: AbortSignal): Promise<JudgeNoulResult> => {
-            const result = await inner.judgeNouls(input, signal);
             onCall();
+            const result = await inner.judgeNouls(input, signal);
             calls.push(result.usage);
             return result;
         },
