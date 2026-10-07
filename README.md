@@ -151,9 +151,9 @@ Provide exactly one of `pattern` or `queries`. Batch mode accepts 1-10 query obj
 
 ### Matching behavior
 
-By default, a normal-looking pattern is treated as a literal substring. Common regex syntax triggers regex interpretation. A bare `.` is not enough to make the pattern regex.
+By default, a normal-looking pattern is treated as a literal substring and runs through the smart cascade. Compact regex syntax (`|`, `^`/`$` anchors, `[class]`, `{n}`, `\d`-style escapes, or compact groups like `foo.*bar` / `(group)` without inner spaces) auto-routes to regex. Multi-line patterns, prose with parenthesised asides, and isolated `.*` / `.+` in multi-word text stay on the smart cascade — set `regex: true` to force regex interpretation (the pattern must be a valid regex; `regex` and `literal` cannot be combined). A bare `.` is not enough to make the pattern regex.
 
-Set `literal: true` to force deterministic substring matching and skip hybrid semantic expansion.
+Set `literal: true` to force deterministic substring matching and skip hybrid semantic expansion. Set `regex: true` to force regex matching with no silent fallback (zero hits stay zero).
 
 Without `literal: true`, the cascade combines:
 
@@ -171,6 +171,7 @@ Without `literal: true`, the cascade combines:
 | `glob` | File filter such as `src/**/*.ts` |
 | `ignoreCase` | Case-insensitive text matching |
 | `literal` | Force exact substring path |
+| `regex` | Force regex matching (must be valid; conflicts with `literal`) |
 | `perQueryLimit` | Per-query cap, default 20, max 50 |
 | `limit` | Deprecated per-query alias |
 | `maxResults` | Merged render cap, default 100, max 200 |
@@ -179,7 +180,7 @@ Without `literal: true`, the cascade combines:
 | `structural` | ast-grep options: `language`, `skip`, `groupByFile` |
 | `skip` | Structural pagination shortcut |
 
-Every rendered hit gets search-match evidence, not full-file evidence.
+Every rendered hit gets search-match evidence, not full-file evidence. When auto-detection declines (multi-line input, prose parentheticals, or ambiguous wildcards), the output notes the routing — for example `grep({ pattern: "the token .* should be refreshed", regex: true })` forces regex interpretation.
 
 ---
 

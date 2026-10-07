@@ -3,6 +3,7 @@
 
 import { resolve, relative } from "node:path";
 import { getLSPBridge } from "../lsp/lsp-bridge.js";
+import { canonicalDisplayRoot, tryCanonical } from "./grep-cascade.js";
 
 import type { DeepSearchCandidate, DeepSearchDepth } from "./deep-search.js";
 
@@ -155,7 +156,7 @@ function extractHoverText(contents: unknown): string {
   return "";
 }
 
-function toRelativePath(cwd: string, path: string): string {
-  const rel = relative(cwd, resolve(cwd, path));
+export function toRelativePath(cwd: string, path: string): string {
+  const rel = relative(canonicalDisplayRoot(cwd), tryCanonical(resolve(cwd, path)));
   return rel && !rel.startsWith("..") ? rel.replace(/\\/g, "/") : path.replace(/\\/g, "/");
 }

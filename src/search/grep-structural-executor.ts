@@ -8,12 +8,17 @@
  * schema/dispatch/evidence/format.
  */
 
-import { relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { ContextGraph } from "../context-graph.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
 import { structuralSearch, resolveStructuralLang, STRUCTURAL_SEARCH_MAX_LIMIT, STRUCTURAL_SEARCH_RAW_CEILING } from "../structural/structural-search.js";
 import type { StructuralSearchMatch } from "../structural/structural-search.js";
 import { tryCanonical, type GrepExecutionResult, type GrepHit, type StructuralDetails } from "./grep-cascade.js";
+
+/** Canonical root for relative-path rendering (see canonicalDisplayRoot in grep-cascade). */
+function displayRoot(cwd: string): string {
+    return tryCanonical(cwd);
+}
 
 export const GREP_STRUCTURAL_FETCH_SIZE = STRUCTURAL_SEARCH_MAX_LIMIT;
 export const GREP_STRUCTURAL_MAX_ITERATIONS = 20000;
@@ -182,7 +187,7 @@ async function applyGraphFilterToMatches(args: {
 }): Promise<{ matches: StructuralSearchMatch[]; totalMatches: number; truncated: boolean; graphFilterNotes: string[] }> {
     const hitsForFilter: GrepHit[] = args.allRaw.map((m) => ({
         file: m.path,
-        relFile: relative(args.cwd, m.path).replace(/\\/g, "/"),
+        relFile: relative(displayRoot(args.cwd), isAbsolute(m.path) ? tryCanonical(m.path) : m.path).replace(/\\/g, "/"),
         line: m.line,
         endLine: m.endLine,
         name: "",
@@ -232,8 +237,10 @@ async function runSimpleStructuralQuery(args: {
 type EnrichedStructuralMatch = StructuralSearchMatch & { read: { path: string; offset: number; limit: number } };
 
 function enrichStructuralMatches(matches: StructuralSearchMatch[], cwd: string): EnrichedStructuralMatch[] {
+    const root = displayRoot(cwd);
     return matches.map((m) => {
-        const rel = relative(cwd, m.path).replace(/\\/g, "/");
+        const abs = isAbsolute(m.path) ? tryCanonical(m.path) : m.path;
+        const rel = relative(root, abs).replace(/\\/g, "/");
         const limit = Math.max(1, m.endLine - m.line + 1);
         return { ...m, path: rel, read: { path: rel, offset: m.line, limit } };
     });
@@ -269,7 +276,7 @@ function buildOkResult(args: {
         ...(groupedByFile ? { groupedByFile } : {}),
     };
     const hits: GrepHit[] = args.enriched.map((m) => ({
-        file: tryCanonical(resolve(args.cwd, m.path)),
+        file: tryCanonical(resolve(displayRoot(args.cwd), m.path)),
         relFile: m.path,
         line: m.line,
         endLine: m.endLine,

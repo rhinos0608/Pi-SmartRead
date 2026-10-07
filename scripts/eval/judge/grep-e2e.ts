@@ -65,6 +65,8 @@ import type {
 } from "../../../src/judge/types.js";
 import { createGrepTool, type GrepTraceEvent } from "../../../src/search/grep-tool.js";
 import { disposeSemanticIndexes } from "../../../src/indexing/semantic-index-registry.js";
+import { shutdownAllManagers } from "../../../src/lsp/lsp-manager.js";
+import { resetLSPBridge } from "../../../src/lsp/lsp-bridge.js";
 import {
     GATE_CONSTANTS,
     classifyGoldRow,
@@ -93,6 +95,7 @@ import {
     isHardError,
     isKnownSourceHash,
     validateCheckpointRow,
+    canonicalizeCorpusRoot,
     type CheckpointRow,
     type RunIdentityInput,
 } from "./grep-e2e-contract.js";
@@ -182,7 +185,7 @@ function parseArgs(argv: string[]): {
         if (arg === "--config") configArg = argv[++i] ?? "";
         else if (arg === "--queries") queriesArg = argv[++i] ?? "";
         else if (arg === "--limit" || arg === "--limit-queries") limitArg = argv[++i] ?? "";
-        else if (arg === "--root") root = resolve(argv[++i] ?? "");
+        else if (arg === "--root") root = canonicalizeCorpusRoot(resolve(argv[++i] ?? ""));
         else if (arg === "--data-dir") dataDir = resolve(argv[++i] ?? "");
         else if (arg === "--timeout-ms") timeoutMs = Number(argv[++i] ?? "");
         else if (arg === "--resume") resume = true;
@@ -290,7 +293,10 @@ function createSnapshotCorpus(ref: string): string {
     const repoRoot = gitRootFromScript() ?? resolve(process.cwd());
     const archive: Buffer = execFileSync("git", ["archive", ref], { cwd: repoRoot, maxBuffer: 256 * 1024 * 1024 });
     execFileSync("tar", ["-x", "-C", dir], { input: archive });
-    return dir;
+    // mkdtemp on macOS lands under symlinked /var: canonicalize so hit
+    // display paths and gold matching share one root (defense in depth
+    // with the production canonical-display-root fix).
+    return canonicalizeCorpusRoot(dir);
 }
 
 function codeUnderTest(): { head: string; dirty: string[] } {
@@ -893,6 +899,17 @@ try {
     console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
     failed = true;
 } finally {
+    // Tear down language-server processes before leaving: without this
+    // the harness hangs on live LSP child handles after the report.
+    // Harness-only cleanup; production manager lifecycle is untouched.
+    await shutdownAllManagers().catch((error) => {
+        console.error(`warning: lsp shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    try {
+        resetLSPBridge();
+    } catch (error) {
+        console.error(`warning: lsp bridge reset failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     disposeSemanticIndexes();
 }
 

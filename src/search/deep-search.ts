@@ -127,6 +127,7 @@ export interface PublicDeepSearchDetails extends Omit<DeepSearchDetails, "matche
 // ── Channel imports (used by orchestrator) ────────────────────────────────────
 
 import { RRF_K } from "./deep-search-constants.js";
+import { canonicalDisplayRoot, tryCanonical } from "./grep-cascade.js";
 import { extractQueryTerms, enrichMatchProvenance } from "./deep-search-semantic.js";
 import { enrichRelationships } from "./deep-search-symbol.js";
 import { selectGraphSeedFiles } from "./deep-search-graph.js";
@@ -168,8 +169,8 @@ function resolveDeepSearchRoot(params: DeepSearchParams, defaultCwd: string): st
   return directory ? resolve(defaultCwd, directory) : defaultCwd;
 }
 
-function toRelativePath(cwd: string, path: string): string {
-  const rel = relative(cwd, resolve(cwd, path));
+export function toRelativePath(cwd: string, path: string): string {
+  const rel = relative(canonicalDisplayRoot(cwd), tryCanonical(resolve(cwd, path)));
   return rel && !rel.startsWith("..") ? rel.replace(/\\/g, "/") : path.replace(/\\/g, "/");
 }
 

@@ -16,6 +16,7 @@ import {
     lstatSync,
     openSync,
     readFileSync,
+    realpathSync,
     writeFileSync,
     writeSync,
 } from "node:fs";
@@ -254,4 +255,20 @@ export function appendCheckpointLine(path: string, line: string): void {
 /** Completed judge_degraded runs keep measured coverage; only hard errors lose it. */
 export function isHardError(status: string): boolean {
     return status.startsWith("error:");
+}
+
+/**
+ * Canonical benchmark corpus root: mkdtemp roots (macOS /var ->
+ * /private/var) and explicit --root values may contain symlinks. Hit
+ * files are canonicalized via realpath, so the root they are made
+ * relative to must be canonical too, or gold matching compares
+ * '../../..' escapes against 'src/...' labels. Missing paths fall
+ * through unchanged (the harness walk fails on those, not here).
+ */
+export function canonicalizeCorpusRoot(root: string): string {
+    try {
+        return realpathSync(root);
+    } catch {
+        return root;
+    }
 }

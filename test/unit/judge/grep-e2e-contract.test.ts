@@ -10,6 +10,7 @@ import {
     mkdirSync,
     mkdtempSync,
     readFileSync,
+    realpathSync,
     rmSync,
     statSync,
     symlinkSync,
@@ -28,6 +29,7 @@ import {
     isConsistentDuplicate,
     isHardError,
     isKnownSourceHash,
+    canonicalizeCorpusRoot,
     stableErrorCode,
     validateCheckpointRow,
     type CheckpointRow,
@@ -121,6 +123,26 @@ describe("validateCheckpointRow", () => {
         ) as { ok: true; row: CheckpointRow }).row;
         expect(isConsistentDuplicate(a, same)).toBe(true);
         expect(isConsistentDuplicate(a, diff)).toBe(false);
+    });
+});
+
+describe("canonicalizeCorpusRoot", () => {
+    it("resolves a symlinked root to its canonical path", () => {
+        const real = realpathSync(mkdtempSync(join(tmpdir(), "corpus-real-")));
+        const link = `${real}-link`;
+        try { rmSync(link, { recursive: true, force: true }); } catch { /* ignore */ }
+        symlinkSync(real, link, "dir");
+        try {
+            expect(canonicalizeCorpusRoot(link)).toBe(real);
+            expect(canonicalizeCorpusRoot(real)).toBe(real);
+        } finally {
+            rmSync(link, { recursive: true, force: true });
+            rmSync(real, { recursive: true, force: true });
+        }
+    });
+    it("passes missing paths through for the harness walk to reject", () => {
+        const missing = join(tmpdir(), "smartread-no-such-corpus-dir");
+        expect(canonicalizeCorpusRoot(missing)).toBe(missing);
     });
 });
 

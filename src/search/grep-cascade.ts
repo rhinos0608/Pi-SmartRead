@@ -38,8 +38,15 @@ export interface GrepHit {
     matchedQueries?: string[];
 }
 
+export interface GrepRouting {
+    mode: "regex" | "literal" | "smart";
+    reason: "forced_regex" | "forced_literal" | "auto_regex" | "auto_literal" | "auto_declined_newline" | "auto_declined_prose_group" | "auto_declined_prose_wildcard" | "auto_declined_invalid_regex";
+    note?: string;
+}
+
 export interface GrepExecutionResult {
     pattern: string;
+    routing?: GrepRouting;
     shown: GrepHit[];
     totalHits: number;
     engines: string[];
@@ -107,6 +114,21 @@ export interface GrepTextInput {
 
 export function tryCanonical(filePath: string): string {
     try { return realpathSync(filePath); } catch { return filePath; }
+}
+
+/**
+ * Canonical display root for relative-path rendering. Hit files are
+ * canonicalized via tryCanonical/realpath, so the root they are made
+ * relative to must be canonical too — otherwise a symlinked cwd
+ * (macOS /var -> /private/var, symlinked workdirs) yields
+ * '../../..' escapes instead of 'src/...' paths.
+ */
+export function canonicalDisplayRoot(cwd: string): string {
+    return tryCanonical(cwd);
+}
+
+function relToDisplayRoot(cwd: string, absPath: string): string {
+    return relative(canonicalDisplayRoot(cwd), tryCanonical(absPath)).replace(/\\/g, "/");
 }
 
 // Scoped-file predicate: true when a canonical hit path falls outside the
@@ -220,7 +242,7 @@ function tryGraphExactSymbol(
     if (isScopedOut(absPath, scopedFile)) return false;
     insertHitOnce(hits, `${absPath}:${def.line}`, symbolHitFromMatch(
         absPath,
-        relative(cwd, absPath).replace(/\\/g, "/"),
+        relToDisplayRoot(cwd, absPath),
         { line: def.line, name: def.name, kind: def.kind },
         { score: 1 },
     ));
@@ -236,10 +258,11 @@ async function collectSymbolSearchHits(
 ): Promise<boolean> {
     try {
         const symResult = await handleSymbol(input.pattern, input.bigK, false, input.searchDir, input.cwd, input.signal, input.fileGlob);
+        const displayRoot = canonicalDisplayRoot(input.cwd);
         for (const m of symResult.matches) {
-            const absPath = tryCanonical(resolve(input.cwd, m.relative_path));
+            const absPath = tryCanonical(resolve(displayRoot, m.relative_path));
             if (isScopedOut(absPath, input.scopedFile)) continue;
-            insertHitOnce(hits, `${absPath}:${m.line}`, symbolHitFromMatch(absPath, m.relative_path, m, input.overrides));
+            insertHitOnce(hits, `${absPath}:${m.line}`, symbolHitFromMatch(absPath, relative(displayRoot, absPath).replace(/\\/g, "/"), m, input.overrides));
         }
         return hits.size > 0;
     } catch {
@@ -297,7 +320,7 @@ async function searchIndexedBm25(
             if (isScopedOut(absPath, ctx.scopedFile)) continue;
             hits.set(`${absPath}:${r.lineStart}`, {
                 file: absPath,
-                relFile: relative(ctx.cwd, absPath).replace(/\\/g, "/"),
+                relFile: relToDisplayRoot(ctx.cwd, absPath),
                 line: r.lineStart,
                 endLine: r.lineEnd,
                 name: r.symbolKind,
@@ -333,7 +356,7 @@ async function searchSemanticHits(ctx: IndexedCascadeCtx): Promise<Map<string, G
             if (isScopedOut(absPath, ctx.scopedFile)) continue;
             hits.set(`${absPath}:${r.lineStart}`, {
                 file: absPath,
-                relFile: relative(ctx.cwd, absPath).replace(/\\/g, "/"),
+                relFile: relToDisplayRoot(ctx.cwd, absPath),
                 line: r.lineStart,
                 endLine: r.lineEnd,
                 name: r.symbolKind,
@@ -498,7 +521,7 @@ async function runTextGrep(
         const absPath = tryCanonical(m.file as string);
         hits.push({
             file: absPath,
-            relFile: relative(cwd, absPath).replace(/\\/g, "/"),
+            relFile: relToDisplayRoot(cwd, absPath),
             line: typeof m.line === "number" ? m.line : 1,
             endLine: typeof m.endLine === "number" ? m.endLine : (typeof m.line === "number" ? m.line : 1),
             name: typeof m.name === "string" ? m.name : "(text match)",
@@ -744,7 +767,7 @@ export async function runFallbackBm25(
         const bestLine = findBestLine(lines, queryTokens);
         hits.set(`${absPath}:${bestLine}`, {
             file: absPath,
-            relFile: relative(cwd, absPath).replace(/\\/g, "/"),
+            relFile: relToDisplayRoot(cwd, absPath),
             line: bestLine,
             endLine: bestLine,
             name: "(bm25 match)",
