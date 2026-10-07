@@ -1,21 +1,149 @@
 import { realpathSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
     RPC_CHANNELS,
     LANGUAGE_INTELLIGENCE_RPC_METHODS,
+    LSP_TIMEOUT_MS_MIN,
+    LSP_TIMEOUT_MS_DEFAULT,
+    LSP_TIMEOUT_MS_MAX,
     validateLanguageIntelligenceCapabilitiesRequest,
     validateCheckPostEditDiagnosticsRequest,
     validateCheckPostEditDiagnosticsResponse,
+    validateRenamePreviewRequest,
+    validateOrganizeImportsRequest,
+    validateFormattingRequest,
+    validateCodeActionRequest,
     type CheckPostEditDiagnosticsResponse,
     type LanguageDiagnostic,
 } from "@rhinos0608/pi-workspace-protocol";
 import { createRpcServer, type BusLike, type RequestEvent } from "@rhinos0608/pi-workspace-protocol";
-import { getLSPBridge } from "../lsp/lsp-bridge.js";
+import type { StrictEnvelope, StrictRequest } from "../lsp/lsp-strict-contract.js";
 import { resolveLanguageServer, detectProjectRoot } from "./language-intelligence-runtime.js";
 import { validateWorkspaceEdit } from "../workspace/workspace-edit-validator.js";
-import type { RenamePreviewRequest, RenamePreviewResponse, LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
+import type { RenamePreviewResponse, LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 
 export interface LanguageIntelligenceProviderBus extends BusLike {}
+
+type ExecutorFn = (req: unknown, deps?: Record<string, unknown>) => Promise<StrictEnvelope>;
+
+// Test seam: unit tests inject a fake executor; production dynamically
+// imports the canonical executor. All proposal/diagnostic sourcing below
+// goes through executeLspOperation — zero disk writes (proposals only).
+let executorOverride: ExecutorFn | null = null;
+
+export function __setLanguageIntelligenceExecutorForTests(fn: ExecutorFn | null): void {
+    executorOverride = fn;
+}
+
+export function __resetLanguageIntelligenceExecutorForTests(): void {
+    executorOverride = null;
+}
+
+async function runExecutor(req: StrictRequest, opts: { cwd: string }): Promise<StrictEnvelope> {
+    // NOTE (Wave B Round 2): the broker AbortSignal seam is proposal-only —
+    // these RPC handlers carry no caller signal, so none is threaded here.
+    // The executor supports deps.signal for deeper cancellation; wiring a
+    // caller signal through is future work (don't boil the ocean).
+    if (executorOverride) return executorOverride(req, { cwd: opts.cwd });
+    const { executeLspOperation } = await import("../lsp/lsp-executor.js");
+    return executeLspOperation(req, { cwd: opts.cwd });
+}
+
+function envelopeIsFresh(e: { meta?: { freshness?: { state?: string } } }): boolean {
+    return e.meta?.freshness?.state === "fresh";
+}
+
+/**
+ * RPC proposal-path encoding guard (fail-closed).
+ *
+ * RPC edit DTOs carry no encoding and the SmartEdit planner assumes UTF-16
+ * coordinates, so proposal paths (rename/format/organizeImports/codeAction)
+ * must not forward or return coordinates negotiated in any other encoding.
+ * Non-UTF-16 negotiated encoding rejects with an `unsupported-encoding`
+ * error — never converts. Missing encoding defaults to utf-16 (LSP default).
+ * The direct strict tool path is unaffected: it keeps negotiated encoding
+ * surfaced via envelope server.positionEncoding.
+ */
+/**
+ * LSP timeout envelope (ms) — sourced from protocol v0.6.0 LSP_TIMEOUT_MS_*.
+ * Deadline semantics: timeoutMs is a relative service-work budget for the
+ * SmartRead executor (owns timeout + $/cancelRequest). The SmartEdit
+ * transport deadline is service + 1-2s slack — transport side owns that
+ * slack, never this provider.
+ */
+export const LANGUAGE_INTELLIGENCE_TIMEOUT_MIN = LSP_TIMEOUT_MS_MIN;
+export const LANGUAGE_INTELLIGENCE_TIMEOUT_DEFAULT = LSP_TIMEOUT_MS_DEFAULT;
+export const LANGUAGE_INTELLIGENCE_TIMEOUT_MAX = LSP_TIMEOUT_MS_MAX;
+/** Shorter service-work budget for the post-edit diagnostics path. */
+export const POST_EDIT_DIAGNOSTICS_TIMEOUT_MS = 4_000 as const;
+/** Default service-work budget for proposal ops (rename/format/organize/codeAction). */
+export const PROPOSAL_TIMEOUT_MS = LSP_TIMEOUT_MS_DEFAULT;
+
+/**
+ * Clamp a caller-supplied timeoutMs into the protocol envelope [250, 30000].
+ * Non-integer / non-finite / missing values fall back to `fallback`.
+ */
+export function clampLanguageIntelligenceTimeout(requested: unknown, fallback: number = LANGUAGE_INTELLIGENCE_TIMEOUT_DEFAULT): number {
+    if (typeof requested !== "number" || !Number.isInteger(requested) || !Number.isFinite(requested)) return fallback;
+    if (requested < LANGUAGE_INTELLIGENCE_TIMEOUT_MIN) return LANGUAGE_INTELLIGENCE_TIMEOUT_MIN;
+    if (requested > LANGUAGE_INTELLIGENCE_TIMEOUT_MAX) return LANGUAGE_INTELLIGENCE_TIMEOUT_MAX;
+    return requested;
+}
+
+export const RPC_PROPOSAL_POSITION_ENCODING = "utf-16" as const;
+
+export function isRpcProposalEncodingSupported(encoding: string | undefined): boolean {
+    return (encoding ?? RPC_PROPOSAL_POSITION_ENCODING) === RPC_PROPOSAL_POSITION_ENCODING;
+}
+
+export function rpcProposalEncodingError(encoding: string | undefined): string {
+    return `unsupported-encoding: server negotiated ${encoding ?? "unknown"}, RPC proposal path requires utf-16`;
+}
+
+function rpcProposalEncodingOf(env: StrictEnvelope): string | undefined {
+    return (env.server as { positionEncoding?: string } | undefined)?.positionEncoding;
+}
+
+/** Ambiguous-server envelope passthrough: preserve candidates/message so the
+ * caller can disambiguate. No DTO selector field (out of scope) — the
+ * candidates ride in the free-form error string. */
+function envelopeAmbiguityMessage(env: StrictEnvelope): string {
+    const raw = (env.error as { message?: unknown } | undefined)?.message;
+    const detail = typeof raw === "string" && raw.length > 0 ? raw : "ambiguous server selection";
+    return detail.startsWith("ambiguous") ? detail : `ambiguous: ${detail}`;
+}
+
+/** Executor normalized WorkspaceEdit ({changes:[{uri,edits}]}) → validator input ({fileEdits:[{filePath,edits}]}). URIs resolved to absolute paths; returns null when nothing actionable. */
+function normalizedTextEditsToFileEdits(
+    result: unknown,
+    filePath: string,
+): { fileEdits: Array<{ filePath: string; edits: unknown[] }> } | null {
+    if (!Array.isArray(result) || result.length === 0) return null;
+    return { fileEdits: [{ filePath, edits: result }] };
+}
+
+function normalizedEditToFileEdits(result: unknown): { fileEdits: Array<{ filePath: string; edits: Array<{ range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string }> }> } | null {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+    const changes = (result as Record<string, unknown>).changes;
+    if (!Array.isArray(changes) || changes.length === 0) return null;
+    const fileEdits: Array<{ filePath: string; edits: unknown }> = [];
+    for (const c of changes) {
+        if (!c || typeof c !== "object") return null;
+        const uri = (c as Record<string, unknown>).uri;
+        const edits = (c as Record<string, unknown>).edits;
+        if (typeof uri !== "string" || uri.length === 0 || !Array.isArray(edits)) return null;
+        let filePath: string;
+        try {
+            filePath = uri.startsWith("file://") ? fileURLToPath(uri) : uri;
+        } catch {
+            return null;
+        }
+        fileEdits.push({ filePath, edits });
+    }
+    if (fileEdits.length === 0) return null;
+    return { fileEdits } as { fileEdits: Array<{ filePath: string; edits: Array<{ range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string }> }> };
+}
 
 export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProviderBus): { dispose(): void } {
     const server = createRpcServer({
@@ -59,20 +187,37 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                     return validatedOrDegraded(degraded("content-mismatch"));
                 }
 
-                // c. LSP call
-                const bridge = await getLSPBridge();
+                // Freshness honesty gate: executor ok/empty only count as
+                // confirmed/clean when meta.freshness.state === "fresh".
+                // Unknown/stale answers degrade to unconfirmed (never false-clean).
+                // c. LSP call — sourced from executeLspOperation (diagnostics op). Zero disk writes.
                 let outcome: { status: string; diagnostics: Array<{ message?: unknown; severity?: unknown; source?: unknown; range?: unknown }> };
-                if (!bridge || typeof (bridge as unknown as { getFreshDiagnosticsOutcome?: unknown }).getFreshDiagnosticsOutcome !== "function") {
-                    // No bridge at all -> unavailable
-                    const resp: CheckPostEditDiagnosticsResponse = { status: "unavailable", reason: "no-server", diagnostics: [], truncated: false };
-                    return validatedOrDegraded(resp);
-                }
                 try {
-                    outcome = await (bridge as unknown as { getFreshDiagnosticsOutcome: (p: string, r: string, o: unknown) => Promise<{ status: string; diagnostics: unknown[] }> }).getFreshDiagnosticsOutcome(
-                        request.canonicalPath,
-                        request.canonicalWorkspaceRoot,
-                        { waitMs: request.waitMs },
-                    ) as typeof outcome;
+                    const timeoutMs = clampLanguageIntelligenceTimeout(request.timeoutMs, POST_EDIT_DIAGNOSTICS_TIMEOUT_MS);
+                    const env = await runExecutor({ operation: "diagnostics", path: request.canonicalPath, workspace: request.canonicalWorkspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: request.canonicalWorkspaceRoot });
+                    if (env.status === "unavailable") {
+                        const resp: CheckPostEditDiagnosticsResponse = { status: "unavailable", reason: "no-server", diagnostics: [], truncated: false };
+                        return validatedOrDegraded(resp);
+                    }
+                    // Fail-closed encoding guard (mirrors RPC_PROPOSAL_POSITION_ENCODING):
+                    // RPC diagnostic ranges carry no encoding and callers assume
+                    // UTF-16, so non-UTF-16 negotiated coordinates never surface
+                    // as confirmed/empty — they degrade to unconfirmed.
+                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) {
+                        return validatedOrDegraded(degraded("unconfirmed"));
+                    }
+                    if (env.status === "unsupported") {
+                        return validatedOrDegraded(degraded("unconfirmed"));
+                    }
+                    if (env.status === "ok") {
+                        if (!envelopeIsFresh(env)) return validatedOrDegraded(degraded("unconfirmed"));
+                        outcome = { status: "confirmed", diagnostics: (Array.isArray(env.result) ? env.result : []) as typeof outcome.diagnostics };
+                    } else if (env.status === "empty") {
+                        if (!envelopeIsFresh(env)) return validatedOrDegraded(degraded("unconfirmed"));
+                        outcome = { status: "empty", diagnostics: [] };
+                    } else {
+                        return validatedOrDegraded(degraded("unconfirmed"));
+                    }
                 } catch {
                     return validatedOrDegraded(degraded("unconfirmed"));
                 }
@@ -166,19 +311,44 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 const v = validateRenamePreviewRequest(payload);
                 if (!v.ok) throw new Error(v.error);
                 const req = v.value;
-                const bridge = await getLSPBridge();
-                if (!bridge || typeof (bridge as unknown as { rename?: unknown }).rename !== "function") {
-                    const resp: RenamePreviewResponse = { ok: false, error: "no-server" };
-                    return resp;
-                }
                 const resolution = resolveLanguageServer(req.filePath, process.cwd());
                 const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
+                const line0 = (req.line ?? 1) - 1;
+                const char0 = (req.character ?? 1) - 1;
+                if (line0 < 0 || char0 < 0) {
+                    const resp: RenamePreviewResponse = { ok: false, error: "position-out-of-range" };
+                    return resp;
+                }
                 let rawEdit: LspWorkspaceEdit | null = null;
                 try {
-                    rawEdit = await withBudget(
-                        (bridge as unknown as { rename: (f: string, l: number, c: number, n: string, r: string) => Promise<LspWorkspaceEdit | null> }).rename(req.filePath, req.line, req.character, req.newName, workspaceRoot),
-                        10_000,
-                    );
+                    // Sourced from executeLspOperation (rename op, 0-based protocol coords). Zero disk writes.
+                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
+                    const env = await runExecutor({ operation: "rename", path: req.filePath, position: { line: line0, character: char0 }, newName: req.newName, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
+                    if (env.status === "unavailable") {
+                        const resp: RenamePreviewResponse = { ok: false, error: "no-server" };
+                        return resp;
+                    }
+                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) {
+                        const resp: RenamePreviewResponse = { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
+                        return resp;
+                    }
+                    if (env.status === "ambiguous") {
+                        const resp: RenamePreviewResponse = { ok: false, error: envelopeAmbiguityMessage(env) };
+                        return resp;
+                    }
+                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) {
+                        const resp: RenamePreviewResponse = { ok: false, error: "no edits" };
+                        return resp;
+                    }
+                    if (env.status !== "ok") {
+                        const resp: RenamePreviewResponse = { ok: false, error: "rename failed" };
+                        return resp;
+                    }
+                    if (!envelopeIsFresh(env)) {
+                        const resp: RenamePreviewResponse = { ok: false, error: "unconfirmed" };
+                        return resp;
+                    }
+                    rawEdit = normalizedEditToFileEdits(env.result) as unknown as LspWorkspaceEdit | null;
                 } catch (e) {
                     const msg = e instanceof Error ? e.message : String(e);
                     const resp: RenamePreviewResponse = { ok: false, error: msg.includes("timed out") ? "timeout" : "rename failed" };
@@ -193,7 +363,7 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                     const resp: RenamePreviewResponse = { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
                     return resp;
                 }
-                const resp: RenamePreviewResponse = { ok: true, workspaceEdit: validated.value as unknown as LspWorkspaceEdit };
+                const resp: RenamePreviewResponse = { ok: true, workspaceEdit: { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...validated.value } as unknown as LspWorkspaceEdit };
                 return resp;
             }
 
@@ -201,18 +371,24 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 const v = validateOrganizeImportsRequest(payload);
                 if (!v.ok) throw new Error(v.error);
                 const req = v.value;
-                const bridge = await getLSPBridge();
-                if (!bridge || typeof (bridge as unknown as { organizeImports?: unknown }).organizeImports !== "function") {
-                    return { ok: false, error: "no-server" };
-                }
                 const resolution = resolveLanguageServer(req.filePath, process.cwd());
                 const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
                 let rawEdit: LspWorkspaceEdit | null = null;
                 try {
-                    rawEdit = await withBudget(
-                        (bridge as unknown as { organizeImports: (f: string, r: string) => Promise<LspWorkspaceEdit | null> }).organizeImports(req.filePath, workspaceRoot),
-                        10_000,
-                    );
+                    // organizeImports has no dedicated executor op: sourced from the
+                    // codeActions op filtered to source.organizeImports (same wire
+                    // shape the connection uses), first edit wins. Zero disk writes.
+                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
+                    const env = await runExecutor({ operation: "codeActions", path: req.filePath, range: { start: { line: 0, character: 0 }, end: { line: Number.MAX_SAFE_INTEGER, character: 0 } }, context: { only: ["source.organizeImports"] }, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
+                    if (env.status === "unavailable") return { ok: false, error: "no-server" };
+                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) return { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
+                    if (env.status === "ambiguous") return { ok: false, error: envelopeAmbiguityMessage(env) };
+                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) return { ok: false, error: "no edits" };
+                    if (env.status !== "ok") return { ok: false, error: "organize imports failed" };
+                    if (!envelopeIsFresh(env)) return { ok: false, error: "unconfirmed" };
+                    const actions = Array.isArray(env.result) ? env.result as Array<{ edit?: unknown }> : [];
+                    const firstEdit = actions.find((a) => a && typeof a === "object" && (a as Record<string, unknown>).edit)?.edit ?? null;
+                    rawEdit = normalizedEditToFileEdits(firstEdit) as unknown as LspWorkspaceEdit | null;
                 } catch (e) {
                     const msg = e instanceof Error ? e.message : String(e);
                     return { ok: false, error: msg.includes("timed out") ? "timeout" : "organize imports failed" };
@@ -220,25 +396,27 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 if (!rawEdit) return { ok: false, error: "no edits" };
                 const validated = validateWorkspaceEdit(rawEdit);
                 if (!validated.ok) return { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
-                return { ok: true, workspaceEdit: validated.value as unknown as LspWorkspaceEdit };
+                return { ok: true, workspaceEdit: { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...validated.value } as unknown as LspWorkspaceEdit };
             }
 
             if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting) {
                 const v = validateFormattingRequest(payload);
                 if (!v.ok) throw new Error(v.error);
                 const req = v.value;
-                const bridge = await getLSPBridge();
-                if (!bridge || typeof (bridge as unknown as { formatting?: unknown }).formatting !== "function") {
-                    return { ok: false, error: "no-server" };
-                }
                 const resolution = resolveLanguageServer(req.filePath, process.cwd());
                 const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
                 let rawEdit: LspWorkspaceEdit | null = null;
                 try {
-                    rawEdit = await withBudget(
-                        (bridge as unknown as { formatting: (f: string, r: string, t?: number, s?: boolean) => Promise<LspWorkspaceEdit | null> }).formatting(req.filePath, workspaceRoot, req.tabSize, req.insertSpaces),
-                        10_000,
-                    );
+                    // Sourced from executeLspOperation (formatDocument op). Zero disk writes.
+                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
+                    const env = await runExecutor({ operation: "formatDocument", path: req.filePath, formatting: { tabSize: req.tabSize ?? 2, insertSpaces: req.insertSpaces ?? true }, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
+                    if (env.status === "unavailable") return { ok: false, error: "no-server" };
+                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) return { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
+                    if (env.status === "ambiguous") return { ok: false, error: envelopeAmbiguityMessage(env) };
+                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) return { ok: false, error: "no edits" };
+                    if (env.status !== "ok") return { ok: false, error: "formatting failed" };
+                    if (!envelopeIsFresh(env)) return { ok: false, error: "unconfirmed" };
+                    rawEdit = normalizedTextEditsToFileEdits(env.result, req.filePath) as unknown as LspWorkspaceEdit | null;
                 } catch (e) {
                     const msg = e instanceof Error ? e.message : String(e);
                     return { ok: false, error: msg.includes("timed out") ? "timeout" : "formatting failed" };
@@ -246,16 +424,21 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 if (!rawEdit) return { ok: false, error: "no edits" };
                 const validated = validateWorkspaceEdit(rawEdit);
                 if (!validated.ok) return { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
-                return { ok: true, workspaceEdit: validated.value as unknown as LspWorkspaceEdit };
+                return { ok: true, workspaceEdit: { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...validated.value } as unknown as LspWorkspaceEdit };
             }
 
             if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction) {
                 const v = validateCodeActionRequest(payload);
                 if (!v.ok) throw new Error(v.error);
                 const req = v.value;
-                const bridge = await getLSPBridge();
-                if (!bridge || typeof (bridge as unknown as { codeActions?: unknown }).codeActions !== "function") {
-                    return { ok: false, error: "no-server" };
+                // Range-order guard (protocol envelope allows any non-negative
+                // end; a strictly backwards range is a caller error). Zero-length legal.
+                if (req.endLine !== undefined || req.endCharacter !== undefined) {
+                    const effEndLine = req.endLine ?? req.line;
+                    const effEndChar = req.endCharacter ?? req.character;
+                    if (effEndLine < req.line || (effEndLine === req.line && effEndChar < req.character)) {
+                        throw new Error("CodeActionRequest range end must not precede start");
+                    }
                 }
                 const resolution = resolveLanguageServer(req.filePath, process.cwd());
                 const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
@@ -267,12 +450,18 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 const context: { diagnostics?: unknown[]; only?: string[] } = {};
                 if (req.diagnostics !== undefined) context.diagnostics = req.diagnostics as unknown as unknown[];
                 if (req.only !== undefined) context.only = req.only as unknown as string[];
-                let actionsRaw: Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }> = [];
+                // Sourced from executeLspOperation (codeActions op, 0-based protocol coords). Zero disk writes.
+                let actionsRaw: Array<{ title: string; kind?: string; edit?: unknown; isPreferred?: boolean }> = [];
                 try {
-                    actionsRaw = await withBudget(
-                        (bridge as unknown as { codeActions: (f: string, r: unknown, c: unknown, root: string) => Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>> }).codeActions(req.filePath, range, context, workspaceRoot),
-                        10_000,
-                    );
+                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
+                    const env = await runExecutor({ operation: "codeActions", path: req.filePath, range, context, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
+                    if (env.status === "unavailable") return { ok: false, error: "no-server" };
+                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) return { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
+                    if (env.status === "ambiguous") return { ok: false, error: envelopeAmbiguityMessage(env) };
+                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) return { ok: true, actions: [] };
+                    if (env.status !== "ok") return { ok: false, error: "code action failed" };
+                    if (!envelopeIsFresh(env)) return { ok: false, error: "unconfirmed" };
+                    actionsRaw = (Array.isArray(env.result) ? env.result : []) as typeof actionsRaw;
                 } catch (e) {
                     const msg = e instanceof Error ? e.message : String(e);
                     return { ok: false, error: msg.includes("timed out") ? "timeout" : "code action failed" };
@@ -282,8 +471,12 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 for (const a of actionsRaw) {
                     let workspaceEdit: LspWorkspaceEdit | undefined;
                     if (a.edit) {
-                        const vEdit = validateWorkspaceEdit(a.edit);
-                        if (vEdit.ok) workspaceEdit = vEdit.value as unknown as LspWorkspaceEdit;
+                        // Executor edits are normalized ({changes:[{uri,edits}]});
+                        // convert to validator input ({fileEdits}) before validation.
+                        const converted = normalizedEditToFileEdits(a.edit);
+                        if (!converted) continue;
+                        const vEdit = validateWorkspaceEdit(converted);
+                        if (vEdit.ok) workspaceEdit = { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...vEdit.value } as unknown as LspWorkspaceEdit;
                         else continue;
                     }
                     actions.push({ title: a.title, kind: a.kind, workspaceEdit, isPreferred: a.isPreferred });
@@ -308,60 +501,10 @@ function validatedOrDegraded(resp: CheckPostEditDiagnosticsResponse): CheckPostE
     return { status: "degraded", reason: "unconfirmed", diagnostics: [], truncated: false };
 }
 
-function validateOrganizeImportsRequest(v: unknown): { ok: true; value: { filePath: string } } | { ok: false; error: string } {
-    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "OrganizeImportsRequest must be object" };
-    const o = v as Record<string, unknown>;
-    const { filePath } = o;
-    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "OrganizeImportsRequest.filePath must be non-empty string" };
-    if (filePath.includes("\0")) return { ok: false, error: "OrganizeImportsRequest.filePath must not contain NUL" };
-    return { ok: true, value: v as { filePath: string } };
-}
 
-function validateFormattingRequest(v: unknown): { ok: true; value: { filePath: string; tabSize?: number; insertSpaces?: boolean } } | { ok: false; error: string } {
-    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "FormattingRequest must be object" };
-    const o = v as Record<string, unknown>;
-    const { filePath, tabSize, insertSpaces } = o;
-    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "FormattingRequest.filePath must be non-empty string" };
-    if (filePath.includes("\0")) return { ok: false, error: "FormattingRequest.filePath must not contain NUL" };
-    if (tabSize !== undefined && (typeof tabSize !== "number" || !Number.isInteger(tabSize) || tabSize < 1 || tabSize > 16)) return { ok: false, error: "FormattingRequest.tabSize must be integer 1..16 if present" };
-    if (insertSpaces !== undefined && typeof insertSpaces !== "boolean") return { ok: false, error: "FormattingRequest.insertSpaces must be boolean if present" };
-    return { ok: true, value: v as { filePath: string; tabSize?: number; insertSpaces?: boolean } };
-}
 
-function validateCodeActionRequest(v: unknown): { ok: true; value: { filePath: string; line: number; character: number; endLine?: number; endCharacter?: number; diagnostics?: unknown[]; only?: string[] } } | { ok: false; error: string } {
-    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "CodeActionRequest must be object" };
-    const o = v as Record<string, unknown>;
-    const { filePath, line, character, endLine, endCharacter, diagnostics, only } = o;
-    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "CodeActionRequest.filePath must be non-empty string" };
-    if (filePath.includes("\0")) return { ok: false, error: "CodeActionRequest.filePath must not contain NUL" };
-    if (typeof line !== "number" || !Number.isInteger(line) || line < 1) return { ok: false, error: "CodeActionRequest.line must be integer >=1" };
-    if (typeof character !== "number" || !Number.isInteger(character) || character < 1) return { ok: false, error: "CodeActionRequest.character must be integer >=1" };
-    if (endLine !== undefined && (typeof endLine !== "number" || !Number.isInteger(endLine) || endLine < 1)) return { ok: false, error: "CodeActionRequest.endLine must be integer >=1 if present" };
-    if (endCharacter !== undefined && (typeof endCharacter !== "number" || !Number.isInteger(endCharacter) || endCharacter < 1)) return { ok: false, error: "CodeActionRequest.endCharacter must be integer >=1 if present" };
-    if (diagnostics !== undefined && !Array.isArray(diagnostics)) return { ok: false, error: "CodeActionRequest.diagnostics must be array if present" };
-    if (only !== undefined) {
-        if (!Array.isArray(only)) return { ok: false, error: "CodeActionRequest.only must be array if present" };
-        for (let i=0;i<(only as unknown[]).length;i++) if (typeof (only as unknown[])[i] !== "string") return { ok: false, error: `CodeActionRequest.only[${i}] must be string` };
-    }
-    return { ok: true, value: v as { filePath: string; line: number; character: number; endLine?: number; endCharacter?: number; diagnostics?: unknown[]; only?: string[] } };
-}
 
-function validateRenamePreviewRequest(v: unknown): { ok: true; value: RenamePreviewRequest } | { ok: false; error: string } {
-    if (!v || typeof v !== "object" || Array.isArray(v)) return { ok: false, error: "RenamePreviewRequest must be object" };
-    const o = v as Record<string, unknown>;
-    const { filePath, line, character, newName } = o;
-    if (typeof filePath !== "string" || filePath.length === 0) return { ok: false, error: "RenamePreviewRequest.filePath must be non-empty string" };
-    if (filePath.includes("\0")) return { ok: false, error: "RenamePreviewRequest.filePath must not contain NUL" };
-    if (typeof line !== "number" || !Number.isInteger(line) || line < 1) return { ok: false, error: "RenamePreviewRequest.line must be integer >=1" };
-    if (typeof character !== "number" || !Number.isInteger(character) || character < 1) return { ok: false, error: "RenamePreviewRequest.character must be integer >=1" };
-    if (typeof newName !== "string" || newName.length === 0) return { ok: false, error: "RenamePreviewRequest.newName must be non-empty string" };
-    if (newName.length > 256) return { ok: false, error: "RenamePreviewRequest.newName must be <=256 chars" };
-    return { ok: true, value: v as RenamePreviewRequest };
-}
 
-function withBudget<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
-        promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
-    });
-}
+// withBudget() removed (Wave B Round 2): the executor owns the service-work
+// timeout plus $/cancelRequest on deadline. A non-cancelling race here would
+// report timeout while leaving in-flight work running.

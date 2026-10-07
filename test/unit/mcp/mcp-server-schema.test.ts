@@ -61,24 +61,18 @@ describe("MCP tool registry schema (no subprocess)", () => {
     }
   });
 
-  it("inputSchema entries are valid JSON Schema", () => {
+  it("inputSchema entries are root type-object schemas (upstream requirement)", () => {
     const tools = buildToolRegistry();
     for (const tool of tools) {
       const schema = tool.parameters as unknown as Record<string, unknown>;
       expect(schema).toBeDefined();
-      // Type.Union produces oneOf with discriminants
-      const hasValidSchema =
-        (schema as { type?: unknown }).type === "object" ||
-        Array.isArray((schema as { oneOf?: unknown }).oneOf) ||
-        Array.isArray((schema as { anyOf?: unknown }).anyOf);
-      expect(hasValidSchema).toBe(true);
-      // Should have properties, required, oneOf, or anyOf at minimum
-      const hasContent =
-        (schema as { properties?: unknown }).properties !== undefined ||
-        (schema as { required?: unknown }).required !== undefined ||
-        Array.isArray((schema as { oneOf?: unknown }).oneOf) ||
-        Array.isArray((schema as { anyOf?: unknown }).anyOf);
-      expect(hasContent).toBe(true);
+      // Upstream function-calling requires parameters schema type "object";
+      // top-level unions (anyOf/oneOf) are rejected with invalid_request_error.
+      expect((schema as { type?: unknown }).type).toBe("object");
+      expect((schema as { anyOf?: unknown }).anyOf).toBeUndefined();
+      expect((schema as { oneOf?: unknown }).oneOf).toBeUndefined();
+      // Should have properties at minimum
+      expect((schema as { properties?: unknown }).properties).toBeDefined();
     }
   });
 });

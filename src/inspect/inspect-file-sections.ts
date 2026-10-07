@@ -275,12 +275,34 @@ export function buildFileHotspotsSection(cwd: string, absolutePath: string, call
     }
 }
 
+function resolveOneNavPath(uri: unknown, loc: unknown): { path?: string; loc: unknown } | undefined {
+    if (typeof uri !== "string" || uri.length === 0) return undefined;
+    return { path: uriToFsPath(uri) ?? undefined, loc };
+}
+
 function resolveNavPath(it: any): { path?: string; loc: unknown } {
-    if (it?.from?.uri) return { path: uriToFsPath(it.from.uri), loc: it.from };
-    if (it?.to?.uri) return { path: uriToFsPath(it.to.uri), loc: it.to };
-    if (it?.location?.uri) return { path: uriToFsPath(it.location.uri), loc: it };
-    if (it?.uri) return { path: uriToFsPath(it.uri), loc: it };
+    const from = it?.from;
+    const to = it?.to;
+    const location = it?.location;
+    const candidates: Array<{ uri: unknown; loc: unknown }> = [
+        { uri: from?.uri, loc: from },
+        { uri: to?.uri, loc: to },
+        { uri: location?.uri, loc: it },
+        { uri: it?.uri, loc: it },
+    ];
+    for (const c of candidates) {
+        const r = resolveOneNavPath(c.uri, c.loc);
+        if (r) return r;
+    }
     return { path: undefined, loc: it };
+}
+
+function hasNavUri(it: any): boolean {
+    if (!it || typeof it !== "object") return false;
+    if (it.from && typeof it.from === "object" && "uri" in it.from) return true;
+    if (it.to && typeof it.to === "object" && "uri" in it.to) return true;
+    if (it.location && typeof it.location === "object" && "uri" in it.location) return true;
+    return "uri" in it;
 }
 
 function collectNavResources(items: unknown[], cwd: string, absolutePath: string): SectionResources {
@@ -288,6 +310,7 @@ function collectNavResources(items: unknown[], cwd: string, absolutePath: string
     for (const it of items as any[]) {
         const { path: p, loc } = resolveNavPath(it);
         if (p) addSearchMatchResource(srNav, p, cwd, loc);
+        else if (hasNavUri(it)) continue;
         else addSearchMatchResource(srNav, absolutePath, cwd, it);
     }
     return srNav;

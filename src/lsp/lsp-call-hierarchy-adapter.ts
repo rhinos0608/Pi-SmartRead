@@ -52,7 +52,9 @@ export async function prepareCallHierarchy(
 export async function incomingCalls(
   item: LSPCallHierarchyItem, root: string,
 ): Promise<LSPCallHierarchyIncomingCall[]> {
-  const langId = detectLanguageFromExtension(lspUriToPath(item.uri));
+  const itemPath = lspUriToPath(item.uri);
+  if (!itemPath) return [];
+  const langId = detectLanguageFromExtension(itemPath);
   if (!langId) return [];
   try {
     const result = await withServer(root, langId, async (server) => {
@@ -66,7 +68,9 @@ export async function incomingCalls(
 export async function outgoingCalls(
   item: LSPCallHierarchyItem, root: string,
 ): Promise<LSPCallHierarchyOutgoingCall[]> {
-  const langId = detectLanguageFromExtension(lspUriToPath(item.uri));
+  const itemPath = lspUriToPath(item.uri);
+  if (!itemPath) return [];
+  const langId = detectLanguageFromExtension(itemPath);
   if (!langId) return [];
   try {
     const result = await withServer(root, langId, async (server) => {

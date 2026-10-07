@@ -15,6 +15,8 @@ export type ResolutionResult =
       executable: string;
       args: string[];
       tier: "override" | "project-local" | "system" | "managed";
+      /** Role tag preserved from the matched descriptor (descriptor.roles[0]); undefined when untagged. */
+      role?: string;
     }
   | {
       status: "degraded";
@@ -140,6 +142,95 @@ function allMarkersForLanguage(languageId: string): string[] {
   return [...set];
 }
 
+function roleForDescriptor(desc: ServerDescriptor): string | undefined {
+  return desc.roles?.[0];
+}
+
+/** Single available resolution (narrowed from ResolutionResult). */
+export type AvailableResolution = Extract<ResolutionResult, { status: "available" }>;
+
+interface CollectDeps {
+  root: string;
+  languageId: string;
+  isTrusted: (r: string) => boolean;
+  fileExists: (p: string) => boolean;
+  checkExecutable: (cmd: string) => boolean;
+  homedir?: string;
+}
+
+// Per-descriptor best-tier collection: every eligible descriptor contributes at most
+// one entry (project-local > system > managed), so role-tagged siblings coexist
+// instead of the first match suppressing the rest.
+function collectAvailable(
+  descriptors: ServerDescriptor[],
+  deps: CollectDeps,
+): AvailableResolution[] {
+  const out: AvailableResolution[] = [];
+  const trusted = deps.isTrusted(deps.root);
+  for (const desc of descriptors) {
+    const single = [desc];
+    // Project-local only when trusted (tryProjectLocal returns null untrusted
+    // without FS stat; also skip per-desc call when untrusted).
+    if (trusted) {
+      const local = tryProjectLocal(single, deps.root, deps.isTrusted, deps.fileExists);
+      if (local && local.status === "available") { out.push(local); continue; }
+    }
+    const sys = trySystemPath(single, deps.root, deps.languageId, deps.checkExecutable);
+    if (sys && sys.status === "available") { out.push(sys); continue; }
+    const managed = tryManaged(single, deps.root, deps.languageId, deps.homedir);
+    if (managed && managed.status === "available") out.push(managed);
+  }
+  return out;
+}
+
+/**
+ * Multi-preserving resolver: returns one available resolution per eligible
+ * descriptor (best tier each), roles intact. Empty when degraded (disabled,
+ * invalid override, or nothing executable) — caller maps to degradedFallback.
+ */
+export function resolveAllLanguageServers(
+  filePath: string,
+  cwd: string,
+  opts: ResolveOptions = {},
+): AvailableResolution[] {
+  const checkExecutable = opts.checkExecutable ?? defaultCheckExecutable;
+  const fileExists = opts.fileExists ?? existsSync;
+  const isTrusted = (root: string): boolean => {
+    if (opts.isRootTrustedFn) return opts.isRootTrustedFn(root);
+    return isRootTrusted(root, opts.homedir as string | undefined);
+  };
+  const languageId = detectLanguageId(filePath);
+  if (!languageId) return [];
+  const descriptors = getDescriptorsForLanguage(languageId);
+  if (descriptors.length === 0) return [];
+  const cfg = loadConfig(opts.homedir);
+  if (cfg.disabled?.includes(languageId)) return [];
+  const markers = allMarkersForLanguage(languageId);
+  const root = detectRoot(filePath, cwd, markers);
+  const override = cfg.overrides?.[languageId];
+  // Explicit command override wins alone (single pinned entry or empty).
+  if (override?.command) {
+    if (!checkExecutable(override.command)) return [];
+    const descriptorId = override.descriptorId ?? descriptors[0]!.id;
+    const overrideDesc = descriptors.find((d) => d.id === descriptorId) ?? descriptors[0]!;
+    const overrideRole = roleForDescriptor(overrideDesc);
+    return [{
+      status: "available", languageId, root, descriptorId,
+      executable: override.command, args: override.args ?? [], tier: "override",
+      ...(overrideRole !== undefined ? { role: overrideRole } : {}),
+    }];
+  }
+  let ordered = descriptors;
+  if (override && !override.command && override.descriptorId) {
+    const pinned = descriptors.find((d) => d.id === override.descriptorId);
+    if (!pinned) return [];
+    ordered = [pinned, ...descriptors.filter((d) => d.id !== pinned.id)];
+  }
+  return collectAvailable(ordered, {
+    root, languageId, isTrusted, fileExists, checkExecutable, homedir: opts.homedir,
+  });
+}
+
 // ── Main resolver ───────────────────────────────────────────────────
 
 export function resolveLanguageServer(
@@ -202,8 +293,10 @@ export function resolveLanguageServer(
     const cmd = override.command;
     const args = override.args ?? [];
     const descriptorId = override.descriptorId ?? descriptors[0]!.id;
+    const overrideDesc = descriptors.find((d) => d.id === descriptorId) ?? descriptors[0]!;
+    const overrideRole = roleForDescriptor(overrideDesc);
     if (checkExecutable(cmd)) {
-      return { status: "available", languageId, root, descriptorId, executable: cmd, args, tier: "override" };
+      return { status: "available", languageId, root, descriptorId, executable: cmd, args, tier: "override", ...(overrideRole !== undefined ? { role: overrideRole } : {}) };
     }
     return {
       status: "degraded",
@@ -229,27 +322,22 @@ export function resolveLanguageServer(
     }
     // Reorder descriptors with pinned first
     const reordered = [pinned, ...descriptors.filter((d) => d.id !== pinned.id)];
-    // Tier 2 + 3 with reordered list
-    const tier2 = tryProjectLocal(reordered, root, isTrusted, fileExists);
-    if (tier2) return tier2;
-    const tier3 = trySystemPath(reordered, root, languageId, checkExecutable);
-    if (tier3) return tier3;
-    const tier4 = tryManaged(reordered, root, languageId, opts.homedir);
-    if (tier4) return tier4;
+    // Collect every eligible descriptor (best tier each), pinned first; serve
+    // the first for the single-result contract.
+    const pinnedAvail = collectAvailable(reordered, {
+      root, languageId, isTrusted, fileExists, checkExecutable, homedir: opts.homedir,
+    });
+    if (pinnedAvail.length > 0) return pinnedAvail[0]!;
     return degradedFallback(languageId, attemptedDescriptorIds, reordered, isTrusted, root);
   }
 
-  // Tier 2: Project-local trusted binaries
-  const localResult = tryProjectLocal(descriptors, root, isTrusted, fileExists);
-  if (localResult) return localResult;
-
-  // Tier 3: System PATH
-  const systemResult = trySystemPath(descriptors, root, languageId, checkExecutable);
-  if (systemResult) return systemResult;
-
-  // Tier 4: Pi-managed — synchronous check for already-installed managed binaries (no spawn/network)
-  const tier4 = tryManaged(descriptors, root, languageId, opts.homedir);
-  if (tier4) return tier4;
+  // Collect every eligible descriptor (best tier each) so role-tagged siblings
+  // all reach the caller; serve the first for the single-result contract.
+  // resolveAllLanguageServers exposes the full list to the manager.
+  const all = collectAvailable(descriptors, {
+    root, languageId, isTrusted, fileExists, checkExecutable, homedir: opts.homedir,
+  });
+  if (all.length > 0) return all[0]!;
 
   // Tier 5: Degraded
   return degradedFallback(languageId, attemptedDescriptorIds, descriptors, isTrusted, root);
@@ -285,6 +373,7 @@ function tryProjectLocal(
             executable: candidate,
             args: cand.args,
             tier: "project-local",
+            ...(roleForDescriptor(desc) !== undefined ? { role: roleForDescriptor(desc)! } : {}),
           };
         }
       }
@@ -313,6 +402,7 @@ function trySystemPath(
           executable: cand.command,
           args: cand.args,
           tier: "system",
+          ...(roleForDescriptor(desc) !== undefined ? { role: roleForDescriptor(desc)! } : {}),
         };
       }
     }
@@ -344,6 +434,7 @@ function tryManaged(
               executable: binPath,
               args: cand.args,
               tier: "managed",
+              ...(roleForDescriptor(desc) !== undefined ? { role: roleForDescriptor(desc)! } : {}),
             };
           }
         }

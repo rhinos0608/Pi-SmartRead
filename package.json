@@ -65,7 +65,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@orama/orama": "^3.1.18",
-    "@rhinos0608/pi-workspace-protocol": "github:rhinos0608/Pi-Workspace-Protocol#v0.4.0",
+    "@rhinos0608/pi-workspace-protocol": "github:rhinos0608/Pi-Workspace-Protocol#v0.6.0",
     "@sinclair/typebox": "^0.34.13",
     "ignore": "^7.0.5",
     "quickjs-emscripten": "0.32.0",
@@ -92,10 +92,10 @@
     "@types/node": "^24.5.2",
     "@typescript-eslint/parser": "^8.59.1",
     "eslint": "^10.3.0",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.59.1",
-    "vitest": "^5.0.0"
+    "vitest": "^4.1.11"
   },
   "pi": {
     "extensions": [

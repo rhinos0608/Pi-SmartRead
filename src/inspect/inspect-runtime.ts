@@ -7,9 +7,9 @@
  * file + directory inspect pipelines. No envelopes, no dispatch.
  */
 import { resolve as pathResolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalPathOrFallback, canonicalPathOrNull } from "../canonical-path.js";
 import { resourceIdFor, type InspectedResource } from "@rhinos0608/pi-workspace-protocol";
-import { uriToFsPath } from "./inspect-sections.js";
 import type { InspectV4Input } from "./inspect-types.js";
 import type { ContextGraph } from "../context-graph.js";
 import { buildCallGraph, type CallGraphResult } from "../structural/callgraph.js";
@@ -34,34 +34,63 @@ export function resolveLspProvider(input: InspectV4Input): LspInspectionProvider
     return (input.lspInspectionProvider as LspInspectionProvider | undefined) ?? null;
 }
 
-export function canonicalizeSingleNavItem(it: unknown): unknown {
+/** Fail-closed file URI → path: file: scheme only, null otherwise (cf. bridge legacyRenameUriToPath + connection workspaceUriToPath). Non-file/malformed URIs (https:, untitled:, garbage) must never become local paths. */
+function canonToFileUri(canon: string): string {
+    return pathToFileURL(canon).href;
+}
+function navUriToPath(uri: unknown): string | null {
+    if (typeof uri !== "string" || !uri.startsWith("file:")) return null;
+    try {
+        return fileURLToPath(uri);
+    } catch {
+        return null;
+    }
+}
+
+export function canonicalizeSingleNavItem(it: unknown): unknown | null {
     if (!it || typeof it !== "object") return it;
     const rec = it as Record<string, any>;
     // callHierarchy incoming/outgoing: { from/to: { uri, range } }
-    if (rec.from?.uri && typeof rec.from.uri === "string") {
-        const canon = tryCanonical(uriToFsPath(rec.from.uri));
-        return { ...rec, from: { ...rec.from, uri: "file://" + canon } };
+    if (rec.from && typeof rec.from === "object" && "uri" in rec.from) {
+        if (typeof rec.from.uri !== "string" || rec.from.uri.length === 0) return null;
+        const p = navUriToPath(rec.from.uri);
+        if (!p) return null;
+        const canon = tryCanonical(p);
+        return { ...rec, from: { ...rec.from, uri: canonToFileUri(canon) } };
     }
-    if (rec.to?.uri && typeof rec.to.uri === "string") {
-        const canon = tryCanonical(uriToFsPath(rec.to.uri));
-        return { ...rec, to: { ...rec.to, uri: "file://" + canon } };
+    if (rec.to && typeof rec.to === "object" && "uri" in rec.to) {
+        if (typeof rec.to.uri !== "string" || rec.to.uri.length === 0) return null;
+        const p = navUriToPath(rec.to.uri);
+        if (!p) return null;
+        const canon = tryCanonical(p);
+        return { ...rec, to: { ...rec.to, uri: canonToFileUri(canon) } };
     }
     const loc = rec.location ?? it;
-    if (loc && typeof (loc as any).uri === "string") {
-        const canon = tryCanonical(uriToFsPath((loc as any).uri));
-        const newUri = "file://" + canon;
+    if (loc && typeof loc === "object" && "uri" in (loc as any)) {
+        if (typeof (loc as any).uri !== "string" || ((loc as any).uri as string).length === 0) return null;
+        const p = navUriToPath((loc as any).uri);
+        if (!p) return null;
+        const canon = tryCanonical(p);
+        const newUri = canonToFileUri(canon);
         if (rec.location) return { ...rec, location: { ...rec.location, uri: newUri } };
         return { ...rec, uri: newUri };
     }
     if (typeof rec.uri === "string") {
-        const canon = tryCanonical(uriToFsPath(rec.uri));
-        return { ...rec, uri: "file://" + canon };
+        const p = navUriToPath(rec.uri);
+        if (!p) return null;
+        const canon = tryCanonical(p);
+        return { ...rec, uri: canonToFileUri(canon) };
     }
     return it;
 }
 
 export function canonicalizeNavigationItems(items: unknown[], _cwd: string): unknown[] {
-    return (items as any[]).map(canonicalizeSingleNavItem);
+    const out: unknown[] = [];
+    for (const it of items as any[]) {
+        const canon = canonicalizeSingleNavItem(it);
+        if (canon !== null) out.push(canon);
+    }
+    return out;
 }
 
 export function mergeRanges(ranges: Array<{ startLine: number; endLine: number }>): Array<{ startLine: number; endLine: number }> {

@@ -113,12 +113,13 @@ describe("WP-SR6 MCP parity — no new tool names, existing mirror", () => {
     const grep = findTool("grep");
     const inspectSchema: any = inspect.parameters;
     const grepSchema: any = grep.parameters;
-    const iprops = inspectSchema.anyOf ?? inspectSchema.oneOf ?? [];
-    const navigateBranch: any = iprops.find((b: any) => b.properties?.navigation);
-    expect(navigateBranch).toBeDefined();
-    expect(navigateBranch.properties.navigation).toBeDefined();
-    expect(navigateBranch.properties.navigation.properties.operation).toBeDefined();
-    expect(navigateBranch.properties.diagnostics).toBeDefined();
+    expect(inspectSchema.type).toBe("object");
+    expect(inspectSchema.anyOf).toBeUndefined();
+    expect(inspectSchema.oneOf).toBeUndefined();
+    const iprops = inspectSchema.properties ?? {};
+    expect(iprops.navigation).toBeDefined();
+    expect(iprops.navigation.properties.operation).toBeDefined();
+    expect(iprops.diagnostics).toBeDefined();
     const gprops = grepSchema.properties ?? grepSchema;
     expect(gprops.structural).toBeDefined();
     expect(gprops.structural.properties.skip).toBeDefined();
@@ -284,11 +285,11 @@ describe("WP-SR6 MCP stdio round-trip (src/mcp-server.ts tools/list & tools/call
     const grep = tools.find((t) => t.name === "grep");
     expect(inspect).toBeDefined();
     expect(grep).toBeDefined();
-    const branches: any[] = inspect.inputSchema.anyOf ?? inspect.inputSchema.oneOf ?? [];
-    const navBranch: any = branches.find((b: any) => b.properties?.navigation);
-    expect(navBranch).toBeDefined();
-    expect(navBranch.properties.navigation).toBeDefined();
-    expect(navBranch.properties.diagnostics).toBeDefined();
+    expect(inspect.inputSchema.type).toBe("object");
+    expect(inspect.inputSchema.anyOf).toBeUndefined();
+    expect(inspect.inputSchema.oneOf).toBeUndefined();
+    expect(inspect.inputSchema.properties.navigation).toBeDefined();
+    expect(inspect.inputSchema.properties.diagnostics).toBeDefined();
     expect(grep.inputSchema.properties.structural).toBeDefined();
     // no parallel surface
     expect(tools.map((t) => t.name)).not.toContain("structural_search");

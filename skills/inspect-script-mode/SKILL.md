@@ -1,11 +1,11 @@
 ---
 name: inspect-script-mode
-description: Compose multi-hop code investigations (grep to read to LSP to graph) in one inspect({ script }) call instead of N sequential tool calls.
+description: Compose multi-hop code investigations (grep to read to LSP to graph) in one inspect({ mode: "script", script }) call instead of N sequential tool calls.
 ---
 
 # inspect script mode
 
-One `inspect({ script })` call runs a bounded read-only JS program that composes
+One `inspect({ mode: "script", script })` call runs a bounded read-only JS program that composes
 the calls you would otherwise make one at a time.
 
 ## WHEN

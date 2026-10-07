@@ -53,13 +53,13 @@ async function runScript(script: string, params: Record<string, unknown> = {}, t
 describe("script schema", () => {
     it("exposes an optional script param with ADR-0002 WHEN/WHEN NOT/RETURNS/EXAMPLE description", () => {
         const tool = makeTool();
-        const branches = (tool.parameters as any).anyOf ?? (tool.parameters as any).oneOf;
-        expect(branches).toBeDefined();
-        const scriptBranch = branches.find((b: any) => b.properties?.mode?.const === "script");
-        expect(scriptBranch).toBeDefined();
-        // Script branch rejects foreign keys at the schema level too.
-        expect(scriptBranch.additionalProperties).toBe(false);
-        const props = scriptBranch.properties;
+        const schema = tool.parameters as any;
+        // Flattened root object schema (upstream requires type object, no top-level union).
+        expect(schema.type).toBe("object");
+        expect(schema.anyOf).toBeUndefined();
+        expect(schema.oneOf).toBeUndefined();
+        expect(schema.additionalProperties).toBe(false);
+        const props = schema.properties;
         expect(props.script).toBeDefined();
         const desc: string = props.script.description;
         expect(desc).toContain("WHEN:");
@@ -75,16 +75,19 @@ describe("script schema", () => {
         }
     });
 
-    it("makes path optional in script mode but required in file/directory/navigate", () => {
+    it("makes path optional at schema level; per-mode requiredness enforced at runtime", async () => {
         const tool = makeTool();
-        const branches = (tool.parameters as any).anyOf ?? (tool.parameters as any).oneOf;
-        const byMode = Object.fromEntries(branches.map((b: any) => [b.properties.mode.const, b]));
-        expect(byMode.script.required ?? []).not.toContain("path");
-        expect(byMode.script.properties.path).toBeDefined();
-        for (const mode of ["file", "directory", "navigate"]) {
-            expect(byMode[mode].required).toContain("path");
-            expect(byMode[mode].additionalProperties).toBe(false);
-        }
+        const schema = tool.parameters as any;
+        expect(schema.type).toBe("object");
+        expect(schema.properties.path).toBeDefined();
+        expect(schema.required ?? []).not.toContain("path");
+        expect(schema.additionalProperties).toBe(false);
+        // Runtime: file/directory/navigate reject a missing path; script accepts it.
+        await expect(
+            tool.execute("x-no-path", { mode: "file" } as any, undefined, undefined, makeCtx()),
+        ).rejects.toThrow();
+        const ok = await runScript("return 1;");
+        expect((ok as any).details?.mode ?? "script").toBeDefined();
     });
 
     it("leaves the InspectV4Mode union untouched and exposes query on the result mode", () => {

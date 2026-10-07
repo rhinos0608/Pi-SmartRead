@@ -114,43 +114,7 @@ const DiagnosticsSchema = Type.Object(
     { description: "LSP diagnostics", additionalProperties: false },
 );
 
-const FileBranch = Type.Object(
-    {
-        mode: Type.Literal("file"),
-        path: Type.String({ description: "File path to inspect." }),
-        analysis: Type.Optional(FileAnalysisSchema),
-    },
-    { additionalProperties: false },
-);
-
-const DirectoryBranch = Type.Object(
-    {
-        mode: Type.Literal("directory"),
-        path: Type.String({ description: "Directory path to map." }),
-        analysis: Type.Optional(DirectoryAnalysisSchema),
-    },
-    { additionalProperties: false },
-);
-
-const NavigateBranch = Type.Object(
-    {
-        mode: Type.Literal("navigate"),
-        path: Type.String({ description: "File or directory navigation target." }),
-        navigation: Type.Optional(NavigationSchema),
-        diagnostics: Type.Optional(DiagnosticsSchema),
-    },
-    { additionalProperties: false },
-);
-
-const ScriptBranch = Type.Object(
-    {
-        mode: Type.Literal("script"),
-        path: Type.Optional(
-            Type.String({ description: "Optional cwd anchor for host calls that omit a path. Omitted anchors at cwd." }),
-        ),
-        script: Type.String({
-            minLength: 1,
-            description: `WHEN:
+const ScriptBranchDescription = `WHEN:
 - running a multi-hop investigation where each call's arguments depend on the previous call's result (grep a symbol, then LSP references on the hit, then graph impact on those files) that would otherwise cost 3+ sequential round trips
 
 WHEN NOT:
@@ -159,16 +123,35 @@ WHEN NOT:
 
 RETURNS: the script's JSON return value plus a bounded per-call audit log naming each op, its args, the path or resource touched, and its status.
 
-EXAMPLE: { mode: "script", script: "const g = await grep(\\"handleAuth\\", { literal: true }); const r = await read(\\"src/auth.ts\\"); return { hits: g.totalHits, lines: r.totalLines };" }`,
-        }),
-    },
-    { additionalProperties: false },
-);
+EXAMPLE: { mode: "script", script: "const g = await grep(\\"handleAuth\\", { literal: true }); const r = await read(\\"src/auth.ts\\"); return { hits: g.totalHits, lines: r.totalLines };" }`;
 
-const InspectSchema = Type.Union([FileBranch, DirectoryBranch, NavigateBranch, ScriptBranch], {
-    description:
-        "Inspect modes: file (artifact facts + signals), directory (repo map + architecture), navigate (LSP navigation + diagnostics), script (bounded multi-hop composition).",
-});
+// Flattened schema — providers (e.g. Console Go upstream) require a root
+// JSON Schema of type "object" and reject anyOf unions at the top level.
+// The four-mode XOR is enforced at runtime in execute() + rejectForeignKeys.
+const InspectSchema = Type.Object(
+    {
+        mode: Type.Union([Type.Literal("file"), Type.Literal("directory"), Type.Literal("navigate"), Type.Literal("script")], {
+            description: "Inspect mode to run.",
+        }),
+        path: Type.Optional(Type.String({ description: "File, directory, or navigation target path. Required for file/directory/navigate; optional cwd anchor for script." })),
+        analysis: Type.Optional(Type.Union([FileAnalysisSchema, DirectoryAnalysisSchema], {
+            description: "Mode-specific analysis options: file signals/call-graph or directory map/architecture. Must match mode.",
+        })),
+        navigation: Type.Optional(NavigationSchema),
+        diagnostics: Type.Optional(DiagnosticsSchema),
+        script: Type.Optional(
+            Type.String({
+                minLength: 1,
+                description: ScriptBranchDescription,
+            }),
+        ),
+    },
+    {
+        additionalProperties: false,
+        description:
+            "Inspect modes: file (artifact facts + signals), directory (repo map + architecture), navigate (LSP navigation + diagnostics), script (bounded multi-hop composition).",
+    },
+);
 
 export interface InspectToolOptions {
     /** Resolver to publish envelopes into on successful execution. */

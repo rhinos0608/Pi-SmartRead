@@ -477,6 +477,9 @@ describe("language-intelligence-installer", () => {
     const lockFile = join(locksDir, "heartbeat-unit.lock");
     const owned: Array<{ fd: number }> = [];
     const ownLock = (token: string): { fd: number; path: string; token: string } => {
+      // Windows: an open handle leaves a deleted file pending-delete and blocks
+      // recreate (EPERM), so close owned fds before path-level rm/recreate.
+      for (const o of owned) { try { closeSync(o.fd); } catch {} }
       try { rmSync(lockFile, { force: true }); } catch {}
       const fd = openSync(lockFile, "wx");
       writeSync(fd, token);
@@ -502,6 +505,7 @@ describe("language-intelligence-installer", () => {
       expect(readFileSync(lockFile, "utf-8")).toBe("99999:12345:180000");
 
       // Recreated lock (new inode): must not clobber via path reopen.
+      try { closeSync(lock.fd); } catch {}
       try { rmSync(lockFile, { force: true }); } catch {}
       writeFileSync(lockFile, "99999:12345:180000", "utf-8");
       expect(refreshInstallLock(lock)).toBe(false);

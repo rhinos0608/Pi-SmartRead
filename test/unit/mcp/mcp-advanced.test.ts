@@ -35,7 +35,8 @@ function mcpInitialized(): Record<string, unknown> {
 }
 
 /**
- * Send JSON-RPC messages to the MCP server and return the last response.
+ * Send JSON-RPC messages to the MCP server and resolve with the response
+ * matching the last id-bearing request (last-on-close fallback).
  *
  * Parses stdout line-by-line; collects all responses and returns the last one
  * when the process closes. This avoids a race where the `close` event fires
@@ -68,15 +69,40 @@ function callMcpServer(
       stderr += data.toString();
     });
 
-    // Collect all JSON-RPC responses; return the last one when close fires.
+    // Resolve on the response matching the last id-bearing request.
+    // Last-on-close is racy: stdin EOF can exit the server before a slow
+    // handler (repo-map) answers, stranding an earlier response.
+    const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
+    const expectedId = [...messages].reverse().find((m) => "id" in m)?.id;
+    let settled = false;
+    function settleOk(response: Record<string, unknown>): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearInterval(pollStartup);
+      // Signal EOF only now: ending stdin at send time lets the server
+      // exit before a slow handler (repo-map) answers, stranding id 1.
+      try { child.stdin.end(); } catch { /* already closed */ }
+      child.kill();
+      resolve(response);
+    }
+
+    // Collect all JSON-RPC responses; fall back to the last one on close.
+    // Buffer partial lines: a large single-line response (repo-map) can
+    // fragment across pipe chunks, and neither half parses alone.
     const responses: Array<Record<string, unknown>> = [];
+    let carry = "";
 
     child.stdout.on("data", (data: Buffer) => {
-      for (const raw of data.toString().split("\n")) {
+      const segments = (carry + data.toString()).split("\n");
+      carry = data.toString().endsWith("\n") ? "" : (segments.pop() ?? "");
+      for (const raw of segments) {
         const line = raw.trim();
         if (!line) continue;
         try {
-          responses.push(JSON.parse(line) as Record<string, unknown>);
+          const parsed = JSON.parse(line) as Record<string, unknown>;
+          responses.push(parsed);
+          if (expectedId !== undefined && parsed.id === expectedId) settleOk(parsed);
         } catch {
           // Skip non-JSON lines (e.g. debug output)
         }
@@ -90,10 +116,23 @@ function callMcpServer(
     });
 
     // `close` fires after stdin closes AND the process exits.
-    // Collect responses as they arrive; return the last one on close.
-    // This avoids the race where close fires before the promise is settled —
-    // Node.js delivers the callback even to already-resolved/rejected promises.
+    // Preferred path already resolved on id match; this is fallback only.
     child.on("close", () => {
+      if (settled) return;
+      settled = true;
+      // Flush a trailing line that arrived without a newline.
+      if (carry.trim()) {
+        try {
+          const parsed = JSON.parse(carry) as Record<string, unknown>;
+          responses.push(parsed);
+          if (expectedId !== undefined && parsed.id === expectedId) {
+            clearTimeout(timeout);
+            clearInterval(pollStartup);
+            resolve(parsed);
+            return;
+          }
+        } catch { /* ignore */ }
+      }
       clearTimeout(timeout);
       clearInterval(pollStartup);
       if (responses.length === 0) {
@@ -103,8 +142,6 @@ function callMcpServer(
       resolve(responses[responses.length - 1]!);
     });
 
-    const messages = Array.isArray(messageOrMessages) ? messageOrMessages : [messageOrMessages];
-
     // Wait for server startup signal before sending.
     // tsx cold-boots esbuild; the server signals readiness via stderr.
     const pollStartup = setInterval(() => {
@@ -113,7 +150,8 @@ function callMcpServer(
         for (const message of messages) {
           child.stdin.write(JSON.stringify(message) + "\n");
         }
-        child.stdin.end();
+        // stdin stays open until settleOk: early EOF can exit the server
+        // before a slow handler answers (macos-only flakes).
       }
     }, 100);
   });
@@ -378,7 +416,7 @@ describe("MCP advanced capabilities", () => {
     });
   }, 60_000);
 
-  it("reading smartread://repo-map returns placeholder text", async () => {
+  it("reading smartread://repo-map returns a generated repository map", async () => {
     const response = await callMcpServer([
       mcpInitialize(),
       mcpInitialized(),
@@ -391,9 +429,15 @@ describe("MCP advanced capabilities", () => {
     ]);
 
     const result = response.result as any;
+    expect(response.id).toBe(23);
+    expect(response.error).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(result.contents).toBeDefined();
     const content = result.contents[0]!;
     expect(content.uri).toBe("smartread://repo-map");
-    expect(content.text).toContain("repo-map-placeholder");
+    expect(typeof content.text).toBe("string");
+    expect(content.text.length).toBeGreaterThan(0);
+    expect(content.text).not.toContain("repo-map-placeholder");
   }, 60_000);
 
   it("throws for unknown resource URI", async () => {

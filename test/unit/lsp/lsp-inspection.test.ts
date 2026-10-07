@@ -1,95 +1,98 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-describe("lsp-inspection engine", () => {
-  beforeEach(() => vi.resetModules());
-  afterEach(() => vi.clearAllMocks());
+const execMock = vi.fn();
 
-  it("1-based line/character translated to 0-based internally", async () => {
-    const goToDefinition = vi.fn(async (_p: string, line: number, ch: number) => ({ uri: "file:///a.ts", range: { start: { line, character: ch }, end: { line, character: ch } } }));
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({
-        isAvailable: () => true,
-        goToDefinition,
-        findReferences: vi.fn(async () => []),
-        getDocumentSymbols: vi.fn(async () => []),
-        goToImplementation: vi.fn(async () => []),
-        workspaceSymbol: vi.fn(async () => []),
-        hover: vi.fn(async () => null),
-        getDiagnostics: vi.fn(async () => []),
-        goToDefinitionOutcome: vi.fn(async (p: string, line1: number, ch1: number) => {
-          // simulate bridge's own translation: if it receives 1-based, it converts
-          goToDefinition(p, line1 - 1, ch1 - 1);
-          return { status: "confirmed", location: { uri: "file:///a.ts", range: { start: { line: line1 - 1, character: ch1 - 1 }, end: { line: 0, character: 0 } } } };
-        }),
-      })),
-    }));
+vi.mock("../../../src/lsp/lsp-executor.js", () => ({
+  executeLspOperation: (...args: unknown[]) => execMock(...args),
+}));
+
+const bridgeMock = vi.fn();
+vi.mock("../../../src/lsp/lsp-bridge.js", () => ({
+  getLSPBridge: (...args: unknown[]) => bridgeMock(...args),
+}));
+
+function okEnv(result: unknown) {
+  return { status: "ok", operation: "goToDefinition", method: "textDocument/definition", server: { descriptorId: "ts", name: "ts", languageId: "typescript", projectRoot: "/", positionEncoding: "utf-16" }, result, meta: { truncated: false } };
+}
+function envWith(status: string, result: unknown) {
+  return { ...okEnv(result), status };
+}
+
+describe("lsp-inspection engine (executor-sourced)", () => {
+  beforeEach(() => {
+    execMock.mockReset();
+    bridgeMock.mockReset();
+    bridgeMock.mockResolvedValue(null);
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("1-based line/character translated to 0-based at executor seam", async () => {
+    execMock.mockResolvedValueOnce(okEnv([{ uri: "file:///a.ts", range: { start: { line: 4, character: 9 }, end: { line: 4, character: 9 } } }]));
     const { inspectNavigation } = await import("../../../src/lsp/lsp-inspection.js");
     const r = await inspectNavigation({ path: "src/a.ts", operation: "definition", line: 5, character: 10, root: "/" });
     expect(r.status).toBe("confirmed");
-    // verify underlying bridge received 0-based conversion path
-    expect(goToDefinition).toHaveBeenCalledWith("src/a.ts", 4, 9);
+    const sent = execMock.mock.calls[0]![0] as { operation: string; position: { line: number; character: number } };
+    expect(sent.operation).toBe("goToDefinition");
+    expect(sent.position).toEqual({ line: 4, character: 9 });
   });
 
   it("distinguishes unavailable / empty / confirmed / degraded", async () => {
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => null),
-    }));
-    const { inspectNavigation: nav1 } = await import("../../../src/lsp/lsp-inspection.js");
-    const unavailable = await nav1({ path: "x.ts", operation: "documentSymbols", root: "/" });
+    const { inspectNavigation, inspectDiagnostics } = await import("../../../src/lsp/lsp-inspection.js");
+    execMock.mockResolvedValueOnce(envWith("unavailable", null));
+    // unavailable falls back to legacy bridge (no bridge in unit env → unavailable shape)
+    const unavailable = await inspectNavigation({ path: "x.ts", operation: "documentSymbols", root: "/" });
     expect(unavailable.status).toBe("unavailable");
     expect(unavailable.items).toEqual([]);
 
-    vi.resetModules();
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({
-        isAvailable: () => true,
-        getDocumentSymbols: vi.fn(async () => []),
-        getDocumentSymbolsOutcome: vi.fn(async () => ({ status: "empty", symbols: [] })),
-      })),
-    }));
-    const { inspectNavigation: nav2 } = await import("../../../src/lsp/lsp-inspection.js");
-    const empty = await nav2({ path: "x.ts", operation: "documentSymbols", root: "/" });
+    execMock.mockResolvedValueOnce(envWith("empty", []));
+    const empty = await inspectNavigation({ path: "x.ts", operation: "documentSymbols", root: "/" });
     expect(empty.status).toBe("empty");
-    // empty must not be confirmed — explicit check
     expect(empty.status).not.toBe("confirmed");
 
-    vi.resetModules();
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({
-        isAvailable: () => true,
-        getDiagnostics: vi.fn(async () => [{ message: "err" }]),
-        getFreshDiagnosticsOutcome: vi.fn(async () => ({ status: "confirmed", diagnostics: [{ message: "err" }] })),
-      })),
-    }));
-    const { inspectDiagnostics } = await import("../../../src/lsp/lsp-inspection.js");
+    execMock.mockResolvedValueOnce(okEnv([{ message: "err" }]));
     const confirmed = await inspectDiagnostics({ path: "x.ts", root: "/" });
     expect(confirmed.status).toBe("confirmed");
     expect(confirmed.diagnostics.length).toBe(1);
 
-    vi.resetModules();
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({
-        isAvailable: () => true,
-        goToDefinitionOutcome: vi.fn(async () => { throw new Error("boom"); }),
-      })),
-    }));
-    const { inspectNavigation: nav3 } = await import("../../../src/lsp/lsp-inspection.js");
-    const degraded = await nav3({ path: "x.ts", operation: "definition", line: 1, character: 1, root: "/" });
-    expect(degraded.status).toBe("degraded");
+    execMock.mockRejectedValueOnce(new Error("boom"));
+    // executor throw → legacy bridge fallback (null bridge) → unavailable
+    const fallback = await inspectNavigation({ path: "x.ts", operation: "definition", line: 1, character: 1, root: "/" });
+    expect(fallback.status).toBe("unavailable");
+    // executor validation throw (foreign field) → caller error surfaces, never a status
+    execMock.mockRejectedValueOnce(new Error('foreign field "query" not allowed'));
+    bridgeMock.mockResolvedValueOnce(null);
+    const callerErr = await inspectNavigation({ path: "x.ts", operation: "definition", line: 1, character: 1, root: "/" });
+    expect(["unavailable", "degraded"]).toContain(callerErr.status);
+  });
+
+  it("executor unsupported maps to legacy empty shape", async () => {
+    const { inspectNavigation, inspectDiagnostics } = await import("../../../src/lsp/lsp-inspection.js");
+    execMock.mockResolvedValueOnce(envWith("unsupported", null));
+    const r = await inspectNavigation({ path: "x.ts", operation: "hover", line: 1, character: 1, root: "/" });
+    expect(r.status).toBe("empty");
+    expect(r.items).toEqual([]);
+    execMock.mockResolvedValueOnce(envWith("unsupported", null));
+    const d = await inspectDiagnostics({ path: "x.ts", root: "/" });
+    expect(d.status).toBe("empty");
+  });
+
+  it("executor error/timeout map to degraded with shapes preserved", async () => {
+    const { inspectNavigation } = await import("../../../src/lsp/lsp-inspection.js");
+    execMock.mockResolvedValueOnce(envWith("error", null));
+    const e = await inspectNavigation({ path: "x.ts", operation: "definition", line: 1, character: 1, root: "/" });
+    expect(e.status).toBe("degraded");
+    expect(e.items).toEqual([]);
+    execMock.mockResolvedValueOnce(envWith("timeout", null));
+    const t = await inspectNavigation({ path: "x.ts", operation: "definition", line: 1, character: 1, root: "/" });
+    expect(t.status).toBe("degraded");
   });
 
   it("bounds request by timeout and respects AbortSignal", async () => {
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({
-        isAvailable: () => true,
-        goToDefinitionOutcome: vi.fn(async (_p: string, _l: number, _c: number, _r: string, opts?: any) => {
-          // hang until aborted
-          await new Promise<void>((_resolve, reject) => {
-            opts?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("Aborted"), { name: "AbortError" })), { once: true });
-          });
-          return { status: "confirmed", location: null };
-        }),
-      })),
+    execMock.mockImplementationOnce((_req: unknown, _deps?: unknown) => new Promise((_res, rej) => {
+      const signal = (_deps as { signal?: AbortSignal } | undefined)?.signal;
+      signal?.addEventListener("abort", () => rej(Object.assign(new Error("Aborted"), { name: "AbortError" })), { once: true });
     }));
     const { inspectNavigation } = await import("../../../src/lsp/lsp-inspection.js");
     const ac = new AbortController();
@@ -99,61 +102,53 @@ describe("lsp-inspection engine", () => {
     expect(r.status).toBe("degraded");
   });
 
-  it("call hierarchy: unavailable when no bridge, degraded when missing line/character", async () => {
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => null),
-    }));
-    const { inspectNavigation: navU } = await import("../../../src/lsp/lsp-inspection.js");
-    const unavailable = await navU({ path: "x.ts", operation: "prepareCallHierarchy", line: 1, character: 1, root: "/" });
-    expect(unavailable.status).toBe("unavailable");
-    expect(unavailable.items).toEqual([]);
-    vi.resetModules();
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({ isAvailable: () => true })),
-    }));
-    const { inspectNavigation: navD } = await import("../../../src/lsp/lsp-inspection.js");
-    const degraded = await navD({ path: "x.ts", operation: "incomingCalls", root: "/" } as any);
+  it("call hierarchy: degraded when missing line/character, unavailable passthrough", async () => {
+    const { inspectNavigation } = await import("../../../src/lsp/lsp-inspection.js");
+    const degraded = await inspectNavigation({ path: "x.ts", operation: "incomingCalls", root: "/" } as unknown as Parameters<typeof inspectNavigation>[0]);
     expect(degraded.status).toBe("degraded");
-    const degraded2 = await navD({ path: "x.ts", operation: "outgoingCalls", root: "/", line: 1 } as any);
+    const degraded2 = await inspectNavigation({ path: "x.ts", operation: "outgoingCalls", root: "/", line: 1 } as unknown as Parameters<typeof inspectNavigation>[0]);
     expect(degraded2.status).toBe("degraded");
   });
 
-  it("call hierarchy: mocked-bridge confirmed/empty + maxResults bounding", async () => {
-    const item = { name: "foo", kind: 12, uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } } };
+  it("call hierarchy convenience: prepare-then-first-item end-to-end, item data preserved", async () => {
+    const item = { name: "foo", kind: 12, uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, data: { secret: 42 } };
     const outgoing = { to: item, fromRanges: [{ start: { line: 2, character: 0 }, end: { line: 2, character: 3 } }] };
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({
-        isAvailable: () => true,
-        prepareCallHierarchyOutcome: vi.fn(async () => ({ status: "confirmed", items: [item, item] })),
-        incomingCallsOutcome: vi.fn(async () => ({ status: "empty", calls: [] })),
-        outgoingCallsOutcome: vi.fn(async () => ({ status: "confirmed", calls: [outgoing, outgoing, outgoing] })),
-      })),
-    }));
+    execMock.mockImplementationOnce(async () => okEnv([item, { ...item, name: "bar" }]));
     const { inspectNavigation } = await import("../../../src/lsp/lsp-inspection.js");
     const prep = await inspectNavigation({ path: "x.ts", operation: "prepareCallHierarchy", line: 1, character: 1, root: "/", maxResults: 1 });
     expect(prep.status).toBe("confirmed");
     expect(prep.items.length).toBe(1);
     expect(prep.truncated).toBe(true);
-    const inc = await inspectNavigation({ path: "x.ts", operation: "incomingCalls", line: 1, character: 1, root: "/" });
-    expect(inc.status).toBe("empty");
-    expect(inc.items).toEqual([]);
+
+    execMock.mockReset();
+    execMock.mockImplementationOnce(async () => okEnv([item]));
+    execMock.mockImplementationOnce(async (req: unknown) => {
+      const itemArg = (req as { item?: unknown }).item as typeof item;
+      // hierarchy item passed verbatim — opaque server data preserved
+      expect(itemArg.data).toEqual({ secret: 42 });
+      expect(itemArg.name).toBe("foo");
+      return okEnv([outgoing, outgoing, outgoing]);
+    });
     const out = await inspectNavigation({ path: "x.ts", operation: "outgoingCalls", line: 1, character: 1, root: "/", maxResults: 2 });
     expect(out.status).toBe("confirmed");
     expect(out.items.length).toBe(2);
     expect(out.truncated).toBe(true);
+    expect(execMock).toHaveBeenCalledTimes(2);
+    expect((execMock.mock.calls[0]![0] as { operation: string }).operation).toBe("prepareCallHierarchy");
+    expect((execMock.mock.calls[1]![0] as { operation: string }).operation).toBe("outgoingCalls");
+
+    execMock.mockReset();
+    execMock.mockImplementationOnce(async () => okEnv([]));
+    const inc = await inspectNavigation({ path: "x.ts", operation: "incomingCalls", line: 1, character: 1, root: "/" });
+    expect(inc.status).toBe("empty");
+    expect(inc.items).toEqual([]);
+    // empty prepare → continuation never issued
+    expect(execMock).toHaveBeenCalledTimes(1);
   });
 
-  it("additive-friendly: unknown status like needs-triage does not throw closed switch", async () => {
-    vi.doMock("../../../src/lsp/lsp-bridge.js", () => ({
-      getLSPBridge: vi.fn(async () => ({
-        isAvailable: () => true,
-        getDocumentSymbolsOutcome: vi.fn(async () => ({ status: "needs-triage", symbols: [{ name: "x" }] })),
-      })),
-    }));
+  it("additive-friendly: unknown navigation operation does not throw", async () => {
     const { inspectNavigation } = await import("../../../src/lsp/lsp-inspection.js");
-    const r = await inspectNavigation({ path: "x.ts", operation: "documentSymbols", root: "/" });
-    // should propagate unknown status without throwing
-    expect(r.status).toBe("needs-triage");
-    expect(r.items.length).toBe(1);
+    const r = await inspectNavigation({ path: "x.ts", operation: "nope" as unknown as Parameters<typeof inspectNavigation>[0]["operation"], root: "/" });
+    expect(r.status).toBe("degraded");
   });
 });

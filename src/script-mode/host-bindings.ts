@@ -38,6 +38,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 import type { WorkspaceEvidenceEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import { LSP_TIMEOUT_MS_MIN, LSP_TIMEOUT_MS_DEFAULT } from "@rhinos0608/pi-workspace-protocol";
 import { executeInspectV4 } from "../inspect/inspect.js";
 import type {
     CallDirection,
@@ -111,14 +112,14 @@ const DIFF_TARGETS: ReadonlySet<string> = new Set(["unstaged", "staged", "HEAD"]
 // failing fast instead of dispatching a doomed call. In-flight calls on
 // the direct (no-provider) path are still bounded by the run AbortSignal,
 // which is threaded through as `input.signal`.
-/** Mirrors `DEFAULT_TIMEOUT_MS` in `lsp-inspection.ts`. */
-export const LSP_DEFAULT_TIMEOUT_MS = 5000;
+/** Default LSP service-work budget (protocol LSP_TIMEOUT_MS_DEFAULT). */
+export const LSP_DEFAULT_TIMEOUT_MS = LSP_TIMEOUT_MS_DEFAULT;
 /**
  * Floor for the clamped LSP timeout. A near-zero remaining budget yields
  * this instead of a 0ms timeout (which would be a meaningless immediate
  * failure inside the LSP layer rather than a clean budget abort here).
  */
-export const MIN_LSP_TIMEOUT_MS = 250;
+export const MIN_LSP_TIMEOUT_MS = LSP_TIMEOUT_MS_MIN;
 
 export function clampLspTimeoutMs(remainingMs: number): number {
     if (!Number.isFinite(remainingMs) || remainingMs < 0) return MIN_LSP_TIMEOUT_MS;

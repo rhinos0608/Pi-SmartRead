@@ -34,6 +34,8 @@ export interface GrepHit {
     snippet: string;
     engines: string[];
     score: number;
+    /** Batch provenance: patterns whose query produced this hit (merged on dedup). */
+    matchedQueries?: string[];
 }
 
 export interface GrepExecutionResult {

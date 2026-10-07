@@ -23,7 +23,38 @@ export interface ServerDescriptor {
   initializationOptions?: Record<string, unknown>;
   settings?: Record<string, unknown>;
   expectedCapabilities?: string[];
+  /** Role tag for multi same-language servers (e.g. "primary" | "fallback"). */
+  roles?: string[];
 }
+
+/** Validated custom (runtime-registered) descriptors. Catalog is runtime source of truth. */
+const customDescriptors: ServerDescriptor[] = [];
+
+export function validateDescriptor(d: ServerDescriptor): string[] {
+  const errs: string[] = [];
+  if (!d.id) errs.push("id required");
+  if (!d.languageIds?.length) errs.push("languageIds required");
+  if (!d.commandCandidates?.length) errs.push("commandCandidates required");
+  for (const c of d.commandCandidates ?? []) if (!c.command) errs.push(`candidate missing command in ${d.id}`);
+  return errs;
+}
+
+/** Register validated custom descriptors (throws on invalid). */
+export function registerCustomDescriptors(descs: ServerDescriptor[]): void {
+  for (const d of descs) {
+    const errs = validateDescriptor(d);
+    if (errs.length) throw new Error(`invalid descriptor ${d.id}: ${errs.join("; ")}`);
+  }
+  for (const d of descs) {
+    const i = customDescriptors.findIndex((x) => x.id === d.id);
+    if (i >= 0) customDescriptors[i] = d; else customDescriptors.push(d);
+  }
+}
+
+export function clearCustomDescriptors(): void { customDescriptors.length = 0; }
+
+/** Runtime source of truth: built-in catalog + validated custom descriptors. */
+export function getActiveCatalog(): ServerDescriptor[] { return [...LANGUAGE_SERVER_CATALOG, ...customDescriptors]; }
 
 export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
   {
@@ -216,13 +247,13 @@ function sortedByPriority(descriptors: ServerDescriptor[]): ServerDescriptor[] {
 }
 
 export function getDescriptorsForLanguage(languageId: string): ServerDescriptor[] {
-  const filtered = LANGUAGE_SERVER_CATALOG.filter((d) => d.languageIds.includes(languageId));
+  const filtered = getActiveCatalog().filter((d) => d.languageIds.includes(languageId));
   return sortedByPriority(filtered);
 }
 
 export function getDescriptorsForExtension(ext: string): ServerDescriptor[] {
   const normalized = ext.startsWith(".") ? ext.toLowerCase() : `.${ext.toLowerCase()}`;
-  const filtered = LANGUAGE_SERVER_CATALOG.filter((d) =>
+  const filtered = getActiveCatalog().filter((d) =>
     d.extensions.some((e) => e.toLowerCase() === normalized),
   );
   return sortedByPriority(filtered);

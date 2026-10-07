@@ -68,6 +68,8 @@ export interface ExperimentalFeaturesConfig {
   gitNotes?: boolean;
   /** Enable graph mutation tool (breakage/co-change edge recording). Default: false. */
   graphMutate?: boolean;
+  /** Show hint-only bash-misuse advisories. Default: true. */
+  bashMisuseHints?: boolean;
 }
 
 export interface ResolvedGitContextConfig {
@@ -140,6 +142,20 @@ export function loadGitContextConfig(cwd?: string): ResolvedGitContextConfig {
   };
 }
 
+/**
+ * Resolve bash-misuse hints flag. Default on; explicit env 0/1 overrides config.
+ * Follows PI_SMARTREAD_* env pattern (env wins over repo config).
+ */
+export function resolveBashMisuseHintsEnabled(
+  experimental?: ExperimentalFeaturesConfig,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const raw = env.PI_SMARTREAD_BASH_MISUSE_HINTS;
+  if (raw === "0") return false;
+  if (raw === "1") return true;
+  return experimental?.bashMisuseHints ?? true;
+}
+
 export function loadExperimentalConfig(cwd?: string): ExperimentalFeaturesConfig {
   const resolvedCwd = cwd ?? process.cwd();
   const configPath = findConfigFile(resolvedCwd);
@@ -162,7 +178,13 @@ interface RawConfig {
   probeEnabled?: boolean;
   rerankEnabled?: boolean;
   hydeEnabled?: boolean;
-  externalReranker?: ExternalRerankerConfig;
+  externalReranker?: {
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
+    timeoutMs?: number;
+    maxDocuments?: number;
+  };
   search?: SearchConfig;
   gitContext?: GitContextConfig;
   experimental?: ExperimentalFeaturesConfig;
@@ -250,11 +272,15 @@ function loadRaw(cwd?: string): RawConfig {
   const baseUrl =
     process.env.PI_SMARTREAD_EMBEDDING_BASE_URL ??
     process.env.EMBEDDING_BASE_URL;
+  const rerankerBaseUrl = process.env.PI_SMARTREAD_RERANKER_BASE_URL;
 
-  // When baseUrl comes from the user's env, validate it.
-  // Repo-level baseUrl is silently ignored (untrusted).
+  // Network endpoints are trusted only from the user's environment.
+  // Repo-level baseUrl/apiKey values are silently ignored.
   if (baseUrl !== undefined) {
     validateUrl(baseUrl, "baseUrl");
+  }
+  if (rerankerBaseUrl !== undefined) {
+    validateUrl(rerankerBaseUrl, "externalReranker.baseUrl");
   }
 
   return {
@@ -275,6 +301,17 @@ function loadRaw(cwd?: string): RawConfig {
       (process.env.PI_SMARTREAD_MAX_CHUNKS ? parseInt(process.env.PI_SMARTREAD_MAX_CHUNKS, 10) : undefined),
     probeEnabled: fromFile.probeEnabled ?? false,
     rerankEnabled: fromFile.rerankEnabled ?? false,
+    hydeEnabled: fromFile.hydeEnabled ?? false,
+    externalReranker:
+      rerankerBaseUrl !== undefined
+        ? {
+            baseUrl: rerankerBaseUrl,
+            apiKey: process.env.PI_SMARTREAD_RERANKER_API_KEY,
+            model: fromFile.externalReranker?.model,
+            timeoutMs: fromFile.externalReranker?.timeoutMs,
+            maxDocuments: fromFile.externalReranker?.maxDocuments,
+          }
+        : undefined,
   };
 }
 
@@ -318,14 +355,14 @@ export function validateEmbeddingConfig(cwd?: string): ResolvedEmbeddingConfig |
     probeEnabled: raw.probeEnabled ?? false,
     rerankEnabled: raw.rerankEnabled ?? false,
     hydeEnabled: raw.hydeEnabled ?? false,
-    // Security: repo-level externalReranker config is untrusted for network endpoints.
-    // Only env vars supply the reranker baseUrl/apiKey.
-    // Model and timeout settings may still come from file config.
-    externalReranker: raw.externalReranker
+    // Security: raw.externalReranker is already env-gated in loadRaw().
+    externalReranker: raw.externalReranker?.baseUrl
       ? {
-          ...raw.externalReranker,
-          baseUrl: process.env.PI_SMARTREAD_RERANKER_BASE_URL ?? raw.externalReranker.baseUrl,
-          apiKey: process.env.PI_SMARTREAD_RERANKER_API_KEY ?? raw.externalReranker.apiKey,
+          baseUrl: raw.externalReranker.baseUrl,
+          apiKey: raw.externalReranker.apiKey,
+          model: raw.externalReranker.model,
+          timeoutMs: raw.externalReranker.timeoutMs,
+          maxDocuments: raw.externalReranker.maxDocuments,
         }
       : undefined,
   };

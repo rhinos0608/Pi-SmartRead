@@ -43,7 +43,7 @@ describe("language-intelligence warmup", () => {
     // lsp-bridge must call resolveLanguageServer which internally checks trust gate — ensure no direct existsSync on node_modules/.bin without trust check
     // (Phase B split: bridge family spans lsp-bridge + lsp-types + lsp-manager + lsp-connection)
     const bridgeSrc = ["src/lsp/lsp-bridge.ts", "src/lsp/lsp-types.ts", "src/lsp/lsp-manager.ts", "src/lsp/lsp-connection.ts"].map((f) => readFileSync(f, "utf-8")).join("\n");
-    expect(bridgeSrc).toContain("resolveLanguageServer");
+    expect(bridgeSrc).toMatch(/resolve(All)?LanguageServers/);
     expect(bridgeSrc).not.toMatch(/node_modules.*\\.bin.*existsSync/);
   });
 

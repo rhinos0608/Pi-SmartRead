@@ -216,8 +216,9 @@ describe("LSP catalog expansion", () => {
         }
         expect(captured.length).toBeGreaterThanOrEqual(1);
         // at least one call must carry request purpose (getFreshDiagnosticsOutcome also does internal warmup-status calls via getDiagnosticsFor)
-        expect(captured).toEqual(expect.arrayContaining([{ purpose: "request" }]));
-        expect(captured[0]).toEqual({ purpose: "request" });
+        // objectContaining: the canonical executor carries invariant extras (allowInstall:false) alongside purpose.
+        expect(captured).toEqual(expect.arrayContaining([expect.objectContaining({ purpose: "request" })]));
+        expect(captured[0]).toEqual(expect.objectContaining({ purpose: "request" }));
       } finally {
         spy.mockRestore();
         await shutdownAllManagers();
@@ -253,7 +254,7 @@ describe("LSP catalog expansion", () => {
 
   it("resolution goes through runtime (lsp-bridge imports resolveLanguageServer)", async () => {
     const src = readFileSync("src/lsp/lsp-types.ts", "utf-8");
-    expect(src).toContain("resolveLanguageServer");
+    expect(src).toMatch(/resolve(All)?LanguageServers/);
     expect(src).toContain("language-intelligence-runtime");
     // Must not still use execFileSync for which/where (bridge family)
     for (const f of ["src/lsp/lsp-bridge.ts", "src/lsp/lsp-types.ts", "src/lsp/lsp-manager.ts", "src/lsp/lsp-connection.ts"]) {

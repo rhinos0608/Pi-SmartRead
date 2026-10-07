@@ -15,7 +15,7 @@ import {
     executeDirectoryInspect,
     executeFileInspect,
 } from "../../../src/inspect/inspect.js";
-import { validateInspectionEnvelope } from "@rhinos0608/pi-workspace-protocol";
+import { validateInspectionEnvelope, PROTOCOL_SCHEMA_VERSION } from "@rhinos0608/pi-workspace-protocol";
 import { createInspectV4Tool } from "../../../src/inspect/inspect-tool.js";
 
 let workdir: string;
@@ -72,7 +72,7 @@ describe("executeInspectV4", () => {
         expect(result.contentText).toContain("a.ts");
         expect(result.contentText).toContain("b.ts");
         // Protocol validator accepts mode 'symbol' (not 'file').
-        expect(result.workspaceEvidence.schemaVersion).toBe(3);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
         expect(result.workspaceEvidence.sessionId).toMatch(/^[0-9a-f]{64}$/);
     });
@@ -87,7 +87,7 @@ describe("executeInspectV4", () => {
         expect(result.workspaceEvidence.mode).toBe("symbol");
         expect(result.contentText).toContain("Signals");
         // Protocol validator accepts mode 'symbol' (not 'file').
-        expect(result.workspaceEvidence.schemaVersion).toBe(3);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
         expect(result.workspaceEvidence.sessionId).toMatch(/^[0-9a-f]{64}$/);
         expect(Array.isArray(result.workspaceEvidence.resources)).toBe(true);
@@ -126,7 +126,7 @@ describe("executeDirectoryInspect", () => {
         expect(result.workspaceEvidence.mode).toBe("map");
         expect(result.workspaceEvidence.resources).toEqual([]);
         expect(result.lineCount).toBeGreaterThan(0);
-        expect(result.workspaceEvidence.schemaVersion).toBe(3);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
     });
 });
@@ -143,7 +143,7 @@ describe("executeFileInspect", () => {
         expect(result.contentText).toContain("Signals");
         expect(result.workspaceEvidence.mode).toBe("symbol");
         expect(Array.isArray(result.workspaceEvidence.resources)).toBe(true);
-        expect(result.workspaceEvidence.schemaVersion).toBe(3);
+        expect(result.workspaceEvidence.schemaVersion).toBe(PROTOCOL_SCHEMA_VERSION);
         expect(result.workspaceEvidence.inspectionId).toMatch(/^[0-9a-f]{64}$/);
         expect(result.workspaceEvidence.sessionId).toMatch(/^[0-9a-f]{64}$/);
     });
@@ -389,20 +389,21 @@ describe("createInspectV4Tool (schema and execute)", () => {
         expect(tool.name).toBe("inspect");
     });
 
-    it("exposes a discriminated mode union and no query/symbol/action", () => {
+    it("exposes a flattened mode enum and no query/symbol/action", () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         const schema = tool.parameters as Record<string, any>;
-        const branches = schema.anyOf ?? schema.oneOf;
-        expect(Array.isArray(branches)).toBe(true);
-        expect(branches.length).toBe(4);
-        const consts = branches.map((b: any) => b?.properties?.mode?.const).sort();
+        // Upstream providers require a root type-object schema (no top-level union).
+        expect(schema.type).toBe("object");
+        expect(schema.anyOf).toBeUndefined();
+        expect(schema.oneOf).toBeUndefined();
+        const modes = schema.properties?.mode?.anyOf ?? schema.properties?.mode?.oneOf ?? [];
+        expect(Array.isArray(modes)).toBe(true);
+        const consts = modes.map((b: any) => b?.const).sort();
         expect(consts).toEqual(["directory", "file", "navigate", "script"]);
-        for (const b of branches as any[]) {
-            const props = (b as any)?.properties ?? {};
-            expect(props.query).toBeUndefined();
-            expect(props.symbol).toBeUndefined();
-            expect(props.action).toBeUndefined();
-        }
+        const props = schema.properties ?? {};
+        expect(props.query).toBeUndefined();
+        expect(props.symbol).toBeUndefined();
+        expect(props.action).toBeUndefined();
     });
 
     it("description mentions file and directory modes", () => {
@@ -431,10 +432,9 @@ describe("createInspectV4Tool (schema and execute)", () => {
     it("directory mode accepts analysis bag (schema + execute)", async () => {
         const tool = createInspectV4Tool({ getSessionFilePath: () => null });
         const schema = tool.parameters as Record<string, any>;
-        const branches = schema.anyOf ?? schema.oneOf;
-        const dirBranch = (branches as any[]).find((b: any) => b?.properties?.mode?.const === "directory");
-        expect(dirBranch.properties.analysis).toBeDefined();
-        expect(dirBranch.properties.architecture).toBeUndefined();
+        expect(schema.type).toBe("object");
+        expect(schema.properties?.analysis).toBeDefined();
+        expect(schema.properties?.architecture).toBeUndefined();
         const tool2 = createInspectV4Tool({ getSessionFilePath: () => "/sessions/abc.jsonl" });
         const result = await tool2.execute(
             "c-dir-analysis",

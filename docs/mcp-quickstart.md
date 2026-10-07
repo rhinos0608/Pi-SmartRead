@@ -26,13 +26,13 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 
 | MCP Tool | Description |
 |---|---|
-| `inspect` | File/directory intelligence: directory → ranked repo map; file → structural facts (callers, children, overrides, re-exports) + quality signals (complexity, public API, reuse, recency, tests, deprecation) |
-| `grep` | Code search — BM25 ranking + symbol matching + semantic fallback behind a grep-shaped interface |
-| `skill` | Run named skills declared in `.pi-smartread/skills/` |
+| `inspect` | Four explicit modes: `file` structural facts/signals, `directory` repo map/architecture, `navigate` LSP-backed navigation/diagnostics, and bounded read-only `script` composition |
+| `grep` | Code search — literal/regex, BM25, symbol, semantic fallback, structural options, and graph filters |
+| `skill` | Discover/read procedural skills from package/project/global skill roots |
 | `graph_mutate` | [experimental] Record semantic coupling edges — requires `experimental.graphMutate: true` |
 | git-notes tools | [experimental] Read/write git notes — requires `experimental.gitNotes: true` |
 
-> **Note:** `read` is Pi-extension-only and is **not** exposed over MCP. MCP `inspect` returns a repo map or structural facts; it does not provide strong file-read provenance. Use `grep` for code search.
+> **Note:** the wrapped `read` tool and strict model-facing `LSP` tool are Pi-extension-only and are **not** exposed over MCP. MCP `inspect`/`grep` are discovery surfaces and do not provide the Pi read wrapper's strong file-read provenance.
 
 ---
 
@@ -72,7 +72,7 @@ The server exposes these MCP prompts:
 ## Prerequisites
 
 - **Node.js ≥ 20**
-- **`npm install`** in the `Pi-SmartRead/` directory
+- **`npm ci`** in the `Pi-SmartRead/` directory
 - **`tsx`** (included as a dev dependency — no global install needed)
 - **Embedding config** (only for semantic ranking — BM25-only works without it)
 
@@ -204,8 +204,10 @@ The MCP server inherits all Pi-SmartRead configuration from environment variable
 | `PI_SMARTREAD_EMBEDDING_API_KEY` | API key (optional) |
 | `PI_SMARTREAD_CHUNK_SIZE` | Chunk size in characters (optional) |
 | `PI_SMARTREAD_CHUNK_OVERLAP` | Chunk overlap in characters (optional) |
+| `PI_SMARTREAD_RERANKER_BASE_URL` | External reranker endpoint (optional, env-only) |
+| `PI_SMARTREAD_RERANKER_API_KEY` | External reranker API key (optional, env-only) |
 
-Alternatively, place a `pi-smartread.config.json` file in the project root (the `cwd` the server runs in).
+A `pi-smartread.config.json` in the project root can provide non-network settings such as model names, chunk sizes, HyDE/rerank flags, and git/search options. Network endpoints and API keys remain environment-only trust decisions.
 
 To pass environment variables to an MCP server in Claude Code, use the `--env` flag:
 
@@ -243,7 +245,7 @@ Or in `.mcp.json`:
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
 | **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
 | **Install** | `pi install git:...` | `npx tsx src/mcp-server.ts` |
-| **Same tools?** | `read`, `inspect`, `grep`, `skill`, and optional experimental tools | `inspect`, `grep`, `skill`, and optional experimental tools only — `read` is not exposed |
+| **Same tools?** | `read`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools | `inspect`, `grep`, `skill`, and optional experimental tools only — wrapped `read` and strict `LSP` are not exposed |
 
 ---
 
@@ -253,9 +255,9 @@ Or in `.mcp.json`:
 
 **Server exits immediately when testing** — Make sure you're piping valid JSON-RPC to stdin.
 
-**"Cannot find package 'tsx'"** — Run `npm install` in the Pi-SmartRead directory, or install tsx globally (`npm i -g tsx`).
+**"Cannot find package 'tsx'"** — Run `npm ci` in the Pi-SmartRead directory. A global `tsx` install is not required.
 
-**No semantic ranking** — The MCP server uses the same embedding config as the Pi extension. Set `PI_SMARTREAD_EMBEDDING_BASE_URL` and `PI_SMARTREAD_EMBEDDING_MODEL`, or place a `pi-smartread.config.json` in the working directory.
+**No semantic ranking** — Set `PI_SMARTREAD_EMBEDDING_BASE_URL` in the environment and provide a model via `PI_SMARTREAD_EMBEDDING_MODEL` or `pi-smartread.config.json`. Repository config cannot supply a trusted network endpoint.
 
 **Tool returns "Error: Embedding baseUrl is required"** — Use `grep { pattern }` for config-free search, or configure embeddings.
 

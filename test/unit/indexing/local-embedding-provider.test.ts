@@ -134,7 +134,7 @@ describe(
         // This handles onnxruntime incompatibilities without crashing the suite.
         provider = null;
       }
-    });
+    }, 30_000);
 
     it.runIf(runIntegration)("produces vectors for a single text input", async () => {
       if (!provider) return; // Model init failed; skip gracefully

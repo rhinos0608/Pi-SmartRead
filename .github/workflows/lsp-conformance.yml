@@ -1,0 +1,106 @@
+name: LSP conformance (real servers RS2-RS5)
+
+# Wave D strict matrix: Linux-only, one lane per server. Each lane pins the
+# exact toolchain version (see scripts/check-lsp-conformance-binaries.mjs
+# PINS — single source of truth), prints version evidence via the preflight
+# script, then runs only that server's integration file with conformance env.
+# Any vitest skip fails the lane (strict: absent/unusable/hover-unavailable/
+# unexpected skip -> FAIL). Normal `npm test` keeps honest skip.
+# RS6 dynamic-registration skip stays separate (not an RS2-5 env skip).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/lsp/**"
+      - "src/language-intelligence/**"
+      - "test/integration/lsp/**"
+      - "scripts/check-lsp-conformance-binaries.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/lsp-conformance.yml"
+  pull_request:
+    paths:
+      - "src/lsp/**"
+      - "src/language-intelligence/**"
+      - "test/integration/lsp/**"
+      - "scripts/check-lsp-conformance-binaries.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/lsp-conformance.yml"
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: pyright
+            rs: RS2
+            test: test/integration/lsp/real-server-pyright.test.ts
+          - server: gopls
+            rs: RS3
+            test: test/integration/lsp/real-server-gopls.test.ts
+          - server: rust-analyzer
+            rs: RS4
+            test: test/integration/lsp/real-server-rust-analyzer.test.ts
+          - server: clangd
+            rs: RS5
+            test: test/integration/lsp/real-server-clangd.test.ts
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --fetch-retries=5 --fetch-timeout=600000
+
+      - name: Install pyright 1.1.399 (RS2)
+        if: matrix.server == 'pyright'
+        run: npm install -g pyright@1.1.399
+
+      - name: Install gopls v0.19.1 (RS3)
+        if: matrix.server == 'gopls'
+        run: |
+          go install golang.org/x/tools/gopls@v0.19.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install rust-analyzer via toolchain 1.83.0 (RS4)
+        if: matrix.server == 'rust-analyzer'
+        run: |
+          rustup toolchain install 1.83.0 --component rust-analyzer
+          rustup default 1.83.0
+
+      - name: Install clangd 19 (RS5)
+        if: matrix.server == 'clangd'
+        run: |
+          sudo apt-get update && sudo apt-get install -y clangd-19
+          sudo ln -sf /usr/bin/clangd-19 /usr/bin/clangd
+
+      - name: Preflight binary check + version evidence (${{ matrix.rs }}/${{ matrix.server }})
+        run: node scripts/check-lsp-conformance-binaries.mjs --server ${{ matrix.server }}
+
+      - name: Run ${{ matrix.rs }} strict (zero-skip)
+        env:
+          PI_SMARTREAD_LSP_CONFORMANCE: "1"
+          PI_SMARTREAD_LSP_CONFORMANCE_STRICT: "1"
+        run: |
+          npx vitest run "${{ matrix.test }}" --reporter=verbose 2>&1 | tee conformance-output.txt
+          if grep -Ei '[1-9][0-9]* skipped|skipped [1-9]' conformance-output.txt; then
+            # Complement to bounded hover polling in the RS2-RS5 suites: allow
+            # the single known honest hover-indexing skip, fail on anything else.
+            if grep -F -q "server still indexing" conformance-output.txt \
+              && ! grep -Ei -q 'not on PATH|not runnable|unusable' conformance-output.txt \
+              && ! grep -Ei -q '[2-9][0-9]* skipped|skipped [2-9]' conformance-output.txt; then
+              echo "STRICT ALLOW: single honest hover-indexing skip (${{ matrix.rs }}/${{ matrix.server }})"
+            else
+              echo "STRICT FAIL: ${{ matrix.rs }}/${{ matrix.server }} reported skips (expected zero-skip green)"
+              exit 1
+            fi
+          fi

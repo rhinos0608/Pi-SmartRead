@@ -748,14 +748,14 @@ async function handleQueryRead(queryParams: QueryReadParams, b: ReadBranchCtx): 
  *   - Multiple files: { paths: [{ path, offset?, limit? }, ...] }
  *   - Semantic search: { query, directory?, topK? }
  *
- * Every mode returns a `details.workspaceEvidence` envelope (schema v3)
- * that authorizes patch.
+ * Every mode returns a versioned `details.workspaceEvidence` envelope
+ * with coverage semantics that determine patch authority.
  */
 export function createExtendedReadTool(opts?: WrapReadToolOptions): ToolDefinition {
   return {
     name: "read",
     label: "read",
-    description: "Read files with strong workspace evidence. Single file: { path: \"src/auth.ts\" } or { path, offset, limit }. Multiple files: { paths: [{ path: \"a.ts\" }, { path: \"b.ts\" }] }. Query: { query: \"auth flow\" } — uses shared indexed BM25+embedding RRF and reads selected files, with grep+AST discovery only when semantic retrieval is unavailable. Batch evidence covers complete file blocks actually rendered; partial or omitted blocks are not authorized. Large supported source files read without offset/limit return a compact AST symbol outline (signatures + line ranges, no bodies) instead of the full file — use offset/limit or symbol to read a specific part. Chasing a multi-hop lead across dependent grep/read/inspect calls? Compose the chase in one call with `inspect({ script })`.",
+    description: "Read files with strong workspace evidence. Single file: { path: \"src/auth.ts\" } or { path, offset, limit }. Multiple files: { paths: [{ path: \"a.ts\" }, { path: \"b.ts\" }] }. Query: { query: \"auth flow\" } — uses shared indexed BM25+embedding RRF and reads selected files, with grep+AST discovery only when semantic retrieval is unavailable. Batch evidence covers complete file blocks actually rendered; partial or omitted blocks are not authorized. Large supported source files read without offset/limit return a compact AST symbol outline (signatures + line ranges, no bodies) instead of the full file — use offset/limit or symbol to read a specific part. Chasing a multi-hop lead across dependent grep/read/inspect calls? Compose the chase in one call with `inspect({ mode: \"script\", script })`.",
     parameters: ReadSchema as unknown as Record<string, unknown>,
 
     async execute(
