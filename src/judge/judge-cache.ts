@@ -10,7 +10,7 @@
  * in a caller-supplied directory; lazy-loaded, capped with compaction,
  * tolerant of corrupt lines. No new dependencies.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { JsonValue, NoulQuestion } from "./types.js";
@@ -193,7 +193,7 @@ export class JudgeCache {
         if (!this.file) return;
         try {
             mkdirSync(join(this.file, ".."), { recursive: true });
-            const tmp = `${this.file}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+            const tmp = `${this.file}.tmp.${Date.now()}.${randomUUID()}`;
             writeFileSync(
                 tmp,
                 newest.map(([k, v]) => `${JSON.stringify({ key: k, p: v.p, ts: v.createdAt })}\n`).join(""),

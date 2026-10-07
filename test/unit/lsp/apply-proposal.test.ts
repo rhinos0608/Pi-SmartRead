@@ -1,4 +1,7 @@
 /** Stage 4 (option A): applyProposal staging/apply over SmartEdit RPC. Failing-first. */
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { validateStrictRequest } from "../../../src/lsp/lsp-strict-contract.js";
 import { getOperationDef } from "../../../src/lsp/lsp-operation-registry.js";
@@ -34,15 +37,23 @@ function memBus(): BusLike & { dispose(): void } {
   };
 }
 
+// OS-native scratch dir: POSIX-style "/tmp/..." literals are not absolute on
+// Windows (resolve() drive-prefixes them), so build every fixture path from
+// os.tmpdir() and file URIs via pathToFileURL. Absolute request paths must
+// still stage verbatim on every platform.
+const TEST_DIR = join(tmpdir(), "apply-proposal-test");
+const RENAME_FILE = join(TEST_DIR, "a.ts");
+const FORMAT_FILE = join(TEST_DIR, "b.ts");
+
 const CTX = {
-  cwd: "/tmp/apply-proposal-test",
-  sessionManager: { getSessionFile: () => "/tmp/apply-proposal-test-session.jsonl" },
+  cwd: TEST_DIR,
+  sessionManager: { getSessionFile: () => join(tmpdir(), "apply-proposal-test-session.jsonl") },
 } as never;
 
 const RENAME_EDIT = {
   changes: [
     {
-      uri: "file:///tmp/apply-proposal-test/a.ts",
+      uri: pathToFileURL(RENAME_FILE).href,
       edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "bbb" }],
     },
   ],
@@ -57,7 +68,7 @@ function executorReturning(value: unknown, status = "ok") {
       descriptorId: "ts",
       name: "ts",
       languageId: "typescript",
-      projectRoot: "/tmp/apply-proposal-test",
+      projectRoot: TEST_DIR,
       positionEncoding: "utf-16",
     },
     result: value,
@@ -274,7 +285,7 @@ describe("applyProposal", () => {
             descriptorId: "ts",
             name: "ts",
             languageId: "typescript",
-            projectRoot: "/tmp/apply-proposal-test",
+            projectRoot: TEST_DIR,
             positionEncoding: "utf-16",
           },
           result: FORMAT_EDITS,
@@ -284,12 +295,12 @@ describe("applyProposal", () => {
       });
       const res = await (tool.execute as Function)(
         "call-2",
-        { operation: "formatDocument", path: "/tmp/apply-proposal-test/b.ts" },
+        { operation: "formatDocument", path: FORMAT_FILE },
         undefined,
         undefined,
         CTX,
       );
-      expect(seenFilePath).toBe("/tmp/apply-proposal-test/b.ts");
+      expect(seenFilePath).toBe(FORMAT_FILE);
       expect(res.details.proposal.proposalId).toBe("prop-abs");
     } finally {
       server.dispose();
