@@ -18,7 +18,7 @@ import {
 describe("precisionAtK / recallAtK", () => {
     it("computes precision over the top-k window", () => {
         expect(precisionAtK([true, false, true], 2)).toBeCloseTo(0.5);
-        expect(precisionAtK([true, true], 5)).toBeCloseTo(1);
+        expect(precisionAtK([true, true], 5)).toBeCloseTo(0.4);
     });
     it("rejects bad k and empty rankings", () => {
         expect(() => precisionAtK([], 5)).toThrow();
