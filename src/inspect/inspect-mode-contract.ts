@@ -73,7 +73,9 @@ function assertBooleanOptions(bag: Record<string, unknown>, keys: readonly strin
 function assertValidCallDepth(bag: Record<string, unknown>): void {
     if (!("callDepth" in bag)) return;
     const depth = bag.callDepth as number;
-    if (!Number.isFinite(depth) || depth < 1 || depth > 5) throw new Error("Error: inspect callDepth must be 1..5");
+    if (!Number.isFinite(depth)) throw new Error("Error: inspect callDepth must be 1..5");
+    if (depth < 1) throw new Error("Error: inspect callDepth must be 1..5");
+    if (depth > 5) throw new Error("Error: inspect callDepth must be 1..5");
 }
 
 function assertValidCallDirection(bag: Record<string, unknown>): void {
@@ -114,9 +116,10 @@ function assertNoUnknownDirectoryOptions(bag: Record<string, unknown>): void {
 
 function assertValidMapTokensOption(bag: Record<string, unknown>): void {
     if (!("mapTokens" in bag)) return;
-    if (!Number.isFinite(bag.mapTokens) || (bag.mapTokens as number) < 256 || (bag.mapTokens as number) > 32768) {
-        throw new Error("Error: inspect mapTokens must be 256..32768");
-    }
+    const value = bag.mapTokens as number;
+    if (!Number.isFinite(value)) throw new Error("Error: inspect mapTokens must be 256..32768");
+    if (value < 256) throw new Error("Error: inspect mapTokens must be 256..32768");
+    if (value > 32768) throw new Error("Error: inspect mapTokens must be 256..32768");
 }
 
 function assertValidFocusOption(bag: Record<string, unknown>): void {
