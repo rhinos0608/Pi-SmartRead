@@ -23,9 +23,15 @@ function runCli(extraArgs: string[], home: string): { status: number | null; std
     try {
         execFileSync(TSX_BIN, ["scripts/eval/external/grep/run.ts", ...extraArgs], {
             cwd: REPO_ROOT,
-            env: { ...process.env, HOME: home },
+            // node:os homedir() (used for all bench cache paths) ignores HOME
+            // on Windows and reads USERPROFILE instead; set both so the temp
+            // HOME isolation is real on every OS. The .cmd launcher also
+            // requires a shell on Windows (spawn without one fails with a
+            // null status instead of the CLI's exit code).
+            env: { ...process.env, HOME: home, USERPROFILE: home },
             encoding: "utf8",
             stdio: ["ignore", "ignore", "pipe"],
+            shell: process.platform === "win32",
         });
         return { status: 0, stderr: "" };
     } catch (error) {
