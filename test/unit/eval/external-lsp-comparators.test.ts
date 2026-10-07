@@ -11,7 +11,7 @@ import { pointLoc, startKey } from "../../../scripts/eval/external/lsp/comparato
 import {
   summarizeLatency,
   type PositionLatency,
-} from "../../../scripts/eval/external/lsp/comparators/run-comparators.js";
+} from "../../../scripts/eval/external/lsp/comparators/latency.js";
 
 const ident = (f: string): ((file: string) => string | null) => (file: string) =>
   file === f ? f : null;
