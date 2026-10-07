@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     buildVonServeArgs,
@@ -13,6 +13,7 @@ import {
     isVonInstalled,
     parsePythonVersion,
     resetVonSidecarForTests,
+    venvServeBin,
     VON_BIND_HOST,
     VON_SDK_PINNED_VERSION,
     VonSidecarManager,
@@ -46,9 +47,12 @@ function okRun(stdout = ""): RunResult {
 }
 
 function seedInstalled(): void {
+    // Simulate the installed entry point where a real venv would place it:
+    // `Scripts/von.exe` on Windows, `bin/von` elsewhere.
     const vonDir = getVonDir(home);
-    mkdirSync(join(vonDir, "bin"), { recursive: true });
-    writeFileSync(join(vonDir, "bin", "von"), "#!/bin/sh\n", "utf-8");
+    const bin = venvServeBin(vonDir);
+    mkdirSync(dirname(bin), { recursive: true });
+    writeFileSync(bin, "#!/bin/sh\n", "utf-8");
     writeFileSync(
         join(vonDir, "install.json"),
         JSON.stringify({ package: "von-sdk", version: VON_SDK_PINNED_VERSION }),
@@ -119,8 +123,9 @@ describe("install", () => {
         expect(pip?.env?.HF_HOME).toBe(getVonHfDir(home));
         // The fake pip creates no files; simulate the installed entry point,
         // then the marker + binary together report installed.
-        mkdirSync(join(getVonDir(home), "bin"), { recursive: true });
-        writeFileSync(join(getVonDir(home), "bin", "von"), "#!/bin/sh\n", "utf-8");
+        const bin = venvServeBin(getVonDir(home));
+        mkdirSync(dirname(bin), { recursive: true });
+        writeFileSync(bin, "#!/bin/sh\n", "utf-8");
         expect(isVonInstalled(home)).toBe(true);
     });
 

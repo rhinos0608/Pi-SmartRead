@@ -3,7 +3,8 @@
  *
  * All fixtures are small synthetic outputs written inline — no dataset
  * content is vendored. Tests cover pure parsing/mapping/ranking helpers and
- * the ripgrep end-to-end path against a temp dir (system rg required).
+ * the ripgrep end-to-end path against a temp dir (system rg required;
+ * rg-dependent cases skip honestly via ctx.skip() when rg is absent).
  */
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -54,6 +55,15 @@ function stubInstance(over: Partial<BenchmarkInstance> = {}): BenchmarkInstance 
         license: "MIT",
         ...over,
     };
+}
+
+function rgAvailable(): boolean {
+    try {
+        execFileSync("rg", ["--version"], { timeout: 15000, stdio: "ignore" });
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 describe("tokenizeForRipgrep", () => {
@@ -123,7 +133,11 @@ describe("parseRipgrepJson", () => {
 });
 
 describe("runRipgrep", () => {
-    it("finds terms in a temp tree and ranks by count", async () => {
+    it("finds terms in a temp tree and ranks by count", async ({ skip }) => {
+        if (!rgAvailable()) {
+            skip("system rg not on PATH — ripgrep lexical-floor e2e unproven here, not a pass");
+            return;
+        }
         const root = tempDir("rg-fix-");
         mkdirSync(join(root, "src"), { recursive: true });
         writeFileSync(join(root, "src/focus.ts"), "focusTracker focusTracker focus\n");
@@ -287,7 +301,11 @@ describe("isComparatorName", () => {
         expect(isComparatorName("zoekt")).toBe(false);
     });
 
-    it("system rg is available for the lexical floor", () => {
+    it("system rg is available for the lexical floor", ({ skip }) => {
+        if (!rgAvailable()) {
+            skip("system rg not on PATH — lexical-floor availability unproven here, not a pass");
+            return;
+        }
         const v: Buffer = execFileSync("rg", ["--version"], { timeout: 15000 });
         expect(v.toString("utf8")).toMatch(/ripgrep/);
     });
