@@ -16,6 +16,7 @@ import {
     checkHoldoutGuard,
     coldStartRuntimeCaches,
     D46_REPORTS_DIR,
+    d46ReportFileHit,
     isCleanPorcelain,
     parseD46RunArgs,
     redactForHoldout,
@@ -26,6 +27,7 @@ import {
     verifySplitManifest,
     wrapJudge,
 } from "../../../scripts/eval/d46/run.js";
+import { scoreD46Query } from "../../../scripts/eval/d46/score.js";
 import { loadSplitQueries, writeSplitManifest } from "../../../scripts/eval/d46/validate.js";
 import type { D46SplitManifest } from "../../../scripts/eval/d46/validate.js";
 
@@ -323,6 +325,46 @@ describe("redactForHoldout", () => {
         expect(redacted["gold"]).toEqual([]);
         expect(redacted["covered"]).toBe(true);
         expect(redactForHoldout(row, false)).toEqual(row);
+    });
+});
+
+describe("d46ReportFileHit", () => {
+    it("agrees with covered when five repeated non-gold units precede the gold file", () => {
+        const gold = [{ path: "src/app.ts", startLine: 10, endLine: 20, grade: 1 as const }];
+        const units = [
+            ...[10, 11, 12, 13, 14].map((line) => ({
+                file: "src/noise.ts",
+                line,
+                endLine: line,
+                snippet: `  ${line} | noise`,
+            })),
+            { file: "src/app.ts", line: 10, endLine: 10, snippet: "  10 | app" },
+        ];
+        const scored = scoreD46Query({
+            query: {
+                id: "hono-001",
+                repo: "honojs/hono",
+                split: "dev",
+                class: "behaviour",
+                query: "synthetic",
+                gold,
+                rationale: "synthetic",
+                author: "test",
+                authoredAt: "2026-10-07T00:00:00Z",
+            },
+            units,
+            totalHits: units.length,
+            renderedChars: 0,
+            routingMode: "smart",
+            judgeInvoked: false,
+            status: "ok",
+            elapsedMs: 1,
+        });
+        expect(scored.successAt5).toBe(true);
+        // The old first-five-units expression is false here (all noise);
+        // the report row must use the distinct-file source instead.
+        expect(units.slice(0, 5).some((u) => gold.some((g) => g.path === u.file))).toBe(false);
+        expect(d46ReportFileHit(scored.top5Files, gold)).toBe(scored.successAt5);
     });
 });
 
