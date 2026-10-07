@@ -27,6 +27,7 @@ Then inside a Claude Code session, use `/mcp` to see live status.
 | MCP Tool | Description |
 |---|---|
 | `inspect` | Structural/architectural analysis: `file` facts/signals, `directory` repo map/architecture, and bounded read-only `script` composition |
+| `find` | File and directory discovery by glob, fuzzy name, or natural-language description |
 | `grep` | Broad code discovery — literal/regex, BM25, symbol, semantic fallback, structural options, and graph filters |
 | `LSP` | Strict compiler/language-server semantics (read-only except applyProposal): definitions, references, hover, symbols, hierarchy, diagnostics, completion, and refactor proposals |
 | `skill` | Discover/read procedural skills from package/project/global skill roots |
@@ -245,8 +246,8 @@ Or in `.mcp.json`:
 | **Transport** | Pi's internal tool API | MCP stdio (via `@modelcontextprotocol/sdk`) |
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
 | **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
-| **Install** | `pi install git:...` | `npx tsx src/mcp-server.ts` |
-| **Same tools?** | `read`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools | `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools; only the wrapped `read` surface is Pi-only |
+| **Install** | `pi install github:rhinos0608/Pi-SmartRead` | `npx tsx src/mcp-server.ts` |
+| **Same tools?** | `read`, `find`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools | `find`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools; only the wrapped `read` surface is Pi-only |
 
 ---
 
@@ -276,8 +277,10 @@ Or in `.mcp.json`:
 │  Cursor, etc.)  │   stdout (JSON-RPC)     │                      │
 └─────────────────┘                         │  Tool Registry       │
                                             │  ┌────────────────┐ │
+                                            │  │ find            │ │
                                             │  │ inspect         │ │
                                             │  │ grep            │ │
+                                            │  │ LSP             │ │
                                             │  │ skill           │ │
                                             │  │ graph_mutate*   │ │
                                             │  │ git-notes*      │ │

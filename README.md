@@ -1,29 +1,55 @@
 # Pi-SmartRead
 
-Code intelligence for [Pi](https://github.com/mariozechner/pi-coding-agent): evidence-bearing reads, hybrid code search, structural inspection, repository intelligence, bounded multi-hop investigation, and strict LSP access (read-only except applyProposal).
+Code intelligence for the [Pi coding agent][pi]. Pi-SmartRead gives the
+model ranked code search, structural and architectural analysis, a strict
+language-server tool, and file reads that record exactly what the model has
+seen.
 
-Pi-SmartRead is both:
+It runs two ways:
 
-- a **Pi extension** with the full model-facing surface, including wrapped `read` and strict `LSP`;
-- a **standalone MCP stdio server** exposing the shared discovery tools, prompts, and `smartread://` resources.
+- **As a Pi extension.** It replaces Pi's `read` and `find`. It adds `grep`,
+  `inspect`, `LSP` and `skill`. It also installs runtime hooks that keep the
+  model's context accurate.
+- **As a standalone MCP server.** Any MCP client gets the same discovery and
+  language-server tools over stdio.
 
-It began as a fork of `pi-read-many` and has since become a broader local code-intelligence runtime.
+Every read records which lines the model actually received. The companion
+editor, [Pi-SmartEdit][smartedit], checks those records before it allows an
+edit. Search results are only leads. The model has to read a file before it
+can change it.
+
+[pi]: https://github.com/earendil-works/pi
+[smartedit]: https://github.com/rhinos0608/Pi-SmartEdit
+
+## Contents
+
+- [Install](#install)
+- [The tools](#the-tools)
+- [A typical investigation](#a-typical-investigation)
+- [Tool reference](#tool-reference)
+- [Relevance judge](#relevance-judge)
+- [Evidence and the SmartEdit boundary](#evidence-and-the-smartedit-boundary)
+- [Language servers](#language-servers)
+- [Runtime behavior inside Pi](#runtime-behavior-inside-pi)
+- [Configuration](#configuration)
+- [MCP server](#mcp-server)
+- [Troubleshooting](#troubleshooting)
+- [Upgrading from older tool names](#upgrading-from-older-tool-names)
+- [Development](#development)
+- [Further reading](#further-reading)
+- [Acknowledgements and license](#acknowledgements-and-license)
 
 ## Install
 
-Requirements: Node.js 20+ and Pi `^0.70.2`.
+You need Node.js 20 or later and Pi in the `^0.70.2` range.
 
 ```bash
 pi install github:rhinos0608/Pi-SmartRead
 ```
 
-If Pi is already running:
+If Pi is already running, load the extension with `/reload`.
 
-```text
-/reload
-```
-
-For a local checkout:
+To work from a local checkout:
 
 ```bash
 git clone https://github.com/rhinos0608/Pi-SmartRead.git
@@ -32,910 +58,677 @@ npm ci
 pi -e ./src/index.ts
 ```
 
-## Surface at a glance
+To use the tools from Claude Code or another MCP client instead, see
+[MCP server](#mcp-server).
 
-| Surface | Pi extension | MCP server | Purpose |
-|---|---:|---:|---|
-| `read` | ✓ | — | Strong-evidence reads for already-known files or symbols |
-| `inspect` | ✓ | ✓ | Structural/architectural file/directory analysis and bounded script composition |
-| `find` | ✓ | ✓ | File and directory discovery by glob, name, or natural-language description |
-| `grep` | ✓ | ✓ | Broad text, symbol, semantic, structural, and graph-filtered code discovery |
-| `LSP` | ✓ | ✓ | Strict compiler/language-server semantic operations (read-only except applyProposal) |
-| `skill` | ✓ | ✓ | Discover and read procedural agent skills |
-| `graph_mutate` | opt-in | opt-in | Persist observed breakage/co-change edges |
-| `git_notes_read/write` | opt-in | opt-in | Git-backed durable AI notes |
-| MCP prompts/resources | — | ✓ | Prompt templates and repository/status/config resources |
+Nothing else is required. Embeddings, the relevance judge and managed
+language servers are all optional. Without them, search falls back to
+lexical and structural ranking.
 
-The Pi extension also installs runtime hooks for context hygiene, repo-map/tool guidance injection, file watching, doom-loop detection, bash-output guarding, evidence publication, and SmartEdit RPC services.
+## The tools
 
-## Which tool should I use?
+| Tool      | Use it to                                                    | Pi | MCP |
+| --------- | ------------------------------------------------------------ | -- | --- |
+| `read`    | Read files, line ranges or named symbols you already know    | ✓  | —   |
+| `find`    | Locate files and directories by glob, fuzzy name or description | ✓ | ✓  |
+| `grep`    | Search inside files for text, symbols, concepts or AST shapes | ✓ | ✓   |
+| `inspect` | Analyze structure and architecture, or run multi-step scripts | ✓ | ✓   |
+| `LSP`     | Ask a language server for definitions, references, types, diagnostics | ✓ | ✓ |
+| `skill`   | Discover and load reusable workflow instructions              | ✓ | ✓   |
 
-- **Know the file and need its source?** Use `read`.
-- **Need to discover candidate files or directories by name or description?** Use `find`.
-- **Need to locate text or symbols inside files?** Use `grep`.
-- **Need aggregate structure, architecture, blast radius, graph, routes, or quality signals?** Use `inspect` in `file` or `directory` mode.
-- **Need exact compiler-backed semantics such as definitions, references, hover, symbols, hierarchy, or diagnostics?** Use strict `LSP`.
-- **Need a dependent multi-hop chase?** Use `inspect { mode: "script", ... }`.
-- **Need a reusable workflow?** Search/read a `skill`.
+Three more tools register only when you enable them: `graph_mutate`,
+`git_notes_read` and `git_notes_write`. See
+[Experimental tools](#experimental-tools).
 
-A critical distinction: `read` is the strong-evidence surface. Search/inspect results are discovery evidence and normally need a follow-up read before mutation.
+The split between the tools is deliberate:
 
----
+- **Discovery tools** (`find`, `grep`, `inspect`) tell the model where to
+  look. Their results never authorize an edit.
+- **`read`** shows source. It is the only tool whose output can authorize
+  an edit.
+- **`LSP`** answers questions that need a compiler, such as which symbol a
+  name resolves to. Use it instead of guessing from text matches.
 
-## `read`
+## A typical investigation
 
-Pi-SmartRead replaces Pi's built-in read tool with an evidence-emitting, context-enriched wrapper.
+The calls below show the order a model usually works in. Each one is a tool
+call in JSON.
 
-Exactly one selector is allowed per call.
-
-### Single file
-
-```json
-{"path":"src/auth.ts"}
-```
-
-Or a specific line range:
+Find the files that look relevant:
 
 ```json
-{"path":"src/auth.ts","offset":120,"limit":80}
+{ "tool": "find", "pattern": "where embedding requests are sent", "path": "src" }
 ```
 
-`offset` is 1-based.
+Search inside them:
 
-### Multiple known files
+```json
+{ "tool": "grep", "pattern": "validateEmbeddingConfig", "path": "src" }
+```
+
+Read the code:
+
+```json
+{ "tool": "read", "symbol": "validateEmbeddingConfig" }
+```
+
+Confirm who calls it, using a 0-based position from the read:
 
 ```json
 {
-  "paths":[
-    {"path":"src/auth.ts"},
-    {"path":"src/session.ts","offset":40,"limit":90}
+  "tool": "LSP",
+  "operation": "findReferences",
+  "path": "src/config.ts",
+  "position": { "line": 324, "character": 16 }
+}
+```
+
+Check what a change would reach:
+
+```json
+{ "tool": "inspect", "mode": "file", "path": "src/config.ts", "analysis": { "impact": true } }
+```
+
+The `tool` key only labels each example. In a real call, the tool name is
+separate from the arguments.
+
+## Tool reference
+
+### `read`
+
+`read` replaces Pi's built-in read. Each call takes exactly one selector:
+`path`, `paths` or `symbol`.
+
+```json
+{ "path": "src/auth.ts" }
+{ "path": "src/auth.ts", "offset": 120, "limit": 80 }
+{ "path": "src/auth.ts:120-199" }
+{ "paths": [{ "path": "src/auth.ts" }, { "path": "src/session.ts", "offset": 40, "limit": 90 }] }
+{ "symbol": "AuthService.login", "limit": 120 }
+```
+
+- `offset` is 1-based. A `path:start-end` suffix is shorthand for
+  `offset` and `limit`.
+- `paths` accepts up to 100 entries. Output is capped at 2,000 lines or
+  50 KB. Files that don't fit are omitted or cut short, with a hint for
+  reading the rest. `stopOnError` defaults to `false`.
+- `symbol` asks the language server first and falls back to the context
+  graph. It starts the read a few lines above the definition.
+- A plain `{ path }` read of a large source file (20 KB by default) returns
+  an AST outline instead of the whole body. The outline lists declarations,
+  signatures and line ranges. Read a range or a symbol to see the body.
+- Reads can append a footer with imports, recent commits, git notes, graph
+  neighbors and language-server symbols. The footer is context, not source,
+  and evidence never covers it.
+- Line prefixes follow `PI_EDIT_MODE`, the setting shared with SmartEdit.
+  Text mode (the default) prints `12|code`. Hashline mode adds a content
+  hash to each line number, so SmartEdit can anchor edits to it.
+
+`read` has no natural-language query mode. Use `grep` or `find` to discover
+files, then `read` them.
+
+### `find`
+
+`find` replaces Pi's built-in `find`. Its schema stays `{ pattern, path?,
+limit? }`, and the form of `pattern` picks the mode:
+
+| Pattern looks like            | Mode             | Default limit |
+| ----------------------------- | ---------------- | ------------- |
+| Contains `*`, `?`, `[` or `{` | Glob             | 100           |
+| A sentence or description     | Natural language | 20            |
+| Anything else                 | Fuzzy name       | 100           |
+
+```json
+{ "pattern": "src/**/*.test.ts" }
+{ "pattern": "grptool" }
+{ "pattern": "files that configure the embedding endpoint", "path": "src" }
+```
+
+The maximum limit is 500. A traversal stops after five seconds and says
+so. Results are grouped by directory, and `find` never matches file
+contents. With the [relevance judge](#relevance-judge) on, natural-language
+results come back as a tree. Each file in the tree carries up to eight
+top-level symbols and a relevance score.
+
+### `grep`
+
+`grep` is the main search tool. Give it either one `pattern` or a batch of
+up to 10 `queries`.
+
+```json
+{ "pattern": "handleAuth", "path": "src" }
+```
+
+```json
+{
+  "path": "src",
+  "queries": [
+    { "pattern": "handleAuth" },
+    { "pattern": "DATABASE_URL", "literal": true },
+    { "pattern": "await $X.json()", "structural": { "language": "typescript" } }
   ],
-  "stopOnError":false
+  "maxResults": 80
 }
 ```
 
-Up to 100 file entries are accepted. Batch evidence covers only complete rendered blocks; omitted or partial packed blocks do not gain edit authority.
+**How patterns are matched.** By default, a pattern runs through a ranked
+cascade:
 
-Natural-language query mode is intentionally not part of `read`. Use `grep` to discover candidate files, then `read` the relevant source. Use `LSP` when the question is compiler-backed rather than textual.
+1. Exact text matches come first.
+2. BM25 lexical ranking follows.
+3. AST symbol matches are added.
+4. The lists are merged by reciprocal-rank fusion and deduplicated.
+5. If that finds nothing and an embedding index exists, semantic search
+   runs as a last resort.
 
-### Symbol read
+Compact regex syntax switches a pattern to regex automatically. That
+includes `|`, `^` and `$` anchors, `[class]`, `{n}`, `\d`-style escapes,
+and groups without spaces such as `foo.*bar`. A lone `.` does not count.
+Multi-line patterns, prose with parentheses, and invalid regexes stay on
+the cascade, and the output says why.
 
-```json
-{"symbol":"AuthService.login","limit":120}
-```
+| Option          | Effect                                                       |
+| --------------- | ------------------------------------------------------------ |
+| `literal`       | Exact substring only. Skips the cascade and semantic search. |
+| `regex`         | Force regex. Zero hits stays zero. Cannot combine with `literal`. |
+| `path`, `glob`  | Scope the search. `path` defaults to the working directory.  |
+| `ignoreCase`    | Case-insensitive matching.                                   |
+| `contextLines`  | Lines around each hit. Default 2, maximum 20.                |
+| `perQueryLimit` | Hits per query. Default 20, maximum 50.                      |
+| `maxResults`    | Total rendered hits. Default 100, maximum 200.               |
+| `graphFilter`   | Keep hits with a graph relation, e.g. `CALLS->auth.login`.   |
+| `structural`    | ast-grep search: `language`, `skip`, `groupByFile`.          |
+| `skip`          | Pagination for structural search.                            |
 
-Qualified symbols resolve via LSP first and the context graph as fallback, then the source is read through the same evidence-producing path.
+`limit` still works as a deprecated alias for `perQueryLimit`.
 
-### Large-file AST outline
+Ranking ships with one knob on: files under test, spec and fixture paths,
+and all Markdown files, score at 0.7 of normal. You can change that and
+the other ranking knobs with environment variables. See
+[docs/configuration.md](docs/configuration.md#grep-ranking). Active knobs
+are listed in `details.rankingKnobs`.
 
-An unbounded single-file read of a supported source file above the configured threshold defaults to a compact structural outline instead of flooding context with the whole body.
+### `inspect`
 
-The outline contains declarations, signatures, nesting, and line ranges. Its evidence covers only the rendered declaration ranges. Use `offset`/`limit` or a symbol read for the implementation body.
+`inspect` analyzes structure. You must set `mode`, and it is never
+inferred from the path.
 
-Environment controls:
-
-- `PI_SMARTREAD_AST_OUTLINE=0` disables this behavior.
-- `PI_SMARTREAD_AST_OUTLINE_BYTES` changes the default 20 KB threshold.
-
-### Read enrichment
-
-Reads can append non-authoritative context such as imports, git recency/history, git notes, graph knowledge, and language-server context. Evidence still describes the rendered source content, not the enrichment footer.
-
----
-
-## `grep`
-
-`grep` is the primary code-search surface.
-
-### One query
-
-```json
-{"pattern":"handleAuth","path":"src"}
-```
-
-### Batch queries
+**File mode** reports a file's dependencies, dependents, callers, type
+relationships and quality signals.
 
 ```json
 {
-  "path":"src",
-  "queries":[
-    {"pattern":"handleAuth"},
-    {"pattern":"DATABASE_URL","literal":true}
-  ],
-  "perQueryLimit":20,
-  "maxResults":80
+  "mode": "file",
+  "path": "src/inspect/inspect.ts",
+  "analysis": { "signals": ["complexity", "tests"], "callDepth": 2, "callDirection": "both", "impact": true }
 }
 ```
 
-Provide exactly one of `pattern` or `queries`. Batch mode accepts 1-10 query objects.
+| Field                        | Values                                                         |
+| ---------------------------- | -------------------------------------------------------------- |
+| `signals`                    | `complexity`, `public-api`, `reuse`, `recency`, `tests`, `deprecation` |
+| `callDepth`, `callDirection` | Depth 1–5 (default 1). Direction `callers`, `callees` or `both`. |
+| `impact`                     | Files and symbols a change could reach                         |
+| `diff`                       | Map `unstaged`, `staged` or `HEAD` changes to affected symbols |
+| `deadCode`, `hotspots`, `routes`, `graphSchema` | Extra reports                               |
+| `compact`                    | Shorter output. Default `false`.                               |
 
-### Matching behavior
-
-By default, a normal-looking pattern is treated as a literal substring and runs through the smart cascade. Compact regex syntax (`|`, `^`/`$` anchors, `[class]`, `{n}`, `\d`-style escapes, or compact groups like `foo.*bar` / `(group)` without inner spaces) auto-routes to regex. Multi-line patterns, prose with parenthesised asides, and isolated `.*` / `.+` in multi-word text stay on the smart cascade — set `regex: true` to force regex interpretation (the pattern must be a valid regex; `regex` and `literal` cannot be combined). A bare `.` is not enough to make the pattern regex.
-
-Set `literal: true` to force deterministic substring matching and skip hybrid semantic expansion. Set `regex: true` to force regex matching with no silent fallback (zero hits stay zero).
-
-Without `literal: true`, the cascade combines:
-
-1. exact-text priority matches;
-2. lexical BM25-style ranking;
-3. AST/symbol matching;
-4. reciprocal-rank fusion and deduplication;
-5. embedding fallback when the semantic index is available and fused search is empty.
-
-### Options
-
-| Field | Meaning |
-|---|---|
-| `path` | Directory or file scope; defaults to cwd |
-| `glob` | File filter such as `src/**/*.ts` |
-| `ignoreCase` | Case-insensitive text matching |
-| `literal` | Force exact substring path |
-| `regex` | Force regex matching (must be valid; conflicts with `literal`) |
-| `perQueryLimit` | Per-query cap, default 20, max 50 |
-| `limit` | Deprecated per-query alias |
-| `maxResults` | Merged render cap, default 100, max 200 |
-| `contextLines` | Context around each hit, 0-20 |
-| `graphFilter` | Relationship filter such as `CALLS->auth.login` |
-| `structural` | ast-grep options: `language`, `skip`, `groupByFile` |
-| `skip` | Structural pagination shortcut |
-
-Every rendered hit gets search-match evidence, not full-file evidence. When auto-detection declines (multi-line input, prose parentheticals, or ambiguous wildcards), the output notes the routing — for example `grep({ pattern: "the token .* should be refreshed", regex: true })` forces regex interpretation.
-
-### Ranking knobs
-
-BM25 ranking demotes test/spec/doc files by default: `PI_SMARTREAD_GREP_RANK_TEST_DEMOTE` multiplies the score of test/spec/fixture/`__tests__` paths, `*.test.*` / `*.spec.*` / `test_*` / `*_test.*` files, and every Markdown file (`*.md`, including READMEs) by 0.7. Set it to `off` (also `0`, `false`, `no`) to disable demotion, or to a factor in (0,1) to override; any other value falls back to 0.7. All other ranking knobs stay default-off. Active knobs are reported in `details.rankingKnobs`.
-
----
-
-## `find`
-
-Pi-SmartRead replaces Pi's built-in `find` with file/directory discovery. Its exact schema remains `{pattern, path?, limit?}`:
+**Directory mode** builds a ranked repository map. It can add
+architecture views on top.
 
 ```json
-{"pattern":"files that configure the embedding endpoint","path":"src","limit":20}
+{ "mode": "directory", "path": "src", "analysis": { "mapTokens": 6000, "clusters": true, "layers": true } }
 ```
 
-Patterns select glob, fuzzy-name, or natural-language discovery. Results are grouped by directory and carry discovery-only evidence; `find` does not locate matching lines. Use `grep` for content and `read` for source. Natural-language results are optionally relevance-judged when `/judge` is enabled; glob and fuzzy-name results are never sent to a judge.
+Directory mode accepts `mapTokens` (256–32,768, default 4,096), `focus`,
+`clusters`, `layers`, `boundaries`, `routes`, `hotspots`, `deadCode`,
+`diff`, `graphSchema` and `compact`. `compact` defaults to `true` here.
 
-## Optional relevance judge
-
-Judging is off by default. In Pi, use `/judge off|local|cloud|status|install`. Cloud mode uses the OpenRouter key from Pi's auth store; cloud requests are restricted to OpenRouter and credentials are never sent to custom endpoints. Local mode uses a managed von sidecar on loopback; installing it requires an explicit UI confirmation for the ~3 GB first download. Local mode is experimental: it measured near chance on the SmartRead relevance benchmark, so cloud is recommended where available. D46 holdout evidence (210 queries / 8 repos): judge-on raised emptied answerable queries (false-empty ~2.4%→17.3%; net harms under 6:1 FN:FP utility, 95% CI [+0.55,+1.06]/query) while improving precision and read-ready on queries it keeps — prefer judge where precision matters more than recall. Thresholds were dev-tuned and must not be retuned against that holdout. Standalone MCP reads `PI_SMARTREAD_JUDGE_MODE` and user-environment credentials. A judge failure falls back to the unjudged search results. Workspace verdicts are cached under `<root>/.pi-smartread/judge-cache`, keyed by backend, endpoint, model, query, unit text and question; entries older than `PI_SMARTREAD_JUDGE_CACHE_MAX_AGE_DAYS` (default 7 days) are treated as misses.
-
----
-
-## `inspect`
-
-`inspect` has **four explicit modes**. The mode is required and is not inferred from the path.
-
-### File mode
+**Script mode** runs a read-only JavaScript program in a QuickJS sandbox.
+A chain of dependent lookups then fits in one tool call.
 
 ```json
 {
-  "mode":"file",
-  "path":"src/inspect/inspect.ts",
-  "analysis":{
-    "signals":["complexity","tests","reuse"],
-    "callDepth":2,
-    "callDirection":"both",
-    "impact":true,
-    "hotspots":true
-  }
+  "mode": "script",
+  "script": "const g = await grep('handleAuth', { literal: true }); const r = await read('src/auth.ts'); return { hits: g.totalHits, lines: r.totalLines };"
 }
 ```
 
-File mode can return structural facts such as dependencies/dependents, callers, parent/children, inheritance/implementation relationships, overrides, re-exports, and quality signals.
+Scripts can call these functions:
 
-Optional analysis fields include:
+- `grep()`, `read()`, `inspectFile()` and `inspectDir()`
+- `lsp.definition`, `references`, `implementation`, `hover`,
+  `documentSymbols`, `workspaceSymbols`, `prepareCallHierarchy`,
+  `incomingCalls` and `outgoingCalls`
+- `graph.impact`, `deadCode`, `callGraph`, `hotspots`, `routes`, `diff`,
+  `clusters`, `layers` and `boundaries`
 
-- `signals`
-- `compact`
-- `callDepth` and `callDirection`
-- `deadCode`
-- `impact`
-- `diff: "unstaged" | "staged" | "HEAD"`
-- `graphSchema`
-- `hotspots`
-- `routes`
+Scripts cannot edit, write or evaluate code. Each run is limited by
+default to:
 
-### Directory mode
+- 50 host calls, of which at most 10 are `lsp.*` calls
+- 5 calls at a time
+- 5 seconds of wall time
+- 12 MB of heap
+- 200 KB per call or result, and 1 MB in total
 
-```json
-{
-  "mode":"directory",
-  "path":"src",
-  "analysis":{
-    "mapTokens":6000,
-    "clusters":true,
-    "layers":true,
-    "boundaries":true,
-    "routes":true
-  }
-}
-```
+A run that exceeds its budget returns partial results, an audit log and any
+evidence it gathered.
 
-Directory mode builds a ranked repository map and can add architecture views such as communities, inferred layers, service boundaries, routes, hotspots, graph schema, and dead-code observations.
+> The `lsp.*` helpers take **1-based** line and character positions and use
+> their own operation names. The strict `LSP` tool takes **0-based**
+> positions. Convert both when you move an example from one to the other.
 
-Directory-specific fields include `mapTokens`, `focus`, `clusters`, `layers`, and `boundaries`, plus several shared analysis flags.
+`inspect` has no navigation or diagnostics. Use `LSP` for those.
 
-`inspect` deliberately does not expose semantic navigation or diagnostics. Use the strict `LSP` tool for definitions, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion, and refactor proposals. This keeps `inspect` focused on aggregate structural and architectural analysis.
+### `LSP`
 
-### Script mode
+`LSP` gives the model strict access to language servers. The tool name is
+uppercase, and positions are **0-based** in the server's negotiated
+encoding. The response reports that encoding in `server.positionEncoding`.
 
 ```json
-{
-  "mode":"script",
-  "script":"const g = await grep(\"handleAuth\", { literal: true }); const r = await read(\"src/auth.ts\"); return { hits: g.totalHits, lines: r.totalLines };"
-}
+{ "operation": "goToDefinition", "path": "src/auth.ts", "position": { "line": 41, "character": 9 } }
 ```
 
-Script mode runs a bounded read-only JavaScript program in QuickJS so dependent retrieval steps can happen inside one tool call.
+| Family     | Operations                                                         |
+| ---------- | ------------------------------------------------------------------ |
+| Navigation | `goToDefinition`, `goToDeclaration`, `goToTypeDefinition`, `goToImplementation`, `findReferences`, `hover`, `documentHighlights`, `documentSymbols`, `workspaceSymbols` |
+| Hierarchy  | `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls`, `prepareTypeHierarchy`, `supertypes`, `subtypes` |
+| Diagnostics and session | `diagnostics`, `workspaceDiagnostics`, `publishedDiagnostics`, `capabilities`, `sessionStatus` |
+| Proposals  | `prepareRename`, `rename`, `codeActions`, `resolveCodeAction`, `formatDocument`, `formatRange`, `formatOnType` |
+| Apply      | `applyProposal`                                                    |
+| Editor     | `completion`, `resolveCompletion`, `signatureHelp`, `inlayHints`, `resolveInlayHint`, `semanticTokens`, `foldingRanges`, `selectionRanges` |
+| Raw        | `request`, for an allowlist of read-only LSP methods               |
 
-Host API:
+The tool fails closed:
 
-- `grep(pattern, opts)`
-- `read(path, opts)`
-- `inspectFile(path, opts)`
-- `inspectDir(path, opts)`
-- `lsp.definition/references/implementation/hover/documentSymbols/workspaceSymbols/prepareCallHierarchy/incomingCalls/outgoingCalls`
-- `graph.impact/deadCode/callGraph/hotspots/routes/diff/clusters/layers/boundaries`
+- Unknown operations, extra fields, bad positions and missing required
+  fields are rejected.
+- `server` routes to that exact descriptor ID or nowhere.
+- A request that cannot be routed gets status `unavailable`. The tool
+  never falls back to another server.
+- The raw `request` operation rejects `workspace/executeCommand`,
+  `workspace/applyEdit`, `did*` notifications and `will*` requests.
 
-There is no edit/write/patch/eval escape hatch.
+Every result arrives in an envelope:
 
-Default budgets are 50 total host calls, 10 LSP calls, 5 concurrent calls, about 5 seconds wall time, 200 KB per call/final result, and 1 MB total returned bytes. Over-budget/timeout execution returns a degraded result with an audit log and any successfully accumulated evidence.
+- `status` is one of `ok`, `empty`, `unsupported`, `unavailable`,
+  `not_ready`, `timeout`, `cancelled`, `error` or `ambiguous`.
+- `operation` and `method` name the request.
+- `server` records the descriptor, language, project root and position
+  encoding.
+- `result` holds the server's answer.
+- `meta` covers freshness, readiness, document version, truncation and the
+  pagination cursor.
 
-The script-mode `lsp.*` namespace follows the inspect-navigation coordinate contract, not the strict `LSP` tool contract.
+**Changing files.** `rename`, `resolveCodeAction` and the format operations
+never write to disk. When SmartEdit is loaded, they stage the edit as a
+proposal and return a `proposalId` and a diff. `applyProposal` with that ID
+is the only operation that changes files. It hands the edit to SmartEdit,
+which checks the evidence first. Staging requires a server that uses
+UTF-16 positions.
 
----
+### `skill`
 
-## Strict `LSP` tool
-
-The Pi extension exposes one model-facing strict language-server tool named **`LSP`**.
+`skill` lists, searches and reads `SKILL.md` workflow files.
 
 ```json
-{
-  "operation":"goToDefinition",
-  "path":"src/auth.ts",
-  "position":{"line":41,"character":9}
-}
+{ "action": "search", "query": "safe rename" }
+{ "name": "lsp-rename" }
 ```
 
-Strict LSP positions are **0-based** in the server's negotiated encoding, which is returned in `server.positionEncoding`.
+It looks for skills in these places:
 
-### Operation families
+- `~/.pi/agent/skills` and `~/.agents/skills`
+- `.pi/skills` and `.agents/skills` in the current or any parent directory
+- package `skills/` directories
+- `package.json` → `pi.skills`
+- the skill paths in Pi settings
 
-**Navigation**
+Skills marked `disable-model-invocation: true` are hidden unless you pass
+`includeHidden`.
 
-- `goToDefinition`
-- `goToDeclaration`
-- `goToTypeDefinition`
-- `goToImplementation`
-- `findReferences`
-- `hover`
-- `documentHighlights`
-- `documentSymbols`
-- `workspaceSymbols`
+This repository ships nine skills. Run `node scripts/validate-skills.mjs`
+to check them.
 
-**Hierarchy**
+| Skill                 | What it does                                                  |
+| --------------------- | ------------------------------------------------------------- |
+| `inspect-script-mode` | Chains grep → read → LSP → graph in one script call           |
+| `lsp-explore`         | Meets unfamiliar code through symbols, definitions and hover  |
+| `lsp-local-symbols`   | Outlines a file so reads can target exact ranges              |
+| `lsp-impact`          | Measures blast radius with references and call hierarchy      |
+| `lsp-rename`          | Requests a rename proposal and applies it through SmartEdit   |
+| `lsp-safe-refactor`   | Triages code actions and refactor proposals                   |
+| `lsp-fix`             | Turns diagnostics into code-action proposals                  |
+| `lsp-cross-root`      | Routes requests across workspaces and exact servers           |
+| `lsp-verify`          | Re-checks diagnostics and references after a change           |
 
-- `prepareCallHierarchy`
-- `incomingCalls`
-- `outgoingCalls`
-- `prepareTypeHierarchy`
-- `supertypes`
-- `subtypes`
+### Experimental tools
 
-**Diagnostics/session**
-
-- `diagnostics`
-- `workspaceDiagnostics`
-- `publishedDiagnostics`
-- `capabilities`
-- `sessionStatus`
-
-**Proposal operations**
-
-- `prepareRename`
-- `rename`
-- `codeActions`
-- `resolveCodeAction`
-- `formatDocument`
-- `formatRange`
-- `formatOnType`
-
-**Editor semantics**
-
-- `completion`
-- `resolveCompletion`
-- `signatureHelp`
-- `inlayHints`
-- `resolveInlayHint`
-- `semanticTokens`
-- `foldingRanges`
-- `selectionRanges`
-
-**Escape hatch**
-
-- `request` for explicitly allowlisted observational raw LSP methods.
-
-The strict request validator rejects unknown operations, foreign fields, invalid positions/ranges, and missing operation-specific fields.
-
-### Strict envelope
-
-Every successful dispatch returns a provenance-bearing envelope with:
-
-- `status`: `ok | empty | unsupported | unavailable | not_ready | timeout | cancelled | error | ambiguous`
-- `operation` and wire `method`
-- `server`: descriptor id, name, language id, project root, position encoding
-- `result`
-- `meta`: freshness, readiness, document version, truncation, cursor
-- optional structured `error`
-
-An exact `server` field routes to that descriptor id only. Unroutable requests return `unavailable`; SmartRead does not silently guess another server.
-
-### Proposal mutation boundary
-
-Rename, formatting, and resolved code-action (resolveCodeAction) operations return proposals. When SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path.
-
-Unsolicited `workspace/applyEdit` is rejected, and raw `workspace/executeCommand` / `workspace/applyEdit` calls are fail-closed.
-
-SmartEdit is the mutation owner. See [docs/lsp-smartedit-contract.md](docs/lsp-smartedit-contract.md).
-
----
-
-## `skill`
-
-The `skill` tool lists, searches, and reads reusable procedural instructions.
+These tools register only when you enable them in
+`pi-smartread.config.json`:
 
 ```json
-{"action":"search","query":"safe rename"}
+{ "experimental": { "graphMutate": true, "gitNotes": true } }
 ```
 
-Or:
+`graph_mutate` records how files are coupled, for example when editing one
+file broke another. The model can then use that history in later analysis.
 
 ```json
-{"name":"lsp-rename"}
+{ "from": "src/types/user.ts", "to": "src/services/auth.ts", "relation": "breakage", "context": "renamed User.id", "confidence": 0.9 }
 ```
 
-Discovery includes:
-
-- `~/.pi/agent/skills`
-- `~/.agents/skills`
-- ancestor `.pi/skills`
-- ancestor `.agents/skills`
-- ancestor/package `skills/`
-- `package.json -> pi.skills`
-- configured paths from Pi settings
-
-Skills with `disable-model-invocation: true` are hidden unless explicitly requested with `includeHidden`.
-
-The repository ships:
-
-| Skill | Purpose |
-|---|---|
-| `inspect-script-mode` | Multi-hop read-only composition |
-| `lsp-explore` | Symbols, definition, hover |
-| `lsp-impact` | References, implementations, call hierarchy |
-| `lsp-local-symbols` | Document outline before targeted reads |
-| `lsp-rename` | Fresh semantic rename proposal |
-| `lsp-safe-refactor` | Code-action/refactor proposal triage |
-| `lsp-fix` | Diagnostics to code-action proposal |
-| `lsp-cross-root` | Explicit workspace/server routing |
-| `lsp-verify` | Post-edit semantic verification |
-
-Validate repository skills with:
-
-```bash
-node scripts/validate-skills.mjs
-```
-
----
-
-## Experimental tools
-
-Experimental tools register only when enabled in `pi-smartread.config.json`.
-
-### `graph_mutate`
-
-Records durable semantic coupling observations such as:
-
-- `breakage`: editing A caused failure in B;
-- `co-change`: A and B are known to move together.
-
-```json
-{
-  "from":"src/types/user.ts",
-  "to":"src/services/auth.ts",
-  "relation":"breakage",
-  "context":"renamed User.id",
-  "confidence":0.9
-}
-```
-
-### Git notes
-
-`git_notes_read` and `git_notes_write` store durable AI context on git commits/branches. They are intended for decisions, constraints, rejected approaches, and continuation context, not as a replacement for normal git history.
-
-Enable both families independently:
-
-```json
-{
-  "experimental":{
-    "graphMutate":true,
-    "gitNotes":true
-  }
-}
-```
-
----
-
-## Workspace evidence and SmartEdit
-
-Pi-SmartRead produces versioned `WorkspaceEvidenceEnvelope` objects from `@rhinos0608/pi-workspace-protocol`.
-
-The important semantics are:
-
-- complete source reads can provide strong file/range evidence;
-- partial reads authorize only rendered ranges;
-- AST outlines authorize rendered declaration lines;
-- grep and inspect results are discovery/search-match evidence;
-- directory maps do not authorize arbitrary file edits;
-- canonical evidence paths use real paths with symlinks resolved;
-- tool-result `details.workspaceEvidence` is the durable source of truth;
-- the resolver cache is rebuilt from tool-result events and serves SmartEdit over RPC.
-
-Direct file reads are intentionally not gated by `PI_SMARTREAD_ALLOWED_ROOT`. That variable scopes automatic semantic indexing/retrieval, not direct tool access.
-
-The shared protocol package is pinned in `package.json`; code should use the imported protocol schema/version constants rather than hardcoding a schema number.
-
----
-
-## Language intelligence runtime
-
-Pi-SmartRead owns language-server processes and routes requests through a strict executor.
-
-### Server resolution
-
-For a file, the resolver tries:
-
-1. explicit user override;
-2. project-local binary, only for a trusted project root;
-3. system/PATH binary;
-4. Pi-managed binary;
-5. degraded/unavailable result.
-
-No server process is spawned merely to probe PATH.
-
-### Built-in descriptor catalog
-
-Current descriptors include TypeScript/JavaScript, Python, Rust, Go, C/C++, C#, Java, PHP, Bash, JSON, YAML, HTML, CSS, Lua, and Ruby servers.
-
-Managed npm installs are available for:
-
-| Descriptor | Managed package |
-|---|---|
-| `typescript` | `typescript-language-server@6.0.0` |
-| `python` | `pyright@1.1.413` |
-| `bash-language-server` | `bash-language-server@5.6.0` |
-| `vscode-json-language-server` | `vscode-langservers-extracted@4.10.0` |
-| `yaml-language-server` | `yaml-language-server@1.24.0` |
-| `vscode-html-language-server` | `vscode-langservers-extracted@4.10.0` |
-| `vscode-css-language-server` | `vscode-langservers-extracted@4.10.0` |
-
-Other catalog entries resolve from project-local or system installations.
-
-### Trust and managed installs
-
-Project-local executables run only from trusted roots.
-
-Trust store:
-
-```text
-~/.pi/agent/language-intelligence/trust.json
-```
-
-Managed runtime:
-
-```text
-~/.pi/agent/language-intelligence/
-  packages/
-  bin/
-  locks/
-  logs/
-  runtime.lock.json
-```
-
-Managed installs use exact package versions, `--ignore-scripts`, atomic swaps, integrity checks, and cross-process locking.
-
-### Operator command: `/lsp`
-
-The slash command is lowercase even though the model-facing tool is uppercase `LSP`.
-
-| Command | Purpose |
-|---|---|
-| `/lsp status` | Language/server resolution summary |
-| `/lsp doctor [lang]` | Detailed resolution diagnosis |
-| `/lsp trust [path]` | Trust a project root for project-local binaries |
-| `/lsp restart [server]` | Evict/restart the current root manager |
-| `/lsp install <server>` | Install one managed server |
-| `/lsp install auto` | Enable auto-install and install missing managed candidates |
-| `/lsp update <server>` | Reinstall the pinned managed version |
-| `/lsp update --all` | Update installed managed servers |
-| `/lsp uninstall <server>` | Remove a managed server |
-
-Configuration is stored under `~/.pi/agent/language-intelligence.json`.
-
-### SmartEdit RPC provider
-
-Pi-SmartRead also exposes the SmartEdit-facing language-intelligence RPC channel. It provides capabilities, post-edit diagnostics, rename preview, organize imports, formatting, and code-action proposals.
-
-The RPC proposal path validates WorkspaceEdits and currently fails closed unless proposal coordinates are UTF-16 compatible. Direct strict `LSP` calls still expose the negotiated server encoding.
-
-See:
-
-- [docs/lsp-conformance.md](docs/lsp-conformance.md)
-- [docs/lsp-smartedit-contract.md](docs/lsp-smartedit-contract.md)
-
----
-
-## Retrieval and repository intelligence
-
-### Semantic index
-
-When embedding configuration is available, SmartRead maintains an ignore-aware persistent semantic index under `.pi-smartread/`, with:
-
-- incremental file state;
-- embedding/config/model fingerprinting;
-- persistent vector storage;
-- file-hash tracking;
-- coverage diagnostics;
-- deleted-file cleanup;
-- retry on failed embeddings.
-
-Without embeddings, retrieval degrades to lexical/structural paths rather than hard-failing.
-
-### Context graph
-
-The context graph combines static structure and persisted observations for graph-aware retrieval and analysis.
-
-Graph-backed features include:
-
-- centrality and PageRank;
-- import/call relationships;
-- community detection;
-- impact analysis;
-- hotspots;
-- route extraction;
-- persisted breakage/co-change edges;
-- graph filters in grep.
-
-### Repository intelligence
-
-`src/repository/` adds workspace snapshots, semantic deltas, ADR storage, lineage, relationship evidence, ranking signals, and snapshot retention.
-
-MCP resources expose several of these repository views directly.
-
----
+`relation` is `breakage` or `co-change`. `git_notes_read` and
+`git_notes_write` store decisions, constraints and rejected approaches as
+git notes on commits. All three tools accept an optional `directory` that
+overrides the working directory.
+
+## Relevance judge
+
+The judge is an optional model that reranks results. It applies only to
+natural-language `grep` queries and natural-language `find` patterns. It is
+**off by default**.
+
+| Command         | Effect                                                         |
+| --------------- | -------------------------------------------------------------- |
+| `/judge cloud`  | Judge through OpenRouter, using the key in Pi's auth store     |
+| `/judge local`  | Judge with a local von sidecar. Experimental.                  |
+| `/judge install`| Install the local sidecar (about 3 GB, asks before downloading) |
+| `/judge status` | Show the mode, backend and cache                               |
+| `/judge off`    | Turn judging off                                               |
+
+**Know the trade-off before you turn it on.** On a held-out benchmark of 210
+queries across eight repositories, the cloud judge made results more
+precise. It also returned nothing far more often for questions that had an
+answer: the rate of empty results rose from about 2.4% to 17.3%. Under the
+benchmark's scoring, the net effect was harmful. The run used excerpt-based
+existence checks, which are not the default; see
+[docs/configuration.md](docs/configuration.md#relevance-judge). Use the
+judge when a short, precise list matters more than finding everything. The
+local judge scored near chance on the same benchmark, so prefer cloud mode.
+
+When the judge rates nothing as confident and doubts that an answer exists,
+`grep` returns `no confident match for "<query>"` with no locations. It
+does not show weak guesses. If the judge fails, you get the unjudged
+results.
+
+Details:
+
+- Cloud requests go only to OpenRouter's origin. The tool never sends
+  credentials to any other endpoint.
+- The local sidecar listens only on `127.0.0.1`.
+- Verdicts are cached in `.pi-smartread/judge-cache/` for 7 days.
+- The MCP server reads `PI_SMARTREAD_JUDGE_MODE` and
+  `PI_SMARTREAD_JUDGE_API_KEY` from its environment.
+
+All judge settings are listed in
+[docs/configuration.md](docs/configuration.md#relevance-judge).
+
+## Evidence and the SmartEdit boundary
+
+Each tool result carries a versioned `WorkspaceEvidenceEnvelope`, defined
+in [`@rhinos0608/pi-workspace-protocol`][protocol], in
+`details.workspaceEvidence`. SmartEdit uses it to decide what the model is
+allowed to change.
+
+- A complete file read gives strong evidence for that file.
+- A partial read covers only the lines it rendered.
+- An AST outline covers only the declaration lines it rendered.
+- In a batch read, files that were omitted or cut short gain no authority.
+- `grep`, `find` and `inspect` produce discovery evidence only. That
+  includes directory maps.
+- Evidence uses real paths, with symlinks resolved.
+- The tool results are the record of truth. SmartRead keeps an in-memory
+  cache of them and serves it to SmartEdit over RPC.
+
+SmartRead never writes files. It publishes evidence and edit proposals, and
+SmartEdit performs every change. The full contract is in
+[docs/lsp-smartedit-contract.md](docs/lsp-smartedit-contract.md).
+
+`PI_SMARTREAD_ALLOWED_ROOT` limits automatic indexing and retrieval only.
+It does not restrict direct reads.
+
+[protocol]: https://github.com/rhinos0608/Pi-Workspace-Protocol
+
+## Language servers
+
+SmartRead starts and manages language-server processes itself. To pick a
+server for a file, it tries these sources in order:
+
+1. Your explicit override
+2. A binary inside the project, but only if you have trusted that root
+3. A binary on your `PATH`
+4. A copy installed and managed by SmartRead
+5. Otherwise, a degraded result. No process is started.
+
+The catalog covers TypeScript and JavaScript, Python, Rust, Go, C and C++,
+C#, Java, PHP, Bash, JSON, YAML, HTML, CSS, Lua and Ruby. The full list is
+in [`language-server-catalog.ts`][catalog]. SmartRead can install these
+servers itself, at fixed versions:
+
+| Server                                     | Package                               |
+| ------------------------------------------ | ------------------------------------- |
+| `typescript`                               | `typescript-language-server@6.0.0`    |
+| `python`                                   | `pyright@1.1.413`                     |
+| `bash-language-server`                     | `bash-language-server@5.6.0`          |
+| `yaml-language-server`                     | `yaml-language-server@1.24.0`         |
+| `vscode-json-language-server`, `-html-`, `-css-` | `vscode-langservers-extracted@4.10.0` |
+
+Managed installs live under `~/.pi/agent/language-intelligence/`. They pin
+exact versions, skip install scripts, check integrity, swap in atomically
+and lock across processes. Trust decisions are stored in `trust.json` in
+that directory. Settings are in `~/.pi/agent/language-intelligence.json`.
+
+Manage servers with the `/lsp` command. The command is lowercase, unlike
+the tool name.
+
+| Command                                | Effect                                       |
+| -------------------------------------- | -------------------------------------------- |
+| `/lsp status`                          | Show how each language resolves              |
+| `/lsp doctor [lang]`                   | Explain one language's resolution in detail  |
+| `/lsp trust [path]`                    | Allow project-local binaries under a root    |
+| `/lsp restart [server]`                | Restart servers for the current root         |
+| `/lsp install <server>`                | Install one managed server                   |
+| `/lsp install auto`                    | Turn on auto-install and install what's missing |
+| `/lsp update <server>`, `/lsp update --all` | Reinstall the pinned version            |
+| `/lsp uninstall <server>`              | Remove a managed server                      |
+
+[catalog]: src/language-intelligence/language-server-catalog.ts
+
+## Runtime behavior inside Pi
+
+Besides its tools, the extension hooks into the Pi session:
+
+- **Startup context.** At the start of a session, it injects a compact
+  repository map and guidance on which tool to use. It also removes Pi's
+  `ls` tool, so the model uses `find` and `grep` instead.
+- **Context hygiene.** After a file changes, earlier reads of that file in
+  the context are replaced with a placeholder. The model then stops
+  reasoning from old source.
+- **Doom-loop detection.** Repeated identical calls, stalled tool streaks
+  and excessive re-reads trigger a warning with a suggested next step.
+- **Output guard.** Oversized `bash` output is cut to a head and tail
+  preview. The guard also bounds large `inspect` and `git_notes_read`
+  results.
+- **Bash hints.** A failed command gets a fix hint for your platform. When
+  `bash` is used where a dedicated tool fits better, an advisory suggests
+  the tool. Advisories never block a command.
+- **Post-edit checks.** If SmartEdit is not installed, SmartRead adds
+  language-server diagnostics and an impact summary after `edit` and
+  `write`.
+- **File watching.** SmartRead polls file stats so its indexes stay
+  current.
+- **Microagents.** Markdown instructions in `.pi-smartread/microagents/` or
+  `.openhands/microagents/` load on a trigger or on every session.
 
 ## Configuration
 
-`pi-smartread.config.json` is discovered by walking upward from the current directory.
-
-### Safe minimal config
+SmartRead looks for `pi-smartread.config.json` in the current directory,
+then in each parent directory. Every field is optional.
 
 ```json
 {
-  "model":"nomic-embed-text",
-  "chunkSizeChars":4096,
-  "chunkOverlapChars":512,
-  "maxChunksPerFile":12,
-  "probeEnabled":false,
-  "rerankEnabled":false,
-  "hydeEnabled":false
+  "model": "nomic-embed-text",
+  "chunkSizeChars": 4096,
+  "rerankEnabled": false,
+  "hydeEnabled": false,
+  "gitContext": { "enabled": true, "readEnrichmentCommits": 3 },
+  "experimental": { "graphMutate": false, "gitNotes": false, "bashMisuseHints": true }
 }
 ```
 
-Network endpoints and API keys are intentionally **not trusted from repository config**.
-
-Set embedding connectivity in the environment:
+**Network endpoints and API keys come only from your environment.**
+SmartRead ignores `baseUrl` and API-key fields in the repository config,
+because you may not trust everyone who can edit a repository. To turn on
+semantic search:
 
 ```bash
 export PI_SMARTREAD_EMBEDDING_BASE_URL="http://localhost:11434/v1"
 export PI_SMARTREAD_EMBEDDING_MODEL="nomic-embed-text"
-# optional
-export PI_SMARTREAD_EMBEDDING_API_KEY="..."
+export PI_SMARTREAD_EMBEDDING_API_KEY="..."   # if your endpoint needs one
 ```
 
-Public non-local endpoints must use HTTPS.
+Plain HTTP is accepted only for local and private-network hosts. Public
+endpoints must use HTTPS. With embeddings configured, SmartRead keeps an
+incremental index in `.pi-smartread/`.
 
-### Embedding knobs
-
-| Config/env | Meaning |
-|---|---|
-| `model` / `PI_SMARTREAD_EMBEDDING_MODEL` | Embedding model |
-| `PI_SMARTREAD_EMBEDDING_BASE_URL` | Trusted endpoint, env only |
-| `PI_SMARTREAD_EMBEDDING_API_KEY` | API key, env only |
-| `chunkSizeChars` / `PI_SMARTREAD_CHUNK_SIZE` | Target chunk size |
-| `chunkOverlapChars` / `PI_SMARTREAD_CHUNK_OVERLAP` | Chunk overlap |
-| `maxChunksPerFile` / `PI_SMARTREAD_MAX_CHUNKS` | Chunk cap per file |
-| `probeEnabled` | Symbol/query probing |
-| `hydeEnabled` | Deterministic HyDE expansion |
-| `rerankEnabled` | Enable reranking stage |
-
-Legacy `EMBEDDING_BASE_URL` and `EMBEDDING_MODEL` are accepted as fallbacks.
-
-### External reranker
-
-When `rerankEnabled` is true and `PI_SMARTREAD_RERANKER_BASE_URL` is set, the ranking stage calls the external reranker. If the call fails, it falls back to the structural reranker.
-
-Repository config may provide non-network settings:
-
-```json
-{
-  "rerankEnabled":true,
-  "externalReranker":{
-    "model":"rerank-english-v3.0",
-    "timeoutMs":10000,
-    "maxDocuments":20
-  }
-}
-```
-
-Endpoint and secret stay in the environment:
-
-```bash
-export PI_SMARTREAD_RERANKER_BASE_URL="https://reranker.example/v1"
-export PI_SMARTREAD_RERANKER_API_KEY="..."
-```
-
-### Git context
-
-Git enrichment is enabled by default. Example:
-
-```json
-{
-  "gitContext":{
-    "enabled":true,
-    "readEnrichmentCommits":3,
-    "coCommitMinCorrelation":0.15,
-    "tokenBudget":{
-      "gitLog":800,
-      "coCommitHotspots":400,
-      "gitNotes":600
-    }
-  }
-}
-```
-
-### File watching
-
-The default watcher favors descriptor-safe polling. Relevant environment controls include:
-
-```bash
-FILE_WATCHER_POLL_INTERVAL_MS=1000
-FILE_WATCHER_MODE=non-recursive
-FILE_WATCHER_MAX_COUNT=16
-```
-
-Native/chokidar modes can use more file descriptors. Generated dependency/build/cache/subagent trees are excluded.
-
-### Retrieval scope
-
-`PI_SMARTREAD_ALLOWED_ROOT` (legacy alias `CBM_ALLOWED_ROOT`) limits automatic semantic-index/retrieval scope. It is not a direct-read authorization boundary.
-
----
-
-## Cross-cutting runtime behavior
-
-### Context hygiene
-
-SmartRead records read context and observes mutations. Reads that became stale can be marked/replaced so the model does not silently reason from pre-edit source.
-
-### Doom-loop detection
-
-Repeated identical retrieval calls are detected and surfaced with tool-specific suggestions.
-
-### Bash context guard
-
-Oversized shell output is bounded to a useful preview; full output can be redirected to temporary storage rather than consuming the model context window.
-
-### Bash misuse hints
-
-Bash misuse hints are on by default. They are hint-only advisories and never block bash. Opt out via `"experimental":{"bashMisuseHints":false}` in `pi-smartread.config.json` or `PI_SMARTREAD_BASH_MISUSE_HINTS=0` (explicit `0`/`1` overrides config).
-
-### Startup context
-
-The extension starts asynchronous repository/index work and can inject a compact repo map plus tool-selection guidance at the beginning of a session.
-
-### Microagents
-
-SmartRead can load markdown microagents from project locations such as `.pi-smartread/microagents/` and `.openhands/microagents/`, with trigger-based or always-loaded instructions.
-
----
+Every config key and environment variable is listed in
+[docs/configuration.md](docs/configuration.md). That covers reranking, git
+context, `grep` ranking, the judge, the output guard, file watching and
+diagnostics.
 
 ## MCP server
 
-Run:
+The server speaks MCP over stdio. To add it to Claude Code:
 
 ```bash
-npm run mcp-server
+claude mcp add pi-smartread -- npx tsx /path/to/Pi-SmartRead/src/mcp-server.ts
 ```
 
-The server uses stdio and the official MCP SDK.
+To start it from a checkout, run `npm run mcp-server`.
 
-### MCP tools
+- **Tools:** `find`, `grep`, `inspect`, `LSP` and `skill`, plus any
+  experimental tools you enable. The `read` tool depends on Pi and is not
+  included.
+- **Prompts:** `explain-code`, `review-diff`, `architectural-analysis` and
+  `smartread-tool-guide`.
+- **Resources:**
+  - `smartread://config`, with secrets redacted
+  - `smartread://repo-map`
+  - `smartread://status`
+  - `smartread://repo/stats`
+  - `smartread://repo/graph/summary`, `/communities` and `/god-nodes`
+  - `smartread://repo/index/status` and `/coverage`
+  - `smartread://repo/adrs`
+  - `smartread://repo/near-clones`
 
-By default:
+The MCP server does not install the Pi hooks. Setup for Claude Desktop,
+Cursor and other clients is in [docs/mcp-quickstart.md](docs/mcp-quickstart.md).
 
-- `inspect`
-- `grep`
-- `skill`
+## Troubleshooting
 
-Enabled experimental registry tools are also exposed.
+**Search says embeddings are unavailable.** Set both
+`PI_SMARTREAD_EMBEDDING_BASE_URL` and a model. Without them, search
+continues with lexical and structural ranking.
 
-The standalone server intentionally does not expose the Pi-wrapped `read` or Pi-registered strict `LSP` tool.
+**A `baseUrl` in the repository config is ignored.** That is intended.
+Endpoints and keys come from the environment only.
 
-### MCP resources
+**`LSP` returns `unavailable`.** Run `/lsp status`, then
+`/lsp doctor <language>`. Install a managed server, add one to your `PATH`,
+or trust the project root for a project-local binary.
 
-| URI | Content |
-|---|---|
-| `smartread://config` | Resolved config with secrets redacted |
-| `smartread://repo-map` | Generated compact repository symbol map |
-| `smartread://status` | Version, tool count, capability flags |
-| `smartread://repo/stats` | File/language statistics |
-| `smartread://repo/graph/summary` | Graph counts and coverage |
-| `smartread://repo/graph/communities` | Architectural communities |
-| `smartread://repo/graph/god-nodes` | Highest-centrality graph nodes |
-| `smartread://repo/index/status` | Graph/index/snapshot status |
-| `smartread://repo/index/coverage` | Index coverage records |
-| `smartread://repo/adrs` | Stored ADR records |
-| `smartread://repo/near-clones` | Near-clone report |
+**A project-local language server is skipped.** Trust the root with
+`/lsp trust [path]`.
 
-### MCP prompts
+**A rename returned an edit, but no file changed.** That is intended.
+Proposals change files only through `applyProposal`, and only when
+SmartEdit is loaded.
 
-- `explain-code`
-- `review-diff`
-- `architectural-analysis`
-- `smartread-tool-guide`
+**`read { path }` returned signatures instead of the file.** That is the
+AST outline for large files. Read a range or a symbol, raise
+`PI_SMARTREAD_AST_OUTLINE_BYTES`, or set `PI_SMARTREAD_AST_OUTLINE=0`.
 
-See [docs/mcp-quickstart.md](docs/mcp-quickstart.md) for client configuration examples.
+**`grep` found nothing, and the judge is on.** The judge may have
+abstained. Run `/judge off` and search again to see the unjudged results.
 
----
+**I want a quick architecture overview.** Run
+`inspect { "mode": "directory", "path": "." }`.
 
-## Language support
+## Upgrading from older tool names
 
-Repository mapping and structural parsing cover a broad multi-language extension map, including TypeScript/JavaScript, Python, Go, Rust, C/C++, C#, Java, Bash, Ruby, PHP, Lua, CSS, HCL, Kotlin, Swift, Solidity, Zig, and others.
+| Old surface                     | Use now                                           |
+| ------------------------------- | ------------------------------------------------- |
+| `read_files`                    | `read { paths: [...] }`                           |
+| `search`                        | `grep`                                            |
+| `repo_map`                      | `inspect { mode: "directory" }`                   |
+| `intent_read` and semantic reads | `grep` or `find`, then `read`                    |
+| Old `symbol` tool               | `read { symbol }`, or `LSP` for semantics         |
+| `inspect` without `mode`        | `inspect` with an explicit `mode`                 |
+| `inspect` `navigate` mode       | `LSP` (positions are 0-based)                     |
 
-Dedicated structural-fact extraction is strongest for TypeScript/JavaScript/TSX and Python.
-
-Call-graph enrichment has dedicated support for TypeScript/JavaScript/TSX, Python, Go, and Rust.
-
-Files without a dedicated AST grammar still work with normal reads and text/lexical retrieval.
-
-The LSP descriptor catalog is separate from tree-sitter language support; see `src/language-intelligence/language-server-catalog.ts` for the current server list.
-
----
+Design notes in `docs/archive/` may still use the old names.
 
 ## Development
 
 ```bash
 npm ci
-npm run typecheck
 npm run lint
+npm run typecheck
 npm test
 ```
 
-Focused tests:
+| Task                         | Command                                                          |
+| ---------------------------- | ---------------------------------------------------------------- |
+| One test file                | `npx vitest run test/unit/search/grep-tool.test.ts`              |
+| LSP unit tests               | `npx vitest run test/unit/lsp`                                   |
+| Validate shipped skills      | `node scripts/validate-skills.mjs`                               |
+| Real language-server tests   | `PI_SMARTREAD_LSP_CONFORMANCE=1 npx vitest run test/integration/lsp` |
 
-```bash
-npx vitest run test/unit/search/grep-tool.test.ts
-npx vitest run test/unit/lsp
-node scripts/validate-skills.mjs
-```
+CI runs lint, typecheck and the full suite on Node 20, on Ubuntu, macOS
+and Windows. A second Linux workflow runs the real-server conformance
+suite against Pyright, gopls, rust-analyzer and clangd, and fails if any
+test is skipped.
 
-Real language-server integration tests are opt-in locally:
+The search and judge benchmarks are in `scripts/eval/`. They include the
+held-out benchmark, comparisons with other search tools, and judge
+precision and recall curves. Results and decisions are recorded in
+[docs/plans/2026-10-06-decision-log.md](docs/plans/2026-10-06-decision-log.md).
 
-```bash
-PI_SMARTREAD_LSP_CONFORMANCE=1 npx vitest run test/integration/lsp
-```
+| Directory                    | Contents                                                 |
+| ---------------------------- | -------------------------------------------------------- |
+| `src/read/`, `src/evidence/` | Reads, enrichment and evidence production                |
+| `src/search/`                | `grep` cascade, `find`, structural and graph filtering   |
+| `src/judge/`                 | Relevance judge, cache and von sidecar                   |
+| `src/inspect/`, `src/script-mode/` | Structural analysis and the QuickJS script host    |
+| `src/lsp/`                   | Strict LSP contract, executor and transport              |
+| `src/language-intelligence/` | Server catalog, resolution, trust, installs and SmartEdit RPC |
+| `src/indexing/`, `src/graph/`, `src/repository/` | Semantic index, context graph and repository intelligence |
+| `src/runtime/`               | Hooks, watcher, guards and the `skill` tool               |
+| `src/mcp/`                   | MCP prompts and resources                                |
+| `skills/`                    | Shipped skills                                           |
 
-The dedicated CI workflow installs pinned Pyright, gopls, rust-analyzer, and clangd environments and enforces zero-skip conformance lanes.
+Operational rules for coding agents working in this repository are in
+[AGENTS.md](AGENTS.md).
 
-Main CI runs `npm ci`, typecheck, and the full test suite on Node 20 across Ubuntu, macOS, and Windows.
+## Further reading
 
-### Repository map
-
-| Directory | Responsibility |
-|---|---|
-| `src/read/` | Evidence-aware known-file/symbol reads plus internal retrieval engines |
-| `src/search/` | Grep cascade, structural search, semantic/graph filtering |
-| `src/inspect/` | File/directory structural analysis and script orchestration |
-| `src/script-mode/` | Bounded QuickJS composition |
-| `src/lsp/` | Strict LSP contract, executor, transport, sessions, codecs |
-| `src/language-intelligence/` | Server catalog, resolver, trust, installs, SmartEdit provider |
-| `src/indexing/` | Semantic index, embeddings, persistence, snapshots/coverage |
-| `src/graph/` | Context graph, communities, mutations, graph enrichment |
-| `src/repository/` | ADRs, lineage, semantic deltas, repository ranking |
-| `src/evidence/` | Workspace evidence production/resolution |
-| `src/runtime/` | Skills, hygiene, watcher, guidance, safety hooks |
-| `src/mcp/` | MCP prompts/resources |
-| `skills/` | Shipped workflow skills |
-| `test/unit/` | Default unit/contract tests |
-| `test/integration/lsp/` | Opt-in real-server LSP suite |
-
----
-
-## Troubleshooting
-
-**Semantic retrieval says embeddings are unavailable**
-
-Set both `PI_SMARTREAD_EMBEDDING_BASE_URL` and a model. The system will otherwise continue in lexical/structural mode.
-
-**Repo config contains a baseUrl but it is ignored**
-
-That is intentional. Network endpoints and API keys are environment-only trust decisions.
-
-**`LSP` returns `unavailable`**
-
-Run `/lsp status` and `/lsp doctor <language>`. Check PATH, project-root trust for local binaries, or install a managed candidate.
-
-**Project-local language server is skipped**
-
-Trust the root with `/lsp trust [path]`.
-
-**A rename/code action returned an edit but nothing changed**
-
-Correct behavior. SmartRead returns proposals; SmartEdit owns mutation.
-
-**An old inspect navigate example no longer works**
-
-That public mode was removed. Use strict `LSP` directly; its positions are 0-based in the negotiated server encoding. Script-mode `lsp.*` helpers remain an internal composition API and use their documented helper coordinates.
-
-**A large `read { path }` returned signatures instead of the whole file**
-
-That is the AST-outline guard. Use `offset`/`limit`, `symbol`, or disable/raise the outline threshold.
-
-**Need a fast architecture overview**
-
-Use:
-
-```json
-{"mode":"directory","path":".","analysis":{"compact":true}}
-```
-
----
-
-## Migration from older tool surfaces
-
-Older versions exposed tools such as `read_files`, `search`, `repo_map`, `symbol`, `intent_read`, and other helper tools directly.
-
-Current equivalents:
-
-| Older surface | Current surface |
-|---|---|
-| `read_files` | `read { paths: [...] }` |
-| intent/semantic read | `grep` for discovery, then `read`; use `LSP` for compiler-backed semantics |
-| symbol read | `read { symbol: "..." }` |
-| `search` | `grep` |
-| `repo_map` | `inspect { mode: "directory", path: ... }` |
-| old inspect query/symbol | `grep` or `read { symbol }` |
-| old auto-detected inspect path | explicit `inspect.mode` |
-| inspect `navigate` / ad-hoc LSP helpers | strict `LSP` |
-
-Historical design documents under `docs/archive/` may still use removed tool names.
-
----
-
-## Further documentation
-
+- [Configuration reference](docs/configuration.md)
 - [MCP quickstart](docs/mcp-quickstart.md)
 - [LSP conformance matrix](docs/lsp-conformance.md)
-- [SmartRead ↔ SmartEdit LSP contract](docs/lsp-smartedit-contract.md)
-- [Inspect script-mode design](docs/plans/2026-09-13-inspect-script-mode-design.md)
-- [LSP semantic substrate plan](docs/plans/2026-09-22-lsp-semantic-substrate-plan.md)
+- [SmartRead and SmartEdit LSP contract](docs/lsp-smartedit-contract.md)
+- [Script-mode design](docs/plans/2026-09-13-inspect-script-mode-design.md)
+- [Relevance judge design](docs/plans/2026-10-05-grep-judge-design.md)
+- [Enhanced `find` design](docs/plans/2026-10-05-enhanced-find-design.md)
 - [Skills convention](skills/README.md)
 - [Archived design history](docs/archive/README.md)
 
-## License
+## Acknowledgements and license
 
-MIT © 2026 Rhine Sharar
+Pi-SmartRead began as a fork of pi-read-many by Gurpartap Singh. That tool
+let Pi read several files in one call, packing them to fit the context.
+Little of that code remains, but the batch `paths` read comes from it.
+
+MIT. See [LICENSE](LICENSE).
