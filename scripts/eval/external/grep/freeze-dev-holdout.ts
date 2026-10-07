@@ -107,7 +107,7 @@ function parseArgs(argv: string[]): { seed: string; offline: boolean } {
 
 const args = parseArgs(process.argv.slice(2));
 
-const mlRows = await fetchAllRows();
+const mlRows = await fetchAllRows({ offline: args.offline });
 const mlRevision = datasetRevision(mlRows);
 const mlConverted = rowsToInstances(mlRows);
 const loaderExclusions: Array<{ instanceId: string; stage: string; reason: string }> = [
