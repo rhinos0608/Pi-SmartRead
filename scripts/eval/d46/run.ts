@@ -82,7 +82,7 @@ import {
     pinnedQueryFileNames,
     type D46SplitManifest,
 } from "./validate.js";
-import type { D46Query, D46Split } from "./schema.js";
+import type { D46GoldSpan, D46Query, D46Split } from "./schema.js";
 import { aggregateD46, scoreD46Query, summarizeD46, type D46RenderedUnit } from "./score.js";
 
 export const D46_REPORTS_DIR = join(homedir(), ".cache", "pi-smartread-bench", "reports");
@@ -581,6 +581,16 @@ export function redactForHoldout(row: Record<string, unknown>, holdout: boolean)
     return redacted;
 }
 
+/**
+ * Report-row file hit: whether any of the first five DISTINCT files
+ * (D62 semantics, the same source as successAt5) matches a gold path.
+ * Scoring the first five rendered units instead would disagree with
+ * covered whenever one non-gold file repeats across those units.
+ */
+export function d46ReportFileHit(top5Files: string[], gold: Array<Pick<D46GoldSpan, "path">>): boolean {
+    return top5Files.some((f) => gold.some((g) => g.path === f));
+}
+
 export function wrapJudge(inner: Judge, onCall: () => void, calls: JudgeUsage[]): Judge {
     return {
         info: inner.info,
@@ -890,7 +900,7 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
                 const row: Record<string, unknown> = {
                     ...scored,
                     qid: scored.id,
-                    fileHit: trace.units.slice(0, 5).some((u) => q.gold.some((g) => g.path === u.file)),
+                    fileHit: d46ReportFileHit(scored.top5Files, q.gold),
                     readReady: scored.readReadyAt5,
                     covered: scored.successAt5,
                     abstained: trace.abstained,
