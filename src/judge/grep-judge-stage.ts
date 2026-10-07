@@ -270,11 +270,14 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     // reported in `unjudged` or with no probability — stay visible as
     // unjudged fallback hits after the kept hits, in fused order.
     const unjudgedCodes = new Map(unitUnjudged.map((entry) => [entry.id, entry.code]));
-    const unjudgedUnits = units.filter((u) => !unitProbs.has(u.id));
+    // A unit counts as unjudged when it is missing a probability OR the
+    // judge explicitly reported it as unjudged: an id in the unjudged
+    // response list stays a fallback even if it also carries a probability.
+    const unjudgedUnits = units.filter((u) => !unitProbs.has(u.id) || unjudgedCodes.has(u.id));
     const ranked = units
         .map((u, fusedRank) => ({ unit: u, p: unitProbs.get(u.id), fusedRank }))
         .filter((r): r is { unit: (typeof units)[number]; p: number; fusedRank: number } =>
-            r.p !== undefined && r.p >= threshold)
+            r.p !== undefined && r.p >= threshold && !unjudgedCodes.has(r.unit.id))
         .sort((a, b) => b.p - a.p || a.fusedRank - b.fusedRank);
     const merged = mergeKeptRanges(ranked.map((r) => ({ hit: r.unit.hit, p: r.p })));
     const belowThreshold = units.length - unjudgedUnits.length - new Set(ranked.map((r) => r.unit.id)).size;
