@@ -3,12 +3,23 @@
  *
  * Pure and import-safe: stdlib only (node:crypto, node:fs), no grep/judge
  * tool imports, so unit tests can import this without engine side effects.
- * The harness owns IO; this module owns canonical identity, checkpoint
- * validation, sanitized error codes, and private-file checks.
+ * This module owns canonical identity, checkpoint validation, sanitized
+ * error codes, private-file checks, and the symlink-safe checkpoint
+ * append (appendCheckpointLine); the harness owns all other IO.
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import {
+    appendFileSync,
+    closeSync,
+    constants,
+    lstatSync,
+    openSync,
+    readFileSync,
+    realpathSync,
+    writeFileSync,
+    writeSync,
+} from "node:fs";
 import { join } from "node:path";
 
 /** Versioned checkpoint/identity schema. Old or qid-only rows fail closed. */
@@ -359,8 +370,20 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
     if (options?.recompute) {
         throw new Error("refuses-recompute: --recompute requires captured rendered text plus a pinned scorer version on BOTH sides; reports carry neither, so rescoring cannot run");
     }
-    const bQueries = baseline.queries ?? [];
-    const vQueries = variant.queries ?? [];
+    const requireQueries = (name: string, report: PairedReport): PairedReportQuery[] => {
+        if (!Array.isArray(report.queries)) {
+            throw new Error(`refuses-pair: ${name} queries missing or not an array`);
+        }
+        const expected = report.manifest?.queryCount;
+        if (expected !== undefined && report.queries.length !== expected) {
+            throw new Error(
+                `refuses-pair: ${name} query count ${report.queries.length} vs manifest queryCount ${expected}`,
+            );
+        }
+        return report.queries;
+    };
+    const bQueries = requireQueries("baseline", baseline);
+    const vQueries = requireQueries("variant", variant);
     const bQids = bQueries.map((q) => q.qid);
     const vQids = vQueries.map((q) => q.qid);
     if (bQids.length !== vQids.length || !bQids.every((qid, i) => qid === vQids[i])) {
@@ -411,6 +434,48 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
             : 0,
         deltas,
     };
+};
+/**
+ * Append one JSONL checkpoint line: exclusive-create 0600 for new files;
+ * the append path refuses symlinks (lstat rejection, plus O_NOFOLLOW
+ * where the platform supports it) so a pre-planted symlink at the
+ * predictable checkpoint path can never redirect the write. New files keep
+ * the documented 0600 mode; appends reuse the existing owned handle.
+ */
+export function appendCheckpointLine(path: string, line: string): void {
+    try {
+        writeFileSync(path, line, { flag: "wx", mode: 0o600 });
+        return;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+    }
+    let stat;
+    try {
+        stat = lstatSync(path);
+    } catch {
+        throw new Error("refusing checkpoint append: checkpoint path is unstatable");
+    }
+    if (stat.isSymbolicLink()) throw new Error("refusing checkpoint append: checkpoint path is a symlink");
+    const nofollow = (constants as unknown as { O_NOFOLLOW?: number }).O_NOFOLLOW;
+    if (typeof nofollow === "number") {
+        let fd: number;
+        try {
+            fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | nofollow);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ELOOP") {
+                throw new Error("refusing checkpoint append: checkpoint path is a symlink");
+            }
+            throw error;
+        }
+        try {
+            writeSync(fd, line);
+        } finally {
+            closeSync(fd);
+        }
+        return;
+    }
+    // Platforms without O_NOFOLLOW: best effort after the lstat rejection above.
+    appendFileSync(path, line);
 }
 
 /** Completed judge_degraded runs keep measured coverage; only hard errors lose it. */

@@ -82,7 +82,7 @@ function assertRanked(ranked: boolean[], k: number): void {
 export function precisionAtK(ranked: boolean[], k: number): number {
     assertRanked(ranked, k);
     const top = ranked.slice(0, k);
-    return top.filter(Boolean).length / top.length;
+    return top.filter(Boolean).length / k;
 }
 
 /**

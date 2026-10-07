@@ -13,7 +13,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import type { BenchmarkInstance } from "./instance.js";
 
 export function reposDir(): string {
@@ -28,7 +28,26 @@ export function bareRepoDir(repo: string): string {
     return join(reposDir(), `${repo.replace("/", "__")}.git`);
 }
 
+export const INSTANCE_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/** Reject dataset ids that could escape the snapshots dir (e.g. '../'). */
+export function assertSafeInstanceId(instanceId: string): void {
+    if (!INSTANCE_ID_PATTERN.test(instanceId)) {
+        throw new Error(`unsafe instance_id: ${JSON.stringify(instanceId)}`);
+    }
+    const root = resolve(join(snapshotsDir(), instanceId));
+    const base = `${resolve(snapshotsDir())}${sep}`;
+    if (root !== resolve(snapshotsDir()) && !root.startsWith(base)) {
+        throw new Error(`unsafe instance_id: ${JSON.stringify(instanceId)}`);
+    }
+    // ".." and "." pass the charset but resolve outside/within the base.
+    if (instanceId === ".." || instanceId === ".") {
+        throw new Error(`unsafe instance_id: ${JSON.stringify(instanceId)}`);
+    }
+}
+
 export function snapshotDir(instanceId: string): string {
+    assertSafeInstanceId(instanceId);
     return join(snapshotsDir(), instanceId);
 }
 
