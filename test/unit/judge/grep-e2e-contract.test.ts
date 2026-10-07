@@ -366,4 +366,13 @@ describe("pairReports", () => {
             variant,
         )).toThrow(/queryCount/);
     });
+    it("refuses pairing when either report has duplicate qids", () => {
+        // [q01, q01] would otherwise pass the ordered-qid check and then
+        // collapse in the variant lookup map, silently mis-pairing rows.
+        const dupRows: PairedReport["queries"] = [{ qid: "q01" }, { qid: "q01" }];
+        expect(() => pairReports(report("sha256:base", dupRows), report("sha256:variant", dupRows)))
+            .toThrow(/duplicate qid "q01"/);
+        expect(() => pairReports(report("sha256:base", dupRows), variant)).toThrow(/baseline.*duplicate qid/);
+        expect(() => pairReports(base, report("sha256:variant", dupRows))).toThrow(/variant.*duplicate qid/);
+    });
 });
