@@ -77,6 +77,7 @@ import {
     GATE_CONSTANTS,
     READ_READY_DEFAULT_BUDGET,
     classifyGoldRow,
+    fileEndLine,
     goldCovered,
     goldFileHit,
     legacyTop5TokenEstimate,
@@ -703,10 +704,9 @@ const actualFileEnds = new Map<string, number>();
                 existingFiles.add(rel);
                 try {
                     const text = readFileSync(full, "utf8");
-                    const parts = text.split("\n");
                     // Empty files have no lines: record end line 0 so any gold
                     // span (which starts at line >= 1) fails the EOF check.
-                    actualFileEnds.set(rel, text.length === 0 ? 0 : text.endsWith("\n") ? parts.length - 1 : parts.length);
+                    actualFileEnds.set(rel, fileEndLine(text));
                 } catch { /* unreadable file: EOF span check skipped for it */ }
             }
         }
