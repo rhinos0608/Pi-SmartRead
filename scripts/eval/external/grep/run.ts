@@ -124,6 +124,7 @@ try {
     if (args.offline && !existsSync(join(homedir(), ".cache/pi-smartread-bench/datasets/swe-bench-multilingual"))) {
         throw new Error("--offline with no cached dataset rows; run once online first");
     }
+<<<<<<< HEAD
     // Resolved ranking knobs, recorded in every external report.
     const rankingKnobs = toRankReportSettings(resolveGrepRankingOptions());
     // Engine source content identity (shared helper): ties this report to
@@ -134,6 +135,9 @@ try {
         console.warn(`warning: engine source identity unknown (${engineSourceHash}); report cannot be tied to a known code state`);
     }
     const rows = await fetchAllRows();
+=======
+    const rows = await fetchAllRows({ offline: args.offline });
+>>>>>>> origin/stack/pr-08
     const revision = datasetRevision(rows);
     const { instances, skipped } = rowsToInstances(rows);
     const byId = new Map(instances.map((i) => [i.instanceId, i]));

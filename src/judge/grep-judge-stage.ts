@@ -226,7 +226,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     if (units.length === 0) return idle(input.hits);
 
     let unitProbs: Map<string, number>;
-    let unitUnjudgedIds: string[] = [];
+    let unitUnjudged: Array<{ id: string; code: string }> = [];
     let cacheHits = 0;
     let costUsd: number | undefined;
     try {
@@ -239,7 +239,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
             })),
         });
         unitProbs = unitResult.p;
-        unitUnjudgedIds = unitResult.unjudged.map((entry) => entry.id);
+        unitUnjudged = unitResult.unjudged ?? [];
         cacheHits += unitResult.cacheHits ?? 0;
         costUsd = addCost(costUsd, unitResult.usage.costUsd);
     } catch (err) {
@@ -263,25 +263,29 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
         costUsd = addCost(costUsd, existsResult.usage.costUsd);
     } catch { existsP = undefined; }
 
-    // Units the provider left unscored — reported in `unjudged` or with no
-    // probability — must never be silently dropped as p=0. They stay visible
-    // as unjudged fallback hits after the kept hits, in fused order.
-    const unjudgedIds = new Set<string>([
-        ...unitUnjudgedIds,
-        ...units.filter((u) => unitProbs.get(u.id) === undefined).map((u) => u.id),
-    ]);
-    const unjudgedUnits = units
-        .map((u, fusedRank) => ({ unit: u, fusedRank }))
-        .filter(({ unit }) => unjudgedIds.has(unit.id))
-        .sort((a, b) => a.fusedRank - b.fusedRank);
+    // Units the judge did not answer (missing probability) are preserved
+    // with degradation instead of defaulting to 0 and silently dropping:
+    // a per-item judge non-answer is a per-item error, and the judge
+    // never drops results on error. Units the provider left unscored —
+    // reported in `unjudged` or with no probability — stay visible as
+    // unjudged fallback hits after the kept hits, in fused order.
+    const unjudgedCodes = new Map(unitUnjudged.map((entry) => [entry.id, entry.code]));
+    const unjudgedUnits = units.filter((u) => !unitProbs.has(u.id));
     const ranked = units
-        .map((u, fusedRank) => ({ unit: u, p: unitProbs.get(u.id) ?? 0, fusedRank }))
-        .filter((r) => !unjudgedIds.has(r.unit.id) && r.p >= threshold)
+        .map((u, fusedRank) => ({ unit: u, p: unitProbs.get(u.id), fusedRank }))
+        .filter((r): r is { unit: (typeof units)[number]; p: number; fusedRank: number } =>
+            r.p !== undefined && r.p >= threshold)
         .sort((a, b) => b.p - a.p || a.fusedRank - b.fusedRank);
     const merged = mergeKeptRanges(ranked.map((r) => ({ hit: r.unit.hit, p: r.p })));
-    const belowThreshold = units.length - new Set(ranked.map((r) => r.unit.id)).size - unjudgedIds.size;
-    const unjudgedDetail = { count: unjudgedIds.size, ids: [...unjudgedIds] };
+    const belowThreshold = units.length - unjudgedUnits.length - new Set(ranked.map((r) => r.unit.id)).size;
+    const unjudgedDetail = { count: unjudgedUnits.length, ids: unjudgedUnits.map((u) => u.id) };
+    const partialCode = unjudgedUnits.length > 0
+        ? unjudgedUnits.map((u) => unjudgedCodes.get(u.id) ?? "bad_response")[0]!
+        : undefined;
 
+    // Abstention requires every unit to be confidently judged a non-match:
+    // judge-unanswered units are preserved below with degradation instead.
+    // Hits past the unit cap are unscored fallbacks, not abstentions either.
     if (merged.length === 0 && unjudgedUnits.length === 0 && beyondCapHits.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
         return {
             judged: true,
@@ -311,7 +315,11 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
 
     const judgedHits: JudgedGrepHit[] = [
         ...merged.map((m) => ({ ...m.hit, judgeP: m.p })),
-        ...unjudgedUnits.map(({ unit }) => ({ ...unit.hit })),
+        // Preserve judge-unanswered units in fused order after the judged hits
+        // (no judgeP), so a partial judge response degrades instead of silently
+        // dropping candidates. Hits past the unit cap stay visible as unscored
+        // fallbacks after the kept hits, in fused order — never vanishing.
+        ...unjudgedUnits.map((u) => ({ ...u.hit })),
         ...beyondCapHits,
     ];
     const pointers = await judgePointers(judge, input, judgedHits, input.hits);
@@ -324,6 +332,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
         hits: judgedHits,
         unjudged: input.hits,
         abstained: false,
+        ...(partialCode ? { degradation: { backend: "judge" as const, code: partialCode } } : {}),
         judge: {
             backend: judge.info.backend,
             model: judge.info.model,
