@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/alpha.ts",
+      "contentHash": "hash-alpha"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/beta.py",
+      "contentHash": "hash-beta"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

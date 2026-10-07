@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   bm25Scores,
+  compileBm25Corpus,
   cosineSimilarity,
   computeRanks,
   computeRrfScores,
   tokenize,
-} from "../../scoring.js";
+} from "../../src/scoring.js";
 
 describe("tokenize", () => {
   describe("full-token behavior (preserve existing tests)", () => {
@@ -155,9 +156,17 @@ describe("cosineSimilarity", () => {
     expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0);
   });
 
-  it("returns -Infinity when either vector has zero norm", () => {
-    expect(cosineSimilarity([0, 0], [1, 2])).toBe(-Infinity);
-    expect(cosineSimilarity([1, 2], [0, 0])).toBe(-Infinity);
+  it("returns 0 when either vector has zero norm", () => {
+    expect(cosineSimilarity([0, 0], [1, 2])).toBe(0);
+    expect(cosineSimilarity([1, 2], [0, 0])).toBe(0);
+  });
+
+  it("returns 0 for empty vectors", () => {
+    expect(cosineSimilarity([], [])).toBe(0);
+  });
+
+  it("returns 0 for length-mismatched vectors", () => {
+    expect(cosineSimilarity([1, 0], [1, 0, 0])).toBe(0);
   });
 });
 
@@ -177,6 +186,31 @@ describe("computeRanks", () => {
 
   it("handles single element", () => {
     expect(computeRanks([0.9], ["a"])).toEqual([1]);
+  });
+});
+
+describe("compileBm25Corpus", () => {
+  it("compiled corpus scores match bm25Scores exactly", () => {
+    const docs = [
+      "export function authToken validator handles signing and expiry",
+      "auth middleware checks token signature before route",
+      "const DATABASE_HOST = 'localhost';",
+      "cache key uses token hash for auth lookups",
+    ];
+    const corpus = compileBm25Corpus(docs);
+    const query = "auth token signing";
+    const compiled = corpus.score(query);
+    const direct = bm25Scores(query, docs);
+    expect(compiled.length).toBe(docs.length);
+    for (let i = 0; i < docs.length; i++) {
+      expect(compiled[i]!).toBeCloseTo(direct[i]!, 10);
+    }
+  });
+
+  it("empty corpus scores to an empty array without dividing by zero", () => {
+    const corpus = compileBm25Corpus([]);
+    expect(corpus.score("anything")).toEqual([]);
+    expect(corpus.avgDocLen).toBe(0);
   });
 });
 

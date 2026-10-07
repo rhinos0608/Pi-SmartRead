@@ -1,0 +1,5 @@
+## Review
+- Correct: `mcp-server.ts:40-43,103-176` declares `prompts`/`resources` capabilities and registers `prompts/list`, `prompts/get`, `resources/list`, and `resources/read`; `mcp-prompts.ts:21-70` and `mcp-resources.ts:22-113` match the SDK shapes. Exact-match URI resolution in `resolveResource()` avoids path traversal.
+- [BLOCKER] `test/unit/mcp-advanced.test.ts:40-96,104-425` waits for the subprocess to `close`, but the MCP server stays alive after stdin ends. In practice, the suite times out on every protocol test, so the new handlers are not actually validated in CI.
+- [WARN] `mcp-resources.ts:130-138` interpolates `name` directly into `smartread://result/${name}` with no encoding/validation. Today the callers are internal, but untrusted input could create malformed or misleading resource URIs.
+- [NIT] `mcp-resources.ts:131` says the threshold is in bytes, but it uses `content.length` (code units), not byte length.

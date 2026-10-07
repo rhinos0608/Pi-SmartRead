@@ -1,0 +1,23 @@
+{
+  "before": [
+    {
+      "path": "src/client.js",
+      "contentHash": "js client stable"
+    }
+  ],
+  "after": [
+    {
+      "path": "src/client.js",
+      "contentHash": "js client stable"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "src/client.js",
+      "afterPath": "src/client.js"
+    }
+  ],
+  "description": "JavaScript unchanged file",
+  "category": "positive"
+}

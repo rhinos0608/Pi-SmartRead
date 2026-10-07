@@ -14,6 +14,12 @@ export default tseslint.config(
     ],
   },
   {
+    files: ["test/**/*.ts"],
+    rules: {
+      "no-console": "off",
+    },
+  },
+  {
     files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parser: tsParser,
@@ -31,12 +37,51 @@ export default tseslint.config(
       "no-unused-vars": "off",
 
       // Additional quality rules
-      "no-console": "warn",
+      "no-console": ["warn", { "allow": ["warn", "error"] }],
       "prefer-const": "error",
       "no-var": "error",
       "eqeqeq": ["error", "smart"],
       "no-throw-literal": "error",
       "prefer-promise-reject-errors": "error",
+
+      // P0 guardrails — warnings so existing debt does not fail
+      "complexity": ["warn", 15],
+      "max-depth": ["warn", 4],
+      "max-params": ["warn", 5],
+      "max-lines-per-function": ["warn", { "max": 100, "skipBlankLines": true, "skipComments": true, "IIFEs": true }],
+    },
+  },
+  {
+    // P0 guardrails as errors for the 22 extracted modules only
+    files: [
+      "src/canonical-path.ts",
+      "src/graph/context-graph-build.ts",
+      "src/extension-lifecycle.ts",
+      "src/extension-registration.ts",
+      "src/extension-result-pipeline.ts",
+      "src/search/grep-cascade.ts",
+      "src/search/grep-structural-executor.ts",
+      "src/read/hook-enrich.ts",
+      "src/inspect/inspect-budget.ts",
+      "src/inspect/inspect-file-core.ts",
+      "src/inspect/inspect-file-sections.ts",
+      "src/lsp/lsp-call-hierarchy-adapter.ts",
+      "src/lsp/lsp-navigation-adapter.ts",
+      "src/lsp/lsp-server-operation.ts",
+      "src/evidence/read-many-evidence.ts",
+      "src/read/read-many-plan.ts",
+      "src/read/read-many-reader.ts",
+      "src/ranking/rerank-colbert.ts",
+      "src/ranking/rerank-external.ts",
+      "src/ranking/rerank-structural.ts",
+      "src/graph/shared-context-graph.ts",
+      "src/structural/test-linkage.ts",
+    ],
+    rules: {
+      "complexity": ["error", 15],
+      "max-depth": ["error", 4],
+      "max-params": ["error", 5],
+      "max-lines-per-function": ["error", { "max": 100, "skipBlankLines": true, "skipComments": true, "IIFEs": true }],
     },
   },
 );

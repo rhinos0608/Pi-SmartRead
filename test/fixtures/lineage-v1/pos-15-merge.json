@@ -1,0 +1,47 @@
+{
+  "before": [
+    {
+      "path": "src/left.ts",
+      "contentHash": "merge shared implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "src/right.ts",
+      "contentHash": "unrelated module"
+    }
+  ],
+  "after": [
+    {
+      "path": "src/combined.ts",
+      "contentHash": "merge shared implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/left.ts",
+      "afterPath": "src/combined.ts"
+    }
+  ],
+  "description": "Merge leaves one matched source and one removal",
+  "category": "positive"
+}

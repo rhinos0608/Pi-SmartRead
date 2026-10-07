@@ -14,10 +14,9 @@
     "types": ["node"]
   },
   "include": [
-    "index.ts", "read-many.ts", "utils.ts", "config.ts",
-    "scoring.ts", "chunking.ts", "embedding.ts", "resolver.ts",
-    "intent-read.ts", "languages.ts", "cache.ts", "pagerank.ts",
-    "tree-context.ts", "file-discovery.ts", "tags.ts", "repomap.ts",
-    "repomap-tool.ts", "hook.ts", "special.ts", "test/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "test/**/*.ts",
+    "vitest.config.ts"
   ]
 }

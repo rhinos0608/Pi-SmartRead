@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "src/utils.ts",
+      "contentHash": "ts utility implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "lib/utils.ts",
+      "contentHash": "ts utility implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/utils.ts",
+      "afterPath": "lib/utils.ts"
+    }
+  ],
+  "description": "TypeScript pure move with dependency edges",
+  "category": "positive"
+}

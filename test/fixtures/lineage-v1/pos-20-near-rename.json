@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "src/serializer.ts",
+      "contentHash": "serializer implementation details",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "src/serializers.ts",
+      "contentHash": "serializer implementation details",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/serializer.ts",
+      "afterPath": "src/serializers.ts"
+    }
+  ],
+  "description": "Near-basename rename",
+  "category": "positive"
+}

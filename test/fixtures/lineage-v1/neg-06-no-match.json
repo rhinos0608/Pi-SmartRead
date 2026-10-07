@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/api.py",
+      "contentHash": "flask-server"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/ui.ts",
+      "contentHash": "react-component"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

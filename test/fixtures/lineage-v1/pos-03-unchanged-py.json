@@ -1,0 +1,23 @@
+{
+  "before": [
+    {
+      "path": "src/worker.py",
+      "contentHash": "python worker stable"
+    }
+  ],
+  "after": [
+    {
+      "path": "src/worker.py",
+      "contentHash": "python worker stable"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "src/worker.py",
+      "afterPath": "src/worker.py"
+    }
+  ],
+  "description": "Python unchanged file",
+  "category": "positive"
+}

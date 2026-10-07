@@ -1,0 +1,17 @@
+{
+  "before": [
+    {
+      "path": "before/config.ts",
+      "contentHash": "one-two"
+    }
+  ],
+  "after": [
+    {
+      "path": "after/router.js",
+      "contentHash": "three-four"
+    }
+  ],
+  "expected": [],
+  "description": "Hard negative: unrelated files must not form lineage",
+  "category": "hard-negative"
+}

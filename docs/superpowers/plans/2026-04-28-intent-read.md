@@ -26,10 +26,10 @@
 | `test/unit/utils.test.ts` | Create | Unit tests for helpers (extracted from `read-many.test.ts`) |
 | `test/unit/config.test.ts` | Create | Unit tests for config loading and validation |
 | `test/unit/scoring.test.ts` | Create | Unit tests for tokenizer, BM25, cosine, ranks, RRF |
-| `test/unit/embedding.test.ts` | Create | Unit tests for embedding HTTP client (mock fetch) |
-| `test/unit/resolver.test.ts` | Create | Unit tests for directory expansion |
+| `test/unit/indexing/embedding.test.ts` | Create | Unit tests for embedding HTTP client (mock fetch) |
+| `test/unit/search/resolver.test.ts` | Create | Unit tests for directory expansion |
 | `test/unit/intent-read.test.ts` | Create | Integration tests for intent_read tool (mocked deps) |
-| `test/unit/read-many.test.ts` | Modify | Remove helper logic tests (moved to utils.test.ts); update imports |
+| `test/unit/read/read-many.test.ts` | Modify | Remove helper logic tests (moved to utils.test.ts); update imports |
 | `test/unit/index.test.ts` | Modify | Assert both tools are registered |
 
 ---
@@ -40,7 +40,7 @@
 - Create: `utils.ts`
 - Create: `test/unit/utils.test.ts`
 - Modify: `read-many.ts`
-- Modify: `test/unit/read-many.test.ts`
+- Modify: `test/unit/read/read-many.test.ts`
 - Modify: `tsconfig.json`
 
 - [ ] **Step 1: Write the failing utils test**
@@ -867,11 +867,11 @@ git commit -m "feat: add scoring.ts with tokenizer, BM25, cosine similarity, and
 
 **Files:**
 - Create: `embedding.ts`
-- Create: `test/unit/embedding.test.ts`
+- Create: `test/unit/indexing/embedding.test.ts`
 
 - [ ] **Step 1: Write the failing embedding tests**
 
-Create `test/unit/embedding.test.ts`:
+Create `test/unit/indexing/embedding.test.ts`:
 
 ```typescript
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -982,7 +982,7 @@ describe("fetchEmbeddings", () => {
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-npx vitest run test/unit/embedding.test.ts 2>&1 | tail -10
+npx vitest run test/unit/indexing/embedding.test.ts 2>&1 | tail -10
 ```
 
 Expected: `Error: Cannot find module '../../embedding.js'`
@@ -1079,7 +1079,7 @@ export async function fetchEmbeddings(req: EmbedRequest): Promise<EmbedResult> {
 - [ ] **Step 4: Run embedding tests**
 
 ```bash
-npx vitest run test/unit/embedding.test.ts 2>&1 | tail -20
+npx vitest run test/unit/indexing/embedding.test.ts 2>&1 | tail -20
 ```
 
 Expected: All embedding tests pass.
@@ -1087,7 +1087,7 @@ Expected: All embedding tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add embedding.ts test/unit/embedding.test.ts
+git add embedding.ts test/unit/indexing/embedding.test.ts
 git commit -m "feat: add embedding.ts with OpenAI-compatible fetch client and response validation"
 ```
 
@@ -1097,11 +1097,11 @@ git commit -m "feat: add embedding.ts with OpenAI-compatible fetch client and re
 
 **Files:**
 - Create: `resolver.ts`
-- Create: `test/unit/resolver.test.ts`
+- Create: `test/unit/search/resolver.test.ts`
 
 - [ ] **Step 1: Write the failing resolver tests**
 
-Create `test/unit/resolver.test.ts`:
+Create `test/unit/search/resolver.test.ts`:
 
 ```typescript
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -1178,7 +1178,7 @@ describe("resolveDirectory", () => {
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-npx vitest run test/unit/resolver.test.ts 2>&1 | tail -10
+npx vitest run test/unit/search/resolver.test.ts 2>&1 | tail -10
 ```
 
 Expected: `Error: Cannot find module '../../resolver.js'`
@@ -1216,7 +1216,7 @@ export function resolveDirectory(directory: string, cap = 20): DirectoryResoluti
 - [ ] **Step 4: Run resolver tests**
 
 ```bash
-npx vitest run test/unit/resolver.test.ts 2>&1 | tail -20
+npx vitest run test/unit/search/resolver.test.ts 2>&1 | tail -20
 ```
 
 Expected: All resolver tests pass.
@@ -1224,7 +1224,7 @@ Expected: All resolver tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add resolver.ts test/unit/resolver.test.ts
+git add resolver.ts test/unit/search/resolver.test.ts
 git commit -m "feat: add resolver.ts for non-recursive directory expansion via fdir"
 ```
 

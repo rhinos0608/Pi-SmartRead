@@ -1,0 +1,49 @@
+{
+  "before": [
+    {
+      "path": "a.ts",
+      "contentHash": "same"
+    },
+    {
+      "path": "b.js",
+      "contentHash": "same"
+    },
+    {
+      "path": "c.py",
+      "contentHash": "same"
+    }
+  ],
+  "after": [
+    {
+      "path": "a.ts",
+      "contentHash": "same"
+    },
+    {
+      "path": "b.js",
+      "contentHash": "same"
+    },
+    {
+      "path": "c.py",
+      "contentHash": "same"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "a.ts",
+      "afterPath": "a.ts"
+    },
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "b.js",
+      "afterPath": "b.js"
+    },
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "c.py",
+      "afterPath": "c.py"
+    }
+  ],
+  "description": "All files identical by path and content",
+  "category": "edge-case"
+}

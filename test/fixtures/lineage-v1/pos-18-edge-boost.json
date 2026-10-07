@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "deep/original.ts",
+      "contentHash": "edge boosted module",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "elsewhere/renamed.ts",
+      "contentHash": "edge boosted module",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "deep/original.ts",
+      "afterPath": "elsewhere/renamed.ts"
+    }
+  ],
+  "description": "Matching relationship edges boost move confidence",
+  "category": "positive"
+}

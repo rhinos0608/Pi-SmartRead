@@ -7,7 +7,7 @@ import {
   extToLang,
   isSupportedFile,
   getSupportedExtensions,
-} from "../../languages.js";
+} from "../../src/languages.js";
 
 describe("filenameToLang", () => {
   it("detects TypeScript", () => {

@@ -1,0 +1,23 @@
+{
+  "before": [
+    {
+      "path": "src/Case.ts",
+      "contentHash": "case content"
+    }
+  ],
+  "after": [
+    {
+      "path": "SRC/case.ts",
+      "contentHash": "case content"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "UNCHANGED",
+      "beforePath": "src/Case.ts",
+      "afterPath": "SRC/case.ts"
+    }
+  ],
+  "description": "Case-insensitive normalized path",
+  "category": "edge-case"
+}

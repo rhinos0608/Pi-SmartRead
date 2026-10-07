@@ -1,0 +1,76 @@
+{
+  "before": [
+    {
+      "path": "src/models/user.py",
+      "contentHash": "user model",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "src/models/order.py",
+      "contentHash": "order model",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "domain/user.py",
+      "contentHash": "user model",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "domain/order.py",
+      "contentHash": "order model",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/models/user.py",
+      "afterPath": "domain/user.py"
+    },
+    {
+      "kind": "MOVED",
+      "beforePath": "src/models/order.py",
+      "afterPath": "domain/order.py"
+    }
+  ],
+  "description": "Python directory restructure",
+  "category": "positive"
+}

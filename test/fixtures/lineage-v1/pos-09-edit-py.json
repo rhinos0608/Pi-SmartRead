@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "src/worker.py",
+      "contentHash": "import service from core config loader; export function process request options context result cache logger metrics tracker; return result from service;",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "lib/worker.py",
+      "contentHash": "import service from core config loader; export function process request options context result cache logger metrics counter; return result from service;",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "POSSIBLE_MATCH",
+      "beforePath": "src/worker.py",
+      "afterPath": "lib/worker.py"
+    }
+  ],
+  "description": "Python move and content edit",
+  "category": "positive"
+}

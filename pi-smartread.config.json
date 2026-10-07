@@ -1,4 +1,39 @@
 {
+  "model": "text-embedding-embeddinggemma-300m",
   "probeEnabled": true,
-  "rerankEnabled": true
+  "rerankEnabled": true,
+  "hydeEnabled": true,
+  "gitContext": {
+    "enabled": true,
+    "startupLogLimit": 30,
+    "coCommitAnalysisLimit": 100,
+    "coCommitMinCorrelation": 0.15,
+    "coCommitMinCount": 2,
+    "readEnrichmentCommits": 3,
+    "showTrailerKeys": ["Constraint", "Directive", "Rejected"],
+    "notesRefs": ["refs/notes/pi-smartread", "refs/notes/lore", "refs/notes/opencode", "refs/notes/commits"],
+    "tokenBudget": {
+      "gitLog": 800,
+      "coCommitHotspots": 400,
+      "gitNotes": 600
+    }
+  },
+  "search": {
+    "enrich": {
+      "default": {
+        "callers": true,
+        "resolution": true,
+        "symbols": true
+      },
+      "resolve": {
+        "callers": true
+      },
+      "symbols": {
+        "resolution": true
+      },
+      "code": {
+        "symbols": true
+      }
+    }
+  }
 }

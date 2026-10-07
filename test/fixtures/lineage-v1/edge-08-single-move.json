@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "old/file.js",
+      "contentHash": "same content",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "new/file.js",
+      "contentHash": "same content",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "old/file.js",
+      "afterPath": "new/file.js"
+    }
+  ],
+  "description": "Single-file move",
+  "category": "edge-case"
+}

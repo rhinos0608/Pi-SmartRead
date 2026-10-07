@@ -1,0 +1,43 @@
+{
+  "before": [
+    {
+      "path": "src/loader.py",
+      "contentHash": "python loader implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "src/loaders.py",
+      "contentHash": "python loader implementation",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "MOVED",
+      "beforePath": "src/loader.py",
+      "afterPath": "src/loaders.py"
+    }
+  ],
+  "description": "Python rename with identical content",
+  "category": "positive"
+}

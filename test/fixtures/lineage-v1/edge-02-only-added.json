@@ -1,0 +1,17 @@
+{
+  "before": [],
+  "after": [
+    {
+      "path": "src/new.ts",
+      "contentHash": "new content"
+    }
+  ],
+  "expected": [
+    {
+      "kind": "ADDED",
+      "afterPath": "src/new.ts"
+    }
+  ],
+  "description": "Empty before revision",
+  "category": "edge-case"
+}

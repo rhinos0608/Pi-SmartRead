@@ -1,0 +1,76 @@
+{
+  "before": [
+    {
+      "path": "src/one.ts",
+      "contentHash": "duplicate content",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "src/two.js",
+      "contentHash": "duplicate content",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "path": "dst/one.ts",
+      "contentHash": "duplicate content",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    },
+    {
+      "path": "dst/two.js",
+      "contentHash": "duplicate content",
+      "edges": [
+        {
+          "to": "shared/types.ts",
+          "type": "imports"
+        },
+        {
+          "to": "shared/log.ts",
+          "type": "imports"
+        }
+      ]
+    }
+  ],
+  "expected": [
+    {
+      "kind": "POSSIBLE_MATCH",
+      "beforePath": "src/one.ts",
+      "afterPath": "dst/one.ts"
+    },
+    {
+      "kind": "POSSIBLE_MATCH",
+      "beforePath": "src/two.js",
+      "afterPath": "dst/two.js"
+    }
+  ],
+  "description": "Duplicate content hashes matched by path evidence",
+  "category": "edge-case"
+}
