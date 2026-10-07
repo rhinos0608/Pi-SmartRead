@@ -172,6 +172,214 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
         : undefined;
 }
 
+// Single best-effort publish path shared by all branches: the merged
+// envelope is published EXACTLY once per outer tool call. The engine itself
+// never publishes (publish stays exclusively in this wrapper per repo convention).
+type PublishInspection = (details: InspectV4Result) => void;
+
+function createPublisher(opts: InspectToolOptions, sessionFilePath: string): PublishInspection {
+    return (details: { workspaceEvidence: { canonicalWorkspaceRoot: string } }): void => {
+        if (opts.resolver) {
+            try {
+                opts.resolver.publishInspection(
+                    details.workspaceEvidence as unknown,
+                    sessionFilePath,
+                    details.workspaceEvidence.canonicalWorkspaceRoot,
+                );
+            } catch {
+                // best-effort; swallow
+            }
+        }
+    };
+}
+
+function respondWithInspectDetails(
+    details: InspectV4Result,
+    toolCallId: string,
+    publish: PublishInspection,
+) {
+    publish(details);
+    const navDetails = details.navigation;
+    const diagDetails = details.diagnostics;
+    const extraUpstream: Record<string, unknown> = { ...(details.upstreamDetails ?? {}) };
+    if (navDetails) extraUpstream.navigation = navDetails;
+    if (diagDetails) extraUpstream.diagnostics = diagDetails;
+    return {
+        content: [{ type: "text" as const, text: details.contentText }],
+        details: {
+            workspaceEvidence: details.workspaceEvidence,
+            mode: details.mode,
+            lineCount: details.lineCount,
+            byteLength: details.byteLength,
+            truncated: details.truncated,
+            toolCallId,
+            ...(Object.keys(extraUpstream).length > 0
+                ? { upstreamDetails: extraUpstream }
+                : details.upstreamDetails !== undefined
+                  ? { upstreamDetails: details.upstreamDetails }
+                  : {}),
+            ...(navDetails ? { navigation: navDetails } : {}),
+            ...(diagDetails ? { diagnostics: diagDetails } : {}),
+        },
+    };
+}
+
+type InspectResponder = (details: InspectV4Result) => ReturnType<typeof respondWithInspectDetails>;
+
+interface ScriptBranchArgs {
+    raw: Record<string, unknown>;
+    ctx: ExtensionContext;
+    signal: AbortSignal | undefined;
+    sessionFilePath: string;
+    opts: InspectToolOptions;
+    toolCallId: string;
+    publish: PublishInspection;
+}
+
+function buildScriptInput(args: ScriptBranchArgs, anchorPath: string): InspectV4Input {
+    const { ctx, signal, sessionFilePath, opts } = args;
+    const scriptInput: InspectV4Input = {
+        path: anchorPath,
+        cwd: ctx.cwd,
+        sessionFilePath,
+        signal,
+        script: args.raw.script as string,
+    };
+    // Script mode may call any binding, so its needs are unknowable
+    // upfront: pass a lazy no-arg getter and let the engine
+    // resolve/cache it on the first graph.*, impact, or
+    // graphSchema host call. Nothing is built when opts carry no graph.
+    if (typeof opts.contextGraph === "function") {
+        const getGraph = opts.contextGraph;
+        scriptInput.contextGraphGetter = () => getGraph(ctx.cwd);
+    } else if (opts.contextGraph !== undefined) {
+        scriptInput.contextGraph = opts.contextGraph;
+    }
+    if (opts.lspInspectionProvider) {
+        scriptInput.lspInspectionProvider = opts.lspInspectionProvider;
+    }
+    return scriptInput;
+}
+
+async function executeScriptBranch(args: ScriptBranchArgs) {
+    const { raw, toolCallId, publish } = args;
+    const foreignErr = rejectForeignKeys(raw, "script", SCRIPT_MODE_KEYS);
+    if (foreignErr) throw new Error(foreignErr);
+    if (typeof raw.script !== "string" || raw.script.length === 0) {
+        throw new Error('Error: inspect param "script" must be a non-empty string');
+    }
+    // `path` is optional in script mode: omitted anchors at cwd.
+    // It acts only as the cwd/default-path anchor for host calls
+    // (reserved slot for a future engine default-dir channel).
+    // Per-call relative paths resolve against cwd exactly as
+    // direct calls do (host bindings use ctx.cwd), so the anchor
+    // is recorded on upstreamDetails.script.anchorPath and never
+    // stat()'d: a script anchored at a nonexistent path still runs.
+    const anchorPath = typeof raw.path === "string" && raw.path.length > 0 ? raw.path : ".";
+    const scriptDetails = await executeInspectV4(buildScriptInput(args, anchorPath));
+    publish(scriptDetails);
+    // The engine's contentText already renders the return value
+    // plus a compact call-log summary; the bounded call log rides
+    // along under upstreamDetails.script so one script call never
+    // hides what it inspected.
+    const scriptUpstream =
+        ((scriptDetails.upstreamDetails ?? {}) as Record<string, unknown>).script ?? {};
+    return {
+        content: [{ type: "text" as const, text: scriptDetails.contentText }],
+        details: {
+            workspaceEvidence: scriptDetails.workspaceEvidence,
+            mode: "query",
+            lineCount: scriptDetails.lineCount,
+            byteLength: scriptDetails.byteLength,
+            truncated: scriptDetails.truncated,
+            toolCallId,
+            upstreamDetails: { script: scriptUpstream },
+        },
+    };
+}
+
+function validateFileOrDirectoryRequest(raw: Record<string, unknown>, kind: "file" | "directory"): string {
+    if (kind === "directory" && raw.architecture !== undefined) {
+        throw new Error(
+            'Error: inspect directory option "architecture" removed. Use "analysis" instead: { mode: "directory", path, analysis: { ... } }',
+        );
+    }
+    const foreignErr = rejectForeignKeys(
+        raw,
+        kind,
+        kind === "file" ? FILE_MODE_KEYS : DIRECTORY_MODE_KEYS,
+    );
+    if (foreignErr) throw new Error(foreignErr);
+    if (typeof raw.path !== "string" || raw.path.length === 0) {
+        throw new Error(`Error: inspect mode "${kind}" requires "path"`);
+    }
+    return raw.path;
+}
+
+function parseAnalysisBag(raw: Record<string, unknown>, kind: "file" | "directory"): Partial<InspectV4Input> {
+    const bag = asObject(raw.analysis ?? {});
+    if (!bag) {
+        throw new Error(`Error: inspect mode "${kind}" option "analysis" must be an object`);
+    }
+    return kind === "file" ? normalizeFileAnalysis(bag) : normalizeDirectoryAnalysis(bag);
+}
+
+interface FileOrDirectoryBranchArgs {
+    raw: Record<string, unknown>;
+    kind: "file" | "directory";
+    ctx: ExtensionContext;
+    signal: AbortSignal | undefined;
+    sessionFilePath: string;
+    resolveGraph: () => Promise<ContextGraph | undefined>;
+    respond: InspectResponder;
+}
+
+async function attachContextGraph(
+    input: InspectV4Input,
+    args: FileOrDirectoryBranchArgs,
+    normalized: Partial<InspectV4Input>,
+): Promise<void> {
+    if (!needsContextGraph(args.kind, normalized)) return;
+    // getSharedContextGraphAsync can rethrow a raw native
+    // tree-sitter/parser error from the graph build; every
+    // downstream consumer of input.contextGraph already
+    // renders a "not available" fallback when it is
+    // undefined, so leave it unset here (same graceful
+    // degradation as "no DI graph registered").
+    try {
+        input.contextGraph = await args.resolveGraph();
+    } catch (e) {
+        if (args.signal?.aborted) throw e;
+        // leave contextGraph undefined — downstream falls back
+    }
+}
+
+async function executeFileOrDirectoryBranch(args: FileOrDirectoryBranchArgs) {
+    const { raw, kind, ctx, signal, sessionFilePath, respond } = args;
+    const targetPath = validateFileOrDirectoryRequest(raw, kind);
+    const normalized = parseAnalysisBag(raw, kind);
+    const { resolveInspectV4Mode } = await import("./inspect.js");
+    const resolvedMode = resolveInspectV4Mode({ path: targetPath, cwd: ctx.cwd, sessionFilePath, signal });
+    if (resolvedMode !== kind) {
+        throw new Error(
+            `Error: inspect mode "${kind}" requires a ${kind} target (got ${resolvedMode}: ${targetPath})`,
+        );
+    }
+    // Build input WITHOUT resolving the async contextGraph getter yet —
+    // only graph-dependent options pay for the shared graph build.
+    // Invalid option requests return their error above without
+    // invoking the graph getter.
+    const inspectInput: InspectV4Input = {
+        path: targetPath,
+        cwd: ctx.cwd,
+        sessionFilePath,
+        signal,
+        ...normalized,
+    };
+    await attachContextGraph(inspectInput, args, normalized);
+    return respond(await executeInspectV4(inspectInput));
+}
+
 export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
     return {
         name: "inspect",
@@ -193,182 +401,22 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             if (typeof sessionFilePath !== "string" || sessionFilePath.length === 0) {
                 throw new Error("inspect: no real session file (in-memory/ephemeral identity rejected)");
             }
-
-            // Single best-effort publish path shared by all branches: the
-            // merged envelope is published EXACTLY once per outer tool call.
-            // The engine itself never publishes (publish stays exclusively
-            // in this wrapper per repo convention).
-            const publish = (details: { workspaceEvidence: { canonicalWorkspaceRoot: string } }): void => {
-                if (opts.resolver) {
-                    try {
-                        opts.resolver.publishInspection(
-                            details.workspaceEvidence as unknown,
-                            sessionFilePath,
-                            details.workspaceEvidence.canonicalWorkspaceRoot,
-                        );
-                    } catch {
-                        // best-effort; swallow
-                    }
-                }
-            };
-
+            const publish = createPublisher(opts, sessionFilePath);
+            const respond: InspectResponder = (details) =>
+                respondWithInspectDetails(details, toolCallId, publish);
             const raw = params as Record<string, unknown>;
-            const respond = (details: InspectV4Result) => {
-                publish(details);
-                const navDetails = details.navigation;
-                const diagDetails = details.diagnostics;
-                const extraUpstream: Record<string, unknown> = { ...(details.upstreamDetails ?? {}) };
-                if (navDetails) extraUpstream.navigation = navDetails;
-                if (diagDetails) extraUpstream.diagnostics = diagDetails;
-                return {
-                    content: [{ type: "text" as const, text: details.contentText }],
-                    details: {
-                        workspaceEvidence: details.workspaceEvidence,
-                        mode: details.mode,
-                        lineCount: details.lineCount,
-                        byteLength: details.byteLength,
-                        truncated: details.truncated,
-                        toolCallId,
-                        ...(Object.keys(extraUpstream).length > 0
-                            ? { upstreamDetails: extraUpstream }
-                            : details.upstreamDetails !== undefined
-                              ? { upstreamDetails: details.upstreamDetails }
-                              : {}),
-                        ...(navDetails ? { navigation: navDetails } : {}),
-                        ...(diagDetails ? { diagnostics: diagDetails } : {}),
-                    },
-                };
-            };
-
-            const resolveGraph = async (): Promise<ContextGraph | undefined> =>
-                typeof opts.contextGraph === "function" ? opts.contextGraph(ctx.cwd) : opts.contextGraph;
-
             switch (raw.mode) {
-                case "script": {
-                    const foreignErr = rejectForeignKeys(raw, "script", SCRIPT_MODE_KEYS);
-                    if (foreignErr) throw new Error(foreignErr);
-                    if (typeof raw.script !== "string" || raw.script.length === 0) {
-                        throw new Error('Error: inspect param "script" must be a non-empty string');
-                    }
-                    // `path` is optional in script mode: omitted anchors at cwd.
-                    // It acts only as the cwd/default-path anchor for host calls
-                    // (reserved slot for a future engine default-dir channel).
-                    // Per-call relative paths resolve against cwd exactly as
-                    // direct calls do (host bindings use ctx.cwd), so the anchor
-                    // is recorded on upstreamDetails.script.anchorPath and never
-                    // stat()'d: a script anchored at a nonexistent path still runs.
-                    const anchorPath =
-                        typeof raw.path === "string" && raw.path.length > 0 ? raw.path : ".";
-                    const scriptInput: InspectV4Input = {
-                        path: anchorPath,
-                        cwd: ctx.cwd,
-                        sessionFilePath,
-                        signal,
-                        script: raw.script,
-                    };
-                    // Script mode may call any binding, so its needs are unknowable
-                    // upfront: pass a lazy no-arg getter and let the engine
-                    // resolve/cache it on the first graph.*, impact, or
-                    // graphSchema host call. Nothing is built when opts carry no graph.
-                    if (typeof opts.contextGraph === "function") {
-                        const getGraph = opts.contextGraph;
-                        scriptInput.contextGraphGetter = () => getGraph(ctx.cwd);
-                    } else if (opts.contextGraph !== undefined) {
-                        scriptInput.contextGraph = opts.contextGraph;
-                    }
-                    if (opts.lspInspectionProvider) {
-                        scriptInput.lspInspectionProvider = opts.lspInspectionProvider;
-                    }
-                    const scriptDetails = await executeInspectV4(scriptInput);
-                    publish(scriptDetails);
-                    // The engine's contentText already renders the return value
-                    // plus a compact call-log summary; the bounded call log rides
-                    // along under upstreamDetails.script so one script call never
-                    // hides what it inspected.
-                    const scriptUpstream =
-                        ((scriptDetails.upstreamDetails ?? {}) as Record<string, unknown>).script ?? {};
-                    return {
-                        content: [{ type: "text" as const, text: scriptDetails.contentText }],
-                        details: {
-                            workspaceEvidence: scriptDetails.workspaceEvidence,
-                            mode: "query",
-                            lineCount: scriptDetails.lineCount,
-                            byteLength: scriptDetails.byteLength,
-                            truncated: scriptDetails.truncated,
-                            toolCallId,
-                            upstreamDetails: { script: scriptUpstream },
-                        },
-                    };
-                }
-
+                case "script":
+                    return executeScriptBranch({ raw, ctx, signal, sessionFilePath, opts, toolCallId, publish });
                 case "file":
                 case "directory": {
                     const kind = raw.mode as "file" | "directory";
-                    if (kind === "directory" && raw.architecture !== undefined) {
-                        throw new Error(
-                            'Error: inspect directory option "architecture" removed. Use "analysis" instead: { mode: "directory", path, analysis: { ... } }',
-                        );
-                    }
-                    const foreignErr = rejectForeignKeys(
-                        raw,
-                        kind,
-                        kind === "file" ? FILE_MODE_KEYS : DIRECTORY_MODE_KEYS,
-                    );
-                    if (foreignErr) throw new Error(foreignErr);
-                    if (typeof raw.path !== "string" || raw.path.length === 0) {
-                        throw new Error(`Error: inspect mode "${kind}" requires "path"`);
-                    }
-                    const bagKey = "analysis";
-                    const bagRaw = raw[bagKey] ?? {};
-                    const bag = asObject(bagRaw);
-                    if (!bag) {
-                        throw new Error(`Error: inspect mode "${kind}" option "${bagKey}" must be an object`);
-                    }
-                    const normalized = kind === "file" ? normalizeFileAnalysis(bag) : normalizeDirectoryAnalysis(bag);
-
-                    const { resolveInspectV4Mode } = await import("./inspect.js");
-                    const probe: InspectV4Input = {
-                        path: raw.path,
-                        cwd: ctx.cwd,
-                        sessionFilePath,
-                        signal,
-                    };
-                    const resolvedMode = resolveInspectV4Mode(probe);
-                    if (resolvedMode !== kind) {
-                        throw new Error(
-                            `Error: inspect mode "${kind}" requires a ${kind} target (got ${resolvedMode}: ${raw.path})`,
-                        );
-                    }
-
-                    // Build input WITHOUT resolving the async contextGraph getter yet —
-                    // only graph-dependent options pay for the shared graph build.
-                    // Invalid option requests return their error above without
-                    // invoking the graph getter.
-                    const inspectInput: InspectV4Input = {
-                        path: raw.path,
-                        cwd: ctx.cwd,
-                        sessionFilePath,
-                        signal,
-                        ...normalized,
-                    };
-                    if (needsContextGraph(kind, normalized)) {
-                        // getSharedContextGraphAsync can rethrow a raw native
-                        // tree-sitter/parser error from the graph build; every
-                        // downstream consumer of input.contextGraph already
-                        // renders a "not available" fallback when it is
-                        // undefined, so leave it unset here (same graceful
-                        // degradation as "no DI graph registered").
-                        try {
-                            inspectInput.contextGraph = await resolveGraph();
-                        } catch (e) {
-                            if (signal?.aborted) throw e;
-                            // leave contextGraph undefined — downstream falls back
-                        }
-                    }
-                    const details = await executeInspectV4(inspectInput);
-                    return respond(details);
+                    const resolveGraph = async (): Promise<ContextGraph | undefined> =>
+                        typeof opts.contextGraph === "function" ? opts.contextGraph(ctx.cwd) : opts.contextGraph;
+                    return executeFileOrDirectoryBranch({
+                        raw, kind, ctx, signal, sessionFilePath, resolveGraph, respond,
+                    });
                 }
-
                 default:
                     throw new Error(
                         'Error: inspect requires "mode" to be one of "file" | "directory" | "script"',
