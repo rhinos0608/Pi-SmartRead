@@ -312,4 +312,13 @@ describe("pairReports", () => {
             { ...variant, queries: [...variant.queries!].reverse() },
         )).toThrow(/qid/);
     });
+    it("refuses pairing when queries are missing or disagree with manifest queryCount", () => {
+        expect(() => pairReports({ ...base, queries: undefined }, variant)).toThrow(/queries missing/);
+        expect(() => pairReports(base, { ...variant, queries: "q01" as unknown as PairedReport["queries"] }))
+            .toThrow(/queries missing/);
+        expect(() => pairReports(
+            { ...base, manifest: manifest({ queryCount: 3 }) },
+            variant,
+        )).toThrow(/queryCount/);
+    });
 });

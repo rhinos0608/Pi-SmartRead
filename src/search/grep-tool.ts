@@ -593,7 +593,7 @@ export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; 
     }
     if (hasStrongRegexSyntax(pattern)) {
         if (hasBracketClassOnly(pattern)) {
-            return { mode: "smart", reason: "auto_declined_prose_class", note: "Bracketed prefix looks like prose; regex auto-detect declined. Set regex:true to force regex." } as unknown as GrepRouting;
+            return { mode: "smart", reason: "auto_declined_prose_class", note: "Bracketed prefix looks like prose; regex auto-detect declined. Set regex:true to force regex." };
         }
         return { mode: "regex", reason: "auto_regex" };
     }

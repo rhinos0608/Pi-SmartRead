@@ -274,8 +274,20 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
     requireIdentity("corpusKind", bManifest.corpusKind, vManifest.corpusKind);
     requireIdentity("gateConstants", bManifest.gateConstants, vManifest.gateConstants);
     requireIdentity("retrieval params", bManifest.retrievalConditions ?? bManifest.params, vManifest.retrievalConditions ?? vManifest.params);
-    const bQueries = baseline.queries ?? [];
-    const vQueries = variant.queries ?? [];
+    const requireQueries = (name: string, report: PairedReport): PairedReportQuery[] => {
+        if (!Array.isArray(report.queries)) {
+            throw new Error(`refuses-pair: ${name} queries missing or not an array`);
+        }
+        const expected = report.manifest?.queryCount;
+        if (expected !== undefined && report.queries.length !== expected) {
+            throw new Error(
+                `refuses-pair: ${name} query count ${report.queries.length} vs manifest queryCount ${expected}`,
+            );
+        }
+        return report.queries;
+    };
+    const bQueries = requireQueries("baseline", baseline);
+    const vQueries = requireQueries("variant", variant);
     const bQids = bQueries.map((q) => q.qid);
     const vQids = vQueries.map((q) => q.qid);
     if (bQids.length !== vQids.length || !bQids.every((qid, i) => qid === vQids[i])) {

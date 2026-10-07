@@ -133,36 +133,36 @@ describe("parseMcpHover", () => {
 });
 
 describe("summarizeLatency setup timing", () => {
-    const latency = (setupMs: number | null): PositionLatency => ({
+    const latency = (): PositionLatency => ({
         reference: { definition: 10, references: 20, hover: 30 },
         system: { definition: 5, references: 10, hover: 15 },
         workspaceSymbolMs: 5,
-        setupMs,
     });
 
-    it("reports measured setup time instead of zero", () => {
-        const report = summarizeLatency([latency(1200), latency(1200)]);
+    it("reports measured setup time once per run, not once per position", () => {
+        const report = summarizeLatency([latency(), latency()], { ms: 1200 });
         expect(report.setup.p50).toBe(1200);
-        expect(report.setup.n).toBe(2);
+        expect(report.setup.n).toBe(1);
     });
 
     it("reports setup as unavailable (null) with a reason, never zero, when untimed", () => {
-        const report = summarizeLatency([latency(null), latency(null)]);
+        const report = summarizeLatency([latency(), latency()], {
+            ms: null,
+            reason: "setup timing unavailable: fixture",
+        });
         expect(report.setup).toMatchObject({ p50: null, p95: null, n: 0 });
-        expect(typeof report.setupNote).toBe("string");
-        expect(report.setupNote!.length).toBeGreaterThan(0);
+        expect(report.setupNote).toBe("setup timing unavailable: fixture");
     });
 });
   describe("summarizeLatency", () => {
-    const position = (def: number, refs: number, hov: number, sym = 5, setup = 0): PositionLatency => ({
+    const position = (def: number, refs: number, hov: number, sym = 5): PositionLatency => ({
     reference: { definition: def, references: refs, hover: hov },
     system: { definition: def / 2, references: refs / 2, hover: hov / 2 },
     workspaceSymbolMs: sym,
-    setupMs: setup,
   });
 
   it("reports per-operation distributions in matching units for both sides", () => {
-    const report = summarizeLatency([position(10, 20, 30), position(10, 20, 30)]);
+    const report = summarizeLatency([position(10, 20, 30), position(10, 20, 30)], { ms: null });
     for (const side of [report.reference, report.system] as const) {
       expect(Object.keys(side).sort()).toEqual([
         "definition",
@@ -178,18 +178,18 @@ describe("summarizeLatency setup timing", () => {
   });
 
   it("computes per-position totals for both sides and keeps setup apart from answer latency", () => {
-    const report = summarizeLatency([position(10, 20, 30, 100, 7), position(10, 20, 30, 100, 7)]);
+    const report = summarizeLatency([position(10, 20, 30, 100), position(10, 20, 30, 100)], { ms: 7 });
     // Totals are def+refs+hov per position: 60 (ref) and 30 (sys).
     expect(report.reference.perPositionTotal).toMatchObject({ p50: 60, p95: 60, n: 2 });
     expect(report.system.perPositionTotal).toMatchObject({ p50: 30, p95: 30, n: 2 });
-    // Workspace/symbol is its own series; setup tracks startup/index work.
+    // Workspace/symbol is its own series; setup is run-level (n is 1, not 2).
     expect(report.workspaceSymbol).toMatchObject({ p50: 100, n: 2 });
-    expect(report.setup).toMatchObject({ p50: 7, n: 2 });
+    expect(report.setup).toMatchObject({ p50: 7, n: 1 });
     expect(report.reference.definition.p50).not.toBe(report.workspaceSymbol.p50);
   });
 
   it("returns zeroed summaries for no positions", () => {
-    const report = summarizeLatency([]);
+    const report = summarizeLatency([], { ms: null });
     expect(report.reference.definition).toEqual({ p50: 0, p95: 0, n: 0 });
     expect(report.workspaceSymbol).toEqual({ p50: 0, p95: 0, n: 0 });
     expect(report.setup).toEqual({ p50: null, p95: null, n: 0 });
