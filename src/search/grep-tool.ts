@@ -895,7 +895,10 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
         ?? results.some((r) => r.truncated);
     const truncated: boolean = (results as any).globalTruncated
         ?? results.some((r) => r.truncated);
-    if (shown.length === 0) header.push("(no matches for any query)");
+    // An abstention is not a no-result: the per-query abstain messages above
+    // already explain the empty merged view, so the generic no-matches line
+    // renders only for genuinely matchless batches.
+    if (shown.length === 0 && abstainedIndexes.size === 0) header.push("(no matches for any query)");
     else {
         for (const hit of shown) {
             const matched = (hit as { matchedQueries?: string[] }).matchedQueries;

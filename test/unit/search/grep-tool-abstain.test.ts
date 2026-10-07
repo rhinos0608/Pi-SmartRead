@@ -143,4 +143,25 @@ describe("grep abstention rendering (D67)", () => {
         expect(text).not.toContain("(no matches for any query)");
         expect(text).toMatch(/retry-note\.ts\s+L\d/);
     });
+
+    it("all-abstained batch omits the generic no-matches line", async () => {
+        // Every entry abstains, so the merged view is empty: the abstain
+        // messages explain it, and the generic line must not conflate
+        // abstention with no-results.
+        const tool = createGrepTool(makeOpts({ judge: abstainProvider() }));
+        const result = await tool.execute(
+            "t-abstain-all-batch",
+            { queries: [{ pattern: NL_QUERY }, { pattern: NL_QUERY }] },
+            undefined,
+            undefined,
+            makeCtx(workdir),
+        );
+        const text = (result.content[0] as { text: string }).text;
+        const queryResults = (result.details as { queryResults: { shownHits: number }[] }).queryResults;
+        expect(queryResults).toHaveLength(2);
+        expect(queryResults.every((entry) => entry.shownHits === 0)).toBe(true);
+        expect(text).toContain("no confident match");
+        expect(text).not.toContain("(no matches for any query)");
+        expect(text).not.toMatch(/^maybe:/m);
+    });
 });
