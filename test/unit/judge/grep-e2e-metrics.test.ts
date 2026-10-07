@@ -9,6 +9,7 @@ import {
     GATE_CONSTANTS,
     READ_READY_DEFAULT_BUDGET,
     classifyGoldRow,
+    fileEndLine,
     goldCovered,
     isWrongSpanOutcome,
     legacyTop5TokenEstimate,
@@ -106,9 +107,23 @@ describe("q02 dual-count policy", () => {
         expect(report.errors.some((e) => e.includes("beyond actual file end"))).toBe(true);
     });
 
+    it("fileEndLine counts empty files as end line 0 (same path the corpus walk uses)", () => {
+        // Guards the production line-counting path: without the empty-file
+        // branch, "".split("\n") yields one part and the walk records 1.
+        expect(fileEndLine("")).toBe(0);
+        expect(fileEndLine("a\n")).toBe(1);
+        expect(fileEndLine("a\nb")).toBe(2);
+        expect(fileEndLine("a\nb\n")).toBe(2);
+    });
+
     it("gold span into an empty file fails validation before retrieval", () => {
         const rows = [row({ qid: "q01", file: "src/empty.ts", startLine: 1, endLine: 1 })];
-        const report = validateFixture(rows, new Set(["src/empty.ts"]), new Map([["src/empty.ts", 0]]));
+        // The EOF map comes from the production line counter run over real
+        // (empty) file content, not a hardcoded literal: reverting the
+        // empty-file branch in fileEndLine flips this map to 1 and the
+        // assertion below fails.
+        const actualFileEnds = new Map([["src/empty.ts", fileEndLine("")]]);
+        const report = validateFixture(rows, new Set(["src/empty.ts"]), actualFileEnds);
         expect(report.errors.some((e) => e.includes("beyond actual file end"))).toBe(true);
     });
 
