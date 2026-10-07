@@ -209,6 +209,145 @@ export function checkPrivateExisting(stat: {
     return { ok: true };
 }
 
+/** Minimal shape a report JSON must have to participate in paired comparison. */
+export interface PairedReportQuery {
+    qid: string;
+    fileHit?: boolean;
+    covered?: boolean;
+    abstained?: boolean;
+    renderedTokens?: number;
+    readReady?: boolean;
+}
+
+export interface PairedReport {
+    manifest?: {
+        fixtureSha?: string;
+        inventoryHashBefore?: string;
+        queryCount?: number;
+        engineSourceHash?: string;
+        sourceRef?: string | null;
+        corpusKind?: string;
+        gateConstants?: Record<string, number>;
+        retrievalConditions?: Record<string, unknown>;
+        params?: Record<string, unknown>;
+    };
+    queries?: PairedReportQuery[];
+}
+
+export interface PairedQueryDelta {
+    qid: string;
+    readReady: "win" | "loss" | "tie";
+    fileHit: "win" | "loss" | "tie";
+    abstention: "win" | "loss" | "tie";
+    tokenDelta: number;
+}
+
+export interface PairedComparison {
+    baseline: string;
+    variant: string;
+    queryCount: number;
+    readReady: { wins: number; losses: number; ties: number };
+    fileHit: { wins: number; losses: number; ties: number };
+    abstention: { wins: number; losses: number; ties: number };
+    meanTokenDelta: number;
+    deltas: PairedQueryDelta[];
+}
+
+function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
+    if (base === change) return "tie";
+    return change ? "win" : "loss";
+}
+
+/**
+ * Paired per-query comparison of two report JSONs (baseline, variant).
+ * Pairing requires identical fixture/corpus identity: fixtureSha,
+ * corpus inventory hash, and the ordered qid set must all match.
+ * engineSourceHash is the ONLY identity field allowed to differ (it is
+ * the point of the comparison). Throws on any other mismatch.
+ * Abstention "win" means the variant abstained where baseline did not.
+ */
+export function pairReports(baseline: PairedReport, variant: PairedReport, names?: { baseline: string; variant: string }): PairedComparison {
+    const bManifest = baseline.manifest ?? {};
+    const vManifest = variant.manifest ?? {};
+    // Complete matching identity: presence AND equality. Missing on either
+    // side refuses. engineSourceHash is the variable under comparison.
+    const requireIdentity = (field: string, b: unknown, v: unknown): void => {
+        if (b === undefined || v === undefined) {
+            throw new Error(`refuses-pair: ${field} missing (${String(b)} vs ${String(v)})`);
+        }
+        if (stableStringify(b) !== stableStringify(v)) {
+            throw new Error(`refuses-pair: ${field} mismatch (${stableStringify(b)} vs ${stableStringify(v)})`);
+        }
+    };
+    requireIdentity("fixtureSha", bManifest.fixtureSha, vManifest.fixtureSha);
+    requireIdentity("corpus inventory hash", bManifest.inventoryHashBefore, vManifest.inventoryHashBefore);
+    requireIdentity("sourceRef", bManifest.sourceRef, vManifest.sourceRef);
+    requireIdentity("corpusKind", bManifest.corpusKind, vManifest.corpusKind);
+    requireIdentity("gateConstants", bManifest.gateConstants, vManifest.gateConstants);
+    requireIdentity("retrieval params", bManifest.retrievalConditions ?? bManifest.params, vManifest.retrievalConditions ?? vManifest.params);
+    const requireQueries = (name: string, report: PairedReport): PairedReportQuery[] => {
+        if (!Array.isArray(report.queries)) {
+            throw new Error(`refuses-pair: ${name} queries missing or not an array`);
+        }
+        const expected = report.manifest?.queryCount;
+        if (expected !== undefined && report.queries.length !== expected) {
+            throw new Error(
+                `refuses-pair: ${name} query count ${report.queries.length} vs manifest queryCount ${expected}`,
+            );
+        }
+        return report.queries;
+    };
+    const bQueries = requireQueries("baseline", baseline);
+    const vQueries = requireQueries("variant", variant);
+    const rejectDuplicateQids = (name: string, queries: PairedReportQuery[]): void => {
+        const seen = new Set<string>();
+        for (const q of queries) {
+            if (seen.has(q.qid)) {
+                throw new Error(`refuses-pair: ${name} has duplicate qid "${q.qid}"`);
+            }
+            seen.add(q.qid);
+        }
+    };
+    // Duplicate qids would silently collapse in the variant lookup map
+    // (two rows pairing against the same row), so reject them first.
+    rejectDuplicateQids("baseline", bQueries);
+    rejectDuplicateQids("variant", vQueries);
+    const bQids = bQueries.map((q) => q.qid);
+    const vQids = vQueries.map((q) => q.qid);
+    if (bQids.length !== vQids.length || !bQids.every((qid, i) => qid === vQids[i])) {
+        throw new Error("refuses-pair: ordered qid set mismatch");
+    }
+    const vByQid = new Map(vQueries.map((q) => [q.qid, q]));
+    const deltas: PairedQueryDelta[] = bQueries.map((b) => {
+        const v = vByQid.get(b.qid)!;
+        return {
+            qid: b.qid,
+            readReady: boolWinLoss(b.readReady === true, v.readReady === true),
+            fileHit: boolWinLoss(b.fileHit === true, v.fileHit === true),
+            // Abstention direction is inverted: abstaining where baseline did
+            // not is recorded as a "win" only in the abstention column.
+            abstention: b.abstained === v.abstained ? "tie" : (v.abstained ? "win" : "loss"),
+            tokenDelta: (v.renderedTokens ?? 0) - (b.renderedTokens ?? 0),
+        };
+    });
+    const tally = (pick: (d: PairedQueryDelta) => "win" | "loss" | "tie"): { wins: number; losses: number; ties: number } => ({
+        wins: deltas.filter((d) => pick(d) === "win").length,
+        losses: deltas.filter((d) => pick(d) === "loss").length,
+        ties: deltas.filter((d) => pick(d) === "tie").length,
+    });
+    return {
+        baseline: names?.baseline ?? "baseline",
+        variant: names?.variant ?? "variant",
+        queryCount: deltas.length,
+        readReady: tally((d) => d.readReady),
+        fileHit: tally((d) => d.fileHit),
+        abstention: tally((d) => d.abstention),
+        meanTokenDelta: deltas.length > 0
+            ? deltas.reduce((sum, d) => sum + d.tokenDelta, 0) / deltas.length
+            : 0,
+        deltas,
+    };
+};
 /**
  * Append one JSONL checkpoint line: exclusive-create 0600 for new files;
  * the append path refuses symlinks (lstat rejection, plus O_NOFOLLOW

@@ -17,6 +17,7 @@
 import { readFile } from "node:fs/promises";
 import type { ContextGraph } from "../context-graph.js";
 import type { GrepHit } from "../search/grep-cascade.js";
+import { resolveGrepUnitMode } from "../search/grep-units.js";
 import { isNaturalLanguageQuery } from "../search/query-intent.js";
 import type { ResolveJudgeResult } from "./judge-resolver.js";
 import { existsQuestion, unitRelevanceQuestion } from "./questions.js";
@@ -113,6 +114,8 @@ export interface GrepJudgeDetails {
     abstained: boolean;
     pointers: GrepJudgePointer[];
     hits: Array<{ path: string; line: number; endLine: number; p: number }>;
+    /** Active BM25 result-unit mode (D31 seam; additive for reports). */
+    unitMode: "anchor" | "symbol";
 }
 
 export interface GrepJudgeStageResult {
@@ -264,6 +267,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
                 abstained: true,
                 pointers: [],
                 hits: [],
+                unitMode: resolveGrepUnitMode(),
             },
         };
     }
@@ -296,6 +300,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
             abstained: false,
             pointers: pointers.pointers,
             hits: judgedHits.map((h) => ({ path: h.relFile, line: h.line, endLine: h.endLine, p: h.judgeP ?? 0 })),
+            unitMode: resolveGrepUnitMode(),
         },
     };
 }
@@ -353,6 +358,12 @@ async function buildUnitText(
     contextLines: number,
     read: (path: string) => Promise<string>,
 ): Promise<string> {
+    if (resolveGrepUnitMode() === "symbol" && hit.kind === "bm25" && hit.snippet.trim().length > 0) {
+        const symbolLine = hit.name ? `${hit.relFile} symbol ${hit.name}\n` : "";
+        return `${hit.relFile} lines ${hit.line}-${hit.endLine} (nearest use)\n${symbolLine}${hit.snippet}`.slice(
+            0, GREP_JUDGE_UNIT_MAX_CHARS,
+        );
+    }
     try {
         const content = await read(hit.file);
         const lines = content.split(/\r?\n/);

@@ -35,7 +35,7 @@
  * Usage:
  *   npx tsx scripts/eval/judge/grep-e2e.ts --config off|t035|t040|t045|all
  *     [--queries q01,q02] [--limit-queries N] [--root PATH]
- *     [--data-dir PATH] [--timeout-ms N] [--resume]
+ *     [--data-dir PATH] [--timeout-ms N] [--resume] [--token-budget N]
  */
 
 import { execFileSync } from "node:child_process";
@@ -69,13 +69,16 @@ import { shutdownAllManagers } from "../../../src/lsp/lsp-manager.js";
 import { resetLSPBridge } from "../../../src/lsp/lsp-bridge.js";
 import {
     GATE_CONSTANTS,
+    READ_READY_DEFAULT_BUDGET,
     classifyGoldRow,
     fileEndLine,
     goldCovered,
     goldFileHit,
     legacyTop5TokenEstimate,
     renderedTokenEstimate,
+    scoreReadReadySpan,
     summarizeQueries,
+    summarizeReadReady,
     validateFixture,
     type ClassifyEvidence,
     type EvalRow,
@@ -158,6 +161,8 @@ interface QueryTrace {
     coveredGoldRows: number;
     covered: boolean;
     fileHit: boolean;
+    readReady: boolean;
+    readReadyTokens: number;
     goldOutcomes: Array<{ file: string; startLine: number; endLine: number; outcome: string }>;
     status: string;
     elapsedMs: number;
@@ -172,6 +177,7 @@ function parseArgs(argv: string[]): {
     dataDir: string;
     timeoutMs: number;
     resume: boolean;
+    tokenBudget: number;
 } {
     let configArg = "all";
     let queriesArg: string | null = null;
@@ -180,6 +186,7 @@ function parseArgs(argv: string[]): {
     let dataDir = DEFAULT_DATA_DIR;
     let timeoutMs = 60000;
     let resume = false;
+    let tokenBudget = READ_READY_DEFAULT_BUDGET;
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
         if (arg === "--config") configArg = argv[++i] ?? "";
@@ -188,15 +195,17 @@ function parseArgs(argv: string[]): {
         else if (arg === "--root") root = canonicalizeCorpusRoot(resolve(argv[++i] ?? ""));
         else if (arg === "--data-dir") dataDir = resolve(argv[++i] ?? "");
         else if (arg === "--timeout-ms") timeoutMs = Number(argv[++i] ?? "");
+        else if (arg === "--token-budget") tokenBudget = Number(argv[++i] ?? "");
         else if (arg === "--resume") resume = true;
         else if (arg === "--help" || arg === "-h") {
-            console.log("Usage: npx tsx scripts/eval/judge/grep-e2e.ts [--config off|t035|t040|t045|all] [--queries q01,q02] [--limit-queries N] [--root PATH] [--data-dir PATH] [--timeout-ms N] [--resume]");
-            console.log(`Defaults: frozen git-archive snapshot of ${SOURCE_REF}; per-query timeout ${timeoutMs}ms.`);
+            console.log("Usage: npx tsx scripts/eval/judge/grep-e2e.ts [--config off|t035|t040|t045|all] [--queries q01,q02] [--limit-queries N] [--root PATH] [--data-dir PATH] [--timeout-ms N] [--resume] [--token-budget N]");
+            console.log(`Defaults: frozen git-archive snapshot of ${SOURCE_REF}; per-query timeout ${timeoutMs}ms; read-ready token budget ${tokenBudget}.`);
             process.exit(0);
         } else {
             throw new Error(`Unknown argument: ${arg}`);
         }
     }
+    if (!Number.isFinite(tokenBudget) || tokenBudget <= 0) throw new Error("--token-budget must be a positive number");
     const all: ConfigName[] = ["off", "t035", "t040", "t045"];
     if (configArg !== "all" && !(all as string[]).includes(configArg)) {
         throw new Error("--config must be off|t035|t040|t045|all");
@@ -211,6 +220,7 @@ function parseArgs(argv: string[]): {
         dataDir,
         timeoutMs,
         resume,
+        tokenBudget,
     };
 }
 
@@ -376,8 +386,9 @@ async function runQuery(input: {
     root: string;
     judge: GrepJudgeProvider | undefined;
     timeoutMs: number;
+    tokenBudget: number;
 }): Promise<{ trace: QueryTrace; outcome: QueryOutcome }> {
-    const { qid, query, answerable, golds, root, judge, timeoutMs } = input;
+    const { qid, query, answerable, golds, root, judge, timeoutMs, tokenBudget } = input;
     const started = performance.now();
     const events: GrepTraceEvent[] = [];
     const judgeCalls: JudgeCallRecord[] = [];
@@ -495,6 +506,16 @@ async function runQuery(input: {
             : covered
               ? "covered"
               : "mixed";
+    // Read-ready span@5 under the fixed rendered-token budget: per-gold scoring
+    // over the rendered top-5 units (rendered gutter lines, not metadata).
+    // Cost is measured from the exact captured guarded text: each unit's
+    // block is located in order, so headers/notes count toward the budget.
+    // Unlocatable blocks make the query unmeasurable (never synthetic).
+    const readReadyRows = golds.map((g) => scoreReadReadySpan(g, top5, tokenBudget, 5, renderedText));
+    const readReady = golds.length > 0 && readReadyRows.some((r) => r.success);
+    const readReadyTokens = readReady
+        ? Math.min(...readReadyRows.filter((r) => r.success).map((r) => r.tokensUsed))
+        : 0;
     const outcome: QueryOutcome = {
         qid,
         query,
@@ -512,6 +533,8 @@ async function runQuery(input: {
         outcome: outcomeLabel,
         status,
         elapsedMs,
+        readReady,
+        readReadyTokens,
     };
     const trace: QueryTrace = {
         qid,
@@ -539,6 +562,8 @@ async function runQuery(input: {
         coveredGoldRows,
         covered,
         fileHit,
+        readReady,
+        readReadyTokens,
         goldOutcomes,
         status,
         elapsedMs,
@@ -768,6 +793,8 @@ function fingerprintFor(config: ConfigName): string {
             contextLines: 2,
             workspaceRevision: "frozen 0 within process",
             queryCount: qids.length,
+            tokenBudget: args.tokenBudget,
+            readReadyK: 5,
         },
         timeoutMs: args.timeoutMs,
     };
@@ -823,7 +850,7 @@ try {
                 continue;
             }
             process.stdout.write(`[${config}] ${qid} ... `);
-            const { trace, outcome } = await runQuery({ qid, query: group[0]!.query, answerable: group[0]!.answerable, golds, root, judge: provider, timeoutMs: args.timeoutMs });
+            const { trace, outcome } = await runQuery({ qid, query: group[0]!.query, answerable: group[0]!.answerable, golds, root, judge: provider, timeoutMs: args.timeoutMs, tokenBudget: args.tokenBudget });
             traces.push(trace);
             outcomes.push(outcome);
             newQueries++;
@@ -875,16 +902,17 @@ try {
             },
             degradedQueries: degradedCount,
             metricDefinitions: {
+                readReadySpanAt5: `query succeeds if, within the first 5 rendered units AND within ${args.tokenBudget} rendered tokens, some unit's RENDERED gutter lines (parsed from the shown snippet, not metadata ranges) overlap a gold range`,
                 renderedTokens: "ceil(renderedChars/4) over the EXACT guarded tool text (headers, notes, pointers, degradation lines included)",
                 legacyTop5Tokens: "ceil(chars/4) over concatenated top-5 units rendered as '<relFile>:<line>-<endLine> <name>\\n<snippet>' (prior-harness scope, kept for comparison)",
-                overlap: "same repo-relative file AND unit.line <= gold.endLine && unit.endLine >= gold.startLine",
+                overlap: "same repo-relative file AND at least one gold line in the unit's exact SET of displayed gutter lines (no metadata fallback)",
                 knownGoldRecallAt5: "known-fixture diagnostic: sum(covered known gold rows)/sum(known gold rows) over evaluable answerable queries (q02 has no gold rows). NOT a lower bound of true recall.",
                 declaredQueryCoverage: "answerable qids with >=1 covered gold / ALL declared answerable qids (incl. q02, errors count as uncovered)",
                 evaluableQueryCoverage: "answerable qids with >=1 covered gold / answerable qids with >=1 gold row (errors count as uncovered)",
                 fileHitAt5: "evaluable qids with >=1 same-file top-5 hit / evaluable qids",
                 abstentionCorrect: "unanswerable qids with (abstained || top-5 empty) / unanswerable qids",
             },
-            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage },
+            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage, tokenBudget: args.tokenBudget, readReady: summarizeReadReady(outcomes, traces.flatMap((t) => (t.goldOutcomes as Array<{ file: string; startLine: number; endLine: number }>).map((g) => scoreReadReadySpan(g, (t.shown ?? []) as Array<{ relFile: string; line: number; endLine: number; name?: string; snippet: string }>, args.tokenBudget, 5, t.text as string)))) },
             queries: traces,
         };
         if (drifted) {

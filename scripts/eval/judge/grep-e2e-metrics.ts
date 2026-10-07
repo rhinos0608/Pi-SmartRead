@@ -49,6 +49,8 @@ export type GoldOutcome =
     | "not_retrieved"
     | "retrieval_unobserved"
     | "retrieved_wrong_span"
+    | "top5_wrong_span"
+    | "pool_wrong_span"
     | "below_top5"
     | "judge_dropped"
     | "execution_error"
@@ -74,6 +76,9 @@ export interface QueryOutcome {
     outcome: QueryOutcomeLabel;
     status: string;
     elapsedMs: number;
+    /** Read-ready span@5 under the rendered-token budget (additive; absent on old rows). */
+    readReady?: boolean;
+    readReadyTokens?: number;
 }
 
 /** Legacy harness token estimate: top-5 snippet strings only, not rendered output. */
@@ -122,6 +127,14 @@ export interface ClassifyEvidence {
  * Classify one gold row from observable evidence only. Without pre-judge
  * snapshots, pool-level causes (judge_dropped/below_top5) cannot be claimed
  * and fall back to the directly observed file/span outcome.
+ *
+ * Abstention is a QUERY-level flag recorded alongside, never a gold-row
+ * outcome: abstained queries are still classified from pre-judge evidence
+ * (judge_dropped / pool_wrong_span / not_retrieved) so retrieval evidence
+ * is never masked. "retrieved_wrong_span" is retained as a legacy alias
+ * accepted by readers but no longer emitted: same-file misses now split
+ * into "top5_wrong_span" (gold file in rendered top-5, no overlap) vs
+ * "pool_wrong_span" (gold file only beyond top-5 in the pre-judge pool).
  */
 export function classifyGoldRow(
     gold: Pick<EvalRow, "file" | "startLine" | "endLine">,
@@ -130,17 +143,23 @@ export function classifyGoldRow(
 ): GoldOutcome {
     if (evidence.executionStatus?.startsWith("error:")) return "execution_error";
     if (goldCovered(gold, top5)) return "covered";
-    if (evidence.abstained) return "abstained";
-    if (goldFileHit(gold, top5)) return "retrieved_wrong_span";
-    if (evidence.judged && evidence.preJudgeCovered === true) return "judge_dropped";
+    // NOTE: evidence.abstained is deliberately NOT consulted here. It is a
+    // query-level flag; falling through preserves the retrieval evidence.
     if (evidence.shownCovered === true) return "below_top5";
+    if (evidence.judged && evidence.preJudgeCovered === true) return "judge_dropped";
+    if (goldFileHit(gold, top5)) return "top5_wrong_span";
     if (evidence.preJudgeFiles !== undefined && !evidence.preJudgeFiles.includes(gold.file)) {
         return "not_retrieved";
     }
     if (evidence.preJudgeFiles !== undefined && evidence.preJudgeFiles.includes(gold.file)) {
-        return "retrieved_wrong_span";
+        return "pool_wrong_span";
     }
     return "retrieval_unobserved";
+}
+
+/** Legacy alias: readers of old reports may still see this outcome. */
+export function isWrongSpanOutcome(outcome: string): boolean {
+    return outcome === "retrieved_wrong_span" || outcome === "top5_wrong_span" || outcome === "pool_wrong_span";
 }
 
 /**
@@ -294,5 +313,171 @@ export function summarizeQueries(queries: QueryOutcome[]): QuerySummary {
             ? queries.reduce((a, q) => a + q.elapsedMs, 0) / queries.length
             : 0,
         outcomeCounts,
+    };
+}
+
+/** Default rendered-token budget B for readReadySpanAt5. */
+export const READ_READY_DEFAULT_BUDGET = 1500;
+/** Fixed rendered window K for readReadySpanAt5. */
+export const READ_READY_K = 5;
+
+export interface RenderedSpan {
+    lines: Set<number>;
+}
+
+/**
+ * Parse the RENDERED line numbers from a captured card snippet (the
+ * line-numbered text actually shown, e.g. "  20 | code") as the exact
+ * SET of displayed gutter numbers. Metadata line/endLine ranges are NOT
+ * trusted here. Returns null when no gutter numbers are present (the
+ * card then contributes no rendered coverage).
+ */
+export function parseRenderedSpan(snippet: string): RenderedSpan | null {
+    const lines = new Set<number>();
+    for (const line of snippet.split(/\r?\n/)) {
+        const m = /^\s*(\d+)\s*[|:]/.exec(line);
+        if (m) lines.add(Number(m[1]));
+    }
+    if (lines.size === 0) return null;
+    return { lines };
+}
+
+export interface ReadReadyUnit {
+    relFile: string;
+    line: number;
+    endLine: number;
+    name?: string;
+    snippet: string;
+}
+
+export interface ReadReadyResult {
+    success: boolean;
+    unitIndex: number | null;
+    tokensUsed: number;
+    spanLength: number | null;
+    precision: number | null;
+    iou: number | null;
+    /** Rendered cards in the window with no parseable gutter lines. */
+    noGutterUnits: number;
+    /** True when unit blocks could not be located in captured text. */
+    unmeasurable?: boolean;
+}
+
+function unitRenderedChars(unit: ReadReadyUnit): number {
+    return `${unit.relFile}:${unit.line}-${unit.endLine} ${unit.name ?? ""}\n${unit.snippet}`.length;
+}
+
+function spanOverlapMetrics(gold: Pick<EvalRow, "startLine" | "endLine">, span: RenderedSpan): {
+    precision: number; iou: number; length: number;
+} {
+    let overlap = 0;
+    for (let line = gold.startLine; line <= gold.endLine; line++) {
+        if (span.lines.has(line)) overlap++;
+    }
+    const unitLen = span.lines.size;
+    const goldLen = gold.endLine - gold.startLine + 1;
+    const union = unitLen + goldLen - overlap;
+    return {
+        precision: unitLen > 0 ? overlap / unitLen : 0,
+        iou: union > 0 ? overlap / union : 0,
+        length: unitLen,
+    };
+}
+
+/**
+ * Read-ready span@K under a fixed rendered-token budget: a gold row
+ * succeeds if, within the first K rendered units AND within B tokens of
+ * rendered output, some unit's RENDERED lines overlap the gold range.
+ * Per-unit cost is ceil(rendered unit chars/4); units that would exceed
+ * the budget are not consumed.
+ */
+export function scoreReadReadySpan(
+    gold: Pick<EvalRow, "file" | "startLine" | "endLine">,
+    units: ReadReadyUnit[],
+    budget = READ_READY_DEFAULT_BUDGET,
+    k = READ_READY_K,
+    renderedText?: string,
+): ReadReadyResult {
+    // Measured-cost path: locate each unit's rendered block in the exact
+    // captured guarded text in order (headers/notes before the first unit
+    // count toward the budget). Unlocatable blocks are unmeasurable.
+    let blockEnds: number[] | null = null;
+    if (renderedText !== undefined) {
+        blockEnds = [];
+        let cursor = 0;
+        for (let i = 0; i < Math.min(k, units.length); i++) {
+            const snippet = units[i]!.snippet;
+            if (snippet.length === 0) {
+                return { success: false, unitIndex: null, tokensUsed: 0, spanLength: null, precision: null, iou: null, noGutterUnits: 0, unmeasurable: true };
+            }
+            const idx = renderedText.indexOf(snippet, cursor);
+            if (idx === -1) {
+                return { success: false, unitIndex: null, tokensUsed: 0, spanLength: null, precision: null, iou: null, noGutterUnits: 0, unmeasurable: true };
+            }
+            blockEnds.push(idx + snippet.length);
+            cursor = idx + snippet.length;
+        }
+    }
+    let spent = 0;
+    let noGutterUnits = 0;
+    for (let i = 0; i < Math.min(k, units.length); i++) {
+        const unit = units[i]!;
+        const cumulative = blockEnds ? Math.ceil(blockEnds[i]! / 4) : spent + Math.ceil(unitRenderedChars(unit) / 4);
+        if (cumulative > budget) break;
+        spent = cumulative;
+        const span = parseRenderedSpan(unit.snippet);
+        if (!span) {
+            noGutterUnits++;
+            continue;
+        }
+        if (unit.relFile !== gold.file) continue;
+        let hitsGold = false;
+        for (let line = gold.startLine; line <= gold.endLine; line++) {
+            if (span.lines.has(line)) { hitsGold = true; break; }
+        }
+        if (hitsGold) {
+            const m = spanOverlapMetrics(gold, span);
+            return { success: true, unitIndex: i, tokensUsed: spent, spanLength: m.length, precision: m.precision, iou: m.iou, noGutterUnits, unmeasurable: false };
+        }
+    }
+    return { success: false, unitIndex: null, tokensUsed: spent, spanLength: null, precision: null, iou: null, noGutterUnits, unmeasurable: false };
+}
+
+export interface ReadReadySummary {
+    queriesSuccess: string;
+    coveredGoldRows: number;
+    totalGoldRows: number;
+    meanPrecision: number | null;
+    meanIou: number | null;
+    spanLengths: { p50: number | null; p90: number | null; max: number | null };
+    singleGoldQueries: string;
+    multiGoldQueries: string;
+}
+
+/** Summarize read-ready outcomes over evaluable answerable queries. Multi-gold queries reported separately. */
+export function summarizeReadReady(
+    perQuery: Array<{ answerable: boolean; goldRows: number; readReady?: boolean }>,
+    perRow: Array<{ precision: number | null; iou: number | null; spanLength: number | null }>,
+): ReadReadySummary {
+    const evaluable = perQuery.filter((q) => q.answerable && q.goldRows > 0);
+    const ok = evaluable.filter((q) => q.readReady).length;
+    const single = evaluable.filter((q) => q.goldRows === 1);
+    const multi = evaluable.filter((q) => q.goldRows > 1);
+    const precisions = perRow.map((r) => r.precision).filter((v): v is number => v !== null);
+    const ious = perRow.map((r) => r.iou).filter((v): v is number => v !== null);
+    const lens = perRow.map((r) => r.spanLength).filter((v): v is number => v !== null).sort((a, b) => a - b);
+    const quantile = (p: number): number | null => {
+        if (lens.length === 0) return null;
+        return lens[Math.min(lens.length - 1, Math.floor(p * lens.length))]!;
+    };
+    return {
+        queriesSuccess: `${ok}/${evaluable.length}`,
+        coveredGoldRows: perRow.filter((r) => r.precision !== null && (r.precision ?? 0) > 0).length,
+        totalGoldRows: perRow.length,
+        meanPrecision: precisions.length > 0 ? precisions.reduce((a, b) => a + b, 0) / precisions.length : null,
+        meanIou: ious.length > 0 ? ious.reduce((a, b) => a + b, 0) / ious.length : null,
+        spanLengths: { p50: quantile(0.5), p90: quantile(0.9), max: lens.length > 0 ? lens[lens.length - 1]! : null },
+        singleGoldQueries: `${single.filter((q) => q.readReady).length}/${single.length}`,
+        multiGoldQueries: `${multi.filter((q) => q.readReady).length}/${multi.length}`,
     };
 }

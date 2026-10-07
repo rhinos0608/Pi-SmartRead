@@ -118,6 +118,49 @@ describe("grep regex routing — compact syntax stays regex", () => {
     });
 });
 
+describe("grep regex routing — bracketed prose prefixes stay smart", () => {
+    it("issue-title prose with a bracket prefix is text, not a character class", async () => {
+        const { details } = await run({ pattern: "[Bug]: login fails when token expires" });
+        expect(details.routing.mode).toBe("smart");
+        expect(details.routing.reason).toBe("auto_declined_prose_class");
+        expect(details.engines).not.toContain("regex");
+    });
+
+    it("compact bracket syntax still auto-routes to regex", async () => {
+        for (const pattern of ["foo[0-9]+", "[A-Z]\\w+"]) {
+            const { details } = await run({ pattern, path: "src/login.ts" });
+            expect(details.routing.mode).toBe("regex");
+            expect(details.routing.reason).toBe("auto_regex");
+            expect(details.engines).toContain("regex");
+        }
+    });
+
+    it("regex:true still forces bracketed prose to regex", async () => {
+        const { details } = await run({ pattern: "[Bug]: login fails when token expires", regex: true });
+        expect(details.routing.mode).toBe("regex");
+        expect(details.routing.reason).toBe("forced_regex");
+    });
+});
+
+describe("grep regex routing — terminal anchor backslash parity", () => {
+    it("escaped terminal $ (odd backslashes) stays smart", async () => {
+        const { details } = await run({ pattern: "foo\\$", path: "src/login.ts" });
+        expect(details.routing.mode).toBe("smart");
+        expect(details.engines).not.toContain("regex");
+    });
+
+    it("escaped backslash then anchor (even backslashes) routes to regex", async () => {
+        const { details } = await run({ pattern: "foo\\\\$", path: "src/login.ts" });
+        expect(details.routing.mode).toBe("regex");
+        expect(details.engines).toContain("regex");
+    });
+
+    it("leading ^ is an anchor and routes to regex", async () => {
+        const { details } = await run({ pattern: "^foo", path: "src/login.ts" });
+        expect(details.routing.mode).toBe("regex");
+    });
+});
+
 describe("grep regex routing — surface", () => {
     it("single details identify routing and declined syntax renders a note", async () => {
         const { details, text } = await run({ pattern: "handleLogin (the main entry point) returns null" });

@@ -195,6 +195,9 @@ async function main(): Promise<void> {
 
   const refConn = new LSPConnection();
   const posLatencies: PositionLatency[] = [];
+  // Run-level setup timing: measured once, never copied per position.
+  let setupMs: number | null = null;
+  let setupReason: string | null = "setup timing unavailable: startup/open threw before timing completed";
   const results: PositionResult[] = [];
   const statusCounts = new Map<string, number>();
   const tokenSums = new Map<string, number>();
@@ -214,8 +217,12 @@ async function main(): Promise<void> {
   };
 
   try {
-    await refConn.start(TLS_BIN, ["--stdio"], root);
-    await comparator.open(root);
+    const setupTimed = await timed(async () => {
+      await refConn.start(TLS_BIN, ["--stdio"], root);
+      await comparator.open(root);
+    });
+    setupMs = setupTimed.ms;
+    setupReason = null;
 
     for (const pos of positions) {
       const uri = pathToFileURL(pos.file).href;
@@ -230,10 +237,11 @@ async function main(): Promise<void> {
       const sym = await timed(() => refConn.request("workspace/symbol", { query: pos.name }));
       posLatencies.push({
         // Reference per-position timing is captured below once the system
-        // calls complete; setup (workspace/symbol) is labeled separately.
+        // calls complete; workspace/symbol is its own series, setup tracks
+        // actual startup/index work.
         reference: { definition: def.ms, references: refsIncl.ms, hover: hov.ms },
         system: { definition: 0, references: 0, hover: 0 },
-        setupMs: sym.ms,
+        workspaceSymbolMs: sym.ms,
       });
 
       const refDefs = rawToLocs(def.value);
@@ -329,7 +337,7 @@ async function main(): Promise<void> {
     await shutdownAllManagers().catch(() => {});
   }
 
-  const latency = summarizeLatency(posLatencies);
+  const latency = summarizeLatency(posLatencies, { ms: setupMs, reason: setupReason });
   const meanTokens: Record<string, number> = {};
   for (const [k, sum] of tokenSums) {
     const n = tokenNs.get(k) ?? 1;
@@ -397,7 +405,19 @@ async function main(): Promise<void> {
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
-main().catch((err) => {
-  process.stderr.write(`comparator benchmark failed: ${String((err as Error)?.message ?? err)}\n`);
-  process.exitCode = 1;
-});
+function isDirectExecution(): boolean {
+  const invoked = process.argv[1];
+  if (!invoked) return false;
+  try {
+    return pathToFileURL(realpathSync(invoked)).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExecution()) {
+  main().catch((err) => {
+    process.stderr.write(`comparator benchmark failed: ${String((err as Error)?.message ?? err)}\n`);
+    process.exitCode = 1;
+  });
+}

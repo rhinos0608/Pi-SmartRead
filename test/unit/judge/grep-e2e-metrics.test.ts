@@ -7,11 +7,16 @@
 import { describe, expect, it } from "vitest";
 import {
     GATE_CONSTANTS,
+    READ_READY_DEFAULT_BUDGET,
     classifyGoldRow,
     fileEndLine,
+    isWrongSpanOutcome,
     legacyTop5TokenEstimate,
+    parseRenderedSpan,
     renderedTokenEstimate,
+    scoreReadReadySpan,
     summarizeQueries,
+    summarizeReadReady,
     validateFixture,
     type EvalRow,
     type QueryOutcome,
@@ -162,11 +167,22 @@ describe("file-vs-span categories", () => {
         const gold = row({});
         const wrongSpan = [{ relFile: "src/auth.ts", line: 100, endLine: 110 }];
         const elsewhere = [{ relFile: "src/db.ts", line: 10, endLine: 20 }];
-        expect(classifyGoldRow(gold, wrongSpan, { judged: false, abstained: false })).toBe("retrieved_wrong_span");
+        expect(classifyGoldRow(gold, wrongSpan, { judged: false, abstained: false })).toBe("top5_wrong_span");
         expect(classifyGoldRow(gold, elsewhere, { judged: false, abstained: false })).toBe("retrieval_unobserved");
     });
 
-    it("marks judge-dropped only with pre-judge evidence, abstained separately", () => {
+    it("splits pool-only file hits from rendered top-5 misses", () => {
+        const gold = row({});
+        const elsewhere = [{ relFile: "src/db.ts", line: 10, endLine: 20 }];
+        expect(classifyGoldRow(gold, elsewhere, {
+            judged: true, abstained: false, preJudgeFiles: ["src/auth.ts", "src/db.ts"],
+        })).toBe("pool_wrong_span");
+        expect(classifyGoldRow(gold, elsewhere, {
+            judged: true, abstained: false, preJudgeFiles: ["src/db.ts"],
+        })).toBe("not_retrieved");
+    });
+
+    it("marks judge-dropped only with pre-judge evidence, never masks with abstained", () => {
         const gold = row({});
         const top5: Array<{ relFile: string; line: number; endLine: number }> = [];
         // Gold file was a fused candidate but the judge removed it.
@@ -176,8 +192,24 @@ describe("file-vs-span categories", () => {
             preJudgeFiles: ["src/auth.ts"],
             preJudgeCovered: true,
         })).toBe("judge_dropped");
-        // Abstention is its own observable state, not a causal claim.
-        expect(classifyGoldRow(gold, top5, { judged: true, abstained: true })).toBe("abstained");
+        // Abstention is a query-level flag: the same evidence classifies
+        // identically whether or not the query abstained.
+        expect(classifyGoldRow(gold, top5, {
+            judged: true,
+            abstained: true,
+            preJudgeFiles: ["src/auth.ts"],
+            preJudgeCovered: true,
+        })).toBe("judge_dropped");
+        expect(classifyGoldRow(gold, top5, {
+            judged: true,
+            abstained: true,
+            preJudgeFiles: ["src/auth.ts"],
+        })).toBe("pool_wrong_span");
+        expect(classifyGoldRow(gold, top5, {
+            judged: true,
+            abstained: true,
+            preJudgeFiles: ["src/other.ts"],
+        })).toBe("not_retrieved");
     });
 
     it("marks below_top5 when the gold span sits outside the top-5 window", () => {
@@ -200,6 +232,116 @@ describe("file-vs-span categories", () => {
         const gold = row({});
         expect(classifyGoldRow(gold, [], { judged: false, abstained: false })).toBe("retrieval_unobserved");
         expect(classifyGoldRow(gold, [], { judged: false, abstained: false, preJudgeFiles: ["other.ts"] })).toBe("not_retrieved");
+    });
+});
+
+describe("legacy wrong-span alias", () => {
+    it("treats old and split outcomes as wrong-span", () => {
+        expect(isWrongSpanOutcome("retrieved_wrong_span")).toBe(true);
+        expect(isWrongSpanOutcome("top5_wrong_span")).toBe(true);
+        expect(isWrongSpanOutcome("pool_wrong_span")).toBe(true);
+        expect(isWrongSpanOutcome("covered")).toBe(false);
+    });
+});
+
+describe("parseRenderedSpan", () => {
+    it("parses the exact SET of gutter numbers actually shown", () => {
+        expect(parseRenderedSpan("      20 | code\n      22 | more\n      24 | end\n")?.lines)
+            .toEqual(new Set([20, 22, 24]));
+    });
+    it("returns null when the snippet has no gutter numbers", () => {
+        expect(parseRenderedSpan("no line numbers here")).toBeNull();
+    });
+    it("RED: a gap in displayed lines is not covered (gold 21, shown 20+22)", () => {
+        const gold = { file: "src/a.ts", startLine: 21, endLine: 21 };
+        const units = [{ relFile: "src/a.ts", line: 20, endLine: 22, snippet: "      20 | a\n      22 | b\n" }];
+        expect(scoreReadReadySpan(gold, units).success).toBe(false);
+    });
+    it("RED: budget is measured from the captured rendered text in order", () => {
+        const gold = { file: "src/a.ts", startLine: 100, endLine: 100 };
+        const s1 = "     100 | hit\n";
+        const s2 = "     200 | hit\n";
+        const text = `HEADER\n${s1}${s2}`;
+        const units = [
+            { relFile: "src/a.ts", line: 100, endLine: 100, snippet: s1 },
+            { relFile: "src/a.ts", line: 200, endLine: 200, snippet: s2 },
+        ];
+        const end1 = text.indexOf(s1) + s1.length;
+        const over = Math.ceil(end1 / 4);
+        // Budget below the cumulative cost through unit 0: no success.
+        expect(scoreReadReadySpan(gold, units, over - 1, 5, text).success).toBe(false);
+        // Exact cumulative cost through unit 0: success with exact tokens.
+        const ok = scoreReadReadySpan(gold, units, over, 5, text);
+        expect(ok.success).toBe(true);
+        expect(ok.tokensUsed).toBe(over);
+    });
+    it("RED: unlocatable blocks are unmeasurable, never synthetic", () => {
+        const gold = { file: "src/a.ts", startLine: 100, endLine: 100 };
+        const r = scoreReadReadySpan(gold, [{ relFile: "src/a.ts", line: 100, endLine: 100, snippet: "     100 | hit\n" }], 1500, 5, "unrelated text");
+        expect(r.success).toBe(false);
+        expect(r.unmeasurable).toBe(true);
+    });
+    it("RED: a gap in displayed lines is not covered (gold 21, shown 20+22)", () => {
+        const gold = { file: "src/a.ts", startLine: 100, endLine: 105 };
+        expect(scoreReadReadySpan(gold, [{ relFile: "src/a.ts", line: 100, endLine: 105, snippet: "plain snippet" }]).success).toBe(false);
+    });
+});
+
+describe("scoreReadReadySpan", () => {
+    const gold = { file: "src/a.ts", startLine: 100, endLine: 110 };
+    const card = (line: number, endLine: number, snippet: string, file = "src/a.ts"): {
+        relFile: string; line: number; endLine: number; snippet: string;
+    } => ({ relFile: file, line, endLine, snippet });
+    it("scores overlap from RENDERED lines, not metadata ranges", () => {
+        // Metadata claims lines 1-2 but the rendered card shows gutters 100 and 105.
+        const hit = scoreReadReadySpan(gold, [card(1, 2, "     100 | hit\n     105 | hit\n")]);
+        expect(hit.success).toBe(true);
+        expect(hit.unitIndex).toBe(0);
+        expect(hit.spanLength).toBe(2);
+        expect(hit.precision).toBeCloseTo(1, 6);
+        expect(hit.iou).toBeCloseTo(2 / 11, 6);
+    });
+    it("counts gutter-less cards as no coverage, never metadata fallback", () => {
+        const r = scoreReadReadySpan(gold, [card(100, 105, "plain snippet")]);
+        expect(r.success).toBe(false);
+        expect(r.noGutterUnits).toBe(1);
+    });
+    it("counts gutter-less units on other files too, not only gold-file units", () => {
+        const r = scoreReadReadySpan(gold, [
+            card(1, 1, "plain snippet", "src/other.ts"),
+            card(100, 105, "plain snippet"),
+        ]);
+        expect(r.success).toBe(false);
+        expect(r.noGutterUnits).toBe(2);
+    });
+    it("fails when the gold file is absent from the first K units", () => {
+        expect(scoreReadReadySpan(gold, [card(100, 110, "     100 | hit\n", "src/other.ts")]).success)
+            .toBe(false);
+    });
+    it("stops consuming units once the token budget is exhausted", () => {
+        const units = [
+            card(1, 1, "x".repeat(4000), "src/other.ts"),
+            card(100, 110, "     100 | hit\n"),
+        ];
+        expect(scoreReadReadySpan(gold, units, 500).success).toBe(false);
+        expect(scoreReadReadySpan(gold, units, READ_READY_DEFAULT_BUDGET).success).toBe(true);
+    });
+});
+
+describe("summarizeReadReady", () => {
+    it("reports multi-gold queries separately", () => {
+        const summary = summarizeReadReady(
+            [
+                { answerable: true, goldRows: 1, readReady: true },
+                { answerable: true, goldRows: 2, readReady: false },
+                { answerable: false, goldRows: 1, readReady: false },
+            ],
+            [{ precision: 1, iou: 0.5, spanLength: 6 }],
+        );
+        expect(summary.queriesSuccess).toBe("1/2");
+        expect(summary.singleGoldQueries).toBe("1/1");
+        expect(summary.multiGoldQueries).toBe("0/1");
+        expect(summary.meanPrecision).toBeCloseTo(1, 6);
     });
 });
 

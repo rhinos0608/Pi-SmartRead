@@ -4,6 +4,7 @@
  * helpers from scripts/eval/judge/grep-e2e-contract.ts — no engine IO.
  */
 import { describe, expect, it } from "vitest";
+import type { PairedReport } from "../../../scripts/eval/judge/grep-e2e-contract.js";
 import { execFileSync } from "node:child_process";
 import {
     lstatSync,
@@ -26,6 +27,7 @@ import {
     computeRunFingerprint,
     errorStatus,
     hashEngineSources,
+    pairReports,
     isConsistentDuplicate,
     isHardError,
     isKnownSourceHash,
@@ -298,5 +300,79 @@ describe("hashEngineSources (temp git fixture)", () => {
     it("fails closed on missing/unhashable trees", () => {
         expect(isKnownSourceHash(hashEngineSources(join(tmpdir(), "smartread-no-such-dir")))).toBe(false);
         expect(isKnownSourceHash("unknown:hash-failed")).toBe(false);
+    });
+});
+
+describe("pairReports", () => {
+    const manifest = (overrides: Record<string, unknown> = {}): PairedReport["manifest"] => ({
+        fixtureSha: "aaa",
+        inventoryHashBefore: "bbb",
+        queryCount: 2,
+        sourceRef: "abc123",
+        corpusKind: "frozen-git-archive-snapshot",
+        gateConstants: { keep: 3, pointer: 1, exists: 5, find: 0 },
+        retrievalConditions: { perQueryLimit: 40, contextLines: 2 },
+        ...overrides,
+    });
+    const report = (engine: string, rows: PairedReport["queries"]): PairedReport => ({
+        manifest: { ...manifest(), engineSourceHash: engine },
+        queries: rows,
+    });
+    const base = report("sha256:base", [
+        { qid: "q01", fileHit: true, covered: true, abstained: false, renderedTokens: 100, readReady: true },
+        { qid: "q02", fileHit: false, covered: false, abstained: true, renderedTokens: 200, readReady: false },
+    ]);
+    const variant = report("sha256:variant", [
+        { qid: "q01", fileHit: false, covered: false, abstained: false, renderedTokens: 150, readReady: false },
+        { qid: "q02", fileHit: true, covered: true, abstained: false, renderedTokens: 200, readReady: true },
+    ]);
+    it("emits per-query wins/losses/ties and token deltas", () => {
+        const paired = pairReports(base, variant);
+        expect(paired.queryCount).toBe(2);
+        expect(paired.readReady).toEqual({ wins: 1, losses: 1, ties: 0 });
+        expect(paired.fileHit).toEqual({ wins: 1, losses: 1, ties: 0 });
+        // q02 stopped abstaining: recorded as an abstention "loss".
+        expect(paired.abstention).toEqual({ wins: 0, losses: 1, ties: 1 });
+        expect(paired.meanTokenDelta).toBe(25);
+        expect(paired.deltas.map((d) => d.qid)).toEqual(["q01", "q02"]);
+    });
+    it("RED: refuses pairing when identity is missing on either side", () => {
+        const rows: PairedReport["queries"] = [{ qid: "q01" }];
+        expect(() => pairReports({ queries: rows }, { queries: rows })).toThrow(/refuses-pair/);
+        expect(() => pairReports({ manifest: {}, queries: rows }, { manifest: {}, queries: rows }))
+            .toThrow(/refuses-pair/);
+    });
+    it("tolerates engineSourceHash differences but refuses other identity mismatches", () => {
+        expect(() => pairReports(base, variant)).not.toThrow();
+        expect(() => pairReports(
+            { ...base, manifest: manifest({ fixtureSha: "zzz" }) },
+            variant,
+        )).toThrow(/fixtureSha/);
+        expect(() => pairReports(
+            { ...base, manifest: manifest({ inventoryHashBefore: "zzz" }) },
+            variant,
+        )).toThrow(/inventory/);
+        expect(() => pairReports(
+            base,
+            { ...variant, queries: [...variant.queries!].reverse() },
+        )).toThrow(/qid/);
+    });
+    it("refuses pairing when queries are missing or disagree with manifest queryCount", () => {
+        expect(() => pairReports({ ...base, queries: undefined }, variant)).toThrow(/queries missing/);
+        expect(() => pairReports(base, { ...variant, queries: "q01" as unknown as PairedReport["queries"] }))
+            .toThrow(/queries missing/);
+        expect(() => pairReports(
+            { ...base, manifest: manifest({ queryCount: 3 }) },
+            variant,
+        )).toThrow(/queryCount/);
+    });
+    it("refuses pairing when either report has duplicate qids", () => {
+        // [q01, q01] would otherwise pass the ordered-qid check and then
+        // collapse in the variant lookup map, silently mis-pairing rows.
+        const dupRows: PairedReport["queries"] = [{ qid: "q01" }, { qid: "q01" }];
+        expect(() => pairReports(report("sha256:base", dupRows), report("sha256:variant", dupRows)))
+            .toThrow(/duplicate qid "q01"/);
+        expect(() => pairReports(report("sha256:base", dupRows), variant)).toThrow(/baseline.*duplicate qid/);
+        expect(() => pairReports(base, report("sha256:variant", dupRows))).toThrow(/variant.*duplicate qid/);
     });
 });

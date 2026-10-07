@@ -591,7 +591,12 @@ export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; 
         }
         return { mode: "smart", reason: "auto_literal", note: "No regex syntax detected; using smart cascade." };
     }
-    if (hasStrongRegexSyntax(pattern)) return { mode: "regex", reason: "auto_regex" };
+    if (hasStrongRegexSyntax(pattern)) {
+        if (hasBracketClassOnly(pattern)) {
+            return { mode: "smart", reason: "auto_declined_prose_class", note: "Bracketed prefix looks like prose; regex auto-detect declined. Set regex:true to force regex." };
+        }
+        return { mode: "regex", reason: "auto_regex" };
+    }
     if (hasWhitespaceParenGroup(pattern)) {
         return { mode: "smart", reason: "auto_declined_prose_group", note: "Parenthesised aside looks like prose; regex auto-detect declined. Set regex:true to force regex." };
     }
@@ -600,6 +605,14 @@ export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; 
     }
     if (COMPACT_GREP_REGEX.test(pattern)) return { mode: "regex", reason: "auto_regex" };
     return { mode: "smart", reason: "auto_literal", note: "No regex syntax detected; using smart cascade." };
+}
+
+/** A trailing `$` is an end anchor only with even backslash parity (odd = escaped). */
+function hasUnescapedTerminalDollar(pattern: string): boolean {
+    if (!pattern.endsWith("$")) return false;
+    let backslashes = 0;
+    for (let i = pattern.length - 2; i >= 0 && pattern[i] === "\\"; i--) backslashes++;
+    return backslashes % 2 === 0;
 }
 
 function hasUnescapedGrep(text: string, char: string): boolean {
@@ -614,7 +627,7 @@ function hasUnescapedGrep(text: string, char: string): boolean {
 
 function hasStrongRegexSyntax(pattern: string): boolean {
     if (hasUnescapedGrep(pattern, "|")) return true;
-    if (pattern.startsWith("^") || (pattern.endsWith("$") && !pattern.endsWith("\\$"))) return true;
+    if (pattern.startsWith("^") || hasUnescapedTerminalDollar(pattern)) return true;
     if (/\[[^\]]+\]/.test(pattern)) return true;
     if (/\{\d+(,\d*)?\}/.test(pattern)) return true;
     if (/\\[bBdDsSwW.]/.test(pattern)) return true;
@@ -627,6 +640,14 @@ function hasStrongRegexSyntax(pattern: string): boolean {
 function hasWhitespaceParenGroup(pattern: string): boolean {
     const m = /\(([^()]*)\)/.exec(pattern);
     return !!m && /\s/.test(m[1] ?? "");
+}
+
+/** D22 extension: a bracket class alone is not strong syntax in multi-word prose. */
+function hasBracketClassOnly(pattern: string): boolean {
+    if (!/\[[^\]]+\]/.test(pattern)) return false;
+    if (pattern.trim().split(/\s+/).length < 3) return false;
+    const withoutBrackets = pattern.replace(/\[[^\]]*\]/g, " ");
+    return !hasStrongRegexSyntax(withoutBrackets);
 }
 
 function hasIsolatedProseWildcard(pattern: string): boolean {
