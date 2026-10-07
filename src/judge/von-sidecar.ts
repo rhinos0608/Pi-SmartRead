@@ -50,11 +50,13 @@ export function getVonHfDir(home = homedir()): string {
     return join(getVonDir(home), "hf");
 }
 
-function venvBinDir(vonDir: string): string {
+/** venv binary dir inside the managed root: `Scripts` on Windows, `bin` elsewhere. Exported for tests. */
+export function venvBinDir(vonDir: string): string {
     return join(vonDir, process.platform === "win32" ? "Scripts" : "bin");
 }
 
-function venvServeBin(vonDir: string): string {
+/** Installed `von` entry point inside the managed venv. Exported for tests. */
+export function venvServeBin(vonDir: string): string {
     const suffix = process.platform === "win32" ? ".exe" : "";
     return join(venvBinDir(vonDir), `von${suffix}`);
 }
