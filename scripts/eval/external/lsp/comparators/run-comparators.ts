@@ -38,6 +38,7 @@ import {
 import { sampleCorpus, type SampledPosition } from "../sample.js";
 import { createMcpComparator } from "./mcp-server.js";
 import { createPiLspComparator } from "./pi-lsp.js";
+import { createSerenaComparator, lineKey, SERENA_PIN } from "./serena.js";
 import { summarizeLatency, type PositionLatency } from "./latency.js";
 import { startKey, type Comparator, type ComparatorCall } from "./types.js";
 
@@ -132,6 +133,7 @@ async function withOpTimeout(call: Promise<ComparatorCall>): Promise<ComparatorC
 function createComparator(system: string): Comparator {
   if (system === "pi-lsp") return createPiLspComparator(TLS_BIN);
   if (system === "mcp-language-server") return createMcpComparator(TLS_BIN, PINNED_BIN_DIR);
+  if (system === "serena") return createSerenaComparator();
   throw new Error(`unknown system: ${system}`);
 }
 
@@ -167,8 +169,10 @@ interface PositionResult {
   raw: Record<string, { text: string; truncated: boolean }>;
   definitionExact: boolean | null;
   definitionStart: boolean | null;
+  definitionLine: boolean | null;
   refF1: number | null;
   refStartF1: number | null;
+  refLineF1: number | null;
   hoverNonEmpty: boolean | null;
   hoverSig: boolean | null;
 }
@@ -181,8 +185,8 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }>
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  if (args.system !== "pi-lsp" && args.system !== "mcp-language-server") {
-    throw new Error("--system must be pi-lsp or mcp-language-server");
+  if (args.system !== "pi-lsp" && args.system !== "mcp-language-server" && args.system !== "serena") {
+    throw new Error("--system must be pi-lsp, mcp-language-server, or serena");
   }
   const root = CORPORA[args.corpus];
   if (!root) throw new Error(`unknown corpus: ${args.corpus}`);
@@ -204,8 +208,10 @@ async function main(): Promise<void> {
   const tokenNs = new Map<string, number>();
   let defExact = 0;
   let defStart = 0;
+  let defLine = 0;
   let defAnswered = 0;
   let f1Sum = 0;
+  let lineF1Sum = 0;
   let f1N = 0;
   let startF1Sum = 0;
   let hoverNE = 0;
@@ -274,15 +280,20 @@ async function main(): Promise<void> {
 
       let exact: boolean | null = null;
       let start: boolean | null = null;
+      let line: boolean | null = null;
       if (refDefs.length > 0 && !isNonAnswer(sysDef.status)) {
         defAnswered += 1;
         exact = sysDef.locations.some((o) => refDefs.some((r) => definitionMatches(r, o)));
         start = sysDef.locations.some((o) => refDefs.some((r) => definitionMatchesStart(r, o)));
+        // Line-anchored match (Serena output is line-granular by design).
+        line = sysDef.locations.some((o) => refDefs.some((r) => lineKey(r) === lineKey(o)));
         if (exact) defExact += 1;
         if (start) defStart += 1;
+        if (line) defLine += 1;
       }
       let f1: number | null = null;
       let startF1: number | null = null;
+      let lineF1: number | null = null;
       if (!isNonAnswer(sysRefs.status)) {
         const m = setMetrics(refRefs.map(locKey), sysRefs.locations.map(locKey));
         f1 = m.f1;
@@ -292,6 +303,10 @@ async function main(): Promise<void> {
         const sm = setMetrics(refRefs.map(startKey), sysRefs.locations.map(startKey));
         startF1 = sm.f1;
         startF1Sum += sm.f1;
+        // Secondary: line-anchored keys (Serena reports lines only).
+        const lm = setMetrics(refRefs.map(lineKey), sysRefs.locations.map(lineKey));
+        lineF1 = lm.f1;
+        lineF1Sum += lm.f1;
       }
       let hNE: boolean | null = null;
       let hSig: boolean | null = null;
@@ -317,8 +332,10 @@ async function main(): Promise<void> {
         raw,
         definitionExact: exact,
         definitionStart: start,
+        definitionLine: line,
         refF1: f1,
         refStartF1: startF1,
+        refLineF1: lineF1,
         hoverNonEmpty: hNE,
         hoverSig: hSig,
       });
@@ -357,7 +374,9 @@ async function main(): Promise<void> {
       comparators:
         args.system === "pi-lsp"
           ? { piLsp: "0.0.48", piChildEnv: "0.1.10", typebox: "1.3.35" }
-          : { mcpLanguageServer: "v0.1.1 (46e2950)" },
+          : args.system === "serena"
+            ? { serenaAgent: SERENA_PIN.serenaAgent, typescriptLanguageServer: SERENA_PIN.typescriptLanguageServer, typescript: SERENA_PIN.typescript }
+            : { mcpLanguageServer: "v0.1.1 (46e2950)" },
     },
     positions: results.length,
     stratumCounts: Object.fromEntries(stratumCounts),
@@ -365,12 +384,14 @@ async function main(): Promise<void> {
       answered: defAnswered,
       exactMatchRate: defAnswered === 0 ? null : defExact / defAnswered,
       startMatchRate: defAnswered === 0 ? null : defStart / defAnswered,
+      lineMatchRate: defAnswered === 0 ? null : defLine / defAnswered,
     },
     references: {
       measured: f1N,
       meanF1: f1N === 0 ? null : f1Sum / f1N,
       meanStartF1: f1N === 0 ? null : startF1Sum / f1N,
-      keyMode: "exact-locKey primary; start-anchored secondary (mcp outputs starts only)",
+      meanLineF1: f1N === 0 ? null : lineF1Sum / f1N,
+      keyMode: "exact-locKey primary; start-anchored secondary (mcp outputs starts only); line-anchored secondary (serena outputs lines only)",
     },
     hover: {
       answered: hoverAnswered,
@@ -395,8 +416,10 @@ async function main(): Promise<void> {
     positions: results.length,
     defExact: report.definition.exactMatchRate,
     defStart: report.definition.startMatchRate,
+    defLine: report.definition.lineMatchRate,
     meanF1: report.references.meanF1,
     meanStartF1: report.references.meanStartF1,
+    meanLineF1: report.references.meanLineF1,
     hoverSig: report.hover.signatureRate,
     statusCounts: report.statusCounts,
     meanOutputTokens: meanTokens,
