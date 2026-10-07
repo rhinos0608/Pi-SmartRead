@@ -702,7 +702,9 @@ const actualFileEnds = new Map<string, number>();
                 try {
                     const text = readFileSync(full, "utf8");
                     const parts = text.split("\n");
-                    actualFileEnds.set(rel, text.endsWith("\n") ? parts.length - 1 : parts.length);
+                    // Empty files have no lines: record end line 0 so any gold
+                    // span (which starts at line >= 1) fails the EOF check.
+                    actualFileEnds.set(rel, text.length === 0 ? 0 : text.endsWith("\n") ? parts.length - 1 : parts.length);
                 } catch { /* unreadable file: EOF span check skipped for it */ }
             }
         }

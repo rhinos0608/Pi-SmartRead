@@ -321,6 +321,19 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
     };
     const bQueries = requireQueries("baseline", baseline);
     const vQueries = requireQueries("variant", variant);
+    const rejectDuplicateQids = (name: string, queries: PairedReportQuery[]): void => {
+        const seen = new Set<string>();
+        for (const q of queries) {
+            if (seen.has(q.qid)) {
+                throw new Error(`refuses-pair: ${name} has duplicate qid "${q.qid}"`);
+            }
+            seen.add(q.qid);
+        }
+    };
+    // Duplicate qids would silently collapse in the variant lookup map
+    // (two rows pairing against the same row), so reject them first.
+    rejectDuplicateQids("baseline", bQueries);
+    rejectDuplicateQids("variant", vQueries);
     const bQids = bQueries.map((q) => q.qid);
     const vQids = vQueries.map((q) => q.qid);
     if (bQids.length !== vQids.length || !bQids.every((qid, i) => qid === vQids[i])) {
