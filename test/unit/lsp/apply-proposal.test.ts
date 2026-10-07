@@ -1,4 +1,7 @@
 /** Stage 4 (option A): applyProposal staging/apply over SmartEdit RPC. Failing-first. */
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { validateStrictRequest } from "../../../src/lsp/lsp-strict-contract.js";
 import { getOperationDef } from "../../../src/lsp/lsp-operation-registry.js";
@@ -35,14 +38,18 @@ function memBus(): BusLike & { dispose(): void } {
 }
 
 const CTX = {
-  cwd: "/tmp/apply-proposal-test",
-  sessionManager: { getSessionFile: () => "/tmp/apply-proposal-test-session.jsonl" },
+  cwd: join(tmpdir(), "apply-proposal-test"),
+  sessionManager: { getSessionFile: () => join(tmpdir(), "apply-proposal-test-session.jsonl") },
 } as never;
+
+const PROJ_DIR = join(tmpdir(), "apply-proposal-test");
+const PROJ_FILE_A = join(PROJ_DIR, "a.ts");
+const PROJ_FILE_B = join(PROJ_DIR, "b.ts");
 
 const RENAME_EDIT = {
   changes: [
     {
-      uri: "file:///tmp/apply-proposal-test/a.ts",
+      uri: pathToFileURL(PROJ_FILE_A).href,
       edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "bbb" }],
     },
   ],
@@ -57,7 +64,7 @@ function executorReturning(value: unknown, status = "ok") {
       descriptorId: "ts",
       name: "ts",
       languageId: "typescript",
-      projectRoot: "/tmp/apply-proposal-test",
+      projectRoot: PROJ_DIR,
       positionEncoding: "utf-16",
     },
     result: value,
@@ -274,7 +281,7 @@ describe("applyProposal", () => {
             descriptorId: "ts",
             name: "ts",
             languageId: "typescript",
-            projectRoot: "/tmp/apply-proposal-test",
+            projectRoot: PROJ_DIR,
             positionEncoding: "utf-16",
           },
           result: FORMAT_EDITS,
@@ -284,12 +291,12 @@ describe("applyProposal", () => {
       });
       const res = await (tool.execute as Function)(
         "call-2",
-        { operation: "formatDocument", path: "/tmp/apply-proposal-test/b.ts" },
+        { operation: "formatDocument", path: PROJ_FILE_B },
         undefined,
         undefined,
         CTX,
       );
-      expect(seenFilePath).toBe("/tmp/apply-proposal-test/b.ts");
+      expect(seenFilePath).toBe(PROJ_FILE_B);
       expect(res.details.proposal.proposalId).toBe("prop-abs");
     } finally {
       server.dispose();
