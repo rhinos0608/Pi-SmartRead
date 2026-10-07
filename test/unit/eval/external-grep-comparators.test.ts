@@ -176,20 +176,22 @@ describe("runRipgrep", () => {
         expect(out.units.map((u) => u.relFile)).toContain("src/hit.ts");
     });
 
-    it("records an error but continues when a term fails with exit >= 2", async () => {
+    it("records an error and stops when a term fails with exit >= 2", async () => {
         const hit =
             '{"type":"match","data":{"path":{"text":"/root/src/hit.ts"},"line_number":2,"submatches":[{"match":{"text":"present"}}]}}';
-        let calls = 0;
+        const seen: string[] = [];
         const out = await runRipgrep(stubInstance(), "/root", "title", { timeoutMs: 30000 }, {
-            runTerm: () => {
-                calls += 1;
-                if (calls === 1) throw Object.assign(new Error("rg crashed"), { status: 2 });
+            runTerm: (term: string) => {
+                seen.push(term);
+                if (seen.length === 1) throw Object.assign(new Error("rg crashed"), { status: 2 });
                 return hit;
             },
         });
-        expect(calls).toBeGreaterThan(1);
+        // Fatal rg failure must stop the term loop: later terms are NOT run
+        // and partial results from them must not appear.
+        expect(seen.length).toBe(1);
         expect(out.status).toContain("error");
-        expect(out.units.map((u) => u.relFile)).toContain("src/hit.ts");
+        expect(out.units).toEqual([]);
     });
 
     it("continues past a no-match term (rg exit 1) to later terms", async ({ skip }) => {
