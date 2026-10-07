@@ -244,9 +244,10 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                 // NOTE: per-query gather runs before the global merge (pre-render
                 // work is not budgeted); the cap bounds render + evidence only.
                 const candidates: GrepHit[] = [];
-                for (const result of queryResults) {
+                for (let i = 0; i < queryResults.length; i++) {
+                    const result = queryResults[i]!;
                     for (const hit of result.shown) {
-                        candidates.push({ ...hit, matchedQueries: [result.pattern] } as GrepHit);
+                        candidates.push({ ...hit, matchedQueries: [result.pattern], matchedQueryIndexes: [i] } as GrepHit);
                     }
                 }
                 const deduped = dedupGrepHits(candidates);
@@ -565,7 +566,7 @@ function unique<T>(items: T[]): T[] {
 
 /** Detached per-hit copies for the opt-in trace observer. */
 function copyGrepHits(hits: GrepHit[]): GrepHit[] {
-    return hits.map((h) => ({ ...h, engines: [...h.engines], ...(h.matchedQueries ? { matchedQueries: [...h.matchedQueries] } : {}) }));
+    return hits.map((h) => ({ ...h, engines: [...h.engines], ...(h.matchedQueries ? { matchedQueries: [...h.matchedQueries] } : {}), ...(h.matchedQueryIndexes ? { matchedQueryIndexes: [...h.matchedQueryIndexes] } : {}) }));
 }
 
 /** Detached judge-details copy for the opt-in trace observer. */
@@ -831,6 +832,45 @@ function applyOutputGuard(text: string): { text: string; outputTruncated: boolea
     return enforceGrepOutputGuard(text);
 }
 
+// D67: batch abstentions render the abstain message and ZERO location
+// pointers. Abstained per-query hits are already sliced to [] upstream;
+// filter them here as well so merged provenance can never reintroduce
+// an abstained query preserved candidates, and render each abstained
+// query message before the merged view.
+function collectAbstainedIndexes(results: GrepExecutionResult[]): Set<number> {
+    return new Set(
+        results
+            .map((r, i) => ((r as GrepJudgeResultExtras).judge?.abstained ? i : -1))
+            .filter((i) => i >= 0),
+    );
+}
+
+// D67: drop only the abstained entries' provenance, keyed by batch entry
+// index (never by pattern string: duplicate patterns in one batch must
+// not cross-talk). A hit survives when any non-abstained entry produced
+// it; its "matched queries" suffix lists only surviving entries.
+function stripAbstainedProvenance(
+    rawShown: GrepHit[],
+    abstainedIndexes: Set<number>,
+    results: GrepExecutionResult[],
+): GrepHit[] {
+    if (abstainedIndexes.size === 0) return rawShown;
+    return rawShown.flatMap((h) => {
+        const indexes = (h as { matchedQueryIndexes?: number[] }).matchedQueryIndexes;
+        if (indexes) {
+            const kept = indexes.filter((q) => !abstainedIndexes.has(q));
+            if (kept.length === 0) return [];
+            return [{ ...h, matchedQueries: kept.map((q) => results[q]!.pattern), matchedQueryIndexes: kept } as GrepHit];
+        }
+        // Defensive: the batch path always attaches index provenance
+        // (createGrepOutput candidates and the flatMap above), so this
+        // should be unreachable. Without provenance a hit cannot be shown
+        // to belong to a non-abstained entry; under the D67 contract the
+        // safe direction is to drop it rather than leak abstained content.
+        return [];
+    });
+}
+
 function formatBatchOutput(results: GrepExecutionResult[]): string {
     const header: string[] = [];
     for (let i = 0; i < results.length; i++) {
@@ -838,15 +878,27 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
         header.push(`Query ${i + 1}: "${result.pattern}" (${result.totalHits} hits, ${result.elapsedMs}ms, ${result.routing ? `${result.routing.mode}/${result.routing.reason}` : result.engines.join("+")})`);
     }
     header.push("");
+    const abstainedIndexes = collectAbstainedIndexes(results);
+    for (let i = 0; i < results.length; i++) {
+        const extras = results[i]! as GrepExecutionResult & GrepJudgeResultExtras;
+        if (extras.judge?.abstained && extras.judgeNote) {
+            header.push(`Query ${i + 1} abstained: ${extras.judgeNote}`);
+        }
+    }
+    if (abstainedIndexes.size > 0) header.push("");
     // Merged global view: duplicates render once with matched-query provenance.
-    const shown: GrepHit[] = (results as any).globalShown
-        ?? dedupGrepHits(results.flatMap((r) => r.shown.map((h) => ({ ...h, matchedQueries: [r.pattern] }) as GrepHit)));
+    const rawShown: GrepHit[] = (results as any).globalShown
+        ?? dedupGrepHits(results.flatMap((r, i) => r.shown.map((h) => ({ ...h, matchedQueries: [r.pattern], matchedQueryIndexes: [i] }) as GrepHit)));
+    const shown: GrepHit[] = stripAbstainedProvenance(rawShown, abstainedIndexes, results);
     const total: number = (results as any).globalTotal ?? shown.length;
     const totalIsLowerBound: boolean = (results as any).globalTotalIsLowerBound
         ?? results.some((r) => r.truncated);
     const truncated: boolean = (results as any).globalTruncated
         ?? results.some((r) => r.truncated);
-    if (shown.length === 0) header.push("(no matches for any query)");
+    // An abstention is not a no-result: the per-query abstain messages above
+    // already explain the empty merged view, so the generic no-matches line
+    // renders only for genuinely matchless batches.
+    if (shown.length === 0 && abstainedIndexes.size === 0) header.push("(no matches for any query)");
     else {
         for (const hit of shown) {
             const matched = (hit as { matchedQueries?: string[] }).matchedQueries;
@@ -904,10 +956,10 @@ function formatOutput(
     }
 
     if (judgeExtra?.abstainMessage) {
+        // D67: an abstention renders ZERO location pointers. The abstain
+        // message stays; the former `maybe: file:line name` fallback lines
+        // are removed from rendered output in every format path.
         lines.push(judgeExtra.abstainMessage);
-        for (const hit of judgeExtra.abstainPointers ?? []) {
-            lines.push(`maybe: ${hit.relFile}:${hit.line} ${hit.name}`);
-        }
         lines.push("");
     }
 
@@ -1027,6 +1079,9 @@ export function dedupGrepHits(hits: GrepHit[]): GrepHit[] {
             const next = (hit as { matchedQueries?: string[] }).matchedQueries ?? [];
             const set = new Set([...prior, ...next]);
             (existing as { matchedQueries?: string[] }).matchedQueries = [...set];
+            const priorIdx = (existing as { matchedQueryIndexes?: number[] }).matchedQueryIndexes ?? [];
+            const nextIdx = (hit as { matchedQueryIndexes?: number[] }).matchedQueryIndexes ?? [];
+            (existing as { matchedQueryIndexes?: number[] }).matchedQueryIndexes = [...new Set([...priorIdx, ...nextIdx])];
             if (hit.score > existing.score) existing.score = hit.score;
         } else {
             merged.set(key, { ...hit, engines: [...hit.engines] });

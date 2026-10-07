@@ -107,3 +107,17 @@ R1 artifact writer owns harness/new contract helper/tests; metric writer owns pu
 - VERIFIED-probe (post-fix): failure-denominator fixture now reports known-gold 1/2, recall .5, file-hit 1/2 (parent exit 0); metrics tests 16/16.
 - VERIFIED-source: engine identity uses `git ls-files --cached --others --exclude-standard`; unknown identity refuses resume (`grep-e2e-contract.ts:79-107`).
 - VERIFIED-run (parent): judge+search 39 files / 497 tests, typecheck, diff-check all exit 0; nothing staged. Fresh R1 re-review workflow `5887201c` pending before the four-config matrix.
+
+## Final round ledger / campaign status (2026-10-07)
+
+- R1 (eval fidelity): harness contract, engine/file identity, failure denominators, known-gold recall; red-gated fixes landed before any runtime ranking change.
+- R2 (retrieval/cascade/judge): unscored-fallback preservation, exists-evidence capture (`judge.*` per-query details), faithful abstention rendering (zero pointers on abstain), fine-grid sweeps.
+- External program: Probe/ripgrep/Codanna pilots plus LSP parity checks; baselines only, gaps recorded (ranking/latency) — no shipping claims.
+- D46 campaign: dev baselines (D64), judge-off gates (D65, challenger rejected on loss veto), exists capture/sweep (D66), oracle variant + semantics verdicts (D67),
+  abstention contract (D68), single-opening freeze at exists 0.04 / excerpts / keep 0.40 (D69) — opening spent once.
+- D70 verdict: holdout (210 queries, 8 repos) HARMS under the frozen 6:1 FN:FP rule (paired Δ +0.80/query, 95% CI [+0.55,+1.06]);
+  false-empty ~2.4%→17.3% dominates false-content gains; kept queries gain precision/read-ready. Default stays OFF;
+  `/judge cloud` output + README surface the finding; keep-gate work continues on dev only, never retuned against the holdout.
+- Pointers: full per-round record in `docs/plans/2026-10-06-decision-log.md` rows D57–D70 (verdict D70; freeze D69; gate/semantics D65–D68);
+  this section is a status summary only and does not duplicate the log.
+- Campaign closed: no further holdout access; future judge work needs a fresh predeclared cohort.

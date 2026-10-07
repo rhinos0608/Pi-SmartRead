@@ -47,6 +47,8 @@ export interface GrepHit {
     score: number;
     /** Batch provenance: patterns whose query produced this hit (merged on dedup). */
     matchedQueries?: string[];
+    /** Batch provenance: batch entry indexes that produced this hit (merged on dedup). */
+    matchedQueryIndexes?: number[];
 }
 
 export interface GrepRouting {
