@@ -107,15 +107,31 @@ export function normalizeFileAnalysis(bag: Record<string, unknown>): Partial<Ins
     return { ...bag } as Partial<InspectV4Input>;
 }
 
-export function normalizeDirectoryAnalysis(bag: Record<string, unknown>): Partial<InspectV4Input> {
+function assertNoUnknownDirectoryOptions(bag: Record<string, unknown>): void {
     const unknown = rejectUnknownOptions(bag, DIRECTORY_ANALYSIS_KEYS, 'mode "directory" analysis');
     if (unknown) throw new Error(unknown);
-    if ("mapTokens" in bag && (!Number.isFinite(bag.mapTokens) || (bag.mapTokens as number) < 256 || (bag.mapTokens as number) > 32768)) throw new Error("Error: inspect mapTokens must be 256..32768");
-    if ("focus" in bag && (!Array.isArray(bag.focus) || bag.focus.some((v) => typeof v !== "string"))) throw new Error("Error: inspect focus must be an array of strings");
-    for (const key of dirBoolKeys) {
-        if (key in bag && typeof bag[key] !== "boolean") throw new Error(`Error: inspect ${key} must be a boolean`);
+}
+
+function assertValidMapTokensOption(bag: Record<string, unknown>): void {
+    if (!("mapTokens" in bag)) return;
+    if (!Number.isFinite(bag.mapTokens) || (bag.mapTokens as number) < 256 || (bag.mapTokens as number) > 32768) {
+        throw new Error("Error: inspect mapTokens must be 256..32768");
     }
-    if ("diff" in bag && !["unstaged", "staged", "HEAD"].includes(bag.diff as string)) throw new Error('Error: inspect diff must be one of "unstaged" | "staged" | "HEAD"');
+}
+
+function assertValidFocusOption(bag: Record<string, unknown>): void {
+    if (!("focus" in bag)) return;
+    if (!Array.isArray(bag.focus) || bag.focus.some((v) => typeof v !== "string")) {
+        throw new Error("Error: inspect focus must be an array of strings");
+    }
+}
+
+export function normalizeDirectoryAnalysis(bag: Record<string, unknown>): Partial<InspectV4Input> {
+    assertNoUnknownDirectoryOptions(bag);
+    assertValidMapTokensOption(bag);
+    assertValidFocusOption(bag);
+    assertBooleanOptions(bag, dirBoolKeys);
+    assertValidDiffOption(bag);
     return { ...bag } as Partial<InspectV4Input>;
 }
 
