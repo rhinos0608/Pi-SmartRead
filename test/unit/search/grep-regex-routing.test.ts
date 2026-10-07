@@ -161,6 +161,24 @@ describe("grep regex routing — terminal anchor backslash parity", () => {
     });
 });
 
+describe("grep regex routing — routing-note rendering (D22)", () => {
+    it("plain NL smart routing renders no note but keeps routing details", async () => {
+        const { details, text } = await run({ pattern: "login fails when token expires" });
+        expect(details.routing.mode).toBe("smart");
+        expect(details.routing.reason).toBe("auto_literal");
+        expect(details.routing.note).toBeUndefined();
+        expect(text).not.toMatch(/No regex syntax detected/);
+    });
+
+    it("declined apparent regex syntax still renders a note", async () => {
+        const { details, text } = await run({ pattern: "handleLogin (the main entry point) returns null" });
+        expect(details.routing.mode).toBe("smart");
+        expect(details.routing.reason).toMatch(/auto_declined_/);
+        expect(typeof details.routing.note).toBe("string");
+        expect(text).toMatch(/auto-detect declined/);
+    });
+});
+
 describe("grep regex routing — surface", () => {
     it("single details identify routing and declined syntax renders a note", async () => {
         const { details, text } = await run({ pattern: "handleLogin (the main entry point) returns null" });

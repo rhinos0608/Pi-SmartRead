@@ -56,6 +56,11 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
 import { GREP_JUDGE_THRESHOLD_ENV_VAR } from "../../../src/judge/grep-judge-stage.js";
+import {
+    resolveGrepUnitExcerptLines,
+    resolveGrepUnitMaxPerFile,
+    resolveGrepUnitMode,
+} from "../../../src/search/grep-units.js";
 import type { GrepJudgeProvider } from "../../../src/judge/grep-judge-stage.js";
 import type {
     Judge,
@@ -462,7 +467,7 @@ async function runQuery(input: {
         snippet: h.snippet,
     }));
     const preJudgeFiles = preJudge?.stage === "pre-judge" ? preJudge.candidates.map((c) => c.relFile) : undefined;
-    const shownRest = shownCards.slice(5).map((h) => ({ relFile: h.relFile, line: h.line, endLine: h.endLine }));
+    const shownRest = shownCards.slice(5).map((h) => ({ relFile: h.relFile, line: h.line, endLine: h.endLine, snippet: h.snippet }));
     const judged = postJudge?.stage === "post-judge" ? postJudge.judged : false;
     const abstained = postJudge?.stage === "post-judge" ? postJudge.abstained : false;
     const judgeDetails = postJudge?.stage === "post-judge" ? (postJudge.judge ?? null) : null;
@@ -478,7 +483,7 @@ async function runQuery(input: {
                 ? {
                     preJudgeCovered: goldCovered(
                         g,
-                        preJudge.candidates.map((c) => ({ relFile: c.relFile, line: c.line, endLine: c.endLine })),
+                        preJudge.candidates.map((c) => ({ relFile: c.relFile, line: c.line, endLine: c.endLine, snippet: c.snippet })),
                     ),
                 }
                 : {}),
@@ -727,6 +732,15 @@ const code = codeUnderTest();
 // never feeds identity (corpus content hash does); a runtime-alias version
 // limitation is explicit in retrievalConditions.
 const scriptGitRoot = gitRootFromScript();
+// Symbol-unit rendering settings, resolved by the product's own resolver
+// functions (never duplicated here). Bound into the run fingerprint so
+// differently-configured runs never resume into each other; paired
+// comparison intentionally still pairs across them (UNIT_SETTING_KEYS).
+const unitSettings = {
+    unitMode: resolveGrepUnitMode(),
+    maxPerFile: resolveGrepUnitMaxPerFile(),
+    excerptLines: resolveGrepUnitExcerptLines(),
+};
 const manifest = {
     sourceRef: managedCorpus ? SOURCE_REF : null,
     corpusKind: managedCorpus ? "frozen-git-archive-snapshot" : "explicit-mutable-root",
@@ -756,6 +770,7 @@ const manifest = {
         topKMetricWindow: 5,
         contextLines: 2,
         workspaceRevision: "frozen 0 within process",
+        ...unitSettings,
     },
     nodeVersion: process.version,
     gateConstants: { ...GATE_CONSTANTS },
@@ -795,6 +810,7 @@ function fingerprintFor(config: ConfigName): string {
             queryCount: qids.length,
             tokenBudget: args.tokenBudget,
             readReadyK: 5,
+            ...unitSettings,
         },
         timeoutMs: args.timeoutMs,
     };
@@ -912,7 +928,7 @@ try {
                 fileHitAt5: "evaluable qids with >=1 same-file top-5 hit / evaluable qids",
                 abstentionCorrect: "unanswerable qids with (abstained || top-5 empty) / unanswerable qids",
             },
-            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage, tokenBudget: args.tokenBudget, readReady: summarizeReadReady(outcomes, traces.flatMap((t) => (t.goldOutcomes as Array<{ file: string; startLine: number; endLine: number }>).map((g) => scoreReadReadySpan(g, (t.shown ?? []) as Array<{ relFile: string; line: number; endLine: number; name?: string; snippet: string }>, args.tokenBudget, 5, t.text as string)))) },
+            summary: { ...summary, declaredQueryCoverage: declaredCoverage, evaluableQueryCoverage: evaluableCoverage, tokenBudget: args.tokenBudget, readReady: summarizeReadReady(outcomes, traces.flatMap((t) => (t.goldOutcomes as Array<{ file: string; startLine: number; endLine: number }>).map((g) => scoreReadReadySpan(g, t.top5 as Array<{ relFile: string; line: number; endLine: number; name?: string; snippet: string }>, args.tokenBudget, 5, t.text as string)))) },
             queries: traces,
         };
         if (drifted) {

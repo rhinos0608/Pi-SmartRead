@@ -3,7 +3,13 @@
  * Paired comparison of two grep-e2e report JSONs (baseline, variant).
  * Pure offline reader: no engine IO, no reruns.
  *
- *   npx tsx scripts/eval/judge/grep-e2e-compare.ts --baseline A.json --variant B.json [--json]
+ *   npx tsx scripts/eval/judge/grep-e2e-compare.ts --baseline A.json --variant B.json [--json] [--recompute]
+ *
+ * Missing per-query readReady is natively absent on older reports and is
+ * never coerced to failure: those queries report readReady as 'unavailable'
+ * while other metrics still pair. --recompute rescores BOTH sides from
+ * captured text with the same scorer version; reports carry no captured
+ * text, so it refuses fail-closed until the schema supports it.
  *
  * Refuses to pair unless complete run identity matches (fixtureSha,
 * corpus inventory hash, sourceRef, corpusKind, gate constants, retrieval
@@ -14,7 +20,7 @@ import { resolve } from "node:path";
 import { pairReports, type PairedReport } from "./grep-e2e-contract.js";
 
 function usage(): never {
-    console.log("Usage: npx tsx scripts/eval/judge/grep-e2e-compare.ts --baseline A.json --variant B.json [--json]");
+    console.log("Usage: npx tsx scripts/eval/judge/grep-e2e-compare.ts --baseline A.json --variant B.json [--json] [--recompute]");
     process.exit(1);
 }
 
@@ -26,11 +32,13 @@ const argv = process.argv.slice(2);
 let baselinePath: string | null = null;
 let variantPath: string | null = null;
 let asJson = false;
+let recompute = false;
 for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--baseline") baselinePath = argv[++i] ?? null;
     else if (arg === "--variant") variantPath = argv[++i] ?? null;
     else if (arg === "--json") asJson = true;
+    else if (arg === "--recompute") recompute = true;
     else usage();
 }
 if (!baselinePath || !variantPath) usage();
@@ -38,12 +46,12 @@ if (!baselinePath || !variantPath) usage();
 const comparison = pairReports(loadReport(baselinePath), loadReport(variantPath), {
     baseline: baselinePath,
     variant: variantPath,
-});
+}, { recompute });
 if (asJson) {
     console.log(JSON.stringify(comparison, null, 2));
 } else {
-    const line = (label: string, t: { wins: number; losses: number; ties: number }): string =>
-        `${label}: +${t.wins}/-${t.losses}/=${t.ties}`;
+    const line = (label: string, t: { wins: number; losses: number; ties: number; unavailable?: number }): string =>
+        `${label}: +${t.wins}/-${t.losses}/=${t.ties}${t.unavailable ? ` (unavailable:${t.unavailable})` : ""}`;
     console.log(`paired ${comparison.queryCount} queries: ${baselinePath} vs ${variantPath}`);
     console.log(line("readReadySpanAt5", comparison.readReady));
     console.log(line("fileHit@5      ", comparison.fileHit));

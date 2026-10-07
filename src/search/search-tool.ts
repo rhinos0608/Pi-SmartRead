@@ -393,6 +393,14 @@ async function scanGrepFile(
   if (content === null) return;
   const relFile = toRelPath(ctx.cwd, filePath);
   const lines = content.split(/\r?\n/g);
+  // Latency: text-match first; only files with at least one match pay for
+  // tree-sitter definition extraction (used solely for owner attribution).
+  let hasMatch = false;
+  for (const line of lines) {
+    if (ctx.matches.length >= ctx.maxResults) break;
+    if (ctx.matchLine(line ?? "")) { hasMatch = true; break; }
+  }
+  if (!hasMatch) return;
   const definitions = await getOrExtractDefinitions(ctx.definitionCache, filePath, relFile);
   scanGrepLines(lines, filePath, relFile, definitions, ctx);
 }

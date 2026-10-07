@@ -48,6 +48,27 @@ export const GREP_JUDGE_EXISTS_ABSENT = 0.35;
 export const GREP_JUDGE_POINTER_THRESHOLD = 0.45;
 /** Judge at most this many units per query (top of the fused order). */
 export const GREP_JUDGE_MAX_UNITS = 40;
+/** Env override for the per-query unit cap. Non-network knob. */
+export const GREP_JUDGE_MAX_UNITS_ENV_VAR = "PI_SMARTREAD_JUDGE_MAX_UNITS";
+/** Bounds for the env unit-cap override; out-of-range falls back to default. */
+export const GREP_JUDGE_MAX_UNITS_MIN = 10;
+export const GREP_JUDGE_MAX_UNITS_MAX = 120;
+
+/**
+ * Resolve the effective per-query unit cap: an integer inside
+ * [GREP_JUDGE_MAX_UNITS_MIN, GREP_JUDGE_MAX_UNITS_MAX] from the
+ * environment wins; anything absent or invalid falls back
+ * to GREP_JUDGE_MAX_UNITS (fail-closed).
+ */
+export function resolveGrepJudgeMaxUnits(env: Record<string, string | undefined> = process.env): number {
+    const raw = env[GREP_JUDGE_MAX_UNITS_ENV_VAR];
+    if (raw === undefined || raw.trim() === "") return GREP_JUDGE_MAX_UNITS;
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < GREP_JUDGE_MAX_UNITS_MIN || parsed > GREP_JUDGE_MAX_UNITS_MAX) {
+        return GREP_JUDGE_MAX_UNITS;
+    }
+    return parsed;
+}
 /** Graph-neighbour pointer candidates per query. */
 export const GREP_JUDGE_MAX_POINTER_CANDIDATES = 12;
 /** Emitted `next:` pointers per query. */
@@ -89,6 +110,11 @@ export interface GrepJudgeStageInput {
      * (env override, fail-closed to GREP_JUDGE_THRESHOLD).
      */
     threshold?: number;
+    /**
+     * Unit-cap override. Absent → resolveGrepJudgeMaxUnits()
+     * (env override, fail-closed to GREP_JUDGE_MAX_UNITS).
+     */
+    maxUnits?: number;
 }
 
 export interface JudgedGrepHit extends GrepHit {
@@ -116,6 +142,10 @@ export interface GrepJudgeDetails {
     hits: Array<{ path: string; line: number; endLine: number; p: number }>;
     /** Active BM25 result-unit mode (D31 seam; additive for reports). */
     unitMode: "anchor" | "symbol";
+    /** Units the provider left unscored (reported in `unjudged` or with no probability). */
+    unjudged: { count: number; ids: string[] };
+    /** Fused-order hits past the unit cap, left unscored and appended after kept hits. */
+    "unscored_beyond_cap": number;
 }
 
 export interface GrepJudgeStageResult {
@@ -187,7 +217,12 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     const judge = resolved.judge;
     const threshold = input.threshold ?? resolveGrepJudgeThreshold();
 
-    const units = await buildJudgeUnits(input.hits.slice(0, GREP_JUDGE_MAX_UNITS), input.contextLines, input.provider.readFile ?? defaultReadFile);
+    const maxUnits = input.maxUnits ?? resolveGrepJudgeMaxUnits();
+    const cappedHits = input.hits.slice(0, maxUnits);
+    // Hits past the cap are never judged; they stay visible as unscored
+    // fallbacks after the kept hits, in fused order — never vanishing.
+    const beyondCapHits = input.hits.slice(maxUnits);
+    const units = await buildJudgeUnits(cappedHits, input.contextLines, input.provider.readFile ?? defaultReadFile);
     if (units.length === 0) return idle(input.hits);
 
     let unitProbs: Map<string, number>;
@@ -231,23 +266,30 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     // Units the judge did not answer (missing probability) are preserved
     // with degradation instead of defaulting to 0 and silently dropping:
     // a per-item judge non-answer is a per-item error, and the judge
-    // never drops results on error.
+    // never drops results on error. Units the provider left unscored —
+    // reported in `unjudged` or with no probability — stay visible as
+    // unjudged fallback hits after the kept hits, in fused order.
     const unjudgedCodes = new Map(unitUnjudged.map((entry) => [entry.id, entry.code]));
-    const unjudgedUnits = units.filter((u) => !unitProbs.has(u.id));
+    // A unit counts as unjudged when it is missing a probability OR the
+    // judge explicitly reported it as unjudged: an id in the unjudged
+    // response list stays a fallback even if it also carries a probability.
+    const unjudgedUnits = units.filter((u) => !unitProbs.has(u.id) || unjudgedCodes.has(u.id));
     const ranked = units
         .map((u, fusedRank) => ({ unit: u, p: unitProbs.get(u.id), fusedRank }))
         .filter((r): r is { unit: (typeof units)[number]; p: number; fusedRank: number } =>
-            r.p !== undefined && r.p >= threshold)
+            r.p !== undefined && r.p >= threshold && !unjudgedCodes.has(r.unit.id))
         .sort((a, b) => b.p - a.p || a.fusedRank - b.fusedRank);
     const merged = mergeKeptRanges(ranked.map((r) => ({ hit: r.unit.hit, p: r.p })));
     const belowThreshold = units.length - unjudgedUnits.length - new Set(ranked.map((r) => r.unit.id)).size;
+    const unjudgedDetail = { count: unjudgedUnits.length, ids: unjudgedUnits.map((u) => u.id) };
     const partialCode = unjudgedUnits.length > 0
         ? unjudgedUnits.map((u) => unjudgedCodes.get(u.id) ?? "bad_response")[0]!
         : undefined;
 
     // Abstention requires every unit to be confidently judged a non-match:
     // judge-unanswered units are preserved below with degradation instead.
-    if (merged.length === 0 && unjudgedUnits.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
+    // Hits past the unit cap are unscored fallbacks, not abstentions either.
+    if (merged.length === 0 && unjudgedUnits.length === 0 && beyondCapHits.length === 0 && existsP !== undefined && existsP < GREP_JUDGE_EXISTS_ABSENT) {
         return {
             judged: true,
             hits: [],
@@ -268,15 +310,21 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
                 pointers: [],
                 hits: [],
                 unitMode: resolveGrepUnitMode(),
+                unjudged: unjudgedDetail,
+                "unscored_beyond_cap": beyondCapHits.length,
             },
         };
     }
 
-    const judgedHits: JudgedGrepHit[] = merged.map((m) => ({ ...m.hit, judgeP: m.p }));
-    // Preserve judge-unanswered units in fused order after the judged hits
-    // (no judgeP), so a partial judge response degrades instead of silently
-    // dropping candidates.
-    const preservedHits: JudgedGrepHit[] = unjudgedUnits.map((u) => ({ ...u.hit }));
+    const judgedHits: JudgedGrepHit[] = [
+        ...merged.map((m) => ({ ...m.hit, judgeP: m.p })),
+        // Preserve judge-unanswered units in fused order after the judged hits
+        // (no judgeP), so a partial judge response degrades instead of silently
+        // dropping candidates. Hits past the unit cap stay visible as unscored
+        // fallbacks after the kept hits, in fused order — never vanishing.
+        ...unjudgedUnits.map((u) => ({ ...u.hit })),
+        ...beyondCapHits,
+    ];
     const pointers = await judgePointers(judge, input, judgedHits, input.hits);
     if (pointers.result) {
         cacheHits += pointers.cacheHits;
@@ -284,7 +332,7 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
     }
     return {
         judged: true,
-        hits: [...judgedHits, ...preservedHits],
+        hits: judgedHits,
         unjudged: input.hits,
         abstained: false,
         ...(partialCode ? { degradation: { backend: "judge" as const, code: partialCode } } : {}),
@@ -292,15 +340,17 @@ export async function runGrepJudgeStage(input: GrepJudgeStageInput): Promise<Gre
             backend: judge.info.backend,
             model: judge.info.model,
             judged: units.length,
-            kept: judgedHits.length,
+            kept: merged.length,
             belowThreshold,
             threshold,
             cacheHits,
             ...(costUsd !== undefined ? { costUsd } : {}),
             abstained: false,
             pointers: pointers.pointers,
-            hits: judgedHits.map((h) => ({ path: h.relFile, line: h.line, endLine: h.endLine, p: h.judgeP ?? 0 })),
+            hits: merged.map((m) => ({ path: m.hit.relFile, line: m.hit.line, endLine: m.hit.endLine, p: m.p })),
             unitMode: resolveGrepUnitMode(),
+            unjudged: unjudgedDetail,
+            "unscored_beyond_cap": beyondCapHits.length,
         },
     };
 }

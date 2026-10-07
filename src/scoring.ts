@@ -113,11 +113,23 @@ export interface Bm25Corpus {
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
 
+/** Default BM25 saturation/length-normalization values (canonical Okapi-ish defaults). */
+export const DEFAULT_BM25_K1 = BM25_K1;
+export const DEFAULT_BM25_B = BM25_B;
+
+/** Additive BM25 overrides for ranking experiments. Omitted fields keep defaults. */
+export interface Bm25Options {
+  k1?: number;
+  b?: number;
+}
+
 /**
  * Compile a reusable BM25 corpus. For an empty document list, `score` returns
  * an empty array and no division-by-zero occurs.
  */
-export function compileBm25Corpus(documents: string[]): Bm25Corpus {
+export function compileBm25Corpus(documents: string[], options: Bm25Options = {}): Bm25Corpus {
+  const k1 = options.k1 ?? BM25_K1;
+  const b = options.b ?? BM25_B;
   const tokenizedDocs = documents.map(tokenize);
   const n = documents.length;
   const totalTokens = tokenizedDocs.reduce((sum, d) => sum + d.length, 0);
@@ -156,7 +168,7 @@ export function compileBm25Corpus(documents: string[]): Bm25Corpus {
         let score = 0;
         for (const token of queryTokens) {
           const f = tf.get(token) ?? 0;
-          const tfScore = (f * (BM25_K1 + 1)) / (f + BM25_K1 * (1 - BM25_B + BM25_B * (docLen / avgDocLen)));
+          const tfScore = (f * (k1 + 1)) / (f + k1 * (1 - b + b * (docLen / avgDocLen)));
           score += (idf.get(token) ?? 0) * tfScore;
         }
         return score;

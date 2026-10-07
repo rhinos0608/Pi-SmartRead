@@ -94,8 +94,13 @@ describe("computeRunFingerprint", () => {
         const b = identity({ params: { y: 2, x: 1 } });
         expect(computeRunFingerprint(a)).toBe(computeRunFingerprint(b));
     });
+    it("changes when unit-mode settings change (differently-configured runs never resume together)", () => {
+        const base = computeRunFingerprint(identity());
+        expect(computeRunFingerprint(identity({
+            params: { perQueryLimit: 20, topKWindow: 20, contextLines: 2, unitMode: "symbol" },
+        }))).not.toBe(base);
+    });
 });
-
 describe("validateCheckpointRow", () => {
     const known = new Set(["q01", "q02"]);
     it("accepts a matching versioned row", () => {
@@ -314,8 +319,12 @@ describe("pairReports", () => {
         retrievalConditions: { perQueryLimit: 40, contextLines: 2 },
         ...overrides,
     });
-    const report = (engine: string, rows: PairedReport["queries"]): PairedReport => ({
-        manifest: { ...manifest(), engineSourceHash: engine },
+    const report = (
+        engine: string,
+        rows: PairedReport["queries"],
+        manifestOverrides: Record<string, unknown> = {},
+    ): PairedReport => ({
+        manifest: { ...manifest(), ...manifestOverrides, engineSourceHash: engine },
         queries: rows,
     });
     const base = report("sha256:base", [
@@ -329,12 +338,30 @@ describe("pairReports", () => {
     it("emits per-query wins/losses/ties and token deltas", () => {
         const paired = pairReports(base, variant);
         expect(paired.queryCount).toBe(2);
-        expect(paired.readReady).toEqual({ wins: 1, losses: 1, ties: 0 });
+        expect(paired.readReady).toEqual({ wins: 1, losses: 1, ties: 0, unavailable: 0 });
         expect(paired.fileHit).toEqual({ wins: 1, losses: 1, ties: 0 });
         // q02 stopped abstaining: recorded as an abstention "loss".
         expect(paired.abstention).toEqual({ wins: 0, losses: 1, ties: 1 });
         expect(paired.meanTokenDelta).toBe(25);
         expect(paired.deltas.map((d) => d.qid)).toEqual(["q01", "q02"]);
+    });
+    it("never coerces missing readReady to failure: unavailable per query, other metrics still pair", () => {
+        const oldBase = report("sha256:base", [
+            { qid: "q01", fileHit: true, covered: true, abstained: false, renderedTokens: 100 },
+        ], { queryCount: 1 });
+        const newVariant = report("sha256:variant", [
+            { qid: "q01", fileHit: false, covered: false, abstained: false, renderedTokens: 150, readReady: true },
+        ], { queryCount: 1 });
+        const paired = pairReports(oldBase, newVariant);
+        expect(paired.deltas[0]!.readReady).toBe("unavailable");
+        expect(paired.readReady).toEqual({ wins: 0, losses: 0, ties: 0, unavailable: 1 });
+        // Other metrics still pair for the same query.
+        expect(paired.deltas[0]!.fileHit).toBe("loss");
+        expect(paired.fileHit).toEqual({ wins: 0, losses: 1, ties: 0 });
+    });
+    it("--recompute refuses fail-closed without captured text on both sides", () => {
+        expect(() => pairReports(base, variant, undefined, { recompute: true }))
+            .toThrow(/refuses-recompute/);
     });
     it("RED: refuses pairing when identity is missing on either side", () => {
         const rows: PairedReport["queries"] = [{ qid: "q01" }];
@@ -344,6 +371,18 @@ describe("pairReports", () => {
     });
     it("tolerates engineSourceHash differences but refuses other identity mismatches", () => {
         expect(() => pairReports(base, variant)).not.toThrow();
+        expect(() => pairReports(base, {
+            ...variant,
+            manifest: manifest({
+                retrievalConditions: { perQueryLimit: 40, contextLines: 2, unitMode: "symbol", maxPerFile: 2, excerptLines: 12 },
+            }),
+        })).not.toThrow();
+        expect(() => pairReports(base, {
+            ...variant,
+            manifest: manifest({
+                retrievalConditions: { perQueryLimit: 10, contextLines: 2, unitMode: "anchor" },
+            }),
+        })).toThrow(/retrieval params/);
         expect(() => pairReports(
             { ...base, manifest: manifest({ fixtureSha: "zzz" }) },
             variant,

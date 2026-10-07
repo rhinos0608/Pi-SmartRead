@@ -236,7 +236,7 @@ export interface PairedReport {
 
 export interface PairedQueryDelta {
     qid: string;
-    readReady: "win" | "loss" | "tie";
+    readReady: "win" | "loss" | "tie" | "unavailable";
     fileHit: "win" | "loss" | "tie";
     abstention: "win" | "loss" | "tie";
     tokenDelta: number;
@@ -246,11 +246,28 @@ export interface PairedComparison {
     baseline: string;
     variant: string;
     queryCount: number;
-    readReady: { wins: number; losses: number; ties: number };
+    readReady: { wins: number; losses: number; ties: number; unavailable: number };
     fileHit: { wins: number; losses: number; ties: number };
     abstention: { wins: number; losses: number; ties: number };
     meanTokenDelta: number;
     deltas: PairedQueryDelta[];
+}
+
+/**
+ * Symbol-unit result settings carried in retrievalConditions/manifest
+ * params. These describe HOW results were rendered (anchor window vs
+ * enclosing-symbol units, units per file, excerpt length), not WHAT was
+ * retrieved: paired comparison intentionally tolerates differences here
+ * (cross-unit-mode pairing is the point of the comparison), exactly like
+ * engineSourceHash. The run fingerprint still binds them, so
+ * differently-configured runs never resume into each other.
+ */
+export const UNIT_SETTING_KEYS = ["unitMode", "maxPerFile", "excerptLines"] as const;
+
+function withoutUnitSettings(params: Record<string, unknown>): Record<string, unknown> {
+    const copy = { ...params };
+    for (const key of UNIT_SETTING_KEYS) delete copy[key];
+    return copy;
 }
 
 function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
@@ -263,10 +280,12 @@ function boolWinLoss(base: boolean, change: boolean): "win" | "loss" | "tie" {
  * Pairing requires identical fixture/corpus identity: fixtureSha,
  * corpus inventory hash, and the ordered qid set must all match.
  * engineSourceHash is the ONLY identity field allowed to differ (it is
- * the point of the comparison). Throws on any other mismatch.
+ * the point of the comparison). Symbol-unit rendering settings
+ * (UNIT_SETTING_KEYS) are stripped from the retrieval-params comparison:
+ * cross-unit-mode pairing is intended. Throws on any other mismatch.
  * Abstention "win" means the variant abstained where baseline did not.
  */
-export function pairReports(baseline: PairedReport, variant: PairedReport, names?: { baseline: string; variant: string }): PairedComparison {
+export function pairReports(baseline: PairedReport, variant: PairedReport, names?: { baseline: string; variant: string }, options?: { recompute?: boolean }): PairedComparison {
     const bManifest = baseline.manifest ?? {};
     const vManifest = variant.manifest ?? {};
     // Complete matching identity: presence AND equality. Missing on either
@@ -284,7 +303,10 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
     requireIdentity("sourceRef", bManifest.sourceRef, vManifest.sourceRef);
     requireIdentity("corpusKind", bManifest.corpusKind, vManifest.corpusKind);
     requireIdentity("gateConstants", bManifest.gateConstants, vManifest.gateConstants);
-    requireIdentity("retrieval params", bManifest.retrievalConditions ?? bManifest.params, vManifest.retrievalConditions ?? vManifest.params);
+    requireIdentity("retrieval params", withoutUnitSettings(bManifest.retrievalConditions ?? bManifest.params ?? {}), withoutUnitSettings(vManifest.retrievalConditions ?? vManifest.params ?? {}));
+    if (options?.recompute) {
+        throw new Error("refuses-recompute: --recompute requires captured rendered text plus a pinned scorer version on BOTH sides; reports carry neither, so rescoring cannot run");
+    }
     const requireQueries = (name: string, report: PairedReport): PairedReportQuery[] => {
         if (!Array.isArray(report.queries)) {
             throw new Error(`refuses-pair: ${name} queries missing or not an array`);
@@ -322,7 +344,12 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
         const v = vByQid.get(b.qid)!;
         return {
             qid: b.qid,
-            readReady: boolWinLoss(b.readReady === true, v.readReady === true),
+            // Missing readReady is natively absent on older reports: never coerce
+            // to false (that invents wins against them). Mark the metric
+            // unavailable for that query while still pairing other metrics.
+            readReady: (b.readReady === undefined || v.readReady === undefined)
+                ? "unavailable"
+                : boolWinLoss(b.readReady, v.readReady),
             fileHit: boolWinLoss(b.fileHit === true, v.fileHit === true),
             // Abstention direction is inverted: abstaining where baseline did
             // not is recorded as a "win" only in the abstention column.
@@ -335,11 +362,17 @@ export function pairReports(baseline: PairedReport, variant: PairedReport, names
         losses: deltas.filter((d) => pick(d) === "loss").length,
         ties: deltas.filter((d) => pick(d) === "tie").length,
     });
+    const tallyReadReady = (): { wins: number; losses: number; ties: number; unavailable: number } => ({
+        wins: deltas.filter((d) => d.readReady === "win").length,
+        losses: deltas.filter((d) => d.readReady === "loss").length,
+        ties: deltas.filter((d) => d.readReady === "tie").length,
+        unavailable: deltas.filter((d) => d.readReady === "unavailable").length,
+    });
     return {
         baseline: names?.baseline ?? "baseline",
         variant: names?.variant ?? "variant",
         queryCount: deltas.length,
-        readReady: tally((d) => d.readReady),
+        readReady: tallyReadReady(),
         fileHit: tally((d) => d.fileHit),
         abstention: tally((d) => d.abstention),
         meanTokenDelta: deltas.length > 0
