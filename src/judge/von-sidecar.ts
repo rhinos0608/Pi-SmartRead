@@ -180,7 +180,7 @@ export function parsePythonVersion(output: string): { major: number; minor: numb
     return { major: Number(match[1]), minor: Number(match[2]) };
 }
 
-export async function checkPythonVersion(deps: VonSidecarDeps = {}): Promise<{ ok: true; version: string } | { ok: false; error: string }> {
+export async function checkPythonVersion(deps: VonSidecarDeps = {}): Promise<{ ok: true; version: string; executable: string } | { ok: false; error: string }> {
     const resolved = resolveDeps(deps);
     const candidates = ["python3", "python"];
     let lastError = "no python interpreter found";
@@ -194,7 +194,7 @@ export async function checkPythonVersion(deps: VonSidecarDeps = {}): Promise<{ o
                 continue;
             }
             if (parsed.major > 3 || (parsed.major === 3 && parsed.minor >= 12)) {
-                return { ok: true, version: `${parsed.major}.${parsed.minor}` };
+                return { ok: true, version: `${parsed.major}.${parsed.minor}`, executable: cmd };
             }
             return { ok: false, error: `${cmd} is ${parsed.major}.${parsed.minor}; von requires Python >= 3.12` };
         } catch (e) {
@@ -255,9 +255,9 @@ export async function installVonSidecar(deps: VonSidecarDeps = {}, onLog?: (line
     }
     const env = sidecarEnv(resolved.home, resolved.env);
     // 1. Isolated venv inside the managed root.
-    const checked = await checkPythonVersion(deps);
+    const checked = await checkPythonVersion({ ...deps, home: resolved.home, runCmd: resolved.runCmd });
     if (!checked.ok) return { ok: false, error: checked.error };
-    const venv = await resolved.runCmd("python3", ["-m", "venv", vonDir], { env });
+    const venv = await resolved.runCmd(checked.executable, ["-m", "venv", vonDir], { env });
     if (venv.code !== 0) {
         return { ok: false, error: `venv creation failed (exit ${venv.code ?? "unknown"})` };
     }
