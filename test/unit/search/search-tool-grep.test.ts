@@ -144,7 +144,9 @@ describe("search tool combined search", () => {
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => line.split(":").slice(0, 2).join(":").replace(/^\.\//, ""))
+      .map((line) =>
+        line.split(":").slice(0, 2).join(":").replace(/^\.[\\/]/, "").replace(/\\/g, "/"),
+      )
       .sort();
 
     expect(searchMatches).toEqual(rgMatches);
