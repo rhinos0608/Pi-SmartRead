@@ -74,6 +74,8 @@ export class LocalJudge implements Judge {
             const question = item.question("unit");
             const cacheKey = this.cache
                 ? judgeCacheKey({
+                    backend: this.info.backend,
+                    baseUrl: this.info.baseUrl,
                     model: this.info.model,
                     shared: input.shared,
                     state: item.state,

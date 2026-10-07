@@ -184,7 +184,7 @@ Every rendered hit gets search-match evidence, not full-file evidence. When auto
 
 ### Ranking knobs
 
-BM25 ranking demotes test/spec/doc files by default: `PI_SMARTREAD_GREP_RANK_TEST_DEMOTE` multiplies the score of test/spec/fixture/`__tests__` paths and `docs/*.md` by 0.7. Set it to `off` (also `0`, `false`, `no`) to disable demotion, or to a factor in (0,1) to override; any other value falls back to 0.7. All other ranking knobs stay default-off. Active knobs are reported in `details.rankingKnobs`.
+BM25 ranking demotes test/spec/doc files by default: `PI_SMARTREAD_GREP_RANK_TEST_DEMOTE` multiplies the score of test/spec/fixture/`__tests__` paths, `*.test.*` / `*.spec.*` / `test_*` / `*_test.*` files, and every Markdown file (`*.md`, including READMEs) by 0.7. Set it to `off` (also `0`, `false`, `no`) to disable demotion, or to a factor in (0,1) to override; any other value falls back to 0.7. All other ranking knobs stay default-off. Active knobs are reported in `details.rankingKnobs`.
 
 ---
 
@@ -200,7 +200,7 @@ Patterns select glob, fuzzy-name, or natural-language discovery. Results are gro
 
 ## Optional relevance judge
 
-Judging is off by default. In Pi, use `/judge off|local|cloud|status|install`. Cloud mode uses the OpenRouter key from Pi's auth store; cloud requests are restricted to OpenRouter and credentials are never sent to custom endpoints. Local mode uses a managed von sidecar on loopback; installing it requires an explicit UI confirmation for the ~3 GB first download. Local mode is experimental: it measured near chance on the SmartRead relevance benchmark, so cloud is recommended where available. Standalone MCP reads `PI_SMARTREAD_JUDGE_MODE` and user-environment credentials. A judge failure falls back to the unjudged search results.
+Judging is off by default. In Pi, use `/judge off|local|cloud|status|install`. Cloud mode uses the OpenRouter key from Pi's auth store; cloud requests are restricted to OpenRouter and credentials are never sent to custom endpoints. Local mode uses a managed von sidecar on loopback; installing it requires an explicit UI confirmation for the ~3 GB first download. Local mode is experimental: it measured near chance on the SmartRead relevance benchmark, so cloud is recommended where available. Standalone MCP reads `PI_SMARTREAD_JUDGE_MODE` and user-environment credentials. A judge failure falls back to the unjudged search results. Workspace verdicts are cached under `<root>/.pi-smartread/judge-cache`, keyed by backend, endpoint, model, query, unit text and question; entries older than `PI_SMARTREAD_JUDGE_CACHE_MAX_AGE_DAYS` (default 7 days) are treated as misses.
 
 ---
 

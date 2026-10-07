@@ -29,6 +29,22 @@ export function existsQuestion(query: string): NoulQuestion {
     };
 }
 
+/**
+ * Excerpt-based per-query existence noul (D42, behind
+ * PI_SMARTREAD_JUDGE_EXISTS_EVIDENCE=excerpts).
+ *
+ * Scoped explicitly to the shown candidates only — no claim about the
+ * whole repository. Callers pass the excerpt block as part of the noul
+ * state so the judge cache key stays content-sensitive.
+ */
+export function existsExcerptQuestion(query: string): NoulQuestion {
+    return {
+        type: "noul",
+        instructions:
+            `Among these candidates, does any unit answer "${query}"? Judge only the excerpts shown; make no claim about the rest of the repository.`,
+    };
+}
+
 /** Signature-card pointer noul (same question over signature-only cards). */
 export function signaturePointerQuestion(query: string, stateRef: string): NoulQuestion {
     return unitRelevanceQuestion(query, stateRef);
