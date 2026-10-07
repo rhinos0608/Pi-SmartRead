@@ -24,6 +24,7 @@ import {
     type InspectedResource,
 } from "@rhinos0608/pi-workspace-protocol";
 import type { ContextGraph } from "../context-graph.js";
+import { runGrepJudgeStage, type GrepJudgeDetails, type GrepJudgeProvider, type JudgedGrepHit } from "../judge/grep-judge-stage.js";
 import { applyGraphFilter, parseGraphFilter } from "./graph-filter.js";
 import { sessionFileFromContext } from "../inspect/inspect-tool.js";
 import { executeStructuralQuery } from "./grep-structural-executor.js";
@@ -116,7 +117,33 @@ export interface GrepToolOptions {
      * fallback when the graph is unavailable or the match is absent.
      */
     readonly getSharedContextGraphIfBuilt?: (root: string) => ContextGraph | null;
+    /**
+     * Optional WS1 grep judgment stage (spec
+     * docs/plans/2026-10-05-grep-judge-design.md). Narrow injected seam for
+     * J2 runtime wiring: the provider resolves the active judge backend and
+     * peeks at an already-built graph. Absent (or mode off) → grep output
+     * and details are byte-identical to unjudged runs.
+     */
+    readonly judge?: GrepJudgeProvider;
+    /**
+     * Additive opt-in diagnostic observer for measurement harnesses.
+     * Receives copied per-query snapshots (pre-judge candidates, post-judge
+     * hits, post-cap guarded text). Copies are detached from production
+     * state, so observer mutation cannot affect results. Absent → no
+     * overhead beyond a single conditional branch and no logging. Observer
+     * errors propagate to the caller; production errors are never swallowed.
+     */
+    readonly onTraceGrepQuery?: (event: GrepTraceEvent) => void;
 }
+
+/** Per-query diagnostic snapshot stages (observer receives copies only). */
+export type GrepTraceEvent =
+    | { stage: "pre-judge"; pattern: string; candidates: GrepHit[] }
+    | {
+        stage: "post-judge"; pattern: string; shown: GrepHit[]; totalHits: number;
+        judged: boolean; abstained: boolean; judge?: GrepJudgeDetails;
+    }
+    | { stage: "post-cap"; pattern: string; text: string; outputTruncated: boolean };
 
 export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
     return {
@@ -187,7 +214,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
             // single-query path too (slice before evidence/render).
             const globalCap = resolveMaxResults(params as { maxResults?: number });
             if (!hasQueries) {
-                const single = await runGrepQueryWithEvidence(queries[0]!, cwd, opts, signal, sessionFilePath);
+                const single = await runGrepQueryWithEvidence(queries[0]!, cwd, opts, signal, sessionFilePath, ctx);
                 let result = single.result;
                 evidence = single.evidence;
                 if (result.shown.length > globalCap) {
@@ -201,7 +228,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                 queryResults.push(result);
             } else {
                 for (const query of queries) {
-                    queryResults.push(await executeGrepQuery(query, cwd, opts, signal));
+                    queryResults.push(await executeGrepQuery(query, cwd, opts, signal, ctx));
                 }
                 // Batch cardinality: tag per-query provenance, dedup overlapping
                 // file+range hits across queries, then apply the global cap.
@@ -230,8 +257,15 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
 
             if (!hasQueries) {
                 const result = queryResults[0]!;
+                const guarded = applyOutputGuard(formatExecutionOutput(result));
+                opts.onTraceGrepQuery?.({
+                    stage: "post-cap",
+                    pattern: result.pattern,
+                    text: guarded.text,
+                    outputTruncated: guarded.outputTruncated,
+                });
                 return {
-                    content: [{ type: "text" as const, text: applyOutputGuard(formatExecutionOutput(result)).text }],
+                    content: [{ type: "text" as const, text: guarded.text }],
                     details: {
                         workspaceEvidence: evidence,
                         mode: "query",
@@ -243,6 +277,7 @@ export function createGrepTool(opts: GrepToolOptions): ToolDefinition {
                         engines: result.engines,
                         ...(result.degradation ? { degradation: result.degradation } : {}),
                         ...(result.structuralSearch ? { structuralSearch: result.structuralSearch } : {}),
+                        ...("judge" in result && result.judge ? { judge: result.judge } : {}),
                     },
                 };
             }
@@ -288,10 +323,66 @@ export async function runGrepQueryWithEvidence(
     opts: GrepToolOptions,
     signal: AbortSignal | undefined,
     sessionFilePath: string | null | undefined,
+    runtimeContext?: unknown,
 ): Promise<{ result: GrepExecutionResult; evidence: WorkspaceEvidenceEnvelope }> {
-    const result = await executeGrepQuery(params, cwd, opts, signal);
+    const result = await executeGrepQuery(params, cwd, opts, signal, runtimeContext);
     const evidence = buildEvidence(result.shown, cwd, sessionFilePath);
     return { result, evidence };
+}
+
+/** Additive judged fields on a grep result. Absent unless the WS1 judge ran. */
+export interface GrepJudgeResultExtras {
+    judge?: GrepJudgeDetails;
+    judgeNote?: string;
+    judgeFallback?: GrepHit[];
+}
+
+/**
+ * Invoke the WS1 judgment stage for a smart-cascade result. Returns the
+ * input hits untouched (judged: false, no details, no degradation) unless
+ * the provider resolves an enabled backend and the gate accepts the query.
+ */
+async function maybeJudgeGrepHits(args: {
+    query: string;
+    hits: GrepHit[];
+    literal: boolean;
+    regex: boolean;
+    structural: boolean;
+    contextLines: number;
+    cwd: string;
+    runtimeContext?: unknown;
+    provider: GrepJudgeProvider | undefined;
+}): Promise<{
+    judged: boolean;
+    hits: JudgedGrepHit[];
+    unjudged: GrepHit[];
+    details?: GrepJudgeDetails;
+    degradation?: { backend: "judge"; code: string };
+    abstained: boolean;
+    abstainMessage?: string;
+}> {
+    const idle = { judged: false, hits: args.hits, unjudged: args.hits, abstained: false as const };
+    if (!args.provider) return idle;
+    const staged = await runGrepJudgeStage({
+        query: args.query,
+        hits: args.hits,
+        contextLines: args.contextLines,
+        literal: args.literal,
+        regex: args.regex,
+        structural: args.structural,
+        cwd: args.cwd,
+        runtimeContext: args.runtimeContext,
+        provider: args.provider,
+    });
+    return {
+        judged: staged.judged,
+        hits: staged.hits,
+        unjudged: staged.unjudged,
+        ...(staged.judge ? { details: staged.judge } : {}),
+        ...(staged.degradation ? { degradation: staged.degradation } : {}),
+        abstained: staged.abstained,
+        ...(staged.abstainMessage ? { abstainMessage: staged.abstainMessage } : {}),
+    };
 }
 
 async function executeGrepQuery(
@@ -299,7 +390,8 @@ async function executeGrepQuery(
     cwd: string,
     opts: GrepToolOptions,
     signal: AbortSignal | undefined,
-): Promise<GrepExecutionResult> {
+    runtimeContext?: unknown,
+): Promise<GrepExecutionResult & GrepJudgeResultExtras> {
     // Structural branch — validate combos before any IO
     if ((params as any).structural !== undefined) {
         return executeStructuralQuery(params as any, cwd, opts);
@@ -382,15 +474,50 @@ async function executeGrepQuery(
         gatherK = Math.min(gatherK * 2, MAX_GATHER);
     }
 
+    // WS1 judgment stage (smart cascade + NL queries only). Without a
+    // provider, or when the gate/mode says off, hits pass through untouched.
+    // The opt-in trace observer sees detached copies only; observer errors
+    // propagate and production errors are never swallowed.
+    opts.onTraceGrepQuery?.({ stage: "pre-judge", pattern: params.pattern, candidates: copyGrepHits(hits) });
+    const staged = await maybeJudgeGrepHits({
+        query: params.pattern,
+        hits,
+        literal: params.literal === true,
+        regex: regexPattern !== null,
+        structural: false,
+        contextLines,
+        cwd,
+        runtimeContext,
+        provider: opts.judge,
+    });
+    if (staged.degradation) {
+        degradation = [...(degradation ?? []), staged.degradation as unknown as GrepDegradation];
+    }
+    const finalHits = staged.judged || staged.abstained ? staged.hits : hits;
+    const shownHits = staged.abstained ? [] : finalHits.slice(0, topK);
+    const totalHits = staged.abstained ? staged.unjudged.length : finalHits.length;
+    opts.onTraceGrepQuery?.({
+        stage: "post-judge",
+        pattern: params.pattern,
+        shown: copyGrepHits(shownHits),
+        totalHits,
+        judged: staged.judged,
+        abstained: staged.abstained,
+        ...(staged.details ? { judge: structuredCloneDetails(staged.details) } : {}),
+    });
+
     return {
         pattern: params.pattern,
-        shown: hits.slice(0, topK),
-        totalHits: hits.length,
+        shown: shownHits,
+        totalHits,
         engines,
-        truncated: hits.length > topK,
+        truncated: finalHits.length > topK,
         elapsedMs: Date.now() - startTime,
         graphFilterNotes,
         ...(degradation ? { degradation } : {}),
+        ...(staged.details ? { judge: staged.details } : {}),
+        ...(staged.abstainMessage ? { judgeNote: staged.abstainMessage } : {}),
+        ...(staged.abstained ? { judgeFallback: staged.unjudged.slice(0, 3) } : {}),
     };
 }
 
@@ -404,6 +531,20 @@ function publishEvidence(evidence: WorkspaceEvidenceEnvelope, opts: GrepToolOpti
 
 function unique<T>(items: T[]): T[] {
     return [...new Set(items)];
+}
+
+/** Detached per-hit copies for the opt-in trace observer. */
+function copyGrepHits(hits: GrepHit[]): GrepHit[] {
+    return hits.map((h) => ({ ...h, engines: [...h.engines], ...(h.matchedQueries ? { matchedQueries: [...h.matchedQueries] } : {}) }));
+}
+
+/** Detached judge-details copy for the opt-in trace observer. */
+function structuredCloneDetails(details: GrepJudgeDetails): GrepJudgeDetails {
+    return {
+        ...details,
+        pointers: details.pointers.map((p) => ({ ...p })),
+        hits: details.hits.map((h) => ({ ...h })),
+    };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -518,7 +659,7 @@ function buildEvidence(
 
 // ── Output formatting ──────────────────────────────────────────────
 
-function formatExecutionOutput(result: GrepExecutionResult): string {
+function formatExecutionOutput(result: GrepExecutionResult & GrepJudgeResultExtras): string {
     if (result.structuralSearch) {
         return formatStructuralOutput(result);
     }
@@ -531,6 +672,13 @@ function formatExecutionOutput(result: GrepExecutionResult): string {
         result.elapsedMs,
         result.graphFilterNotes,
         result.degradation,
+        result.judge
+            ? {
+                judge: result.judge,
+                abstainMessage: result.judgeNote,
+                abstainPointers: result.judgeFallback,
+            }
+            : undefined,
     );
 }
 
@@ -616,19 +764,36 @@ function formatOutput(
     elapsedMs: number,
     graphFilterNotes?: string[],
     degradation?: GrepDegradation[],
+    judgeExtra?: {
+        judge: GrepJudgeDetails;
+        abstainMessage?: string;
+        abstainPointers?: GrepHit[];
+    },
 ): string {
     const engineStr = engines.join(" + ");
+    const judgedSuffix = judgeExtra ? ", judged" : "";
     const lines: string[] = [
-        `${totalHits} result(s) for "${pattern}" (${engineStr}, ${(elapsedMs / 1000).toFixed(1)}s)`,
+        `${totalHits} result(s) for "${pattern}" (${engineStr}${judgedSuffix}, ${(elapsedMs / 1000).toFixed(1)}s)`,
         "",
     ];
+
+    if (judgeExtra?.abstainMessage) {
+        lines.push(judgeExtra.abstainMessage);
+        for (const hit of judgeExtra.abstainPointers ?? []) {
+            lines.push(`maybe: ${hit.relFile}:${hit.line} ${hit.name}`);
+        }
+        lines.push("");
+    }
 
     const showProvenance = shouldShowPerHitEngines(shown);
     for (const hit of shown) {
         const symbolPart = hit.name ? `  ${hit.name}` : "";
         const lineRange = hit.endLine > hit.line ? `L${hit.line}-${hit.endLine}` : `L${hit.line}`;
         const provenance = showProvenance && hit.engines.length > 0 ? `  [${hit.engines.join("+")}]` : "";
-        lines.push(`${hit.relFile}  ${lineRange}${symbolPart}${provenance}`);
+        const judgeP = typeof (hit as JudgedGrepHit).judgeP === "number"
+            ? `  p=${((hit as JudgedGrepHit).judgeP as number).toFixed(2)}`
+            : "";
+        lines.push(`${hit.relFile}  ${lineRange}${symbolPart}${provenance}${judgeP}`);
         if (hit.snippet) {
             lines.push(hit.snippet);
         }
@@ -641,6 +806,18 @@ function formatOutput(
 
     if (degradation && degradation.length > 0) {
         lines.push(`degraded: ${degradation.map((d) => `${d.backend}_${d.code}`).join(", ")}`);
+    }
+
+    if (judgeExtra) {
+        const j = judgeExtra.judge;
+        const costPart = j.costUsd !== undefined ? ` · $${j.costUsd.toFixed(4)}` : "";
+        lines.push(
+            `judge: ${j.backend} ${j.model} · ${j.judged} judged · ${j.belowThreshold} below τ ${j.threshold.toFixed(2)} · cache ${j.cacheHits}/${j.judged}${costPart}`,
+        );
+        if (j.pointers.length > 0) {
+            const next = j.pointers.map((p) => `${p.path}:${p.line} ${p.symbol} (${p.p.toFixed(2)})`).join(" · ");
+            lines.push(`next: ${next}`);
+        }
     }
 
     if (graphFilterNotes && graphFilterNotes.length > 0) {
