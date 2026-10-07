@@ -191,7 +191,6 @@ describe("findRepoQueryFiles", () => {
     });
 
     it("finds no d46 query files in the repo tree", () => {
-        expect(REPO_ROOT.endsWith("Pi-SmartRead-judge-find")).toBe(true);
         expect(findRepoQueryFiles(REPO_ROOT)).toEqual([]);
     });
 

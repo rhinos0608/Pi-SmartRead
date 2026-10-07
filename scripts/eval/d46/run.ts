@@ -44,7 +44,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
 import { GREP_JUDGE_THRESHOLD_ENV_VAR } from "../../../src/judge/grep-judge-stage.js";
 import type { GrepJudgeProvider } from "../../../src/judge/grep-judge-stage.js";
@@ -258,7 +258,9 @@ export function planColdStartRuntimeCaches(
             return { root, toDelete: [], skippedTracked: [], error: `cannot list tracked files under ${full}` };
         }
         // A cache-named dir holding tracked content is legitimate and skipped.
-        (tracked ? skippedTracked : toDelete).push(full.slice(root.length + 1));
+        // Relative paths use forward slashes on every platform so reports,
+        // manifests, and tests compare identically on Windows and POSIX.
+        (tracked ? skippedTracked : toDelete).push(relative(root, full).replace(/\\/g, "/"));
     }
     toDelete.sort();
     skippedTracked.sort();
@@ -298,7 +300,7 @@ function walkCacheCandidates(root: string, cacheNames: Set<string>, out: string[
                 } catch {
                     return `refuses-symlink: ${full} is not resolvable`;
                 }
-                if (target !== root && !target.startsWith(`${root}/`)) {
+                if (target !== root && !target.replace(/\\/g, "/").startsWith(`${root.replace(/\\/g, "/")}/`)) {
                     return `refuses-symlink: ${full} points outside the checkout`;
                 }
                 // Inside-checkout symlink: leave it in place, do not follow/delete.
