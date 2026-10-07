@@ -188,10 +188,13 @@ export async function runRipgrep(
             }
         } catch (error) {
             // rg exits 1 when a term has no matches: treat as empty for that
-            // term and continue with the remaining terms. Exit >= 2 is a
-            // real error and is recorded while still continuing the loop.
+            // term and continue with the remaining terms. Any other failure
+            // (e.g. exit >= 2) is fatal: record it and stop the term loop
+            // so partial results are never returned after a real error.
             const code = (error as { status?: unknown })?.status;
-            if (code !== 1) status = errorStatus(error);
+            if (code === 1) continue;
+            status = errorStatus(error);
+            break;
         }
     }
     const elapsedMs = performance.now() - started;
