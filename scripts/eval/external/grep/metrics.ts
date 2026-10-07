@@ -67,7 +67,7 @@ export function computeInstanceMetrics(input: {
     const { instance, formulation, shown, renderedText, elapsedMs, status } = input;
     const rankedFiles = dedupeFilesByFirstAppearance(shown);
     const top5Files = new Set(rankedFiles.slice(0, 5));
-    const top5Units = shown.slice(0, 5);
+    const top5Units = shown.filter((u) => top5Files.has(u.relFile));
     const goldRanks = instance.goldFiles.map((file) => {
         const idx = rankedFiles.indexOf(file);
         return { file, rank: idx >= 0 ? idx + 1 : null };

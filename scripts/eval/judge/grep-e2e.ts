@@ -41,7 +41,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-    appendFileSync,
     existsSync,
     lstatSync,
     mkdirSync,
@@ -86,6 +85,7 @@ import {
 import {
     ALLOWED_LABELS,
     CHECKPOINT_SCHEMA_VERSION,
+    appendCheckpointLine,
     checkPrivateExisting,
     computeRunFingerprint,
     errorStatus,
@@ -630,13 +630,7 @@ function loadCheckpointValidated(
 
 /** Exclusive-create 0600 for new checkpoint files; appends reuse the owned handle. */
 function appendCheckpointRow(path: string, entry: CheckpointRow): void {
-    const line = `${JSON.stringify(entry)}\n`;
-    try {
-        writeFileSync(path, line, { flag: "wx", mode: 0o600 });
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
-        appendFileSync(path, line);
-    }
+    appendCheckpointLine(path, `${JSON.stringify(entry)}\n`);
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -665,18 +659,27 @@ if (!corpusRoot) {
 }
 const root = corpusRoot;
 const existingFiles = new Set<string>();
+const actualFileEnds = new Map<string, number>();
 {
     const walk = (dir: string): void => {
         for (const name of readdirSync(dir).sort()) {
             if (name === ".git") continue;
             const full = join(dir, name);
             if (statSync(full).isDirectory()) walk(full);
-            else existingFiles.add(relative(root, full).split(sep).join("/"));
+            else {
+                const rel = relative(root, full).split(sep).join("/");
+                existingFiles.add(rel);
+                try {
+                    const text = readFileSync(full, "utf8");
+                    const parts = text.split("\n");
+                    actualFileEnds.set(rel, text.endsWith("\n") ? parts.length - 1 : parts.length);
+                } catch { /* unreadable file: EOF span check skipped for it */ }
+            }
         }
     };
     walk(root);
 }
-const fixtureValidation = validateFixture(rows, existingFiles);
+const fixtureValidation = validateFixture(rows, existingFiles, actualFileEnds);
 // Fail BEFORE retrieval/network on fixture validation errors: invalid rows
 // must never silently vanish from denominators. q02
 // answerable-without-gold remains allowed (validateFixture never errors on

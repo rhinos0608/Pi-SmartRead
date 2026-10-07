@@ -138,6 +138,33 @@ describe("find judge wave: keep/drop/order", () => {
     });
 });
 
+describe("find judge wave: partial judge response", () => {
+    it("preserves candidates with missing probabilities with degradation instead of dropping them", async () => {
+        const judge = fakeJudge((relPath) => {
+            if (relPath === "src/state.ts") return undefined;
+            if (relPath === "src/authentication.ts") return 0.9;
+            if (relPath === "src/nested/deep-state.ts") return 0.7;
+            return 0.1;
+        });
+        const tool = createFindTool({ judge });
+        const result: any = await tool.execute("j-partial", { pattern: NL_QUERY }, undefined, undefined, ctx());
+        const files = (result.details.entries as any[]).filter((entry) => entry.type === "file");
+        // Judge-kept files stay scored and first; the unanswered candidate
+        // is preserved after them without a score.
+        expect(files.map((entry) => entry.path)).toEqual([
+            "src/authentication.ts",
+            "src/nested/deep-state.ts",
+            "src/state.ts",
+        ]);
+        expect(files[0].score).toBe(0.9);
+        expect(files[2].score).toBeUndefined();
+        expect(result.details.judge).toMatchObject({ kept: 2, dropped: 1, unjudged: 1 });
+        expect(result.details.degraded).toContain("judge_bad_response");
+        expect(result.details.judge.degraded).toContain("judge_bad_response");
+        expect(result.content[0].text).not.toContain("(no matches)");
+    });
+});
+
 describe("find judge wave: directory grouping", () => {
     it("reports a directory only when >= 2 kept files share it", async () => {
         const judge = fakeJudge((relPath) => {
