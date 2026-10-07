@@ -32,13 +32,13 @@ import {
   definitionMatchesStart,
   isNonAnswer,
   locKey,
-  percentile,
   setMetrics,
   type BenchLocation,
 } from "../metrics.js";
 import { sampleCorpus, type SampledPosition } from "../sample.js";
 import { createMcpComparator } from "./mcp-server.js";
 import { createPiLspComparator } from "./pi-lsp.js";
+import { summarizeLatency, type PositionLatency } from "./latency.js";
 import { startKey, type Comparator, type ComparatorCall } from "./types.js";
 
 const BENCH = join(homedir(), ".cache", "pi-smartread-bench");
@@ -177,76 +177,6 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }>
   const t0 = Date.now();
   const value = await fn();
   return { value, ms: Date.now() - t0 };
-}
-
-export type LatencyOperation = "definition" | "references" | "hover";
-
-export interface PositionLatency {
-  reference: Record<LatencyOperation, number>;
-  system: Record<LatencyOperation, number>;
-  /** Reference workspace/symbol time: setup, not answer latency. */
-  setupMs: number;
-}
-
-export interface LatencySummary {
-  p50: number;
-  p95: number;
-  n: number;
-}
-
-export interface LatencyReport {
-  reference: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
-  system: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
-  /** Labeled separately: index/setup time, not comparable answer latency. */
-  setup: LatencySummary;
-}
-
-function summarize(values: number[]): LatencySummary {
-  if (values.length === 0) return { p50: 0, p95: 0, n: 0 };
-  return { p50: percentile(values, 50), p95: percentile(values, 95), n: values.length };
-}
-
-/**
- * Aggregate per-operation latency in matching units for both sides.
- * Reference and system each get definition/references/hover distributions
- * plus a per-position total (def+refs+hov); workspace/symbol time is
- * reported separately as setup so it never mixes with answer latency.
- */
-export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
-  const ops: LatencyOperation[] = ["definition", "references", "hover"];
-  const ref: Record<LatencyOperation, number[]> = { definition: [], references: [], hover: [] };
-  const sys: Record<LatencyOperation, number[]> = { definition: [], references: [], hover: [] };
-  const refTotals: number[] = [];
-  const sysTotals: number[] = [];
-  const setup: number[] = [];
-  for (const p of positions) {
-    let refTotal = 0;
-    let sysTotal = 0;
-    for (const op of ops) {
-      ref[op].push(p.reference[op]);
-      sys[op].push(p.system[op]);
-      refTotal += p.reference[op];
-      sysTotal += p.system[op];
-    }
-    refTotals.push(refTotal);
-    sysTotals.push(sysTotal);
-    setup.push(p.setupMs);
-  }
-  return {
-    reference: {
-      definition: summarize(ref.definition),
-      references: summarize(ref.references),
-      hover: summarize(ref.hover),
-      perPositionTotal: summarize(refTotals),
-    },
-    system: {
-      definition: summarize(sys.definition),
-      references: summarize(sys.references),
-      hover: summarize(sys.hover),
-      perPositionTotal: summarize(sysTotals),
-    },
-    setup: summarize(setup),
-  };
 }
 
 async function main(): Promise<void> {
