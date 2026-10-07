@@ -33,7 +33,13 @@ function buildFixture(prefix: string): string {
 type Match = Record<string, unknown>;
 
 function normalizeMatches(matches: Match[], root: string): unknown[] {
-  return matches.map((m) => ({ ...m, file: String(m["file"]).replace(root, "<root>") }));
+  // `file` is a native absolute path (backslash separators on Windows);
+  // normalize to forward slashes after root substitution so the
+  // byte-identical equivalence check below is OS-independent.
+  return matches.map((m) => ({
+    ...m,
+    file: String(m["file"]).replace(root, "<root>").replace(/\\/g, "/"),
+  }));
 }
 
 describe("deferred definition extraction equivalence", () => {
