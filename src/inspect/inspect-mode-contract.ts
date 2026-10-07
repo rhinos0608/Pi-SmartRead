@@ -155,9 +155,9 @@ const FILE_TARGET_OPS: ReadonlySet<string> = new Set([
 ]);
 
 function asBag(raw: unknown, what: string): Record<string, unknown> {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-        throw new Error(`Error: inspect ${what} must be an object`);
-    }
+    if (typeof raw !== "object") throw new Error(`Error: inspect ${what} must be an object`);
+    if (raw === null) throw new Error(`Error: inspect ${what} must be an object`);
+    if (Array.isArray(raw)) throw new Error(`Error: inspect ${what} must be an object`);
     return raw as Record<string, unknown>;
 }
 
