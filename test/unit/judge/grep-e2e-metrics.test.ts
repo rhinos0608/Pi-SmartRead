@@ -105,6 +105,12 @@ describe("q02 dual-count policy", () => {
         expect(report.errors.some((e) => e.includes("beyond actual file end"))).toBe(true);
     });
 
+    it("gold span into an empty file fails validation before retrieval", () => {
+        const rows = [row({ qid: "q01", file: "src/empty.ts", startLine: 1, endLine: 1 })];
+        const report = validateFixture(rows, new Set(["src/empty.ts"]), new Map([["src/empty.ts", 0]]));
+        expect(report.errors.some((e) => e.includes("beyond actual file end"))).toBe(true);
+    });
+
     it("summarize keeps declared and evaluable coverage separate", () => {
         const summary = summarizeQueries([
             outcome({ qid: "q01", covered: true }),
