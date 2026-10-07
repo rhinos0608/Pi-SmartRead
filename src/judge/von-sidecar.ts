@@ -231,6 +231,7 @@ function sidecarEnv(home: string, env: Record<string, string | undefined>): Node
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
         "http_proxy", "https_proxy", "all_proxy", "no_proxy",
         "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+        "HF_HOME",
     ];
     const next: NodeJS.ProcessEnv = {};
     for (const key of inheritedKeys) {
@@ -238,7 +239,12 @@ function sidecarEnv(home: string, env: Record<string, string | undefined>): Node
         if (value !== undefined) next[key] = value;
     }
     const vonDir = getVonDir(home);
-    next.HF_HOME = getVonHfDir(home);
+    // Default HF_HOME beneath the managed root (the server hangs accepting TCP
+    // without ever answering when HF_HOME is unset). Respect an explicit
+    // setting via the allowlist above; child env only, never process.env.
+    if (next.HF_HOME === undefined || next.HF_HOME === "") {
+        next.HF_HOME = getVonHfDir(home);
+    }
     const binDir = venvBinDir(vonDir);
     next.PATH = `${binDir}${delimiter}${next.PATH ?? ""}`;
     return next;

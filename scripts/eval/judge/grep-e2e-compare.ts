@@ -53,6 +53,12 @@ if (asJson) {
     const line = (label: string, t: { wins: number; losses: number; ties: number; unavailable?: number }): string =>
         `${label}: +${t.wins}/-${t.losses}/=${t.ties}${t.unavailable ? ` (unavailable:${t.unavailable})` : ""}`;
     console.log(`paired ${comparison.queryCount} queries: ${baselinePath} vs ${variantPath}`);
+    const fmtKnobs = (knobs: Record<string, unknown>): string => {
+        const keys = Object.keys(knobs);
+        return keys.length === 0 ? "(defaults)" : keys.map((k) => `${k}=${JSON.stringify(knobs[k])}`).join(" ");
+    };
+    console.log(`rankingKnobs baseline: ${fmtKnobs(comparison.rankingKnobs.baseline)}`);
+    console.log(`rankingKnobs variant : ${fmtKnobs(comparison.rankingKnobs.variant)}`);
     console.log(line("readReadySpanAt5", comparison.readReady));
     console.log(line("fileHit@5      ", comparison.fileHit));
     console.log(line("abstention     ", comparison.abstention));

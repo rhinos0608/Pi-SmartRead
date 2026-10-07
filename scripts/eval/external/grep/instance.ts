@@ -10,7 +10,41 @@
 
 export type ExternalDataset = "swe-bench-multilingual" | "multi-swe-bench";
 
-export type InstanceLanguage = "ts" | "js";
+export type InstanceLanguage = "ts" | "js" | "mixed";
+
+const TS_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+const JS_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs"]);
+
+function goldFileExtension(file: string): string {
+    const base = file.split("/").pop() ?? file;
+    const lower = base.toLowerCase();
+    // Treat .d.ts declaration files as TS (their suffix is still ".ts").
+    if (lower.endsWith(".d.ts")) return ".ts";
+    const dot = lower.lastIndexOf(".");
+    return dot >= 0 ? lower.slice(dot) : "";
+}
+
+/**
+ * Classify an instance by its gold production file extensions.
+ *
+ * `.ts`/`.tsx`/`.mts`/`.cts` count as TS, `.js`/`.jsx`/`.mjs`/`.cjs`
+ * count as JS. All-TS gold is `"ts"`, all-JS gold is `"js"`, and gold
+ * spanning both is `"mixed"`. Gold with no recognized JS/TS extension
+ * falls back to `"js"` (the historical default bucket) so the TS share
+ * constraint only counts genuine TS gold.
+ */
+export function classifyLanguageByGoldFiles(goldFiles: string[]): InstanceLanguage {
+    let hasTs = false;
+    let hasJs = false;
+    for (const file of goldFiles) {
+        const ext = goldFileExtension(file);
+        if (TS_EXTENSIONS.has(ext)) hasTs = true;
+        else if (JS_EXTENSIONS.has(ext)) hasJs = true;
+    }
+    if (hasTs && hasJs) return "mixed";
+    if (hasTs) return "ts";
+    return "js";
+}
 
 export type InstanceSplit = "pilot" | "dev" | "holdout";
 

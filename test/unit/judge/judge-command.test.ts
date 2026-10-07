@@ -81,6 +81,15 @@ describe("registerJudgeCommand", () => {
         expect(calls[0]!.options.handler).toBeTypeOf("function");
         expect(() => registerJudgeCommand({} as never)).not.toThrow();
     });
+    it("marks local mode experimental in the registered description", () => {
+        const calls: Array<{ name: string; options: { description: string } }> = [];
+        registerJudgeCommand(
+            { registerCommand: (name: string, options: { description: string }) => { calls.push({ name, options }); } },
+            makeDeps().deps,
+        );
+        expect(calls[0]!.options.description.toLowerCase()).toContain("local");
+        expect(calls[0]!.options.description.toLowerCase()).toContain("experimental");
+    });
 });
 
 describe("/judge off", () => {
@@ -255,5 +264,26 @@ describe("unknown subcommand", () => {
         await handleJudgeCommand("frobnicate", ctx, makeDeps().deps);
         expect(notified[0]!.type).toBe("warning");
         expect(notified[0]!.message).toContain("Usage: /judge");
+    });
+});
+
+describe("local experimental label (D48)", () => {
+    it("status for local mode states experimental, near chance, and recommends cloud", async () => {
+        const { ctx, notified } = makeCtx();
+        const { deps } = makeDeps({ mode: "local" });
+        await handleJudgeCommand("status", ctx, deps);
+        const text = notified.map((n) => n.message).join("\n").toLowerCase();
+        expect(text).toContain("experimental");
+        expect(text).toContain("near chance");
+        expect(text).toContain("cloud");
+    });
+
+    it("/judge local labels the mode experimental", async () => {
+        const { ctx, notified } = makeCtx();
+        const { deps } = makeDeps();
+        await handleJudgeCommand("local", ctx, deps);
+        const text = notified.map((n) => n.message).join("\n").toLowerCase();
+        expect(text).toContain("experimental");
+        expect(text).toContain("near chance");
     });
 });
