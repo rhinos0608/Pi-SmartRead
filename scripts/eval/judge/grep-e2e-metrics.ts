@@ -162,6 +162,17 @@ export function isWrongSpanOutcome(outcome: string): boolean {
     return outcome === "retrieved_wrong_span" || outcome === "top5_wrong_span" || outcome === "pool_wrong_span";
 }
 
+/**
+ * Last 1-based line number of file text, or 0 when the file is empty.
+ * Single owner of the corpus-walk EOF computation: grep-e2e.ts calls
+ * this instead of inlining the split/endsWith logic.
+ */
+export function fileEndLine(text: string): number {
+    if (text.length === 0) return 0;
+    const parts = text.split("\n");
+    return text.endsWith("\n") ? parts.length - 1 : parts.length;
+}
+
 export interface FixtureValidation {
     totalRows: number;
     totalQueries: number;
