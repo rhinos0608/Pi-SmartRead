@@ -3,6 +3,7 @@
  * (`{mode, updatedAt}`), mirroring language-intelligence-config.ts:
  * tolerant reads, atomic tmp+rename writes. Directory injectable for tests.
  */
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -56,7 +57,7 @@ export function writeJudgeSettings(mode: JudgeMode, home = homedir()): JudgeSett
     } catch {
         // mkdir failure surfaces at write time below.
     }
-    const tmp = `${p}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+    const tmp = `${p}.tmp.${Date.now()}.${randomUUID()}`;
     try {
         writeFileSync(tmp, JSON.stringify(next, null, 2), "utf-8");
         renameSync(tmp, p);

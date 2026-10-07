@@ -23,6 +23,15 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci --fetch-retries=5 --fetch-timeout=600000
+      - name: Install ripgrep (external grep comparator lexical floor)
+        shell: bash
+        run: |
+          if command -v rg >/dev/null 2>&1; then exit 0; fi
+          case "${RUNNER_OS}" in
+            Linux) sudo apt-get update && sudo apt-get install -y ripgrep ;;
+            macOS) brew install ripgrep ;;
+            Windows) choco install ripgrep -y ;;
+          esac
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
