@@ -144,12 +144,18 @@ function errorStatus(error: unknown): string {
     return "error:unknown";
 }
 
+/** Optional seam for unit tests: override per-term rg execution. */
+export interface RipgrepDeps {
+    runTerm?: (term: string) => string;
+}
+
 /** Run the ripgrep floor for one instance+formulation (rg must be on PATH). */
 export async function runRipgrep(
     instance: BenchmarkInstance,
     snapshotRoot: string,
     formulation: Formulation,
     options: ComparatorOptions,
+    deps: RipgrepDeps = {},
 ): Promise<ComparatorOutput> {
     void instance;
     const terms = tokenizeForRipgrep(formulationText(instance, formulation));
@@ -160,30 +166,35 @@ export async function runRipgrep(
     let status = "ok";
     const files = new Map<string, FileMatch>();
     for (const term of terms) {
-        let out: Buffer;
         try {
-            out = execFileSync("rg", ["--json", "-i", "-F", "-e", term, "--", snapshotRoot], {
-                timeout: options.timeoutMs,
-                maxBuffer: 256 * 1024 * 1024,
-            });
+            const out: Buffer | string = deps.runTerm
+                ? deps.runTerm(term)
+                : execFileSync("rg", ["--json", "-i", "-F", "-e", term, "--", snapshotRoot], {
+                    timeout: options.timeoutMs,
+                    maxBuffer: 256 * 1024 * 1024,
+                });
+            const stdout = typeof out === "string" ? out : out.toString("utf8");
+            for (const [rel, m] of parseRipgrepJson(stdout, snapshotRoot)) {
+                const entry = files.get(rel);
+                if (entry) {
+                    entry.count += m.count;
+                    if (m.firstLine < entry.firstLine) {
+                        entry.firstLine = m.firstLine;
+                        if (m.firstText) entry.firstText = m.firstText;
+                    }
+                } else {
+                    files.set(rel, { ...m });
+                }
+            }
         } catch (error) {
-            // rg exits 1 on no matches: skip to the next term, not a failure.
+            // rg exits 1 when a term has no matches: treat as empty for that
+            // term and continue with the remaining terms. Any other failure
+            // (e.g. exit >= 2) is fatal: record it and stop the term loop
+            // so partial results are never returned after a real error.
             const code = (error as { status?: unknown })?.status;
             if (code === 1) continue;
             status = errorStatus(error);
             break;
-        }
-        for (const [rel, m] of parseRipgrepJson(out.toString("utf8"), snapshotRoot)) {
-            const entry = files.get(rel);
-            if (entry) {
-                entry.count += m.count;
-                if (m.firstLine < entry.firstLine) {
-                    entry.firstLine = m.firstLine;
-                    if (m.firstText) entry.firstText = m.firstText;
-                }
-            } else {
-                files.set(rel, { ...m });
-            }
         }
     }
     const elapsedMs = performance.now() - started;

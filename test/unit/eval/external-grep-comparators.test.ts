@@ -157,6 +157,43 @@ describe("runRipgrep", () => {
         expect(out.units).toEqual([]);
     });
 
+    it("continues past a no-match term (rg exit 1) to later terms", async () => {
+        const seen: string[] = [];
+        const hit =
+            '{"type":"match","data":{"path":{"text":"/root/src/hit.ts"},"line_number":2,"submatches":[{"match":{"text":"present"}}]}}';
+        const out = await runRipgrep(stubInstance(), "/root", "title", { timeoutMs: 30000 }, {
+            runTerm: (term: string) => {
+                seen.push(term);
+                if (seen.length === 1) {
+                    // First term has no matches: rg exits 1. Must not abort.
+                    throw Object.assign(new Error("no matches"), { status: 1 });
+                }
+                return hit;
+            },
+        });
+        expect(seen.length).toBeGreaterThan(1);
+        expect(out.status).toBe("ok");
+        expect(out.units.map((u) => u.relFile)).toContain("src/hit.ts");
+    });
+
+    it("records an error and stops when a term fails with exit >= 2", async () => {
+        const hit =
+            '{"type":"match","data":{"path":{"text":"/root/src/hit.ts"},"line_number":2,"submatches":[{"match":{"text":"present"}}]}}';
+        const seen: string[] = [];
+        const out = await runRipgrep(stubInstance(), "/root", "title", { timeoutMs: 30000 }, {
+            runTerm: (term: string) => {
+                seen.push(term);
+                if (seen.length === 1) throw Object.assign(new Error("rg crashed"), { status: 2 });
+                return hit;
+            },
+        });
+        // Fatal rg failure must stop the term loop: later terms are NOT run
+        // and partial results from them must not appear.
+        expect(seen.length).toBe(1);
+        expect(out.status).toContain("error");
+        expect(out.units).toEqual([]);
+    });
+
     it("continues past a no-match term (rg exit 1) to later terms", async ({ skip }) => {
         if (!rgAvailable()) {
             skip("system rg not on PATH — no-match continuation unproven here, not a pass");

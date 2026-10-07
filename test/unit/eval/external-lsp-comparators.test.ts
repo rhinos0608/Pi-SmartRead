@@ -8,6 +8,10 @@ import {
   parseMcpReferences,
 } from "../../../scripts/eval/external/lsp/comparators/parse-mcp-output.js";
 import { pointLoc, startKey } from "../../../scripts/eval/external/lsp/comparators/types.js";
+import {
+  summarizeLatency,
+  type PositionLatency,
+} from "../../../scripts/eval/external/lsp/comparators/latency.js";
 
 const ident = (f: string): ((file: string) => string | null) => (file: string) =>
   file === f ? f : null;
@@ -125,5 +129,45 @@ describe("parseMcpHover", () => {
 
   it("maps blank output to empty", () => {
     expect(parseMcpHover("   \n").status).toBe("empty");
+  });
+});
+
+describe("summarizeLatency", () => {
+  const position = (def: number, refs: number, hov: number, setup = 5): PositionLatency => ({
+    reference: { definition: def, references: refs, hover: hov },
+    system: { definition: def / 2, references: refs / 2, hover: hov / 2 },
+    setupMs: setup,
+  });
+
+  it("reports per-operation distributions in matching units for both sides", () => {
+    const report = summarizeLatency([position(10, 20, 30), position(10, 20, 30)]);
+    for (const side of [report.reference, report.system] as const) {
+      expect(Object.keys(side).sort()).toEqual([
+        "definition",
+        "hover",
+        "perPositionTotal",
+        "references",
+      ]);
+    }
+    expect(report.reference.definition).toMatchObject({ p50: 10, p95: 10, n: 2 });
+    expect(report.reference.references).toMatchObject({ p50: 20, p95: 20, n: 2 });
+    expect(report.reference.hover).toMatchObject({ p50: 30, p95: 30, n: 2 });
+    expect(report.system.definition).toMatchObject({ p50: 5, n: 2 });
+  });
+
+  it("computes per-position totals for both sides and labels setup separately", () => {
+    const report = summarizeLatency([position(10, 20, 30, 100), position(10, 20, 30, 100)]);
+    // Totals are def+refs+hov per position: 60 (ref) and 30 (sys).
+    expect(report.reference.perPositionTotal).toMatchObject({ p50: 60, p95: 60, n: 2 });
+    expect(report.system.perPositionTotal).toMatchObject({ p50: 30, p95: 30, n: 2 });
+    // Setup (workspace/symbol) is separate from answer latency.
+    expect(report.setup).toMatchObject({ p50: 100, n: 2 });
+    expect(report.reference.definition.p50).not.toBe(report.setup.p50);
+  });
+
+  it("returns zeroed summaries for no positions", () => {
+    const report = summarizeLatency([]);
+    expect(report.reference.definition).toEqual({ p50: 0, p95: 0, n: 0 });
+    expect(report.setup).toEqual({ p50: 0, p95: 0, n: 0 });
   });
 });
