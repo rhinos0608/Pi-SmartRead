@@ -832,6 +832,45 @@ function applyOutputGuard(text: string): { text: string; outputTruncated: boolea
     return enforceGrepOutputGuard(text);
 }
 
+// D67: batch abstentions render the abstain message and ZERO location
+// pointers. Abstained per-query hits are already sliced to [] upstream;
+// filter them here as well so merged provenance can never reintroduce
+// an abstained query preserved candidates, and render each abstained
+// query message before the merged view.
+function collectAbstainedIndexes(results: GrepExecutionResult[]): Set<number> {
+    return new Set(
+        results
+            .map((r, i) => ((r as GrepJudgeResultExtras).judge?.abstained ? i : -1))
+            .filter((i) => i >= 0),
+    );
+}
+
+// D67: drop only the abstained entries' provenance, keyed by batch entry
+// index (never by pattern string: duplicate patterns in one batch must
+// not cross-talk). A hit survives when any non-abstained entry produced
+// it; its "matched queries" suffix lists only surviving entries.
+function stripAbstainedProvenance(
+    rawShown: GrepHit[],
+    abstainedIndexes: Set<number>,
+    results: GrepExecutionResult[],
+): GrepHit[] {
+    if (abstainedIndexes.size === 0) return rawShown;
+    return rawShown.flatMap((h) => {
+        const indexes = (h as { matchedQueryIndexes?: number[] }).matchedQueryIndexes;
+        if (indexes) {
+            const kept = indexes.filter((q) => !abstainedIndexes.has(q));
+            if (kept.length === 0) return [];
+            return [{ ...h, matchedQueries: kept.map((q) => results[q]!.pattern), matchedQueryIndexes: kept } as GrepHit];
+        }
+        // Defensive: the batch path always attaches index provenance
+        // (createGrepOutput candidates and the flatMap above), so this
+        // should be unreachable. Without provenance a hit cannot be shown
+        // to belong to a non-abstained entry; under the D67 contract the
+        // safe direction is to drop it rather than leak abstained content.
+        return [];
+    });
+}
+
 function formatBatchOutput(results: GrepExecutionResult[]): string {
     const header: string[] = [];
     for (let i = 0; i < results.length; i++) {
@@ -839,16 +878,7 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
         header.push(`Query ${i + 1}: "${result.pattern}" (${result.totalHits} hits, ${result.elapsedMs}ms, ${result.routing ? `${result.routing.mode}/${result.routing.reason}` : result.engines.join("+")})`);
     }
     header.push("");
-    // D67: batch abstentions render the abstain message and ZERO location
-    // pointers. Abstained per-query hits are already sliced to [] upstream;
-    // filter them here as well so merged provenance can never reintroduce
-    // an abstained query preserved candidates, and render each abstained
-    // query message before the merged view.
-    const abstainedIndexes = new Set(
-        results
-            .map((r, i) => ((r as GrepJudgeResultExtras).judge?.abstained ? i : -1))
-            .filter((i) => i >= 0),
-    );
+    const abstainedIndexes = collectAbstainedIndexes(results);
     for (let i = 0; i < results.length; i++) {
         const extras = results[i]! as GrepExecutionResult & GrepJudgeResultExtras;
         if (extras.judge?.abstained && extras.judgeNote) {
@@ -857,28 +887,9 @@ function formatBatchOutput(results: GrepExecutionResult[]): string {
     }
     if (abstainedIndexes.size > 0) header.push("");
     // Merged global view: duplicates render once with matched-query provenance.
-    // D67: drop only the abstained entries' provenance, keyed by batch entry
-    // index (never by pattern string: duplicate patterns in one batch must
-    // not cross-talk). A hit survives when any non-abstained entry produced
-    // it; its "matched queries" suffix lists only surviving entries.
     const rawShown: GrepHit[] = (results as any).globalShown
         ?? dedupGrepHits(results.flatMap((r, i) => r.shown.map((h) => ({ ...h, matchedQueries: [r.pattern], matchedQueryIndexes: [i] }) as GrepHit)));
-    const shown: GrepHit[] = abstainedIndexes.size === 0
-        ? rawShown
-        : rawShown.flatMap((h) => {
-            const indexes = (h as { matchedQueryIndexes?: number[] }).matchedQueryIndexes;
-            if (indexes) {
-                const kept = indexes.filter((q) => !abstainedIndexes.has(q));
-                if (kept.length === 0) return [];
-                return [{ ...h, matchedQueries: kept.map((q) => results[q]!.pattern), matchedQueryIndexes: kept } as GrepHit];
-            }
-            // Defensive: the batch path always attaches index provenance
-            // (createGrepOutput candidates and the flatMap above), so this
-            // should be unreachable. Without provenance a hit cannot be shown
-            // to belong to a non-abstained entry; under the D67 contract the
-            // safe direction is to drop it rather than leak abstained content.
-            return [];
-        });
+    const shown: GrepHit[] = stripAbstainedProvenance(rawShown, abstainedIndexes, results);
     const total: number = (results as any).globalTotal ?? shown.length;
     const totalIsLowerBound: boolean = (results as any).globalTotalIsLowerBound
         ?? results.some((r) => r.truncated);
