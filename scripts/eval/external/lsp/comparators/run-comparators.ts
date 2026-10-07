@@ -32,13 +32,13 @@ import {
   definitionMatchesStart,
   isNonAnswer,
   locKey,
-  percentile,
   setMetrics,
   type BenchLocation,
 } from "../metrics.js";
 import { sampleCorpus, type SampledPosition } from "../sample.js";
 import { createMcpComparator } from "./mcp-server.js";
 import { createPiLspComparator } from "./pi-lsp.js";
+import { summarizeLatency, type PositionLatency } from "./latency.js";
 import { startKey, type Comparator, type ComparatorCall } from "./types.js";
 
 const BENCH = join(homedir(), ".cache", "pi-smartread-bench");
@@ -179,106 +179,6 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }>
   return { value, ms: Date.now() - t0 };
 }
 
-export type LatencyOperation = "definition" | "references" | "hover";
-
-export interface PositionLatency {
-  reference: Record<LatencyOperation, number>;
-  system: Record<LatencyOperation, number>;
-  /** Reference workspace/symbol time: its own series, not setup/index time. */
-  workspaceSymbolMs: number;
-  /** Measured startup/index work once per run; null when untimed (never zero). */
-  setupMs: number | null;
-  /** Present when setupMs is null: why setup timing is unavailable. */
-  setupReason?: string | null;
-}
-
-export interface LatencySummary {
-  p50: number;
-  p95: number;
-  n: number;
-}
-
-export interface NullableLatencySummary {
-  p50: number | null;
-  p95: number | null;
-  n: number;
-}
-
-export interface LatencyReport {
-  reference: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
-  system: Record<LatencyOperation | "perPositionTotal", LatencySummary>;
-  /** Reference workspace/symbol latency, kept apart from answer latency. */
-  workspaceSymbol: LatencySummary;
-  /** Labeled separately: index/setup time, not comparable answer latency. */
-  setup: NullableLatencySummary;
-  /** Present when setup is unmeasured: why, instead of a zero placeholder. */
-  setupNote: string | null;
-}
-
-function summarize(values: number[]): LatencySummary {
-  if (values.length === 0) return { p50: 0, p95: 0, n: 0 };
-  return { p50: percentile(values, 50), p95: percentile(values, 95), n: values.length };
-}
-
-/** Setup summarization: untimed entries are excluded; all-untimed yields nulls, never zeros. */
-function summarizeSetup(values: Array<number | null>): NullableLatencySummary {
-  const measured = values.filter((v): v is number => typeof v === "number");
-  if (measured.length === 0) return { p50: null, p95: null, n: 0 };
-  return { p50: percentile(measured, 50), p95: percentile(measured, 95), n: measured.length };
-}
-
-/**
- * Aggregate per-operation latency in matching units for both sides.
- * Reference and system each get definition/references/hover distributions
- * plus a per-position total (def+refs+hov); workspace/symbol time is
- * reported separately as workspaceSymbol and setup so neither mixes with
- * answer latency.
- */
-export function summarizeLatency(positions: PositionLatency[]): LatencyReport {
-  const ops: LatencyOperation[] = ["definition", "references", "hover"];
-  const ref: Record<LatencyOperation, number[]> = { definition: [], references: [], hover: [] };
-  const sys: Record<LatencyOperation, number[]> = { definition: [], references: [], hover: [] };
-  const refTotals: number[] = [];
-  const sysTotals: number[] = [];
-  const workspaceSymbol: number[] = [];
-  const setup: Array<number | null> = [];
-  let setupReason: string | null = null;
-  for (const p of positions) {
-    let refTotal = 0;
-    let sysTotal = 0;
-    for (const op of ops) {
-      ref[op].push(p.reference[op]);
-      sys[op].push(p.system[op]);
-      refTotal += p.reference[op];
-      sysTotal += p.system[op];
-    }
-    refTotals.push(refTotal);
-    sysTotals.push(sysTotal);
-    workspaceSymbol.push(p.workspaceSymbolMs);
-    setup.push(p.setupMs);
-    if (p.setupMs === null && setupReason === null) {
-      setupReason = p.setupReason ?? "setup timing unavailable: startup/open ran outside the timed section";
-    }
-  }
-  return {
-    reference: {
-      definition: summarize(ref.definition),
-      references: summarize(ref.references),
-      hover: summarize(ref.hover),
-      perPositionTotal: summarize(refTotals),
-    },
-    system: {
-      definition: summarize(sys.definition),
-      references: summarize(sys.references),
-      hover: summarize(sys.hover),
-      perPositionTotal: summarize(sysTotals),
-    },
-    workspaceSymbol: summarize(workspaceSymbol),
-    setup: summarizeSetup(setup),
-    setupNote: summarizeSetup(setup).n === 0 ? (setupReason ?? "setup timing unavailable") : null,
-  };
-}
-
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.system !== "pi-lsp" && args.system !== "mcp-language-server") {
@@ -295,6 +195,9 @@ async function main(): Promise<void> {
 
   const refConn = new LSPConnection();
   const posLatencies: PositionLatency[] = [];
+  // Run-level setup timing: measured once, never copied per position.
+  let setupMs: number | null = null;
+  let setupReason: string | null = "setup timing unavailable: startup/open threw before timing completed";
   const results: PositionResult[] = [];
   const statusCounts = new Map<string, number>();
   const tokenSums = new Map<string, number>();
@@ -318,7 +221,8 @@ async function main(): Promise<void> {
       await refConn.start(TLS_BIN, ["--stdio"], root);
       await comparator.open(root);
     });
-    const setupMs = setupTimed.ms;
+    setupMs = setupTimed.ms;
+    setupReason = null;
 
     for (const pos of positions) {
       const uri = pathToFileURL(pos.file).href;
@@ -338,7 +242,6 @@ async function main(): Promise<void> {
         reference: { definition: def.ms, references: refsIncl.ms, hover: hov.ms },
         system: { definition: 0, references: 0, hover: 0 },
         workspaceSymbolMs: sym.ms,
-        setupMs,
       });
 
       const refDefs = rawToLocs(def.value);
@@ -434,7 +337,7 @@ async function main(): Promise<void> {
     await shutdownAllManagers().catch(() => {});
   }
 
-  const latency = summarizeLatency(posLatencies);
+  const latency = summarizeLatency(posLatencies, { ms: setupMs, reason: setupReason });
   const meanTokens: Record<string, number> = {};
   for (const [k, sum] of tokenSums) {
     const n = tokenNs.get(k) ?? 1;

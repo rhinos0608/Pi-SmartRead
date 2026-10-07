@@ -91,9 +91,23 @@ describe("python check", () => {
     it("accepts >= 3.12 and rejects older", async () => {
         await expect(
             checkPythonVersion({ home, runCmd: async () => okRun("Python 3.12.4\n") }),
-        ).resolves.toEqual({ ok: true, version: "3.12" });
+        ).resolves.toEqual({ ok: true, version: "3.12", executable: "python3" });
         const old = await checkPythonVersion({ home, runCmd: async () => okRun("Python 3.11.9\n") });
         expect(old.ok).toBe(false);
+    });
+
+    it("falls through to the python executable when python3 is missing", async () => {
+        const seen: string[] = [];
+        const res = await checkPythonVersion({
+            home,
+            runCmd: async (cmd) => {
+                seen.push(cmd);
+                if (cmd === "python3") throw new Error("spawn ENOENT");
+                return okRun("Python 3.12.4\n");
+            },
+        });
+        expect(res).toEqual({ ok: true, version: "3.12", executable: "python" });
+        expect(seen).toEqual(["python3", "python"]);
     });
 
     it("fails when no interpreter runs", async () => {
@@ -117,6 +131,7 @@ describe("install", () => {
         });
         expect(res).toEqual({ ok: true, vonDir: getVonDir(home) });
         const venv = calls.find((c) => c.args.includes("-m"));
+        expect(venv?.cmd).toBe("python3");
         expect(venv?.args).toEqual(["-m", "venv", getVonDir(home)]);
         const pip = calls.find((c) => c.cmd.endsWith("pip") || c.cmd.endsWith("pip.exe"));
         expect(pip?.args).toEqual(["install", `von-sdk==${VON_SDK_PINNED_VERSION}`]);
@@ -157,6 +172,22 @@ describe("install", () => {
         });
         expect(res).toEqual({ ok: false, error: "pip install failed (exit 1)" });
         expect(JSON.stringify(res)).not.toContain(secret);
+    });
+
+    it("creates the venv with the validated python-only executable", async () => {
+        const commands: string[] = [];
+        const res = await installVonSidecar({
+            home,
+            runCmd: async (cmd, args) => {
+                commands.push(cmd);
+                if (cmd === "python3") throw new Error("spawn ENOENT");
+                if (args.includes("--version")) return okRun("Python 3.12.4\n");
+                return okRun("");
+            },
+        });
+        expect(res.ok).toBe(true);
+        // version probes (python3 fails, python succeeds), then venv via python.
+        expect(commands.slice(0, 3)).toEqual(["python3", "python", "python"]);
     });
 });
 

@@ -17,8 +17,7 @@
  * land before any variant results exist.
  */
 
-import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BenchmarkInstance } from "./instance.js";
@@ -31,7 +30,7 @@ import {
     msbRowsToInstances,
     readCachedRows,
 } from "./multi-swe-bench.js";
-import { ensureBareClone, materializeInstance } from "./repos.js";
+import { ensureBareClone, bareRepoDir, materializeInstance } from "./repos.js";
 import {
     DEV_HOLDOUT_DEFAULTS,
     buildDevHoldoutManifest,
@@ -51,6 +50,43 @@ import {
 } from "./swebench-multilingual.js";
 
 const FREEZE_SEED = "external-grep-dev64-holdout32-v1";
+
+/** Recursive on-disk size in bytes; missing/unreadable paths count as 0. Portable (no `du`). */
+function dirSizeBytes(dir: string): number {
+    let total = 0;
+    const walk = (current: string): void => {
+        let names: string[];
+        try {
+            names = readdirSync(current);
+        } catch {
+            return;
+        }
+        for (const name of names) {
+            const full = join(current, name);
+            let st;
+            try {
+                st = statSync(full);
+            } catch {
+                continue;
+            }
+            if (st.isDirectory()) walk(full);
+            else total += st.size;
+        }
+    };
+    walk(dir);
+    return total;
+}
+
+function formatBytes(bytes: number): string {
+    const units = ["B", "K", "M", "G"];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)}${units[unit]}`;
+}
 
 function parseArgs(argv: string[]): { seed: string; offline: boolean } {
     let seed = FREEZE_SEED;
@@ -191,6 +227,7 @@ function acceptRanked(
     capPerRepo: number,
     accepted: BenchmarkInstance[],
     wantSplit: "dev" | "holdout",
+    offline: boolean,
 ): void {
     const perRepo = new Map<string, number>();
     for (const inst of ranked) {
@@ -198,6 +235,9 @@ function acceptRanked(
         const used = perRepo.get(inst.repo) ?? 0;
         if (used >= capPerRepo) continue;
         try {
+            if (offline && !existsSync(join(bareRepoDir(inst.repo), "HEAD"))) {
+                throw new Error(`--offline: missing bare clone for ${inst.repo}; run once online first`);
+            }
             ensureBareClone(inst.repo);
             const mat = materializeInstance(inst);
             if ("excluded" in mat) {
@@ -223,13 +263,14 @@ function acceptRanked(
     }
 }
 
-acceptRanked(devRanked, DEV_HOLDOUT_DEFAULTS.devSize, DEV_HOLDOUT_DEFAULTS.devCapPerRepo, acceptedDev, "dev");
+acceptRanked(devRanked, DEV_HOLDOUT_DEFAULTS.devSize, DEV_HOLDOUT_DEFAULTS.devCapPerRepo, acceptedDev, "dev", args.offline);
 acceptRanked(
     holdoutRanked,
     DEV_HOLDOUT_DEFAULTS.holdoutSize,
     DEV_HOLDOUT_DEFAULTS.holdoutCapPerRepo,
     acceptedHoldout,
     "holdout",
+    args.offline,
 );
 if (acceptedDev.length < DEV_HOLDOUT_DEFAULTS.devSize || acceptedHoldout.length < DEV_HOLDOUT_DEFAULTS.holdoutSize) {
     throw new Error(
@@ -274,9 +315,12 @@ const manifest = buildDevHoldoutManifest({
 if (!verifyDevHoldoutManifest(manifest)) throw new Error("manifest integrity self-check failed");
 const manifestPath = writeDevHoldoutManifest(manifest);
 
-const du = execSync(`du -sh ${join(homedir(), ".cache/pi-smartread-bench/repos")} ` +
-    ` ${join(homedir(), ".cache/pi-smartread-bench/snapshots")} ` +
-    ` ${join(homedir(), ".cache/pi-smartread-bench/datasets")}`, { encoding: "utf8" }).trim();
+const diskDirs = [
+    join(homedir(), ".cache/pi-smartread-bench/repos"),
+    join(homedir(), ".cache/pi-smartread-bench/snapshots"),
+    join(homedir(), ".cache/pi-smartread-bench/datasets"),
+];
+const du = diskDirs.map((d) => `${formatBytes(dirSizeBytes(d))}\t${d}`).join("\n");
 
 const perRepoDev = new Map<string, number>();
 for (const i of acceptedDev) perRepoDev.set(i.repo, (perRepoDev.get(i.repo) ?? 0) + 1);

@@ -133,7 +133,7 @@ try {
     if (!isKnownSourceHash(engineSourceHash)) {
         console.warn(`warning: engine source identity unknown (${engineSourceHash}); report cannot be tied to a known code state`);
     }
-    const rows = await fetchAllRows();
+    const rows = await fetchAllRows({ offline: args.offline });
     const revision = datasetRevision(rows);
     const { instances, skipped } = rowsToInstances(rows);
     const byId = new Map(instances.map((i) => [i.instanceId, i]));

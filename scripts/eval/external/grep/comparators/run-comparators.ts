@@ -90,7 +90,7 @@ try {
     if (args.offline && !existsSync(join(homedir(), ".cache/pi-smartread-bench/datasets/swe-bench-multilingual"))) {
         throw new Error("--offline with no cached dataset rows; run once online first");
     }
-    const rows = await fetchAllRows();
+    const rows = await fetchAllRows({ offline: args.offline });
     const revision = datasetRevision(rows);
     const { instances, skipped } = rowsToInstances(rows);
     const pilot = selectPilot(instances, args.seed);
