@@ -5,12 +5,23 @@
  */
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+    lstatSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     ALLOWED_LABELS,
     CHECKPOINT_SCHEMA_VERSION,
+    appendCheckpointLine,
     checkPrivateExisting,
     computeRunFingerprint,
     errorStatus,
@@ -132,6 +143,40 @@ describe("canonicalizeCorpusRoot", () => {
     it("passes missing paths through for the harness walk to reject", () => {
         const missing = join(tmpdir(), "smartread-no-such-corpus-dir");
         expect(canonicalizeCorpusRoot(missing)).toBe(missing);
+    });
+});
+
+describe("appendCheckpointLine", () => {
+    it("creates new files exclusive 0600 and appends to regular files", () => {
+        const dir = mkdtempSync(join(tmpdir(), "smartread-checkpoint-"));
+        try {
+            const path = join(dir, "e2e-2026-10-06.jsonl");
+            appendCheckpointLine(path, '{"v":1}\n');
+            appendCheckpointLine(path, '{"v":2}\n');
+            expect(readFileSync(path, "utf8")).toBe('{"v":1}\n{"v":2}\n');
+            // Windows has no POSIX file modes; the 0600 assertion is POSIX-only.
+            if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+    it("refuses to append through a planted symlink and leaves the target untouched", () => {
+        const dir = mkdtempSync(join(tmpdir(), "smartread-checkpoint-"));
+        try {
+            const target = join(dir, "target.jsonl");
+            writeFileSync(target, "original\n");
+            const link = join(dir, "e2e-2026-10-06.jsonl");
+            try {
+                symlinkSync(target, link);
+            } catch {
+                return; // Platforms without symlink support skip gracefully.
+            }
+            if (!lstatSync(link).isSymbolicLink()) return;
+            expect(() => appendCheckpointLine(link, '{"v":9}\n')).toThrow(/symlink/);
+            expect(readFileSync(target, "utf8")).toBe("original\n");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 });
 
