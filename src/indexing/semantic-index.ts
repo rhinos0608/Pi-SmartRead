@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -15,6 +16,7 @@ import { fetchEmbeddings, type EmbedRequest, type EmbedResult } from "./embeddin
 import { embeddingProfileId } from "./embedding-profile.js";
 import { discoverFiles, type FileDiscoveryResult } from "../file-discovery.js";
 import { canonicalRelative } from "../workspace/workspace-boundary.js";
+import { isStateRoot } from "../workspace/state-root.js";
 import { bm25Scores, computeRanks } from "../scoring.js";
 import {
   SqliteVecStore,
@@ -119,6 +121,25 @@ const DEFAULT_MAX_FILES = 2_000;
 const DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const RRF_K = 60;
 
+/** SQLite in-memory database name — the store location at non-state roots (F4). */
+const MEMORY_DB_PATH = ":memory:";
+
+/** Exact F5 GC patterns: `semantic-index-<16 hex>.{db,db-wal,db-shm,json}`. */
+const STALE_INDEX_SUFFIXED_RE = /^semantic-index-([0-9a-f]{16})(?:\.db(?:-wal|-shm)?|\.json)$/;
+/** Legacy pre-fingerprint files: `semantic-index.{db,db-wal,db-shm,json}`. */
+const STALE_INDEX_LEGACY_RE = /^semantic-index(?:\.db(?:-wal|-shm)?|\.json)$/;
+
+/**
+ * Map a filename to its fingerprint group (`""` = legacy) for F5 GC,
+ * or `null` when the name is not an index file we may ever touch.
+ */
+function semanticIndexFileGroup(name: string): string | null {
+  const suffixed = STALE_INDEX_SUFFIXED_RE.exec(name);
+  if (suffixed) return suffixed[1]!;
+  if (STALE_INDEX_LEGACY_RE.test(name)) return "";
+  return null;
+}
+
 function normalizeRelative(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 }
@@ -183,6 +204,8 @@ export class SemanticIndex {
   private readonly storeFactory: NonNullable<SemanticIndexOptions["storeFactory"]>;
   private readonly maxFiles: number;
   private readonly maxFileBytes: number;
+  /** True when `root` is a canonical state root (F4: otherwise memory-only). */
+  private readonly persist: boolean;
   private store: VectorStore | null = null;
   private metadata: SemanticMetadata;
   private ready = false;
@@ -194,6 +217,7 @@ export class SemanticIndex {
 
   constructor(root: string, options: SemanticIndexOptions = {}) {
     this.root = resolve(root);
+    this.persist = isStateRoot(this.root);
     this.config = options.config === undefined ? validateEmbeddingConfig(this.root) : options.config;
     this.fingerprint = sha256(JSON.stringify({
       baseUrl: this.config?.baseUrl.replace(/\/+$/, "") ?? "",
@@ -227,7 +251,9 @@ export class SemanticIndex {
       this.ready = true; // Successfully built empty corpus.
       return;
     }
-    if (!existsSync(this.dbPath)) {
+    // F4: opening the on-disk DB can create -wal/-shm siblings, so only a
+    // canonical state root may reopen persisted index state.
+    if (!this.persist || !existsSync(this.dbPath)) {
       this.metadata = emptyMetadata(this.fingerprint);
       return;
     }
@@ -241,6 +267,8 @@ export class SemanticIndex {
         return;
       }
       this.ready = true;
+      // F5: the current fingerprint's index just opened successfully.
+      this.gcStaleIndexFiles();
     } catch {
       this.store = null;
       this.ready = false;
@@ -373,11 +401,18 @@ export class SemanticIndex {
           continue;
         }
         if (!this.store) {
-          if (fullRebuild) {
+          if (fullRebuild && this.persist) {
             try { rmSync(this.dbPath, { force: true }); } catch { /* advisory cache */ }
           }
-          mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
-          this.store = this.storeFactory(this.dbPath, dimension);
+          if (this.persist) {
+            mkdirSync(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+            this.store = this.storeFactory(this.dbPath, dimension);
+            // F5: the current fingerprint's index just opened successfully.
+            this.gcStaleIndexFiles();
+          } else {
+            // F4: memory-only at non-state roots — no dir, no file.
+            this.store = this.storeFactory(MEMORY_DB_PATH, dimension);
+          }
           this.metadata.dimension = dimension;
         }
 
@@ -581,7 +616,9 @@ export class SemanticIndex {
   private resetStoreForDimension(dimension: number): void {
     this.store?.close();
     this.store = null;
-    try { rmSync(this.dbPath, { force: true }); } catch { /* advisory cache */ }
+    if (this.persist) {
+      try { rmSync(this.dbPath, { force: true }); } catch { /* advisory cache */ }
+    }
     this.metadata = emptyMetadata(this.fingerprint);
     this.metadata.dimension = dimension;
     this.ready = false;
@@ -601,11 +638,71 @@ export class SemanticIndex {
   }
 
   private writeMetadata(): void {
+    // F4: metadata persists only at a canonical state root.
+    if (!this.persist) return;
     try {
       mkdirSync(dirname(this.metadataPath), { recursive: true, mode: 0o700 });
       writeFileSync(this.metadataPath, JSON.stringify(this.metadata, null, 2), { mode: 0o600 });
     } catch {
       // Cache persistence is advisory; live index remains usable.
+    }
+  }
+
+  /**
+   * F5 retention: delete stale fingerprint files in the cache dir, keeping
+   * the current fingerprint plus the single most recently modified other
+   * fingerprint (legacy unsuffixed files count as one other fingerprint).
+   * Exact filename patterns only — any other file is never touched.
+   * Best-effort: every error is logged and swallowed, never thrown.
+   */
+  private gcStaleIndexFiles(): void {
+    if (!this.persist) return;
+    const dir = dirname(this.dbPath);
+    try {
+      const groups = new Map<string, { files: string[]; mtimeMs: number }>();
+      for (const name of readdirSync(dir)) {
+        const group = semanticIndexFileGroup(name);
+        if (group === null) continue;
+        let mtimeMs: number;
+        try {
+          mtimeMs = statSync(join(dir, name)).mtimeMs;
+        } catch {
+          continue; // Unreadable entry: leave it alone.
+        }
+        const entry = groups.get(group) ?? { files: [], mtimeMs: 0 };
+        entry.files.push(name);
+        entry.mtimeMs = Math.max(entry.mtimeMs, mtimeMs);
+        groups.set(group, entry);
+      }
+
+      // Current fingerprint survives unconditionally.
+      groups.delete(this.fingerprint.slice(0, 16));
+
+      // Keep the single most recently modified other fingerprint
+      // (lexicographic tie-break keeps the choice deterministic).
+      let newest: { group: string; mtimeMs: number } | null = null;
+      for (const [group, entry] of groups) {
+        if (
+          newest === null ||
+          entry.mtimeMs > newest.mtimeMs ||
+          (entry.mtimeMs === newest.mtimeMs && group < newest.group)
+        ) {
+          newest = { group, mtimeMs: entry.mtimeMs };
+        }
+      }
+      if (newest) groups.delete(newest.group);
+
+      for (const entry of groups.values()) {
+        for (const name of entry.files) {
+          try {
+            rmSync(join(dir, name), { force: true });
+          } catch (error) {
+            console.warn(`SmartRead: could not remove stale semantic index file ${name}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`SmartRead: semantic index cleanup failed in ${dir}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }

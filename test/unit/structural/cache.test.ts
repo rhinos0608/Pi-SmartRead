@@ -99,6 +99,10 @@ describe("TagsCache", () => {
   });
 
   it("clear removes memory entries but disk persists", async () => {
+    // F4 behaviour change: a bare tmpdir has no canonical state root, so
+    // TagsCache is memory-only there. Declare tmpDir a project root so this
+    // test still exercises the disk-persistence-across-clear behaviour.
+    writeFileSync(join(tmpDir, "package.json"), "{}");
     const cache = new TagsCache(tmpDir);
     const testFile = join(tmpDir, "test.ts");
     writeFileSync(testFile, "content");

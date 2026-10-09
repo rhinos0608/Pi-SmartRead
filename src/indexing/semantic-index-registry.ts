@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { SemanticIndex, type SemanticIndexOptions } from "./semantic-index.js";
-import { findProjectWorkspace } from "../workspace/workspace-scope.js";
+import { resolveStateRoot } from "../workspace/state-root.js";
 import { canonicalPath, getAllowedRoot, isWithinRoot } from "../workspace/workspace-boundary.js";
 
 const indexes = new Map<string, SemanticIndex>();
@@ -10,8 +10,18 @@ function registryRoot(path: string): string {
   return canonicalPath(root) ?? root;
 }
 
-/** Clamp semantic indexing to project/allowed-root intersection. */
-export function effectiveSemanticRoot(cwd: string, projectRoot = findProjectWorkspace(cwd) ?? cwd): string | null {
+/**
+ * Clamp semantic indexing to the canonical state root / allowed-root
+ * intersection. The default root is `resolveStateRoot(cwd)`: sessions in a
+ * nested marker dir warm the canonical root, and no canonical state root
+ * (null) means no automatic semantic indexing — `PI_SMARTREAD_ALLOWED_ROOT`
+ * clamping below is unchanged.
+ */
+export function effectiveSemanticRoot(
+  cwd: string,
+  projectRoot: string | null = resolveStateRoot(cwd),
+): string | null {
+  if (!projectRoot) return null;
   const canonicalProject = registryRoot(projectRoot);
   const allowedRoot = getAllowedRoot(cwd);
   if (!allowedRoot) return canonicalProject;

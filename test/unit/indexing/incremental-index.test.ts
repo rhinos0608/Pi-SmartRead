@@ -70,6 +70,10 @@ describe("loadCache / saveCache", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cache-io-"));
+    // F4 behaviour change: saveCache persists only when its derived root is a
+    // canonical state root; the empty `.git` makes the temp dir one (scan-safe:
+    // `.git` is in HARD_SKIP_DIRS).
+    mkdirSync(join(tmpDir, ".git"));
   });
 
   afterEach(() => {
@@ -84,7 +88,8 @@ describe("loadCache / saveCache", () => {
   });
 
   it("round-trips cache data", () => {
-    const cachePath = join(tmpDir, "file-hashes.json");
+    // Canonical layout: saveCache derives the state root as dirname(dirname(path)).
+    const cachePath = join(tmpDir, ".pi-smartread", "file-hashes.json");
     const files: FileHashCache = {
       "src/a.ts": { hash: "abc123", mtimeMs: 1000, size: 42 },
       "src/b.ts": { hash: "def456", mtimeMs: 2000, size: 84 },
@@ -271,6 +276,10 @@ describe("buildCache", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "buildcache-"));
+    // F4 behaviour change: file-hashes.json persists only at a canonical state
+    // root; the fixture declares `.git` so first/subsequent-run semantics still
+    // exercise real disk persistence.
+    mkdirSync(join(tmpDir, ".git"));
     cacheDir = join(tmpDir, ".pi-smartread");
     mkdirSync(join(tmpDir, "src"), { recursive: true });
     writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
@@ -355,6 +364,9 @@ describe("buildCache", () => {
 describe("invalidateCache", () => {
   it("resets cache to empty", () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "invalidate-"));
+    // F4 behaviour change: fixture must be a canonical state root for the
+    // reset (build + invalidate) to touch disk at all.
+    mkdirSync(join(tmpDir, ".git"));
     mkdirSync(join(tmpDir, "src"), { recursive: true });
     writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
 
@@ -431,6 +443,9 @@ describe("createIncrementalIndex", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "incidx-"));
+    // F4 behaviour change: hasCache()/invalidate() read and write the on-disk
+    // cache, which now exists only at a canonical state root.
+    mkdirSync(join(tmpDir, ".git"));
     mkdirSync(join(tmpDir, "src"), { recursive: true });
     writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
     writeFileSync(join(tmpDir, "src", "b.ts"), "export const b = 2;");
@@ -692,6 +707,9 @@ describe("createIncrementalIndex updateGraphStats", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "updstats-"));
+    // F4 behaviour change: "persists across re-creation" needs disk writes,
+    // which now happen only at a canonical state root.
+    mkdirSync(join(tmpDir, ".git"));
     mkdirSync(join(tmpDir, "src"), { recursive: true });
     writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
     writeFileSync(join(tmpDir, "src", "b.ts"), "export const b = 2;");
@@ -782,6 +800,9 @@ describe("captureFileEntries", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "capture-"));
+    // F4 behaviour change: "uses cache when available" builds the on-disk
+    // cache first, which now persists only at a canonical state root.
+    mkdirSync(join(tmpDir, ".git"));
     mkdirSync(join(tmpDir, "src"), { recursive: true });
     writeFileSync(join(tmpDir, "src", "a.ts"), "export const a = 1;");
     writeFileSync(join(tmpDir, "src", "b.ts"), "export const b = 2;");

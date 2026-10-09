@@ -51,7 +51,8 @@ import {
   renderMicroagentContext,
   type Microagent,
 } from "./runtime/microagents.js";
-import { findProjectWorkspace, isProjectWorkspace, projectWorkspaceForFile } from "./workspace/workspace-scope.js";
+import { isProjectWorkspace, projectWorkspaceForFile } from "./workspace/workspace-scope.js";
+import { resolveStateRoot } from "./workspace/state-root.js";
 import { createReadManyTool } from "./read/read-many.js";
 import { disposeSemanticIndexes, effectiveSemanticRoot, getOrCreateSemanticIndex } from "./indexing/semantic-index-registry.js";
 
@@ -215,6 +216,18 @@ export function resetSessionState(): void {
 }
 
 /**
+ * Start session-scoped state writers at the canonical state root
+ * (state-root fix): diagnostics persist at the git top level / outermost
+ * non-git marker only — `null` means nothing is persisted. Returns that
+ * state root so the semantic warm-up derives from the same single root.
+ */
+function startSessionStateWriters(cwd: string): string | null {
+   const stateRoot = resolveStateRoot(cwd);
+   if (stateRoot) startResourceDiagnostics(stateRoot);
+   return stateRoot;
+}
+
+/**
  * Register session lifecycle hooks for startup repo-map injection.
  *
  * - session_start (reason=startup): eagerly starts repo map generation.
@@ -225,7 +238,7 @@ export function resetSessionState(): void {
 export function registerSessionHooks(pi: ExtensionAPI): void {
    pi.on("session_start", (_event, ctx) => {
       resetSessionState();
-      startResourceDiagnostics(ctx.cwd);
+      const stateRoot = startSessionStateWriters(ctx.cwd);
       const key = computeRepoKey(ctx.cwd);
       const mapPromise = isProjectWorkspace(ctx.cwd)
          ? generateCompactMap(ctx.cwd).then((r) => r?.map ?? null)
@@ -264,13 +277,13 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
       cachedMicroagents = doScanMicroagents(ctx.cwd);
 
       // Start async semantic index warm-up (fire-and-forget, non-blocking).
-      // Only for bounded project workspaces with embedding config.
-      if (isProjectWorkspace(ctx.cwd)) {
-        const projectRoot = findProjectWorkspace(ctx.cwd);
-        const embedConfig = projectRoot ? validateEmbeddingConfig(projectRoot) : null;
+      // Only at the canonical state root with embedding config: a session
+      // started inside a nested marker dir warms the canonical root instead.
+      if (stateRoot) {
+        const embedConfig = validateEmbeddingConfig(stateRoot);
         let semanticRoot: string | null = null;
         try {
-          semanticRoot = projectRoot ? effectiveSemanticRoot(ctx.cwd, projectRoot) : null;
+          semanticRoot = effectiveSemanticRoot(ctx.cwd, stateRoot);
         } catch {
           // Invalid/disjoint boundary: skip advisory semantic warm-up.
         }
