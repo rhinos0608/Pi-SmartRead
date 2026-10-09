@@ -1,6 +1,7 @@
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLspTool } from "../../../src/lsp/lsp-tool.js";
 import { AFFORDANCE_BOUNDS } from "../../../src/lsp/affordance-contract.js";
@@ -113,7 +114,7 @@ describe("LSP affordance bundle", () => {
 
     const investigateTool = createLspTool({
       affordances: true,
-      executeOperation: async () => envelope("workspaceSymbols", [{ name: large, uri: "file:///tmp/known.ts" }]) as any,
+      executeOperation: async () => envelope("workspaceSymbols", [{ name: large, uri: pathToFileURL(join(root, "known.ts")).href }]) as any,
     });
     const investigated = await (investigateTool.execute as Function)("call", {
       operation: "investigate", task: "references", symbol: "run",
