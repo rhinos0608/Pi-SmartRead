@@ -22,7 +22,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, sep } from "node:path";
+import { join } from "node:path";
 import { estimateTokens, type BenchLocation } from "../metrics.js";
 import type { SampledPosition } from "../sample.js";
 import { pointLoc, type Comparator, type ComparatorCall } from "./types.js";
@@ -197,7 +197,7 @@ function toPointLoc(
 ): BenchLocation | null {
   if (typeof entry.relative_path !== "string") return null;
   if (typeof entry.body_location?.start_line !== "number") return null;
-  const file = canonicalize(join(root, entry.relative_path.replace(/[\\/]/g, sep)));
+  const file = canonicalize(join(root, entry.relative_path).replace(/\\/g, "/"));
   if (!file) return null;
   return pointLoc(file, entry.body_location.start_line, 0);
 }
@@ -270,7 +270,7 @@ export function parseSerenaReferences(
   const seen = new Set<string>();
   for (const [rel, groups] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof groups !== "object" || groups === null) continue;
-    const file = canonicalize(join(root, rel.replace(/[\\/]/g, sep)));
+    const file = canonicalize(join(root, rel).replace(/\\/g, "/"));
     if (!file) continue;
     const symbols = Object.values(groups as Record<string, unknown>).flatMap((g) =>
       Array.isArray(g) ? g : [],

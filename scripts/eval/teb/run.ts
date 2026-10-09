@@ -660,7 +660,11 @@ export const TEB_CONTAMINATION_BENCH_MARKER = "pi-smartread-bench";
  */
 export function expandHomeSpelling(text: string, homeDir: string): string {
     const home = homeDir.endsWith("/") ? homeDir.slice(0, -1) : homeDir;
-    const unescaped = text.replace(/\\(.)/g, "$1").replace(/['"]/g, "");
+    // On Windows a backslash is a path separator, so only unescape escaped
+    // backslashes and quotes; elsewhere keep full shell-escape unescaping.
+    const unescaped = (process.platform === "win32"
+        ? text.replace(/\\([\\'"])/g, "$1")
+        : text.replace(/\\(.)/g, "$1")).replace(/['"]/g, "");
     return unescaped
         .replace(/\$\{HOME\}/g, home)
         .replace(/\$HOME(?![A-Za-z0-9_])/g, home)
