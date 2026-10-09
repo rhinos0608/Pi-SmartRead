@@ -41,6 +41,7 @@ import {
 } from "../../../scripts/eval/teb/run.js";
 import { activePiGroupPids, buildPiArgs, killActivePiGroups, launchPiSession, type PiSpawnFn } from "../../../scripts/eval/teb/launch.js";
 import { toRunnerView, type TebTask } from "../../../scripts/eval/teb/schema.js";
+import { parseSurfaceIdentity } from "../../../scripts/eval/surface-identity.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -681,6 +682,25 @@ describe("teb shutdown (P1-4)", () => {
 });
 
 describe("runTebCli dry-run", () => {
+    it("refuses mixed surface-identity opt-in arms", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-identity-mixed-"));
+        const tasksFile = join(dir, "tasks.jsonl");
+        writeFileSync(tasksFile, `${JSON.stringify(definitionTask())}\n`);
+        const configPath = join(dir, "arms.json");
+        writeFileSync(configPath, JSON.stringify({ gamma: { expectedIdentity: { general: true, inspect: false } } }));
+        await expect(runTebCli(
+            parseTebRunArgs(["--tasks", tasksFile, "--split", "pilot", "--out", join(dir, "out"), "--dry-run", "--arms", "baseline,gamma", "--arms-config", configPath]),
+            { extensionPath: join(dir, "index.ts"), piVersion: "test" },
+        )).rejects.toThrow(/every arm or none/);
+    });
+
+    it("parses canonical product identity and rejects missing or malformed lines", () => {
+        const hash = "a".repeat(64);
+        const payload = { selectors: { general: true, inspect: false }, variants: { lsp: "affordance-bundle", inspect: "baseline", grep: "baseline", guidance: "affordance-bundle", mcpInstructions: "affordance-bundle", note: "wp-c-unbuilt" }, surfaceIdentity: hash, schemaHash: hash, guidanceHash: hash };
+        expect(parseSurfaceIdentity(`[pi-smartread:surface-identity] ${JSON.stringify(payload)}\n`).surfaceIdentity).toBe(hash);
+        expect(() => parseSurfaceIdentity("")).toThrow(/missing/);
+        expect(() => parseSurfaceIdentity("[pi-smartread:surface-identity] nope\n")).toThrow(/malformed/);
+    });
     it("writes prompts and a manifest without spawning", async () => {
         const dir = mkdtempSync(join(tmpdir(), "teb-run-"));
         const tasksFile = join(dir, "tasks.jsonl");
@@ -910,7 +930,7 @@ describe("runTebCli dry-run", () => {
         const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { sessions: Array<{ arm: string; selectors: { general: boolean; inspect: boolean }; surfaceIdentity: string }> };
         expect(manifest.sessions.filter(({ arm }) => arm === "baseline").every(({ selectors }) => selectors.general === false && selectors.inspect === false)).toBe(true);
         expect(manifest.sessions.filter(({ arm }) => arm === "lsp-affordance").every(({ selectors }) => selectors.general === true && selectors.inspect === false)).toBe(true);
-        expect(manifest.sessions.every((session) => /^[0-9a-f]{64}$/.test(session.surfaceIdentity))).toBe(true);
+        expect(manifest.sessions.every((session) => session.surfaceIdentity === undefined)).toBe(true);
     });
 
     it("stores the full arm registry and arms config in the manifest (P1-7)", async () => {

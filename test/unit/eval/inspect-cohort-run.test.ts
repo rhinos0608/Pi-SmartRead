@@ -81,12 +81,12 @@ describe("inspect cohort runner contracts", () => {
             derivation: "synthetic fixture", agreement: "agree", labelers: ["a", "b"], adjudication: "agree", snapshot: { head: commit, clean: true } };
         const tasks = join(dir, "tasks.jsonl"); writeFileSync(tasks, `${JSON.stringify(task)}\n`);
         const oldRepos = process.env["INSPECT_REPOS_DIR"]; process.env["INSPECT_REPOS_DIR"] = repos;
-        const identity: InspectSelectorIdentity = { selectors: { general: false, inspect: false }, surfaceIdentity: "surface-pin", schemaHash: "schema-pin", guidanceHash: "guidance-pin" };
+        const identity: InspectSelectorIdentity = { selectors: { general: false, inspect: false }, variants: { lsp: "baseline", inspect: "baseline", grep: "baseline", guidance: "baseline", mcpInstructions: "baseline" }, surfaceIdentity: "surface-pin", schemaHash: "schema-pin", guidanceHash: "guidance-pin" };
         try {
             const result = await runInspectCli({ tasks, split: "pilot", arms: ["off"], replicates: 1, maxTurns: 1, model: "provider/model-v2",
                 thinking: "high", timeoutMs: 1000, out: join(dir, "out"), dryRun: false, taskIds: null, limit: null,
                 openHoldout: false, freezeFile: null, piBin: "pi" }, {
-                selectorIdentity: () => identity, expectedIdentityByArm: { off: identity },
+                expectedIdentityByArm: { off: identity },
                 spawnFn: () => { throw new Error("spawn fake-pi ENOENT"); },
             });
             const manifest = JSON.parse(readFileSync(result.manifestPath, "utf8")) as { batchInvalidated: boolean; rerunList: unknown[]; sessions: Array<{ excluded: boolean; rerunRequired: boolean; infraFailure: { kind: string } | null }> };
@@ -100,17 +100,16 @@ describe("inspect cohort runner contracts", () => {
         }
     });
 
-    it("refuses non-dry launches without real product-supplied surface identity", async () => {
+    it("allows an empty non-dry batch without requiring a per-arm identity", async () => {
         const dir = mkdtempSync(join(tmpdir(), "inspect-identity-"));
         const tasks = join(dir, "empty.jsonl"); writeFileSync(tasks, "");
         await expect(runInspectCli({ tasks, split: "pilot", arms: ["off"], replicates: 1, maxTurns: 1,
             model: "provider/model-v2", thinking: "high", timeoutMs: 1000, out: join(dir, "out"), dryRun: false,
-            taskIds: null, limit: null, openHoldout: false, freezeFile: null, piBin: "pi" }))
-            .rejects.toThrow(/surface.identity.unavailable/);
+            taskIds: null, limit: null, openHoldout: false, freezeFile: null, piBin: "pi" })).resolves.toMatchObject({ manifestPath: expect.any(String) });
     });
 
     it("excludes selector or guidance identity mismatch and invalid selectors for rerun", () => {
-        const expected: InspectSelectorIdentity = { selectors: { general: false, inspect: true }, surfaceIdentity: "surface-a", schemaHash: "schema-a", guidanceHash: "guide-a" };
+        const expected: InspectSelectorIdentity = { selectors: { general: false, inspect: true }, variants: { lsp: "baseline", inspect: "inspect-bundle", grep: "baseline", guidance: "inspect-bundle", mcpInstructions: "inspect-bundle" }, surfaceIdentity: "surface-a", schemaHash: "schema-a", guidanceHash: "guide-a" };
         expect(selectorIdentityMismatch(expected, expected)).toBeNull();
         expect(selectorIdentityMismatch({ ...expected, guidanceHash: "guide-b" }, expected)).toMatch(/guidance/);
         expect(selectorIdentityMismatch({ ...expected, selectors: { general: false, inspect: false } }, expected)).toMatch(/selector/);
@@ -127,6 +126,8 @@ describe("inspect cohort runner contracts", () => {
         expect(() => assertNoHoldoutExposure(`${prompt} grade.ts`)).toThrow(/blacklist/);
         expect(() => assertNoHoldoutExposure(prompt, ["sealed-task-id"])).not.toThrow();
         expect(() => assertNoHoldoutExposure(`${prompt} sealed-task-id`, ["sealed-task-id"])).toThrow(/blacklist/);
+        expect(() => assertNoHoldoutExposure(`${prompt} forbidden pilot wording`, ["forbidden pilot wording"])).toThrow(/blacklist/);
+        expect(() => assertNoHoldoutExposure(`${prompt} /tmp/gold/routes.json`)).toThrow(/blacklist/);
     });
 
     it("constructs the task prompt from runner-visible projection only", () => {

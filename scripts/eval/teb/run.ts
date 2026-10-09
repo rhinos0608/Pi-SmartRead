@@ -29,6 +29,7 @@ import { FAMILY_TABLE, parseTebJsonl, toRunnerView, type RunnerTaskView, type Te
 // Static import is cycle-safe: score.ts imports run.ts type-only
 // (erased at runtime), and both CLI mains are argv-guarded.
 import { classifySessionValidity } from "./score.js";
+import { parseSurfaceIdentity, SurfaceIdentityError } from "../surface-identity.js";
 import {
     buildPiArgs,
     killActivePiGroups,
@@ -282,7 +283,7 @@ export function buildTaskPrompt(view: RunnerTaskView, arm: TebArm): string {
 export const TEB_BUILTIN_ARMS: readonly string[] = ["baseline", "instructed"] as const;
 
 /** Per-arm overrides from a --arms-config JSON file. */
-export type TebArmsConfig = Record<string, Partial<Pick<TebArm, "extensionPath" | "env" | "promptSuffix">>>;
+export type TebArmsConfig = Record<string, Partial<Pick<TebArm, "extensionPath" | "env" | "promptSuffix">> & { expectedIdentity?: { general: boolean; inspect: false } }>;
 
 /** Load a --arms-config JSON file: {"<arm>": {extensionPath?, env?, promptSuffix?}}. */
 export function loadArmsConfig(path: string): TebArmsConfig {
@@ -915,7 +916,7 @@ export interface TebSessionRecord {
     attempt: number;
     /** Effective selector values supplied to this arm (unset selectors are off). */
     selectors?: { general: boolean; inspect: boolean; invalid?: string[] };
-    /** SHA-256 of the loaded extension entry file for this session. */
+    /** Canonical product identity reported by an opted-in session. */
     surfaceIdentity?: string;
 }
 
@@ -1003,6 +1004,10 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
     mkdirSync(runDir, { recursive: true });
 
     const armConfigs = args.armsConfig ? loadArmsConfig(args.armsConfig) : {};
+    const expectedIdentityArms = args.arms.filter((name) => armConfigs[name]?.expectedIdentity !== undefined);
+    if (expectedIdentityArms.length > 0 && expectedIdentityArms.length !== args.arms.length) {
+        throw new Error("surface identity expectations must be configured for every arm or none");
+    }
     const piBin = opts.piBin ?? args.piBin;
     // E11b: the resolved binary and its version are part of the record.
     const piVersion = opts.piVersion ?? (args.dryRun ? "unknown" : getPiVersion(piBin));
@@ -1174,13 +1179,7 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
                     error: null,
                     attempt: rerunAttempt ?? 1,
                     selectors: effectiveAffordanceSelectors(arm.env ?? {}),
-                    surfaceIdentity: (() => {
-                        try {
-                            return sha256File(arm.extensionPath ?? extensionPath);
-                        } catch {
-                            return "unknown";
-                        }
-                    })(),
+                    ...(armConfigs[arm.name]?.expectedIdentity ? { surfaceIdentity: "missing" } : {}),
                 };
 
                 if (args.dryRun) {
@@ -1257,6 +1256,7 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
                             ...(process.env as Record<string, string>),
                             PI_SMARTREAD_SKILL_SYNC: "0",
                             ...(arm.env ?? {}),
+                            ...(armConfigs[arm.name]?.expectedIdentity ? { PI_SMARTREAD_SURFACE_IDENTITY_LOG: "1" } : {}),
                         };
                         const result = await launchPiSession({
                             piBin,
@@ -1337,6 +1337,21 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
                         record.identityReason = record.selectors?.invalid === undefined
                             ? identityCheck.reason
                             : `invalid affordance selector value(s): ${record.selectors.invalid.join(", ")}`;
+                        const expectedIdentity = armConfigs[arm.name]?.expectedIdentity;
+                        if (expectedIdentity) {
+                            try {
+                                const surface = parseSurfaceIdentity(stderrText);
+                                record.surfaceIdentity = surface.surfaceIdentity;
+                                const mismatch = surface.selectors.general !== expectedIdentity.general ||
+                                    surface.selectors.inspect !== expectedIdentity.inspect ||
+                                    surface.selectors.invalid !== undefined;
+                                if (mismatch) throw new Error("surface identity selectors do not match frozen arm expectation");
+                            } catch (error) {
+                                const reason = error instanceof SurfaceIdentityError ? `surface identity ${error.code}` : error instanceof Error ? error.message : String(error);
+                                record.identityOk = false;
+                                record.identityReason = reason;
+                            }
+                        }
                         // E11a: bench-cache/task-file references in tool args.
                         const contamination = scanLogForContamination(logText, contaminationMarkers);
                         record.contaminated = contamination.contaminated;

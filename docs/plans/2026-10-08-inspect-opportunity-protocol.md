@@ -148,3 +148,12 @@ New files only (no edits to frozen TEB seams): `scripts/eval/inspect-cohort/sche
 ## 13. Residual risks
 
 Six pinned repos + TS-centric supported syntax limit generalisation (sensitivity only). Transfer slice is comparability, not superiority. Schema status is pending validation: SCHEMA-CONTRACT-READY will describe closed runtime shape contracts ONLY — never pilot readiness, benchmark improvement, and never an implemented semantic grader — and applies only after the validator gaps are closed and fixtures pass.
+
+## 14. Amendment A1 — latency separated from the effectiveness study (owner-approved 2026-10-10, pre-pilot)
+
+Approved before any inspect pilot, dev, or holdout session ran and before any §8 calibration value was frozen, so no outcome informed it. The owner's priority is accuracy and recall.
+
+- **§8 (d) latency gate becomes report-only.** Cold/warm latency stays in the §8 secondary metrics and is reported per arm with its stated n, but it is not a promotion gate in the pilot, dev, or holdout study. Gates (a) false-completeness, (b) invalid-call, (c) cost, and all inherited gates are unchanged.
+- **Separate latency benchmark.** If latency becomes a decision input, it is measured in a separately preregistered benchmark run in an exclusive measurement window (no concurrent development, retrieval, judge, or agent work), reusing the §8 latency definitions.
+- **Quiet windows still required for agent sessions.** Pilot, dev, and holdout agent sessions run with no concurrent development or benchmark processes. Reason: the per-task wall cap (§11, 240 s) turns load-induced slowness into ordinary timeouts, which count as task failures (§9), so load could bias accuracy. Paid sessions also cost money to rerun.
+- **Disclosure.** Every session records the 1-minute load average at start and end; sessions with load above 2× the machine's idle baseline are flagged descriptively. This amendment does not license reruns based on outcomes.

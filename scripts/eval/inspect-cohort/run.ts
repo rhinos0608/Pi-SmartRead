@@ -1,21 +1,17 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { loadavg, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { INSPECT_ANSWER_SHAPES, parseInspectJsonl, toInspectRunnerView, type InspectFamily } from "./schema.js";
+import { INSPECT_ANSWER_SHAPES, parseInspectJsonl, toInspectRunnerView, type InspectFamily, type InspectTask } from "./schema.js";
 import { INSPECT_GENERIC_TEXT, INSPECT_INSTRUCTED_TEXT } from "./prompts.js";
+import { parseSurfaceIdentity, type SurfaceIdentity } from "../surface-identity.js";
 import { buildPiArgs, launchPiSession, type PiSpawnFn, type TebArm } from "../teb/launch.js";
 import { claimHoldoutOpening, classifyInfraFailure, extractSessionIdentity, parseFreezeFile, scanLogForContamination, sha256Hex, type TebInfraFailure, type TebSessionIdentity } from "../teb/run.js";
 
 export const INSPECT_RUNNER_VERSION = 1;
 export const INSPECT_TOOL_ALLOWLIST = "read,bash,grep,find,inspect,LSP";
-export interface InspectSelectorIdentity {
-    selectors: { general: boolean; inspect: boolean; invalid?: string[] };
-    surfaceIdentity: string;
-    schemaHash: string;
-    guidanceHash: string;
-}
+export type InspectSelectorIdentity = SurfaceIdentity;
 
 export interface InspectSessionValidityInput {
     identityMismatch: string | null;
@@ -99,6 +95,7 @@ export function checkInspectSessionIdentity(
 export function selectorIdentityMismatch(actual: InspectSelectorIdentity, expected: InspectSelectorIdentity): string | null {
     if (actual.selectors.invalid?.length) return `invalid selector value: ${actual.selectors.invalid.join(", ")}`;
     if (JSON.stringify(actual.selectors) !== JSON.stringify(expected.selectors)) return "effective selector mismatch";
+    if (JSON.stringify(actual.variants) !== JSON.stringify(expected.variants)) return "surface variants mismatch";
     if (actual.surfaceIdentity !== expected.surfaceIdentity) return "surface identity mismatch";
     if (actual.schemaHash !== expected.schemaHash) return "schema hash mismatch";
     if (actual.guidanceHash !== expected.guidanceHash) return "guidance hash mismatch";
@@ -142,8 +139,22 @@ export function collectGoldPathMarkers(gold: unknown): string[] {
 }
 
 export function assertNoHoldoutExposure(prompt: string, extraMarkers: string[] = []): void {
-    const hits = ["pi-smartread-bench", "candidateUniverse", "grade.ts", ...extraMarkers].filter((marker) => marker.length > 0 && prompt.includes(marker));
+    const hits = ["pi-smartread-bench", "candidateUniverse", "grade.ts", "grader", "adjudication", ...extraMarkers]
+        .filter((marker) => marker.length > 0 && prompt.includes(marker));
+    if (/(?:^|[\s"'])\/(?:tmp|home|Users)\/[^\s"']+/.test(prompt)) hits.push("absolute path");
     if (hits.length) throw new Error(`holdout exposure blacklist hit in prompt: ${hits.join(", ")}`);
+}
+
+function collectHandoffBlacklist(otherSplitTasks: InspectTask[], currentSplit: InspectTask["split"]): string[] {
+    const markers = new Set<string>();
+    for (const task of otherSplitTasks) {
+        if (task.split === "holdout") markers.add(task.id);
+        if (task.split !== currentSplit && (task.split === "pilot" || task.split === "dev")) markers.add(task.prompt);
+        for (const path of collectGoldPathMarkers(task.gold)) markers.add(path);
+        markers.add(task.candidateUniverse.id);
+        markers.add(task.candidateUniverse.sha256);
+    }
+    return [...markers].filter((marker) => marker.length >= 3);
 }
 
 export function buildInspectTaskPrompt(view: { prompt: string; answerShape: string }, arm: InspectArm): string {
@@ -186,6 +197,7 @@ export interface InspectSessionRecord {
     resolvedModel: string | null; thinkingResolved: string | null; contaminated: boolean; contaminationHit: string | null;
     infraFailure: TebInfraFailure | null; timedOut: boolean; turns: number; elapsedMs: number; error: string | null;
     excluded: boolean; exclusionReason: string | null; rerunRequired: boolean; gradedFailure: boolean;
+    loadAverageStart: number | null; loadAverageEnd: number | null; highLoad: boolean;
 }
 
 function expectedIdentityFor(arm: InspectArm, surfaceIdentity: string): InspectSelectorIdentity {
@@ -195,6 +207,7 @@ function expectedIdentityFor(arm: InspectArm, surfaceIdentity: string): InspectS
             inspect: arm.env?.["PI_SMARTREAD_INSPECT_AFFORDANCES"] === "1",
         },
         surfaceIdentity,
+        variants: { lsp: "baseline", inspect: arm.name === "on" ? "inspect-bundle" : "baseline", grep: "baseline", guidance: arm.name === "on" ? "inspect-bundle" : "baseline", mcpInstructions: arm.name === "on" ? "inspect-bundle" : "baseline" },
         schemaHash: createHash("sha256").update(JSON.stringify(INSPECT_ANSWER_SHAPES)).digest("hex"),
         guidanceHash: createHash("sha256").update(`${INSPECT_INSTRUCTED_TEXT}\n${INSPECT_GENERIC_TEXT}`).digest("hex"),
     };
@@ -204,9 +217,10 @@ export interface RunInspectOptions {
     spawnFn?: PiSpawnFn;
     extensionPath?: string;
     /** Product-captured effective identity, captured after constructing each arm. */
-    selectorIdentity?: (arm: InspectArm) => InspectSelectorIdentity;
-    /** Frozen per-arm expectation; independent of the product-reported effective identity. */
+    /** Frozen per-arm expectation; independent of session-reported identity. */
     expectedIdentityByArm?: Partial<Record<InspectArmName, InspectSelectorIdentity>>;
+    idleLoadAverage?: number;
+    loadAverage?: () => number;
 }
 
 export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOptions = {}): Promise<{ runDir: string; manifestPath: string }> {
@@ -216,19 +230,11 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
     let tasks = parsed.tasks.filter((t) => t.split === args.split);
     if (args.taskIds) { const ids = new Set(args.taskIds); tasks = tasks.filter((t) => ids.has(t.id)); }
     if (args.limit !== null) tasks = tasks.slice(0, args.limit);
-    const actualIdentityByArm = new Map<InspectArmName, InspectSelectorIdentity>();
     const expectedIdentityByArm = new Map<InspectArmName, InspectSelectorIdentity>();
-    if (!args.dryRun && !opts.selectorIdentity) {
-        throw new Error("surface-identity-unavailable: non-dry runs require product-supplied surface identity");
-    }
     if (!args.dryRun) {
         for (const task of tasks) {
             for (const arm of resolveInspectArms(args.arms, !task.negativeControl)) {
-                const actual = opts.selectorIdentity?.(arm);
                 const expected = opts.expectedIdentityByArm?.[arm.name];
-                if (!actual || !actual.surfaceIdentity || actual.surfaceIdentity === "unavailable") {
-                    throw new Error("surface-identity-unavailable: non-dry runs require product-supplied surface identity");
-                }
                 if (!expected || !expected.surfaceIdentity || expected.surfaceIdentity === "unavailable") {
                     throw new Error(`surface-identity-unavailable: missing frozen expectation for arm ${arm.name}`);
                 }
@@ -236,9 +242,16 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
                 if (expected.selectors.general || expected.selectors.inspect !== expectedInspect || expected.selectors.invalid?.length) {
                     throw new Error(`invalid frozen selector expectation for arm ${arm.name}`);
                 }
-                actualIdentityByArm.set(arm.name, actual);
                 expectedIdentityByArm.set(arm.name, expected);
             }
+        }
+    }
+    const forbidden = collectHandoffBlacklist(parsed.tasks, args.split);
+    for (const task of tasks) {
+        const view = toInspectRunnerView(task);
+        for (const arm of resolveInspectArms(args.arms, !task.negativeControl)) {
+            const prompt = buildInspectTaskPrompt(view, arm);
+            assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [resolve(args.tasks), ...forbidden]);
         }
     }
     const extensionPath = opts.extensionPath ?? resolve(dirname(new URL(import.meta.url).pathname), "..", "..", "..", "src", "index.ts");
@@ -263,14 +276,14 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
         const view = toInspectRunnerView(task);
         for (const arm of arms) for (let replicate = 0; replicate < args.replicates; replicate++) {
             const prompt = buildInspectTaskPrompt(view, arm), sessionDir = join(runDir, task.id, `${arm.name}-r${replicate}`);
-            assertNoHoldoutExposure(prompt, [resolve(args.tasks)]);
             mkdirSync(sessionDir, { recursive: true });
             const expectedIdentity = expectedIdentityByArm.get(arm.name) ?? expectedIdentityFor(arm, "unavailable");
             const record: InspectSessionRecord = { runId, taskId: task.id, family: task.family, arm: arm.name, replicate,
-                promptSha256: createHash("sha256").update(prompt).digest("hex"), selectorIdentity: actualIdentityByArm.get(arm.name) ?? expectedIdentity, identityOk: false,
+                promptSha256: createHash("sha256").update(prompt).digest("hex"), selectorIdentity: expectedIdentity, identityOk: false,
                 identityReason: "session not run", provider: null, resolvedModel: null, thinkingResolved: null, contaminated: false,
                 contaminationHit: null, infraFailure: null, timedOut: false, turns: 0, elapsedMs: 0, error: null,
-                excluded: false, exclusionReason: null, rerunRequired: false, gradedFailure: false };
+                excluded: false, exclusionReason: null, rerunRequired: false, gradedFailure: false,
+                loadAverageStart: null, loadAverageEnd: null, highLoad: false };
             if (args.dryRun) {
                 writeFileSync(join(sessionDir, "prompt.txt"), prompt);
                 writeFileSync(join(sessionDir, "events.jsonl"), ""); writeFileSync(join(sessionDir, "stderr.txt"), "");
@@ -288,18 +301,27 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
                 const status = execFileSync("git", ["-C", checkout, "status", "--porcelain", "--ignored"], { encoding: "utf8" });
                 if (status.trim()) throw new Error(`pinned checkout not clean: ${status.trim()}`);
                 cpSync(checkout, cwd, { recursive: true });
-                const env = { ...process.env, PI_SMARTREAD_SKILL_SYNC: "0", PI_SMARTREAD_AFFORDANCES: "0", PI_SMARTREAD_INSPECT_AFFORDANCES: "0", ...(arm.env ?? {}) } as Record<string, string>;
+                const env = { ...process.env, PI_SMARTREAD_SKILL_SYNC: "0", PI_SMARTREAD_AFFORDANCES: "0", PI_SMARTREAD_INSPECT_AFFORDANCES: "0", ...(arm.env ?? {}), PI_SMARTREAD_SURFACE_IDENTITY_LOG: "1" } as Record<string, string>;
+                const getLoadAverage = opts.loadAverage ?? (() => osLoadAverage());
+                record.loadAverageStart = getLoadAverage();
                 launchAttempted = true;
                 const result = await launchPiSession({ piBin: args.piBin, args: buildPiArgs({ extensionPath: arm.extensionPath ?? extensionPath, model: args.model, thinking: args.thinking, tools: INSPECT_TOOL_ALLOWLIST, prompt }),
                     cwd, env, timeoutMs: args.timeoutMs, maxTurns: args.maxTurns, outJsonl: eventLog, outStderr: stderrLog, spawnFn: opts.spawnFn });
                 launchCompleted = true;
+                record.loadAverageEnd = getLoadAverage();
+                record.highLoad = opts.idleLoadAverage !== undefined && (record.loadAverageStart > 2 * opts.idleLoadAverage || record.loadAverageEnd > 2 * opts.idleLoadAverage);
                 record.timedOut = result.timedOut; record.turns = result.turns; record.elapsedMs = result.elapsedMs;
                 const log = readFileSync(eventLog, "utf8"), stderr = readFileSync(stderrLog, "utf8"), identity = extractInspectSessionIdentity(log);
                 record.provider = identity.provider; record.resolvedModel = identity.model; record.thinkingResolved = identity.thinking;
-                const actual = actualIdentityByArm.get(arm.name)!;
                 const expected = expectedIdentityByArm.get(arm.name)!;
-                record.selectorIdentity = actual;
-                const surfaceMismatch = selectorIdentityMismatch(actual, expected);
+                let actual: InspectSelectorIdentity | null = null;
+                let surfaceMismatch: string | null = null;
+                try { actual = parseSurfaceIdentity(stderr); }
+                catch (error) { surfaceMismatch = error instanceof Error ? error.message : "surface identity malformed"; }
+                if (actual) {
+                    record.selectorIdentity = actual;
+                    surfaceMismatch = selectorIdentityMismatch(actual, expected);
+                }
                 const sessionIdentity = checkInspectSessionIdentity(identity, { model: args.model, thinking: args.thinking });
                 record.identityOk = surfaceMismatch === null && sessionIdentity.ok;
                 record.identityReason = surfaceMismatch ?? sessionIdentity.reason;
@@ -322,7 +344,12 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
                 record.excluded = catchValidity.excluded; record.exclusionReason = catchValidity.exclusionReason;
                 record.rerunRequired = catchValidity.rerunRequired; record.gradedFailure = catchValidity.gradedFailure;
             }
-            finally { rmSync(scratch, { recursive: true, force: true }); }
+            finally {
+                const getLoadAverage = opts.loadAverage ?? (() => osLoadAverage());
+                if (record.loadAverageEnd === null) record.loadAverageEnd = getLoadAverage();
+                record.highLoad = opts.idleLoadAverage !== undefined && (record.loadAverageStart !== null && record.loadAverageStart > 2 * opts.idleLoadAverage || record.loadAverageEnd > 2 * opts.idleLoadAverage);
+                rmSync(scratch, { recursive: true, force: true });
+            }
             manifest.sessions.push(record); flush();
         }
     }
@@ -333,6 +360,10 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
         return { taskId: session.taskId, arm: session.arm, replicate: session.replicate, reason: session.exclusionReason ?? "excluded" };
     });
     flush(); return { runDir, manifestPath };
+}
+
+function osLoadAverage(): number {
+    return Number(loadavg()[0] ?? 0);
 }
 
 function main(): void {
