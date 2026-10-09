@@ -238,20 +238,26 @@ describe("registerSessionHooks", () => {
         makeMockContext(projectDir),
       );
 
-      // Then trigger before_agent_start with mutable sections available
-      const sections: Record<string, string> = {};
-      const result = await handlers.before_agent_start!(
-        {
-          type: "before_agent_start",
-          systemPrompt: "You are a helpful agent.",
-          prompt: "hi",
-          systemPromptOptions: { sections },
-        },
-        makeMockContext(projectDir),
-      );
+      // session_start does not await map generation, and before_agent_start
+      // waits at most 750ms for it. On a slow runner the first call can miss
+      // the map, so call again until the cached map is ready.
+      let sections: Record<string, string> = {};
+      const deadline = Date.now() + 12_000;
+      do {
+        sections = {};
+        const result = await handlers.before_agent_start!(
+          {
+            type: "before_agent_start",
+            systemPrompt: "You are a helpful agent.",
+            prompt: "hi",
+            systemPromptOptions: { sections },
+          },
+          makeMockContext(projectDir),
+        );
+        // No forced systemPrompt replacement on the sections path
+        expect(result).toBeUndefined();
+      } while (sections["smartread_repo_map"] === undefined && Date.now() < deadline);
 
-      // No forced systemPrompt replacement on the sections path
-      expect(result).toBeUndefined();
       // Repo map section is set; the tool guide is no longer injected here
       expect(sections["smartread_repo_map"]).toContain("index.ts");
       expect(Object.values(sections).join("\n")).not.toContain("SmartRead Tool Guide");

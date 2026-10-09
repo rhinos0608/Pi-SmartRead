@@ -111,6 +111,7 @@ describe("bounded inspect structural gather", () => {
             expect.objectContaining({ path: "routes.ts", route: "/users", range: { start: 1, end: 1 } }),
         ]));
         expect(result.heuristics).toContain(expect.stringMatching(/not.*mounted/i));
+        expect(result.sections.find((section) => section.name === "routes")?.heuristics).toContain(expect.stringMatching(/not.*mounted/i));
     });
 
     it("stops later sequential stages on cancellation", async () => {

@@ -15,7 +15,7 @@ export interface GatherRelation {
 }
 export interface GatherUnresolved { source: string; specifier: string; reason: string; citation: InspectCitation & { range: { start: number; end: number }; specifier: string; resolutionRule: string } }
 export interface GatherStage { name: string; args: Record<string, unknown>; derivation: string; status: InspectTaskStatus | "not-run"; observed: { files: number | null; bytes: number | null; wallMs: number | null; outputBytes: number | null } }
-export interface GatherSection { name: string; status: InspectTaskStatus; coverage: "complete" | "partial" | "unknown"; items: unknown[]; omissions: string[] }
+export interface GatherSection { name: string; status: InspectTaskStatus; coverage: "complete" | "partial" | "unknown"; items: unknown[]; omissions: string[]; heuristics?: string[] }
 export interface GatherResult {
     recipe: GatherRecipe;
     sections: GatherSection[];
@@ -212,7 +212,7 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
         const current = stages[i]!;
         if (aborted(input.signal)) { result.status = "partial"; result.coverage = "partial"; result.followups.push("Retry the gather with an active signal."); break; }
         const verdict = admitted();
-        if (!verdict.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(`Retry with a scoped sub-path: ${verdict.reasons.join("; ")}`); break; }
+        if (!verdict.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(verdict.reasons.some((reason) => /outputBytes/i.test(reason)) ? `Output budget refused this result; retry with a scoped sub-path: ${verdict.reasons.join("; ")}` : `Retry with a scoped sub-path: ${verdict.reasons.join("; ")}`); break; }
         const tick = clock();
         if (i === 0) {
             current.args = { mode: input.mode, root: requestedRoot };
@@ -249,14 +249,13 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
             current.args = { candidates: universe.length };
             const manifests = manifestRecords;
             const packagePaths = new Map<string, string>();
-            const workspaceNames = new Set<string>();
             const aliases = new Set<string>();
             const rootManifestPath = admittedFiles.find((file) => file.path === "package.json");
             let rootManifest: PackageManifest = {};
             for (const manifestFile of admittedFiles.filter((file) => file.path.endsWith("package.json"))) {
                 if (aborted(input.signal)) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; break; }
                 const admission = admitted(1, manifestFile.bytes);
-                if (!admission.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(`Retry with a scoped sub-path: ${admission.reasons.join("; ")}`); break; }
+                if (!admission.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(admission.reasons.some((reason) => /outputBytes/i.test(reason)) ? `Output budget refused this result; retry with a scoped sub-path: ${admission.reasons.join("; ")}` : `Retry with a scoped sub-path: ${admission.reasons.join("; ")}`); break; }
                 try {
                     const text = await readWithinScope(manifestFile.path);
                     const actualBytes = Buffer.byteLength(text);
@@ -274,7 +273,7 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
             for (const configFile of admittedFiles.filter((file) => file.path === "tsconfig.json" || (file.path.startsWith("tsconfig.") && file.path.endsWith(".json")))) {
                 if (aborted(input.signal)) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; break; }
                 const admission = admitted(1, configFile.bytes);
-                if (!admission.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(`Retry with a scoped sub-path: ${admission.reasons.join("; ")}`); break; }
+                if (!admission.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(admission.reasons.some((reason) => /outputBytes/i.test(reason)) ? `Output budget refused this result; retry with a scoped sub-path: ${admission.reasons.join("; ")}` : `Retry with a scoped sub-path: ${admission.reasons.join("; ")}`); break; }
                 try {
                     const text = await readWithinScope(configFile.path);
                     const actualBytes = Buffer.byteLength(text);
@@ -285,13 +284,10 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
                 } catch { result.omissions.push(`${configFile.path}: tsconfig-read-or-parse-failed`); result.status = "partial"; result.coverage = "partial"; }
             }
             const declaredWorkspaces = workspacePatterns(rootManifest);
-            for (const [name, manifestPath] of packagePaths) {
-                if (manifestPath !== rootManifestPath?.path && matchesWorkspacePattern(manifestPath.replace(/\\/g, "/").slice(0, -"/package.json".length), declaredWorkspaces)) workspaceNames.add(name);
-            }
             for (const file of universe) {
                 if (aborted(input.signal)) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; break; }
                 const admission = admitted(1, file.bytes);
-                if (!admission.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(`Retry with a scoped sub-path: ${admission.reasons.join("; ")}`); break; }
+                if (!admission.admitted) { current.status = "partial"; result.status = "partial"; result.coverage = "partial"; result.followups.push(admission.reasons.some((reason) => /outputBytes/i.test(reason)) ? `Output budget refused this result; retry with a scoped sub-path: ${admission.reasons.join("; ")}` : `Retry with a scoped sub-path: ${admission.reasons.join("; ")}`); break; }
                 let text: string;
                 try { text = await readWithinScope(file.path); }
                 catch { result.omissions.push(`${file.path}: source-read-failed`); result.coverage = "partial"; result.status = "partial"; continue; }
@@ -324,7 +320,7 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
                         const localManifest = nearestManifest ? manifests.get(nearestManifest) : rootManifest;
                         const dependencies = { ...localManifest?.dependencies, ...localManifest?.devDependencies, ...localManifest?.peerDependencies };
                         const importedPackage = packageName(ref.specifier);
-                        const workspaceManifest = workspaceNames.has(importedPackage) ? [...packagePaths].find(([name]) => name === importedPackage)?.[1] : undefined;
+                        const workspaceManifest = [...packagePaths].find(([name, manifestPath]) => name === importedPackage && manifestPath !== rootManifestPath?.path && matchesWorkspacePattern(manifestPath.replace(/\\/g, "/").slice(0, -"/package.json".length), declaredWorkspaces))?.[1];
                         if (workspaceManifest) {
                             const entry = resolve(dirname(workspaceManifest), manifestEntry(manifests.get(workspaceManifest)!));
                             let target = targetCandidates(entry).map((candidate) => admittedFiles.find((file) => resolve(scopeRoot, file.path) === resolve(candidate))?.path).find((candidate) => candidate !== undefined);
@@ -382,9 +378,10 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
             }
             routeItems.sort((a, b) => compareText(a.path, b.path) || a.range.start - b.range.start || compareText(a.route, b.route));
             const coverage = result.coverage;
-            const section = (name: string, items: unknown[]): GatherSection => ({ name, status: result.status, coverage, items, omissions: [...result.omissions] });
+            const section = (name: string, items: unknown[], heuristics: string[] = []): GatherSection => ({ name, status: result.status, coverage, items, omissions: [...result.omissions], ...(heuristics.length > 0 ? { heuristics } : {}) });
             const addSection = (name: string, items: unknown[]): void => {
-                const candidate = section(name, items);
+                const heuristics = name === "routes" ? ["Route registrations are source candidates only; they do not prove routes are mounted at runtime."] : [];
+                const candidate = section(name, items, heuristics);
                 if (!outputFits({ relations: result.relations, unresolved: result.unresolved, sections: [...result.sections, candidate] })) { outputRefusal(); return; }
                 result.sections.push(candidate);
             };
@@ -397,13 +394,13 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
                 result.heuristics.push("Architecture groupings and layers are heuristic, not architectural facts.");
                 addSection("architecture", [...result.relations.filter((relation) => relation.kind === "workspace-import"), ...manifestRecords.entries()].map((item) => item));
             } else if (view === "routes") {
-                result.heuristics.push("Static registrations are source candidates; they do not establish runtime-mounted endpoints.");
+                result.heuristics.push("Route registrations are source candidates only; they do not prove routes are mounted at runtime.");
                 addSection("routes", routeItems);
             } else if (view === "change-review") {
                 const affected = result.relations.filter((relation) => changedRanges.get(relation.source)?.some((range) => range.start <= relation.citation.range.end && range.end >= relation.citation.range.start));
                 addSection("change-review", affected);
             } else {
-                result.heuristics.push("Static registrations are source candidates; they do not establish runtime-mounted endpoints.");
+                result.heuristics.push("Route registrations are source candidates only; they do not prove routes are mounted at runtime.");
                 addSection("dependencies", [...result.relations, ...result.unresolved]);
                 addSection("routes", routeItems);
             }

@@ -76,7 +76,7 @@ describe("executeTaskView", () => {
         const result = await executeTaskView({ view: "routes", mode: "directory", path: root, cwd: root });
         expect(result.text).toContain("/ok");
         expect(result.text).not.toContain("/outside");
-        expect(result.sections[0]?.omissions).toContain("linked: symlink-skipped");
+        expect(result.sections[0]?.omissions).toContain("linked: symlink-skipped; count: 1");
         expect(result.coverage).toBe("partial");
     });
 
