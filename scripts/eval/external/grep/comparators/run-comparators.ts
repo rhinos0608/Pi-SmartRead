@@ -12,6 +12,16 @@
  *   npx tsx scripts/eval/external/grep/comparators/run-comparators.ts --system ripgrep|probe|codanna
  *     [--split pilot|dev] [--formulation title|body|both] [--limit N] [--timeout-ms N]
  *     [--seed SEED] [--offline] [--multi-swe-bench --accept-license-review]
+ *   npx tsx scripts/eval/external/grep/comparators/run-comparators.ts --system ripgrep|probe|codanna
+ *     --manifest PATH [--split dev|holdout] [--open-holdout] [--accept-license-review]
+ *     [--formulation title|body|both] [--limit N] [--timeout-ms N] [--offline]
+ *
+ * --manifest loads a frozen dev/holdout manifest with integrity
+ * verification (fail closed) and runs --split dev from it without
+ * re-freezing or rewriting any manifest. --split holdout is refused
+ * unless --open-holdout is also given (single-use per D41). Frozen
+ * manifests span Multi-SWE-bench rows, so --manifest also requires
+ * --accept-license-review.
  *
  * Per-system setup/index time is captured separately from per-query latency
  * (setupMs vs elapsedMs on each outcome, totalSetupMs on the report).
@@ -23,10 +33,16 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { COMPARATORS, comparatorManifest, isComparatorName, type ComparatorName } from "./index.js";
-import type { BenchmarkInstance, Formulation } from "../instance.js";
+import { COMPARATORS, comparatorManifest } from "./index.js";
+import type { BenchmarkInstance } from "../instance.js";
+import { frozenSplitIds, loadFrozenManifest } from "../frozen-manifest.js";
 import { computeInstanceMetrics, summarizeMetrics, type InstanceMetrics } from "../metrics.js";
-import { assertMultiSweBenchLicense } from "../multi-swe-bench.js";
+import {
+    ensureDatasetFileCached,
+    msbRowsToInstances,
+    MULTI_SWE_BENCH_FILES,
+    readCachedRows,
+} from "../multi-swe-bench.js";
 import { ensureBareClone, materializeInstance } from "../repos.js";
 import { freezeManifest, selectPilot, writeManifest, type FrozenManifest } from "../sampling.js";
 import { datasetRevision, fetchAllRows, rowsToInstances } from "../swebench-multilingual.js";
@@ -34,57 +50,19 @@ import { datasetRevision, fetchAllRows, rowsToInstances } from "../swebench-mult
 /** Per-run outcome: standard metrics plus comparator setup/index time. */
 export type ComparatorOutcome = InstanceMetrics & { setupMs: number };
 
-function parseArgs(argv: string[]): {
-    system: ComparatorName;
-    split: string;
-    formulations: Formulation[];
-    limit: number | null;
-    timeoutMs: number;
-    seed: string;
-    offline: boolean;
-    multiSweBench: boolean;
-} {
-    let system: ComparatorName | null = null;
-    let split = "pilot";
-    let formulationArg = "both";
-    let limit: number | null = null;
-    let timeoutMs = 60000;
-    let seed = "external-grep-v1";
-    let offline = false;
-    let multiSweBench = false;
-    for (let i = 0; i < argv.length; i++) {
-        const arg = argv[i];
-        if (arg === "--system") {
-            const value = argv[++i] ?? "";
-            if (!isComparatorName(value)) throw new Error("--system must be ripgrep|probe|codanna");
-            system = value;
-        } else if (arg === "--split") split = argv[++i] ?? split;
-        else if (arg === "--formulation") formulationArg = argv[++i] ?? formulationArg;
-        else if (arg === "--limit") limit = Number(argv[++i]);
-        else if (arg === "--timeout-ms") timeoutMs = Number(argv[++i] ?? "");
-        else if (arg === "--seed") seed = argv[++i] ?? seed;
-        else if (arg === "--offline") offline = true;
-        else if (arg === "--multi-swe-bench") multiSweBench = true;
-        else if (arg === "--accept-license-review") continue;
-        else if (arg === "--help" || arg === "-h") {
-            console.log("Usage: run-comparators.ts --system ripgrep|probe|codanna [--split pilot|dev] [--formulation title|body|both] [--limit N] [--timeout-ms N] [--seed SEED] [--offline]");
-            process.exit(0);
-        } else throw new Error(`Unknown argument: ${arg}`);
-    }
-    if (system === null) throw new Error("--system is required (ripgrep|probe|codanna)");
-    if (multiSweBench) assertMultiSweBenchLicense(argv);
-    if (!["pilot", "dev"].includes(split)) throw new Error("--split must be pilot|dev");
-    if (!["title", "body", "both"].includes(formulationArg)) throw new Error("--formulation must be title|body|both");
-    const formulations: Formulation[] =
-        formulationArg === "both" ? ["title", "body"] : [formulationArg as Formulation];
-    return { system, split, formulations, limit, timeoutMs, seed, offline, multiSweBench };
-}
+import { parseComparatorArgs } from "./args.js";
 
 function reportsDir(): string {
     return join(homedir(), ".cache/pi-smartread-bench/reports");
 }
 
-const args = parseArgs(process.argv.slice(2));
+let args: ReturnType<typeof parseComparatorArgs>;
+try {
+    args = parseComparatorArgs(process.argv.slice(2));
+} catch (error) {
+    console.error(`error: ${(error as Error).message}`);
+    process.exit(2);
+}
 let failed = false;
 try {
     if (args.offline && !existsSync(join(homedir(), ".cache/pi-smartread-bench/datasets/swe-bench-multilingual"))) {
@@ -93,17 +71,56 @@ try {
     const rows = await fetchAllRows({ offline: args.offline });
     const revision = datasetRevision(rows);
     const { instances, skipped } = rowsToInstances(rows);
-    const pilot = selectPilot(instances, args.seed);
-    const manifest: FrozenManifest = freezeManifest(instances, pilot, args.seed, revision);
-    const manifestPath = writeManifest(manifest);
     const byId = new Map(instances.map((i) => [i.instanceId, i]));
-    const splitIds = args.split === "pilot" ? manifest.pilot : manifest.dev;
+    let manifestPath: string;
+    let manifestSha256: string;
+    let splitIds: string[];
+    let manifestLine: string;
+    const extraExcluded: Array<Record<string, unknown>> = [];
+    if (args.manifestPath !== null) {
+        // Frozen run: verify integrity, select the split, never re-freeze or rewrite.
+        const frozen = loadFrozenManifest(args.manifestPath);
+        const { ids, holdoutWarning } = frozenSplitIds(frozen, args.split, { openHoldout: args.openHoldout });
+        if (holdoutWarning !== null) console.log(holdoutWarning);
+        manifestPath = args.manifestPath;
+        manifestSha256 = frozen.sha256;
+        // Frozen dev/holdout spans both datasets: resolve ids missing
+        // from Multilingual via cached Multi-SWE-bench rows (offline
+        // respects the cache; online refreshes it first).
+        const missing = ids.filter((id) => !byId.has(id));
+        if (missing.length > 0) {
+            for (const file of MULTI_SWE_BENCH_FILES) {
+                if (!args.offline) await ensureDatasetFileCached(file);
+                const converted = msbRowsToInstances(await readCachedRows(file));
+                for (const inst of converted.instances) {
+                    if (!byId.has(inst.instanceId)) byId.set(inst.instanceId, inst);
+                }
+            }
+        }
+        splitIds = ids;
+        for (const id of ids) {
+            if (!byId.has(id)) {
+                extraExcluded.push({ instanceId: id, reason: "manifest-id-unresolved", stage: "loader" });
+            }
+        }
+        manifestLine = `manifest: ${manifestPath} (split=${args.split} frozen-dev=${frozen.dev.length} frozen-holdout=${frozen.holdout.length})`;
+    } else {
+        const pilot = selectPilot(instances, args.seed);
+        const manifest: FrozenManifest = freezeManifest(instances, pilot, args.seed, revision);
+        manifestPath = writeManifest(manifest);
+        manifestSha256 = manifest.sha256;
+        splitIds = args.split === "pilot" ? manifest.pilot : manifest.dev;
+        manifestLine = `manifest: ${manifestPath} (pilot=${manifest.pilot.length} dev=${manifest.dev.length} holdout=${manifest.holdout.length})`;
+    }
     let selected = splitIds.map((id) => byId.get(id)).filter((i): i is BenchmarkInstance => i !== undefined);
     if (args.limit !== null) selected = selected.slice(0, args.limit);
 
     const runner = COMPARATORS[args.system];
     const outcomes: ComparatorOutcome[] = [];
-    const excluded: Array<Record<string, unknown>> = [...skipped.map((s) => ({ ...s, stage: "loader" }))];
+    const excluded: Array<Record<string, unknown>> = [
+        ...skipped.map((s) => ({ ...s, stage: "loader" })),
+        ...extraExcluded,
+    ];
     for (const instance of selected) {
         let root: string;
         try {
@@ -153,7 +170,7 @@ try {
         seed: args.seed,
         datasetRevision: revision,
         manifestPath,
-        manifestSha256: manifest.sha256,
+        manifestSha256,
         comparator: comparatorManifest(args.system),
         totalSetupMs,
         summary,
@@ -169,7 +186,7 @@ try {
     );
     writeFileSync(reportPath, JSON.stringify(report, null, 2), { mode: 0o600 });
     console.log(`\nreport: ${reportPath}`);
-    console.log(`manifest: ${manifestPath} (pilot=${manifest.pilot.length} dev=${manifest.dev.length} holdout=${manifest.holdout.length})`);
+    console.log(manifestLine);
     console.log(
         `summary: success@5=${summary.successAt5} meanRecall@5=${summary.meanRecallAt5.toFixed(3)} ` +
             `meanMRR=${summary.meanMRR.toFixed(3)} errors=${summary.errors} excluded=${excluded.length} ` +
