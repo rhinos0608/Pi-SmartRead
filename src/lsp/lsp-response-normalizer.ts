@@ -137,9 +137,22 @@ export interface NormalizedDocumentSymbol {
   /** Present only for the SymbolInformation form (derived from location.uri). */
   uri?: string;
   containerName?: string;
+  /**
+   * Opt-in source provenance for anchor resolution ONLY. Present only when
+   * `normalizeDocumentSymbols` runs with `{ markProvenance: true }`:
+   * `"explicit"` for a genuine `DocumentSymbol.selectionRange`,
+   * `"collapsed"` for a `SymbolInformation.location.range` collapsed onto
+   * the selection (broad range — NEVER an identifier selection). Absent by
+   * default so off-mode envelopes stay byte-identical.
+   */
+  selectionProvenance?: "explicit" | "collapsed";
 }
 
-function normalizeSymbolEntry(entry: unknown): NormalizedDocumentSymbol | null {
+export interface SymbolProvenanceOptions {
+  markProvenance?: boolean;
+}
+
+function normalizeSymbolEntry(entry: unknown, markProvenance: boolean): NormalizedDocumentSymbol | null {
   if (!isPlainObject(entry)) return null;
   if (typeof entry.name !== "string" || entry.name.length === 0) return null;
   if (!isUint(entry.kind)) return null;
@@ -150,11 +163,12 @@ function normalizeSymbolEntry(entry: unknown): NormalizedDocumentSymbol | null {
     const selectionRange = asRange(entry.selectionRange);
     if (!range || !selectionRange) return null;
     const symbol: NormalizedDocumentSymbol = { name: entry.name, kind: entry.kind, range, selectionRange };
+    if (markProvenance) symbol.selectionProvenance = "explicit";
     if (entry.children !== undefined) {
       if (!Array.isArray(entry.children)) return null;
       const children: NormalizedDocumentSymbol[] = [];
       for (const child of entry.children) {
-        const normalized = normalizeSymbolEntry(child);
+        const normalized = normalizeSymbolEntry(child, markProvenance);
         if (!normalized) return null;
         children.push(normalized);
       }
@@ -181,6 +195,8 @@ function normalizeSymbolEntry(entry: unknown): NormalizedDocumentSymbol | null {
       selectionRange: range,
       uri: location.uri,
     };
+    // Collapsed location ranges are broad, not identifier selections.
+    if (markProvenance) symbol.selectionProvenance = "collapsed";
     if (entry.containerName !== undefined) {
       if (typeof entry.containerName !== "string") return null;
       symbol.containerName = entry.containerName;
@@ -196,12 +212,16 @@ function normalizeSymbolEntry(entry: unknown): NormalizedDocumentSymbol | null {
  * null/undefined and empty arrays map to `[]`; a non-array input does not
  * wrap (unlike Location — the protocol never returns a bare symbol here).
  */
-export function normalizeDocumentSymbols(result: unknown): NormalizedDocumentSymbol[] | null {
+export function normalizeDocumentSymbols(
+  result: unknown,
+  opts?: SymbolProvenanceOptions,
+): NormalizedDocumentSymbol[] | null {
   if (result === null || result === undefined) return [];
   if (!Array.isArray(result)) return null;
+  const markProvenance = opts?.markProvenance === true;
   const out: NormalizedDocumentSymbol[] = [];
   for (const entry of result) {
-    const symbol = normalizeSymbolEntry(entry);
+    const symbol = normalizeSymbolEntry(entry, markProvenance);
     if (!symbol) return null;
     out.push(symbol);
   }

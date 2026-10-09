@@ -169,16 +169,19 @@ function extractTRPCRoutes(source: string, filePath: string): RouteInfo[] {
  * Extract HTTP route registrations from a single file.
  * @param filePath - Absolute or relative path to the source file.
  */
-export function extractRoutes(filePath: string): RouteInfo[] {
-  const source = readFileSafe(filePath);
-  if (source === null) return [];
-
+export function extractRoutesFromSource(source: string, filePath: string): RouteInfo[] {
   return [
     ...extractExpressFastifyRoutes(source, filePath),
     ...extractNextAppRouterRoutes(source, filePath),
     ...extractNextPagesRouterRoutes(source, filePath),
     ...extractTRPCRoutes(source, filePath),
   ];
+}
+
+export function extractRoutes(filePath: string): RouteInfo[] {
+  const source = readFileSafe(filePath);
+  if (source === null) return [];
+  return extractRoutesFromSource(source, filePath);
 }
 
 // ── Directory scan ────────────────────────────────────────────────

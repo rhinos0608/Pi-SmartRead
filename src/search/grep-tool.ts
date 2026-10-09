@@ -74,7 +74,7 @@ const TopLevelSkipProperty = {
     skip: Type.Optional(Type.Number({ description: "Matches to skip (pagination) for structural search — routes into structural.skip.", minimum: 0 })),
 };
 
-const PATTERN_DESCRIPTION = "Literal substring by default. Compact regex syntax (|, ^, $, [class], {n}, \\d/\\w/\\s/\\b, \\. or compact foo.*bar / (group) without inner spaces) auto-routes to regex. Multi-line patterns, prose with parenthesised asides, and isolated .* / .+ in multi-word text stay on the smart cascade. Set regex:true to force regex (must be valid) or literal:true to force substring.";
+const PATTERN_DESCRIPTION = "Literal substring by default. Compact regex syntax (|, ^, $, [class], {n}, \\d/\\w/\\s/\\b, \\. or compact foo.*bar / (group) without inner spaces) auto-routes to regex. Multi-line patterns, prose with parenthesised asides, and isolated .* / .+ in multi-word text stay on the smart cascade. Set regex:true to force regex (must be valid, never falls back) or literal:true to force substring. If auto-detected regex matches nothing on multi-word text, grep falls back to the smart cascade and says so.";
 
 const GrepQuerySchema = Type.Object({
     pattern: Type.String({ description: PATTERN_DESCRIPTION, minLength: 1 }),
@@ -99,7 +99,7 @@ const GrepSchema = Type.Object({
 type GrepInput = Static<typeof GrepSchema>;
 export type GrepQueryInput = Static<typeof GrepQuerySchema>;
 
-export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. This is the primary broad/textual discovery tool. Provide exactly one of pattern or queries; queries batches up to 10 full searches. Narrow with path, glob, literal, perQueryLimit, contextLines, and maxResults; graphFilter uses "EDGE_TYPE->target"; structural enables ast-grep search. Pattern matching is literal unless compact regex syntax is detected (multi-line patterns and prose with parenthesised asides stay on the smart cascade), literal:true always forces substring matching, and regex:true forces regex matching (pattern must be a valid regex). After discovery, use read for source content at known paths. Use LSP for exact compiler-backed semantics such as definitions, references, types, hierarchy, diagnostics, and refactor safety. Use inspect for aggregate structural or architectural analysis of a known file/directory, and inspect script only for dependent multi-hop chases.`;
+export const GREP_DESCRIPTION = `Search code for one or more text patterns, symbol names, or concepts. This is the primary broad/textual discovery tool. Provide exactly one of pattern or queries; queries batches up to 10 full searches. Narrow with path, glob, literal, perQueryLimit, contextLines, and maxResults; graphFilter uses "EDGE_TYPE->target"; structural enables ast-grep search. Pattern matching is literal unless compact regex syntax is detected (multi-line patterns and prose with parenthesised asides stay on the smart cascade), literal:true always forces substring matching, and regex:true forces regex matching (pattern must be a valid regex). When auto-detected regex matches nothing on multi-word text, grep falls back to the smart cascade and says so; explicit regex:true never falls back. After discovery, use read for source content at known paths. Use LSP for exact compiler-backed semantics such as definitions, references, types, hierarchy, diagnostics, and refactor safety. Use inspect for aggregate structural or architectural analysis of a known file/directory, and inspect script only for dependent multi-hop chases.`;
 
 // ── Factory ─────────────────────────────────────────────────────────
 
@@ -425,7 +425,7 @@ async function executeGrepQuery(
     const caseSensitive = !(params.ignoreCase ?? false);
     const startTime = Date.now();
 
-    const routing = decideGrepRouting(params.pattern, { literal: (params as any).literal, regex: (params as any).regex });
+    let routing = decideGrepRouting(params.pattern, { literal: (params as any).literal, regex: (params as any).regex });
     const fileGlob = params.glob;
     const hasGraphFilter = params.graphFilter !== undefined;
     if (hasGraphFilter && !parseGraphFilter(params.graphFilter!)) {
@@ -455,7 +455,7 @@ async function executeGrepQuery(
     let rankingKnobs: string[] | undefined;
     for (;;) {
         const textInput = { pattern: params.pattern, searchDir, topK: gatherK, contextLines, caseSensitive, cwd, signal, scopedFile, fileGlob };
-        const searchResult = routing.mode === "regex"
+        let searchResult = routing.mode === "regex"
             ? await runRegexGrep({ ...textInput, pattern: params.pattern })
             : routing.mode === "literal"
                 ? await runLiteralGrep(textInput)
@@ -477,6 +477,27 @@ async function executeGrepQuery(
                         allowExactShortCircuit: !hasGraphFilter,
                     },
                 );
+        if (routing.reason === "auto_regex" && searchResult.hits.length === 0 && isPlausiblyNaturalLanguage(params.pattern)) {
+            // C1: auto-detected regex (never explicit regex:true) that matches
+            // nothing on plausibly-NL multi-word text falls back to the smart
+            // cascade instead of returning empty.
+            searchResult = await runSmartCascade(
+                {
+                    pattern: params.pattern,
+                    searchDir,
+                    gatherK,
+                    contextLines,
+                    caseSensitive,
+                    cwd,
+                    signal,
+                    scopedFile,
+                    fileGlob,
+                    deps: opts,
+                    allowExactShortCircuit: !hasGraphFilter,
+                },
+            );
+            routing = { mode: "smart", reason: "auto_regex_fallback", note: "regex auto-route found nothing; showing smart-cascade results." };
+        }
         let current = searchResult.hits;
         engines = searchResult.engines;
         degradation = searchResult.degradation;
@@ -592,6 +613,10 @@ function resolveSearchScope(cwd: string, inputPath: string | undefined): { searc
     // and the search dir share one root: a symlinked cwd otherwise breaks
     // relative display paths and the glob pre-filter.
     return { searchDir: tryCanonical(target) };
+}
+
+function isPlausiblyNaturalLanguage(pattern: string): boolean {
+    return pattern.trim().split(/\s+/).length >= 2;
 }
 
 export function decideGrepRouting(pattern: string, flags?: { literal?: boolean; regex?: boolean }): GrepRouting {

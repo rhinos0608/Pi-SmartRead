@@ -34,7 +34,6 @@ function makeMockAPI(): {
   return { api, handlers };
 }
 
-
 describe("createExtendedReadTool", () => {
   let tmpDir: string;
 
@@ -222,7 +221,7 @@ describe("registerSessionHooks", () => {
     // Should not throw — no-op path
   });
 
-  it("before_agent_start returns system prompt with SmartRead guidance on first turn", async () => {
+  it("before_agent_start sets stable sections on every run without returning systemPrompt", async () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
@@ -239,28 +238,103 @@ describe("registerSessionHooks", () => {
         makeMockContext(projectDir),
       );
 
-      // Then trigger before_agent_start
-      const result = await handlers.before_agent_start!(
-        { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
-        makeMockContext(projectDir),
-      );
+      // session_start does not await map generation, and before_agent_start
+      // waits at most 750ms for it. On a slow runner the first call can miss
+      // the map, so call again until the cached map is ready.
+      let sections: Record<string, string> = {};
+      const deadline = Date.now() + 12_000;
+      do {
+        sections = {};
+        const result = await handlers.before_agent_start!(
+          {
+            type: "before_agent_start",
+            systemPrompt: "You are a helpful agent.",
+            prompt: "hi",
+            systemPromptOptions: { sections },
+          },
+          makeMockContext(projectDir),
+        );
+        // No forced systemPrompt replacement on the sections path
+        expect(result).toBeUndefined();
+      } while (sections["smartread_repo_map"] === undefined && Date.now() < deadline);
 
-      // Should have appended repo map
-      const typed = result as { systemPrompt?: string } | undefined;
-      expect(typed).toBeDefined();
-      expect(typeof typed!.systemPrompt).toBe("string");
-      const promptText = typed!.systemPrompt;
-      expect(promptText).toContain("SmartRead Tool Guide");
-      expect(promptText).toContain("grep discovers candidates");
-      expect(promptText).toContain("read has no natural-language query mode");
-      expect(promptText).toContain("Inspect does not expose LSP navigation or diagnostics");
-      expect(promptText).toContain("LSP { operation, ... }");
+      // Repo map section is set; the tool guide is no longer injected here
+      expect(sections["smartread_repo_map"]).toContain("index.ts");
+      expect(Object.values(sections).join("\n")).not.toContain("SmartRead Tool Guide");
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }
   }, 15_000);
 
-  it("before_agent_start returns undefined for subsequent turns", async () => {
+  it("before_agent_start sets sections on every run (no first-run-only gate)", async () => {
+    const { api, handlers } = makeMockAPI();
+    registerSessionHooks(api);
+
+    // Tiny isolated project so map + git generation settles well within the
+    // 750ms production startup budget deterministically (the whole checkout
+    // races the budget under full-suite load). Per E1-B/E3 sections are
+    // stable once resolved: a section may appear on a later run if still
+    // pending, but must never change content or disappear.
+    const projectDir = mkdtempSync(join(tmpdir(), "hook-sections-stable-"));
+    writeFileSync(join(projectDir, "package.json"), '{"name":"hook-sections-stable"}\n');
+    writeFileSync(join(projectDir, "index.ts"), "export const ready = true;\n");
+    execFileSync("git", ["init"], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["add", "."], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: projectDir, stdio: "ignore" });
+
+    try {
+      // Prime cache
+      await handlers.session_start!(
+        { type: "session_start", reason: "startup" },
+        makeMockContext(projectDir),
+      );
+
+      const runSections = async (): Promise<Record<string, string>> => {
+        const sections: Record<string, string> = {};
+        const result = await handlers.before_agent_start!(
+          {
+            type: "before_agent_start",
+            systemPrompt: "You are a helpful agent.",
+            prompt: "hi",
+            systemPromptOptions: { sections },
+          },
+          makeMockContext(projectDir),
+        );
+        expect(result).toBeUndefined();
+        return sections;
+      };
+
+      // First call sets sections without returning a replacement
+      let settled = await runSections();
+
+      // Later runs may only ADD a section whose generation was still pending;
+      // a section already present must never change or disappear. Slow runners
+      // (Windows git) can need several runs, so poll until both sections exist.
+      const deadline = Date.now() + 12_000;
+      while (
+        (settled["smartread_repo_map"] === undefined || settled["smartread_git_context"] === undefined)
+        && Date.now() < deadline
+      ) {
+        const next = await runSections();
+        for (const key of Object.keys(settled)) {
+          expect(next[key]).toBe(settled[key]);
+        }
+        settled = next;
+      }
+      expect(settled["smartread_repo_map"]).toContain("index.ts");
+      expect(settled["smartread_git_context"]).toBeDefined();
+
+      // Once generation has settled, a further run must reproduce the
+      // sections exactly (stable for the rest of the session).
+      expect(await runSections()).toEqual(settled);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("before_agent_start falls back to one-time systemPrompt on hosts without sections", async () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
@@ -270,22 +344,24 @@ describe("registerSessionHooks", () => {
       makeMockContext(process.cwd()),
     );
 
-    // First call returns map
-    const first = await handlers.before_agent_start!(
+    // Legacy host: no systemPromptOptions on the event. First run appends
+    // map/git/microagents but never the tool guide.
+    const first = (await handlers.before_agent_start!(
       { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
       makeMockContext(process.cwd()),
-    );
-    expect(first as { systemPrompt?: string }).toBeDefined();
+    )) as { systemPrompt?: string } | undefined;
+    expect(first?.systemPrompt).toContain("You are a helpful agent.");
+    expect(first?.systemPrompt).not.toContain("SmartRead Tool Guide");
 
-    // Second call returns undefined (already injected)
+    // Second run returns undefined (already injected)
     const second = await handlers.before_agent_start!(
       { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
       makeMockContext(process.cwd()),
     );
-    expect(second as { systemPrompt?: string } | undefined).toBeUndefined();
+    expect(second).toBeUndefined();
   });
 
-  it("session_shutdown resets injection flag", async () => {
+  it("session_shutdown resets injection flag so the legacy fallback injects again", async () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 

@@ -53,7 +53,7 @@ export interface GrepHit {
 
 export interface GrepRouting {
     mode: "regex" | "literal" | "smart";
-    reason: "forced_regex" | "forced_literal" | "auto_regex" | "auto_literal" | "auto_declined_newline" | "auto_declined_prose_group" | "auto_declined_prose_wildcard" | "auto_declined_prose_class" | "auto_declined_invalid_regex";
+    reason: "forced_regex" | "forced_literal" | "auto_regex" | "auto_regex_fallback" | "auto_literal" | "auto_declined_newline" | "auto_declined_prose_group" | "auto_declined_prose_wildcard" | "auto_declined_prose_class" | "auto_declined_invalid_regex";
     note?: string;
 }
 
