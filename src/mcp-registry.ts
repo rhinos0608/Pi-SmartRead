@@ -21,6 +21,8 @@ import { createGrepTool } from "./search/grep-tool.js";
 import { createFindTool } from "./search/find-tool.js";
 import { resolveMcpJudge } from "./judge/judge-runtime.js";
 import { createLspTool } from "./lsp/lsp-tool.js";
+import { captureAffordanceSelectors, recordEffectiveAffordanceIdentity, selectSurfaceVariants } from "./runtime/affordances.js";
+import { getSmartReadToolGuidance } from "./runtime/tool-guidance.js";
 import { createEvidenceResolver } from "./evidence/workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
 import { ContextGraph } from "./context-graph.js";
@@ -46,6 +48,12 @@ export {
 // Explicitly initialize registry before declaring tools.
 // Inspect is registered at extension activation time via installInspectAndResolver.
 const registry = ToolRegistry.getInstance();
+const affordanceSelectors = captureAffordanceSelectors();
+const surfaceVariants = selectSurfaceVariants(affordanceSelectors);
+
+export function getMcpAffordanceSelectors() {
+    return affordanceSelectors;
+}
 
 // Shared evidence resolver. Created lazily because the event bus
 // is only available at extension runtime. The factory is stored on
@@ -160,7 +168,13 @@ reg("grep", () => createGrepTool({
     },
 }), ToolCategory.READ);
 reg("find", () => createFindTool({ resolveJudge: (root, _ctx, signal) => resolveMcpJudge(root, signal) }), ToolCategory.READ);
-reg("LSP", () => createLspTool(), ToolCategory.READ);
+reg("LSP", () => {
+    const affordances = affordanceSelectors.general.enabled;
+    const guidance = getSmartReadToolGuidance("LSP", affordances)!;
+    const def = createLspTool({ affordances });
+    recordEffectiveAffordanceIdentity(affordanceSelectors, surfaceVariants, def.parameters, def.description, [guidance.snippet, ...guidance.guidelines].join("\n"));
+    return def;
+}, ToolCategory.READ);
 
 // Inspect tool is registered at extension activation time so it can use
 // the live event bus. We expose a helper that the extension calls to add

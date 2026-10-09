@@ -2,6 +2,7 @@ import {
   SMARTREAD_TOOL_GUIDE_TITLE,
   renderSmartReadToolGuide,
 } from "../runtime/tool-guidance.js";
+import { getMcpAffordanceSelectors } from "../mcp-registry.js";
 
 /**
  * One-line MCP-surface note: the standalone MCP registry does not expose the
@@ -17,7 +18,7 @@ export const MCP_READ_NOTE =
 export const SMARTREAD_MCP_INSTRUCTIONS = [
   SMARTREAD_TOOL_GUIDE_TITLE,
   MCP_READ_NOTE,
-  renderSmartReadToolGuide(),
+  renderSmartReadToolGuide(undefined, getMcpAffordanceSelectors().general.enabled),
 ].join("\n");
 
 /** Second argument for `new Server(info, options)`. */

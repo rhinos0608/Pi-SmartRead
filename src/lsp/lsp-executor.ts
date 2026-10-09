@@ -75,6 +75,15 @@ export interface ExecutorDeps {
   now?: () => number;
   cwd?: string;
   signal?: AbortSignal;
+  /**
+   * INTERNAL opt-in (anchor resolution only): mark normalized
+   * document/workspace symbols with `selectionProvenance` so the anchor
+   * resolver can distinguish a genuine `DocumentSymbol.selectionRange`
+   * from a collapsed `SymbolInformation` range. Absent/false (the default
+   * for every existing caller) yields byte-identical legacy envelopes.
+   * Never a model-facing request field.
+   */
+  includeSymbolProvenance?: boolean;
 }
 
 const sharedCursors = new LspCursorStore();
@@ -270,7 +279,7 @@ function buildParams(req: StrictRequest): Record<string, unknown> {
   }
 }
 
-function normalizeByOp(op: StrictOperation, raw: unknown): { value: unknown; malformed: boolean } {
+function normalizeByOp(op: StrictOperation, raw: unknown, markProvenance: boolean): { value: unknown; malformed: boolean } {
   switch (op) {
     case "goToDefinition": case "goToDeclaration": case "goToTypeDefinition":
     case "goToImplementation": case "findReferences": case "documentHighlights": {
@@ -283,7 +292,7 @@ function normalizeByOp(op: StrictOperation, raw: unknown): { value: unknown; mal
       return v === null ? { value: null, malformed: true } : { value: v, malformed: false };
     }
     case "documentSymbols": case "workspaceSymbols": {
-      const v = normalizeDocumentSymbols(raw);
+      const v = normalizeDocumentSymbols(raw, markProvenance ? { markProvenance: true } : undefined);
       return v === null ? { value: null, malformed: true } : { value: v, malformed: false };
     }
     case "prepareCallHierarchy": case "prepareTypeHierarchy": {
@@ -718,7 +727,7 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
         const fanout = (mgr as ExecutorManager & { workspaceSymbol?: (q: string) => Promise<unknown> }).workspaceSymbol;
         if (typeof fanout === "function") {
           const raw = await fanout.call(mgr, r.query ?? "");
-          const { value, malformed } = normalizeByOp(r.operation, raw);
+          const { value, malformed } = normalizeByOp(r.operation, raw, deps.includeSymbolProvenance === true);
           const info: StrictServerInfo = {
             descriptorId: "unknown",
             name: "unknown",
@@ -861,7 +870,7 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
       // Wire issue with timeout; cancellation wins.
       const params = buildParams(r);
       const raw = await issueWithTimeout(conn!, method, params, timeoutMs, signal);
-      const { value, malformed } = normalizeByOp(r.operation, raw);
+      const { value, malformed } = normalizeByOp(r.operation, raw, deps.includeSymbolProvenance === true);
       if (malformed) {
         return {
           status: classifyStatus({ kind: "transport-error" }),

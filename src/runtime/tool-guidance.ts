@@ -66,6 +66,16 @@ const LSP_GUIDELINES = [
   "Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.",
 ] as const;
 
+const LSP_AFFORDANCE_GUIDANCE: SmartReadToolGuidance = {
+  snippet: "LSP resolves exact declaration-name anchors or compiler-known locations.",
+  guidelines: [
+    "For supported navigation operations, provide symbol and optional path XOR position; an explicit path scopes an exact declaration lookup, while pathless symbols are discovery-only and never auto-dispatched.",
+    "investigate accepts one flat task: definition, type, references, implementations, or callers. Check ambiguous_anchor, anchor_search_incomplete, stale_anchor, and anchor_invalid_path; resolution is bounded to 100 candidates, 6 requests, and 15 seconds.",
+    'Examples: {operation:"investigate",task:"callers",symbol:"start",path:"src/server.ts"}; {operation:"investigate",task:"type",path:"src/server.ts",position:{line:12,character:4}}.',
+    "Positions are 0-based in server.positionEncoding. Rename, formatting, and resolved code-action results remain proposals only; applyProposal is the only mutating operation.",
+  ],
+};
+
 const SKILL_SNIPPET = "skill discovers and reads reusable agent workflow skills.";
 
 const SKILL_GUIDELINES = ["skill: discover and read reusable agent workflow skills."] as const;
@@ -85,7 +95,8 @@ export const SMARTREAD_GUIDED_TOOLS = ["read", "grep", "find", "inspect", "LSP",
 export type SmartReadGuidedTool = (typeof SMARTREAD_GUIDED_TOOLS)[number];
 
 /** Look up per-tool guidance by tool name; undefined when no guidance exists. */
-export function getSmartReadToolGuidance(toolName: string): SmartReadToolGuidance | undefined {
+export function getSmartReadToolGuidance(toolName: string, affordances = false): SmartReadToolGuidance | undefined {
+  if (toolName === "LSP" && affordances) return LSP_AFFORDANCE_GUIDANCE;
   return SMARTREAD_TOOL_GUIDANCE[toolName];
 }
 
@@ -108,8 +119,11 @@ const TOOL_GUIDE_LINES: string[] = [
   GUIDE_CLOSING,
 ];
 
-export function renderSmartReadToolGuide(task?: string): string {
+export function renderSmartReadToolGuide(task?: string, affordances = false): string {
   const trimmedTask = task?.trim();
   const taskLine = trimmedTask ? [`Task: ${trimmedTask}`, ""] : [];
-  return [...taskLine, ...TOOL_GUIDE_LINES].join("\n");
+  const lines = affordances
+    ? [...SMARTREAD_GUIDED_TOOLS.flatMap((toolName) => guideSection(toolName, getSmartReadToolGuidance(toolName, true)!))]
+    : TOOL_GUIDE_LINES.slice(1, -1);
+  return [...taskLine, affordances ? GUIDE_LEAD.replace("LSP answers exact compiler/language-server semantic questions", "LSP resolves exact declarations and compiler-known locations") : GUIDE_LEAD, ...lines, GUIDE_CLOSING].join("\n");
 }

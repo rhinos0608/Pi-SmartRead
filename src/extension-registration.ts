@@ -38,6 +38,7 @@ import { createLanguageIntelligenceProvider } from "./language-intelligence/lang
 import { setWorkspaceEditBus } from "./lsp/lsp-workspace-edit.js";
 import { resetDoomLoopState } from "./runtime/doom-loop.js";
 import { getSmartReadToolGuidance } from "./runtime/tool-guidance.js";
+import { recordEffectiveAffordanceIdentity, selectSurfaceVariants, type AffordanceSelectors } from "./runtime/affordances.js";
 import type { ActivationState } from "./extension-lifecycle.js";
 
 // ── Symbol resolution for read { symbol } (WP-5) ────────────────
@@ -166,10 +167,19 @@ export function registerGrepTool(state: ActivationState): void {
   state.grepRegisteredRef.current = true;
 }
 
-export function registerLspTool(state: ActivationState): void {
+export function registerLspTool(state: ActivationState, selectors: AffordanceSelectors): void {
   void state;
-  const lspDef = createLspTool();
-  const lspGuidance = getSmartReadToolGuidance("LSP");
+  const lspDef = createLspTool({ affordances: selectors.general.enabled });
+  const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled);
+  if (lspGuidance) {
+    recordEffectiveAffordanceIdentity(
+      selectors,
+      selectSurfaceVariants(selectors),
+      lspDef.parameters,
+      lspDef.description,
+      [lspGuidance.snippet, ...lspGuidance.guidelines].join("\n"),
+    );
+  }
   ToolRegistry.getInstance().registerOrReplace({
     name: "LSP",
     description: lspDef.description,

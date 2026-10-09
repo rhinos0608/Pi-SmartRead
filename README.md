@@ -348,6 +348,8 @@ encoding. The response reports that encoding in `server.positionEncoding`.
 | Editor     | `completion`, `resolveCompletion`, `signatureHelp`, `inlayHints`, `resolveInlayHint`, `semanticTokens`, `foldingRanges`, `selectionRanges` |
 | Raw        | `request`, for an allowlist of read-only LSP methods               |
 
+With `PI_SMARTREAD_AFFORDANCES=1`, LSP also accepts exact declaration-name anchors and the flat `investigate` tasks. A symbol may include `path` to scope a declaration lookup; without a path, it is discovery-only and is never auto-dispatched. This opt-in surface is experimental and disabled by default.
+
 The tool fails closed:
 
 - Unknown operations, extra fields, bad positions and missing required

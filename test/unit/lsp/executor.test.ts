@@ -948,4 +948,33 @@ describe("executor", () => {
     expect(acquisitions).toBe(2);
     expect(liveRequests).toBe(0);
   });
+  it("symbol provenance: default envelopes carry no marker; opt-in marks explicit/collapsed", async () => {
+    const range = (sl: number, sc: number, el: number, ec: number) => ({
+      start: { line: sl, character: sc },
+      end: { line: el, character: ec },
+    });
+    const raw = [
+      { name: "C", kind: 5, range: range(0, 0, 5, 0), selectionRange: range(0, 6, 0, 7) },
+      { name: "fn", kind: 12, location: { uri: "file:///repo/a.ts", range: range(0, 0, 1, 0) } },
+    ];
+    const run = (extra: Record<string, unknown> = {}) => {
+      const c = conn({ getCapabilityRegistry: () => ({ can: () => true }), requestImpl: async () => raw });
+      return executeLspOperation({ operation: "documentSymbols", path: "a.ts" }, {
+        cwd: ROOT,
+        acquire: async () => ({ conn: c, key: "k" }),
+        release: () => {},
+        ...extra,
+      });
+    };
+    const off = await run();
+    expect(off.status).toBe("ok");
+    for (const entry of off.result as Array<Record<string, unknown>>) {
+      expect("selectionProvenance" in entry).toBe(false);
+    }
+    const on = await run({ includeSymbolProvenance: true });
+    expect(on.status).toBe("ok");
+    const rows = on.result as Array<Record<string, unknown>>;
+    expect(rows[0]!["selectionProvenance"]).toBe("explicit");
+    expect(rows[1]!["selectionProvenance"]).toBe("collapsed");
+  });
 });

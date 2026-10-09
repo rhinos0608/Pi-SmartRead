@@ -170,6 +170,42 @@ describe("normalizeDocumentSymbols — DocumentSymbol[] | SymbolInformation[]", 
     expect(normalizeDocumentSymbols([{ name: "fn", kind: 12, location: "file:///a.ts" }])).toBeNull();
   });
 
+  it("off-mode default carries no selection provenance (byte-identical legacy shape)", () => {
+    const out = normalizeDocumentSymbols([
+      { name: "C", kind: 5, range: R(0, 0, 5, 0), selectionRange: R(0, 6, 0, 7) },
+      { name: "fn", kind: 12, location: { uri: "file:///a.ts", range: R(0, 0, 1, 0) } },
+    ]);
+    expect(out).toHaveLength(2);
+    for (const entry of out ?? []) {
+      expect("selectionProvenance" in entry).toBe(false);
+    }
+    expect(JSON.stringify(out)).toBe(
+      JSON.stringify([
+        { name: "C", kind: 5, range: R(0, 0, 5, 0), selectionRange: R(0, 6, 0, 7) },
+        { name: "fn", kind: 12, range: R(0, 0, 1, 0), selectionRange: R(0, 0, 1, 0), uri: "file:///a.ts" },
+      ]),
+    );
+  });
+
+  it("opt-in provenance marks genuine selectionRange explicit and collapsed SymbolInformation ranges", () => {
+    const out = normalizeDocumentSymbols(
+      [
+        {
+          name: "C",
+          kind: 5,
+          range: R(0, 0, 5, 0),
+          selectionRange: R(0, 6, 0, 7),
+          children: [{ name: "m", kind: 6, range: R(1, 0, 2, 0), selectionRange: R(1, 4, 1, 5) }],
+        },
+        { name: "fn", kind: 12, location: { uri: "file:///a.ts", range: R(0, 0, 1, 0) } },
+      ],
+      { markProvenance: true },
+    );
+    expect(out?.[0]?.selectionProvenance).toBe("explicit");
+    expect(out?.[0]?.children?.[0]?.selectionProvenance).toBe("explicit");
+    expect(out?.[1]?.selectionProvenance).toBe("collapsed");
+  });
+
   it("rejects the whole list when any child symbol is malformed", () => {
     expect(
       normalizeDocumentSymbols([

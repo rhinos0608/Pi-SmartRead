@@ -1,0 +1,497 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`default off-mode surface baseline > locks inspect, grep, find, Pi guidance, and MCP instructions/tool descriptions and schemas 1`] = `
+{
+  "guidance": {
+    "LSP": {
+      "guidelines": [
+        "LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals.",
+        "Positions are 0-based in server.positionEncoding.",
+        "Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals only; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path.",
+        "Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.",
+      ],
+      "snippet": "LSP answers exact compiler/language-server semantic questions — the only path to safe rename/refactor proposals.",
+    },
+    "find": {
+      "guidelines": [
+        "find locates files and directories only — never line ranges (those stay in grep). For line-level content search inside files use grep instead.",
+      ],
+      "snippet": "find locates files and directories by glob, name fragment, or description.",
+    },
+    "grep": {
+      "guidelines": [
+        "grep discovers candidates with lexical/BM25/symbol/semantic layers and batch queries; use structural for AST-grep matching and graphFilter for graph-constrained discovery.",
+        "Grep returns search-match evidence only, so read the source before editing it.",
+      ],
+      "snippet": "grep discovers candidates across text, symbols, and concepts — start broad code discovery here.",
+    },
+    "inspect": {
+      "guidelines": [
+        "inspect analyzes aggregate structure/architecture: file mode gives dependencies/dependents, call graph, impact, dead code, routes, and quality signals; directory mode gives the ranked map, clusters, layers, service boundaries, and hotspots.",
+        "Inspect does not expose LSP navigation or diagnostics: for compiler-known facts about an exact symbol/location use LSP instead.",
+        "inspect { mode: 'script', script } composes a bounded dependent multi-hop investigation when later grep/read/LSP/graph calls depend on earlier results. Do not use script for a lookup that one direct tool call covers.",
+      ],
+      "snippet": "inspect analyzes aggregate structure/architecture of a known file or the repository — never raw content reads.",
+    },
+    "read": {
+      "guidelines": [
+        "read takes exactly one selector: { path, offset?, limit? } for one known file, { paths: [...] } for several, or { symbol, offset?, limit? } for an already-known qualified symbol. read has no natural-language query mode.",
+        "Only complete rendered read blocks provide strong evidence for patch; partial or omitted packed blocks are not authorized.",
+        "Large supported source files read without offset/limit may return a compact AST outline instead of the full body, so use offset/limit or symbol for specific slices.",
+      ],
+      "snippet": "read returns already-known source content with strong workspace evidence — no discovery; use grep or find to locate content first.",
+    },
+    "skill": {
+      "guidelines": [
+        "skill: discover and read reusable agent workflow skills.",
+      ],
+      "snippet": "skill discovers and reads reusable agent workflow skills.",
+    },
+  },
+  "mcpInstructions": "SmartRead Tool Guide
+In standalone MCP the Pi-only wrapped \`read\` tool is not exposed: use your host's own file reading in place of SmartRead read.
+Tool split: grep discovers candidates, read returns already-known source content, inspect analyzes aggregate structure/architecture, and LSP answers exact compiler/language-server semantic questions. Only complete rendered read blocks provide strong evidence for patch:
+- read: read returns already-known source content with strong workspace evidence — no discovery; use grep or find to locate content first. read takes exactly one selector: { path, offset?, limit? } for one known file, { paths: [...] } for several, or { symbol, offset?, limit? } for an already-known qualified symbol. read has no natural-language query mode. Only complete rendered read blocks provide strong evidence for patch; partial or omitted packed blocks are not authorized. Large supported source files read without offset/limit may return a compact AST outline instead of the full body, so use offset/limit or symbol for specific slices.
+- grep: grep discovers candidates across text, symbols, and concepts — start broad code discovery here. grep discovers candidates with lexical/BM25/symbol/semantic layers and batch queries; use structural for AST-grep matching and graphFilter for graph-constrained discovery. Grep returns search-match evidence only, so read the source before editing it.
+- find: find locates files and directories by glob, name fragment, or description. find locates files and directories only — never line ranges (those stay in grep). For line-level content search inside files use grep instead.
+- inspect: inspect analyzes aggregate structure/architecture of a known file or the repository — never raw content reads. inspect analyzes aggregate structure/architecture: file mode gives dependencies/dependents, call graph, impact, dead code, routes, and quality signals; directory mode gives the ranked map, clusters, layers, service boundaries, and hotspots. Inspect does not expose LSP navigation or diagnostics: for compiler-known facts about an exact symbol/location use LSP instead. inspect { mode: 'script', script } composes a bounded dependent multi-hop investigation when later grep/read/LSP/graph calls depend on earlier results. Do not use script for a lookup that one direct tool call covers.
+- LSP: LSP answers exact compiler/language-server semantic questions — the only path to safe rename/refactor proposals. LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals. Positions are 0-based in server.positionEncoding. Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals only; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path. Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.
+- skill: skill discovers and reads reusable agent workflow skills. skill: discover and read reusable agent workflow skills.
+Prefer narrow params. Large unbounded source reads may return a compact AST outline instead of the full source body, so use offset/limit or symbol for specific slices. After code changes, re-run the reads/inspects/LSP checks that informed decisions.",
+  "mcpReadNote": "In standalone MCP the Pi-only wrapped \`read\` tool is not exposed: use your host's own file reading in place of SmartRead read.",
+  "piGuide": "Tool split: grep discovers candidates, read returns already-known source content, inspect analyzes aggregate structure/architecture, and LSP answers exact compiler/language-server semantic questions. Only complete rendered read blocks provide strong evidence for patch:
+- read: read returns already-known source content with strong workspace evidence — no discovery; use grep or find to locate content first. read takes exactly one selector: { path, offset?, limit? } for one known file, { paths: [...] } for several, or { symbol, offset?, limit? } for an already-known qualified symbol. read has no natural-language query mode. Only complete rendered read blocks provide strong evidence for patch; partial or omitted packed blocks are not authorized. Large supported source files read without offset/limit may return a compact AST outline instead of the full body, so use offset/limit or symbol for specific slices.
+- grep: grep discovers candidates across text, symbols, and concepts — start broad code discovery here. grep discovers candidates with lexical/BM25/symbol/semantic layers and batch queries; use structural for AST-grep matching and graphFilter for graph-constrained discovery. Grep returns search-match evidence only, so read the source before editing it.
+- find: find locates files and directories by glob, name fragment, or description. find locates files and directories only — never line ranges (those stay in grep). For line-level content search inside files use grep instead.
+- inspect: inspect analyzes aggregate structure/architecture of a known file or the repository — never raw content reads. inspect analyzes aggregate structure/architecture: file mode gives dependencies/dependents, call graph, impact, dead code, routes, and quality signals; directory mode gives the ranked map, clusters, layers, service boundaries, and hotspots. Inspect does not expose LSP navigation or diagnostics: for compiler-known facts about an exact symbol/location use LSP instead. inspect { mode: 'script', script } composes a bounded dependent multi-hop investigation when later grep/read/LSP/graph calls depend on earlier results. Do not use script for a lookup that one direct tool call covers.
+- LSP: LSP answers exact compiler/language-server semantic questions — the only path to safe rename/refactor proposals. LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals. Positions are 0-based in server.positionEncoding. Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals only; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path. Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.
+- skill: skill discovers and reads reusable agent workflow skills. skill: discover and read reusable agent workflow skills.
+Prefer narrow params. Large unbounded source reads may return a compact AST outline instead of the full source body, so use offset/limit or symbol for specific slices. After code changes, re-run the reads/inspects/LSP checks that informed decisions.",
+  "tools": [
+    {
+      "description": "Find files and directories by glob pattern, name fragment, or natural-language description. Returns matching paths grouped by directory, relative to the search root. Respects .gitignore. For line-level content search inside files use grep instead.",
+      "name": "find",
+      "schema": {
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results (default: 100, 20 for natural language; max 500)",
+            "type": "number",
+          },
+          "path": {
+            "description": "Directory to search in (default: current directory)",
+            "type": "string",
+          },
+          "pattern": {
+            "description": "Glob pattern, file/dir name fragment, or natural-language description, e.g. '*.ts', 'auth', or 'files that configure the embedding endpoint'",
+            "type": "string",
+          },
+        },
+        "required": [
+          "pattern",
+        ],
+        "type": "object",
+      },
+    },
+    {
+      "description": "Search code for one or more text patterns, symbol names, or concepts. This is the primary broad/textual discovery tool. Provide exactly one of pattern or queries; queries batches up to 10 full searches. Narrow with path, glob, literal, perQueryLimit, contextLines, and maxResults; graphFilter uses "EDGE_TYPE->target"; structural enables ast-grep search. Pattern matching is literal unless compact regex syntax is detected (multi-line patterns and prose with parenthesised asides stay on the smart cascade), literal:true always forces substring matching, and regex:true forces regex matching (pattern must be a valid regex). When auto-detected regex matches nothing on multi-word text, grep falls back to the smart cascade and says so; explicit regex:true never falls back. After discovery, use read for source content at known paths. Use LSP for exact compiler-backed semantics such as definitions, references, types, hierarchy, diagnostics, and refactor safety. Use inspect for aggregate structural or architectural analysis of a known file/directory, and inspect script only for dependent multi-hop chases.",
+      "name": "grep",
+      "schema": {
+        "description": "Primary textual/code discovery search. Provide exactly one of pattern or queries. Narrow with path/glob/literal/regex/perQueryLimit/contextLines; use graphFilter for graph-constrained hits and structural for ast-grep queries. Use LSP instead when exact semantic symbol resolution, references, types, hierarchy, or diagnostics are required.",
+        "properties": {
+          "contextLines": {
+            "default": 2,
+            "description": "Lines of context per match (default: 2, max: 20). Applies after the global output cap.",
+            "maximum": 20,
+            "minimum": 0,
+            "type": "number",
+          },
+          "glob": {
+            "description": "File filter, e.g. '*.ts' or 'src/**/*.py'.",
+            "type": "string",
+          },
+          "graphFilter": {
+            "description": "Filter results by graph relationship. Format: "EDGE_TYPE->target" e.g. "CALLS->auth.login" or "IMPORTED_BY->src/core".",
+            "type": "string",
+          },
+          "ignoreCase": {
+            "description": "Case-insensitive search (default: false).",
+            "type": "boolean",
+          },
+          "limit": {
+            "default": 20,
+            "description": "Deprecated alias for per-query limit (default: 20, max: 100). Use perQueryLimit instead; perQueryLimit wins when both are given.",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "number",
+          },
+          "literal": {
+            "description": "Force exact substring. Disables regex auto-detect, BM25, and semantic (default: false).",
+            "type": "boolean",
+          },
+          "maxResults": {
+            "description": "Global max rendered hits across all queries after cross-query dedup (default: 100, max: 200).",
+            "maximum": 200,
+            "minimum": 1,
+            "type": "number",
+          },
+          "path": {
+            "description": "Directory or file to search in (default: cwd).",
+            "type": "string",
+          },
+          "pattern": {
+            "description": "Literal substring by default. Compact regex syntax (|, ^, $, [class], {n}, \\d/\\w/\\s/\\b, \\. or compact foo.*bar / (group) without inner spaces) auto-routes to regex. Multi-line patterns, prose with parenthesised asides, and isolated .* / .+ in multi-word text stay on the smart cascade. Set regex:true to force regex (must be valid, never falls back) or literal:true to force substring. If auto-detected regex matches nothing on multi-word text, grep falls back to the smart cascade and says so. Provide pattern or queries, not both.",
+            "minLength": 1,
+            "type": "string",
+          },
+          "perQueryLimit": {
+            "description": "Max results per query (default: 20, max: 50). Wins over deprecated limit when both are given.",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "number",
+          },
+          "queries": {
+            "description": "Multiple searches to run in one call. Top-level options are shared defaults; per-query options override them.",
+            "items": {
+              "properties": {
+                "contextLines": {
+                  "default": 2,
+                  "description": "Lines of context per match (default: 2, max: 20). Applies after the global output cap.",
+                  "maximum": 20,
+                  "minimum": 0,
+                  "type": "number",
+                },
+                "glob": {
+                  "description": "File filter, e.g. '*.ts' or 'src/**/*.py'.",
+                  "type": "string",
+                },
+                "graphFilter": {
+                  "description": "Filter results by graph relationship. Format: "EDGE_TYPE->target" e.g. "CALLS->auth.login" or "IMPORTED_BY->src/core".",
+                  "type": "string",
+                },
+                "ignoreCase": {
+                  "description": "Case-insensitive search (default: false).",
+                  "type": "boolean",
+                },
+                "limit": {
+                  "default": 20,
+                  "description": "Deprecated alias for per-query limit (default: 20, max: 100). Use perQueryLimit instead; perQueryLimit wins when both are given.",
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "number",
+                },
+                "literal": {
+                  "description": "Force exact substring. Disables regex auto-detect, BM25, and semantic (default: false).",
+                  "type": "boolean",
+                },
+                "path": {
+                  "description": "Directory or file to search in (default: cwd).",
+                  "type": "string",
+                },
+                "pattern": {
+                  "description": "Literal substring by default. Compact regex syntax (|, ^, $, [class], {n}, \\d/\\w/\\s/\\b, \\. or compact foo.*bar / (group) without inner spaces) auto-routes to regex. Multi-line patterns, prose with parenthesised asides, and isolated .* / .+ in multi-word text stay on the smart cascade. Set regex:true to force regex (must be valid, never falls back) or literal:true to force substring. If auto-detected regex matches nothing on multi-word text, grep falls back to the smart cascade and says so.",
+                  "minLength": 1,
+                  "type": "string",
+                },
+                "perQueryLimit": {
+                  "description": "Max results per query (default: 20, max: 50). Wins over deprecated limit when both are given.",
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "number",
+                },
+                "regex": {
+                  "description": "Force regex matching. Pattern must be a valid regex; conflicts with literal:true.",
+                  "type": "boolean",
+                },
+                "skip": {
+                  "description": "Matches to skip (pagination) for structural search — routes into structural.skip.",
+                  "minimum": 0,
+                  "type": "number",
+                },
+                "structural": {
+                  "description": "Structural search options (ast-grep).",
+                  "properties": {
+                    "groupByFile": {
+                      "description": "Group matches by file.",
+                      "type": "boolean",
+                    },
+                    "language": {
+                      "description": "Structural language override (e.g. 'typescript', 'python').",
+                      "type": "string",
+                    },
+                    "skip": {
+                      "description": "Matches to skip (pagination).",
+                      "minimum": 0,
+                      "type": "number",
+                    },
+                  },
+                  "type": "object",
+                },
+              },
+              "required": [
+                "pattern",
+              ],
+              "type": "object",
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "type": "array",
+          },
+          "regex": {
+            "description": "Force regex matching. Pattern must be a valid regex; conflicts with literal:true.",
+            "type": "boolean",
+          },
+          "skip": {
+            "description": "Matches to skip (pagination) for structural search — routes into structural.skip.",
+            "minimum": 0,
+            "type": "number",
+          },
+          "structural": {
+            "description": "Structural search options (ast-grep).",
+            "properties": {
+              "groupByFile": {
+                "description": "Group matches by file.",
+                "type": "boolean",
+              },
+              "language": {
+                "description": "Structural language override (e.g. 'typescript', 'python').",
+                "type": "string",
+              },
+              "skip": {
+                "description": "Matches to skip (pagination).",
+                "minimum": 0,
+                "type": "number",
+              },
+            },
+            "type": "object",
+          },
+        },
+        "type": "object",
+      },
+    },
+    {
+      "description": "Inspect aggregate code structure and repository architecture for already-known targets. Use { mode: "file", path, analysis? } for structural facts such as dependencies/dependents, call graph, impact, dead code, routes, diff mapping, and quality signals. Use { mode: "directory", path, analysis? } for repository maps, graph summaries, clusters, layers, service boundaries, hotspots, routes, and other architectural views. Use { mode: "script", script, path? } only for bounded dependent multi-hop investigations. Do not use inspect for exact compiler-backed semantic lookup or navigation. Use LSP for definitions, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion/signature/inlay information, and refactor proposals. Use read when you simply need the contents of a known file.",
+      "name": "inspect",
+      "schema": {
+        "additionalProperties": false,
+        "description": "Inspect known code structure and repository architecture. Modes: file (aggregate structural facts + quality signals), directory (repo map + architecture), script (bounded dependent multi-hop composition). Use LSP instead for exact compiler/language-server semantics such as definitions, references, hover, symbols, type/call hierarchy, diagnostics, completion, and refactor proposals.",
+        "properties": {
+          "analysis": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "callDepth": {
+                    "description": "BFS call graph traversal depth (1-5, default 1).",
+                    "maximum": 5,
+                    "minimum": 1,
+                    "type": "number",
+                  },
+                  "callDirection": {
+                    "anyOf": [
+                      {
+                        "const": "callers",
+                        "type": "string",
+                      },
+                      {
+                        "const": "callees",
+                        "type": "string",
+                      },
+                      {
+                        "const": "both",
+                        "type": "string",
+                      },
+                    ],
+                    "description": "Call graph traversal direction. Requires callDepth.",
+                  },
+                  "compact": {
+                    "description": "Compact output (default false for file).",
+                    "type": "boolean",
+                  },
+                  "deadCode": {
+                    "description": "Return zero-caller functions in scope.",
+                    "type": "boolean",
+                  },
+                  "diff": {
+                    "anyOf": [
+                      {
+                        "const": "unstaged",
+                        "type": "string",
+                      },
+                      {
+                        "const": "staged",
+                        "type": "string",
+                      },
+                      {
+                        "const": "HEAD",
+                        "type": "string",
+                      },
+                    ],
+                    "description": "Map git diff to affected symbols with risk classification.",
+                  },
+                  "graphSchema": {
+                    "description": "Return graph structure summary (node/edge counts, sample names).",
+                    "type": "boolean",
+                  },
+                  "hotspots": {
+                    "description": "Top-N functions by fan-in.",
+                    "type": "boolean",
+                  },
+                  "impact": {
+                    "description": "Blast radius: files/symbols reachable from target.",
+                    "type": "boolean",
+                  },
+                  "routes": {
+                    "description": "Extract HTTP route → handler mappings.",
+                    "type": "boolean",
+                  },
+                  "signals": {
+                    "description": "Signals to compute (default: all).",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "const": "complexity",
+                          "type": "string",
+                        },
+                        {
+                          "const": "public-api",
+                          "type": "string",
+                        },
+                        {
+                          "const": "reuse",
+                          "type": "string",
+                        },
+                        {
+                          "const": "recency",
+                          "type": "string",
+                        },
+                        {
+                          "const": "tests",
+                          "type": "string",
+                        },
+                        {
+                          "const": "deprecation",
+                          "type": "string",
+                        },
+                      ],
+                    },
+                    "type": "array",
+                  },
+                },
+                "type": "object",
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "boundaries": {
+                    "description": "Detect service boundaries from monorepo config.",
+                    "type": "boolean",
+                  },
+                  "clusters": {
+                    "description": "Run community detection on import graph.",
+                    "type": "boolean",
+                  },
+                  "compact": {
+                    "description": "Compact output (default true for directory).",
+                    "type": "boolean",
+                  },
+                  "deadCode": {
+                    "description": "Return zero-caller functions in scope.",
+                    "type": "boolean",
+                  },
+                  "diff": {
+                    "anyOf": [
+                      {
+                        "const": "unstaged",
+                        "type": "string",
+                      },
+                      {
+                        "const": "staged",
+                        "type": "string",
+                      },
+                      {
+                        "const": "HEAD",
+                        "type": "string",
+                      },
+                    ],
+                    "description": "Map git diff to affected symbols with risk classification.",
+                  },
+                  "focus": {
+                    "description": "Files/symbols to boost in directory mode.",
+                    "items": {
+                      "type": "string",
+                    },
+                    "type": "array",
+                  },
+                  "graphSchema": {
+                    "description": "Return graph structure summary (node/edge counts, sample names).",
+                    "type": "boolean",
+                  },
+                  "hotspots": {
+                    "description": "Top-N functions by fan-in.",
+                    "type": "boolean",
+                  },
+                  "layers": {
+                    "description": "Derive architectural layers.",
+                    "type": "boolean",
+                  },
+                  "mapTokens": {
+                    "description": "Token budget for directory mode (256-32768, default 4096).",
+                    "maximum": 32768,
+                    "minimum": 256,
+                    "type": "number",
+                  },
+                  "routes": {
+                    "description": "Extract HTTP route → handler mappings.",
+                    "type": "boolean",
+                  },
+                },
+                "type": "object",
+              },
+            ],
+            "description": "Aggregate structural analysis only: file signals/call graph/impact/dead-code/routes, or directory repo map/clusters/layers/boundaries. Do not use for definitions, references, hover, language-server symbols, or diagnostics; use LSP for those. Fields belonging to the other inspect mode are rejected at runtime.",
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "const": "file",
+                "type": "string",
+              },
+              {
+                "const": "directory",
+                "type": "string",
+              },
+              {
+                "const": "script",
+                "type": "string",
+              },
+            ],
+            "description": "Structural/contextual inspect mode. Use file for one artifact, directory for repository architecture, or script for a dependent multi-hop read-only investigation. For compiler-backed semantic lookup/navigation use LSP instead.",
+          },
+          "path": {
+            "description": "Known file or directory target. Required for file/directory; optional cwd anchor for script.",
+            "type": "string",
+          },
+          "script": {
+            "description": "WHEN:
+- running a multi-hop investigation where each call's arguments depend on the previous call's result (grep a symbol, then LSP references on the hit, then graph impact on those files) that would otherwise cost 3+ sequential round trips
+
+WHEN NOT:
+- answering a single lookup that one grep, read, or inspect call already covers
+- reading full file prose directly (use plain read; script mode returns a synthesized JSON result, not raw file text)
+
+RETURNS: the script's JSON return value plus a bounded per-call audit log naming each op, its args, the path or resource touched, and its status.
+
+EXAMPLE: { mode: "script", script: "const g = await grep(\\"handleAuth\\", { literal: true }); const r = await read(\\"src/auth.ts\\"); return { hits: g.totalHits, lines: r.totalLines };" }",
+            "minLength": 1,
+            "type": "string",
+          },
+        },
+        "required": [
+          "mode",
+        ],
+        "type": "object",
+      },
+    },
+  ],
+}
+`;
