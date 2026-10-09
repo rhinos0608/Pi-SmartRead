@@ -6,6 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, openSync, readSync, closeSync, r
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { EdgeType, Provenance } from "../context-graph.js";
+import { isStateRoot } from "../workspace/state-root.js";
 
 function canonicalMutationPath(root: string, value: string): string | null {
   // Split off a `:symbol` suffix, skipping a Windows drive-letter colon
@@ -256,6 +257,8 @@ export class EdgeStore {
   }
 
   private static append(root: string, event: MutationEvent): boolean {
+    // F4: never persist mutation events outside a canonical state root.
+    if (!isStateRoot(root)) return false;
     const valid = EdgeStore.validateEvent(event, root);
     if (!valid) return false;
     const logPath = EdgeStore.getLogPath(root);
