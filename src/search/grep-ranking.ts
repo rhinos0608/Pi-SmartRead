@@ -20,9 +20,17 @@
  *   1 + cov^1.5 * 2 where cov = fraction of distinct query terms present.
  * - PI_SMARTREAD_GREP_RANK_STOPWORDS: on/off — drop NL + programming
  *   keyword stopwords from the query before scoring.
+ * - PI_SMARTREAD_GREP_RANK_STEM: on/off (default off) — reduce query and
+ *   document tokens with a dependency-free Porter English stemmer
+ *   (src/search/english-stemmer.ts) after case/split normalisation.
+ *   Applies ONLY to the natural-language BM25 ranking channel
+ *   (tokenizeRankingQuery + the BM25 fallback corpus scorer);
+ *   identifier/exact/regex/structural channels never stem.
  */
 
 import { DEFAULT_BM25_B, DEFAULT_BM25_K1, tokenize } from "../scoring.js";
+import { porterStem } from "./english-stemmer.js";
+import { isNaturalLanguageQuery } from "./query-intent.js";
 
 export const GREP_RANK_TEST_DEMOTE_ENV_VAR = "PI_SMARTREAD_GREP_RANK_TEST_DEMOTE";
 /** Default test/spec/doc demotion factor (D51: confirmed on the frozen holdout). */
@@ -31,6 +39,7 @@ export const GREP_RANK_FILENAME_ENV_VAR = "PI_SMARTREAD_GREP_RANK_FILENAME";
 export const GREP_RANK_BM25_ENV_VAR = "PI_SMARTREAD_GREP_RANK_BM25";
 export const GREP_RANK_COVERAGE_ENV_VAR = "PI_SMARTREAD_GREP_RANK_COVERAGE";
 export const GREP_RANK_STOPWORDS_ENV_VAR = "PI_SMARTREAD_GREP_RANK_STOPWORDS";
+export const GREP_RANK_STEM_ENV_VAR = "PI_SMARTREAD_GREP_RANK_STEM";
 
 export interface GrepRankingOptions {
   /** Score multiplier for test/spec/doc paths; null = knob off. */
@@ -45,6 +54,8 @@ export interface GrepRankingOptions {
   coverageBoost: boolean;
   /** Drop NL + programming stopwords from the query. */
   stopwords: boolean;
+  /** Reduce NL BM25 query/document tokens with the Porter stemmer. */
+  stemming: boolean;
 }
 
 function isOn(raw: string | undefined): boolean {
@@ -93,6 +104,7 @@ export function resolveGrepRankingOptions(
     bm25b: b,
     coverageBoost: isOn(env[GREP_RANK_COVERAGE_ENV_VAR]),
     stopwords: isOn(env[GREP_RANK_STOPWORDS_ENV_VAR]),
+    stemming: isOn(env[GREP_RANK_STEM_ENV_VAR]),
   };
 }
 
@@ -104,7 +116,8 @@ export function isDefaultRankingOptions(options: GrepRankingOptions): boolean {
     options.bm25k1 === DEFAULT_BM25_K1 &&
     options.bm25b === DEFAULT_BM25_B &&
     !options.coverageBoost &&
-    !options.stopwords
+    !options.stopwords &&
+    !options.stemming
   );
 }
 
@@ -183,10 +196,47 @@ export function filterRankingStopwords(tokens: string[]): string[] {
   );
 }
 
-/** Tokenize a query, applying stopword filtering only when the knob is on. */
+/** Tokenize then Porter-stem, deduping stems (idempotent). */
+export function stemRankingTokens(tokens: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of tokens) {
+    const stem = porterStem(tok);
+    if (!seen.has(stem)) {
+      seen.add(stem);
+      out.push(stem);
+    }
+  }
+  return out;
+}
+
+/** Shared BM25 tokenizer for the NL channel: plain split, or split+stem. */
+export function rankingTokenizer(options: GrepRankingOptions): (text: string) => string[] {
+  if (!options.stemming) return tokenize;
+  return (text: string) => stemRankingTokens(tokenize(text));
+}
+
+/**
+ * Per-query ranking options: the stemming knob applies ONLY to
+ * natural-language-shaped queries (shared isNaturalLanguageQuery
+ * classifier, also used by the judge stage and find routing).
+ * Identifier-shaped queries (single identifiers, camelCase/snake_case/
+ * dotted symbols, code-like patterns) always score unstemmed, so the
+ * corpus cache key and scorer stay identical to knob-off for them.
+ */
+export function resolveRankingForQuery(pattern: string, options: GrepRankingOptions): GrepRankingOptions {
+  if (options.stemming && !isNaturalLanguageQuery(pattern)) return { ...options, stemming: false };
+  return options;
+}
+
+/** Tokenize a query, applying stopword filtering only when the knob is on. Stemming additionally requires an NL-shaped query. */
 export function tokenizeRankingQuery(pattern: string, options: GrepRankingOptions): string[] {
   const tokens = tokenize(pattern);
-  return options.stopwords ? filterRankingStopwords(tokens) : tokens;
+  const filtered = options.stopwords ? filterRankingStopwords(tokens) : tokens;
+  // Defense in depth: even callers that pass knob-level options without
+  // per-query resolution never stem identifier-shaped queries.
+  const stem = options.stemming && isNaturalLanguageQuery(pattern);
+  return stem ? stemRankingTokens(filtered) : filtered;
 }
 
 /**
@@ -202,11 +252,19 @@ export function withFilenameHeader(content: string, relFile: string): string {
  * coverage), where cov = fraction of distinct query terms present in the
  * lowercased document text.
  */
-export function coverageBoostFactor(queryTokens: string[], lowerContent: string): number {
+export function coverageBoostFactor(queryTokens: string[], lowerContent: string, stem = false): number {
   const distinct = [...new Set(queryTokens)];
   if (distinct.length === 0) return 1;
   let present = 0;
-  for (const tok of distinct) if (lowerContent.includes(tok)) present++;
+  if (stem) {
+    // Stemmed query tokens rarely occur as raw substrings ("poni" vs
+    // "ponies"), so compare stemmed token sets on both sides. Off
+    // (default) keeps the byte-identical substring check.
+    const contentStems = new Set(stemRankingTokens(tokenize(lowerContent)));
+    for (const tok of distinct) if (contentStems.has(tok)) present++;
+  } else {
+    for (const tok of distinct) if (lowerContent.includes(tok)) present++;
+  }
   const coverage = Math.min(1, present / distinct.length);
   return 1 + Math.pow(coverage, 1.5) * 2;
 }
@@ -221,14 +279,19 @@ export function activeRankingKnobs(options: GrepRankingOptions): string[] {
   }
   if (options.coverageBoost) knobs.push("coverage");
   if (options.stopwords) knobs.push("stopwords");
+  if (options.stemming) knobs.push("stem");
   return knobs;
 }
 
 /**
- * Corpus-cache key segment for ranking knobs. Only knobs that change the
- * indexed document need cache isolation (filename prepending); score-only
- * knobs (demotion, coverage, k1/b, stopwords-as-query-filter) reuse corpora.
+ * Corpus-cache key segment for ranking knobs. Knobs that change the
+ * indexed document need cache isolation (filename prepending, stemming
+ * which changes the token stream); score-only knobs (demotion, coverage,
+ * k1/b, stopwords-as-query-filter) reuse corpora.
  */
 export function rankingCorpusKeySegment(options: GrepRankingOptions): string {
-  return options.filenamePrepend ? "filename=1" : "";
+  const parts: string[] = [];
+  if (options.filenamePrepend) parts.push("filename=1");
+  if (options.stemming) parts.push("stem=1");
+  return parts.join("\u0000");
 }
