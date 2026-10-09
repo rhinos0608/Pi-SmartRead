@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,7 +6,13 @@ import { readCoverage, recordCoverage, summarizeCoverage, writeCoverage } from "
 
 let root: string;
 
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), "smartread-coverage-")); });
+// F4 behaviour change: coverage persists only at a canonical state root, so
+// the fixture declares its temp dir a project (non-git marker) root — the
+// round-trip assertions below encoded the old markerless-root persistence.
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "smartread-coverage-"));
+  writeFileSync(join(root, "package.json"), "{}\n");
+});
 afterEach(() => { rmSync(root, { recursive: true, force: true }); });
 
 describe("index coverage", () => {

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,8 +6,12 @@ import { computeSourceHash, readSnapshot, snapshotPath, verifySnapshot, writeSna
 
 let root: string;
 
+// F4 behaviour change: snapshots persist only at a canonical state root; the
+// fixture declares its temp dir a project root so the round-trip assertions
+// still exercise a real write (they encoded the old markerless-root write).
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "smartread-snapshot-"));
+  writeFileSync(join(root, "package.json"), "{}\n");
 });
 
 afterEach(() => {

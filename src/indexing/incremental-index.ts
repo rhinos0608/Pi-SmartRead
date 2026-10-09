@@ -24,6 +24,7 @@ import {
   join,
 } from "node:path";
 import { withIndexLockSync } from "./index-lock.js";
+import { isStateRoot } from "../workspace/state-root.js";
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -134,6 +135,9 @@ export function saveCache(
   directories: Record<string, number>,
 ): void {
   try {
+    const root = dirname(dirname(cachePath));
+    // F4: the hash cache persists only at a canonical state root.
+    if (!isStateRoot(root)) return;
     const dir = dirname(cachePath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
@@ -143,7 +147,6 @@ export function saveCache(
       files,
       directories,
     };
-    const root = dirname(dirname(cachePath));
     withIndexLockSync(root, "file-hashes", () => {
       writeFileSync(cachePath, JSON.stringify(data, null, 2), "utf-8");
     });
@@ -202,6 +205,8 @@ const HARD_SKIP_DIRS = new Set([
   ".hg",
   "node_modules",
   ".pi-smartread",
+  ".pi-smartread.tags.cache",
+  ".pi-smartread.embeddings.cache",
   ".pi",
   ".yarn",
   ".pnp",
@@ -517,6 +522,8 @@ function detectChangesFromMaps(
  * Forces next buildCache() to do a full scan.
  */
 export function invalidateCache(rootDir: string): void {
+  // F4: no cache writes (including reset markers) outside a canonical state root.
+  if (!isStateRoot(rootDir)) return;
   const cachePath = cacheFilePath(resolve(rootDir));
   try {
     const data: SerializedCache = { version: CACHE_VERSION, files: {}, directories: {} };
