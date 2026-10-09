@@ -662,6 +662,8 @@ describe("runD46Cli --cohort-dir selection cohort (temp fixture only)", () => {
         mkdirSync(checkout, { recursive: true });
         writeFileSync(join(checkout, "a.ts"), "export const x = 1;\n");
         execFileSync("git", ["-C", checkout, "init", "-q"]);
+        execFileSync("git", ["-C", checkout, "config", "user.email", "t@example.invalid"]);
+        execFileSync("git", ["-C", checkout, "config", "user.name", "t"]);
         execFileSync("git", ["-C", checkout, "add", "."]);
         execFileSync("git", ["-C", checkout, "commit", "-qm", "init"]);
         const sha = execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
