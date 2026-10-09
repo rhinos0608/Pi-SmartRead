@@ -179,6 +179,40 @@ describe("grep regex routing — routing-note rendering (D22)", () => {
     });
 });
 
+describe("grep regex routing — auto-regex zero-hit fallback to smart cascade (C1)", () => {
+    const NL_WITH_ASIDE = "token validation fails when the header is missing (SSR)";
+
+    it("NL query with a parenthesised aside falls back to the smart cascade", async () => {
+        const { details, text } = await run({ pattern: NL_WITH_ASIDE });
+        expect(details.routing.mode).toBe("smart");
+        expect(details.routing.reason).toBe("auto_regex_fallback");
+        expect(details.totalHits).toBeGreaterThan(0);
+        expect(text).toContain("regex auto-route found nothing; showing smart-cascade results");
+    });
+
+    it("explicit regex:true never falls back", async () => {
+        const { details, text } = await run({ pattern: NL_WITH_ASIDE, regex: true });
+        expect(details.routing.mode).toBe("regex");
+        expect(details.routing.reason).toBe("forced_regex");
+        expect(details.totalHits).toBe(0);
+        expect(text).not.toContain("smart-cascade results");
+    });
+
+    it("explicit literal:true never falls back", async () => {
+        const { details, text } = await run({ pattern: NL_WITH_ASIDE, literal: true });
+        expect(details.routing.mode).toBe("literal");
+        expect(details.totalHits).toBe(0);
+        expect(text).not.toContain("smart-cascade results");
+    });
+
+    it("single-token compact regex with zero hits does not fall back", async () => {
+        const { details } = await run({ pattern: "zzz.*qqq", path: "src/login.ts" });
+        expect(details.routing.mode).toBe("regex");
+        expect(details.routing.reason).toBe("auto_regex");
+        expect(details.totalHits).toBe(0);
+    });
+});
+
 describe("grep regex routing — surface", () => {
     it("single details identify routing and declined syntax renders a note", async () => {
         const { details, text } = await run({ pattern: "handleLogin (the main entry point) returns null" });

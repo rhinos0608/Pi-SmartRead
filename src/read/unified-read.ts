@@ -8,7 +8,15 @@
  */
 import { createExtendedReadTool, type WrapReadToolOptions } from "../hook.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { getSmartReadToolGuidance } from "../runtime/tool-guidance.js";
 
 export function createReadTool(opts?: WrapReadToolOptions): ToolDefinition {
-  return createExtendedReadTool(opts);
+  const base = createExtendedReadTool(opts);
+  const guidance = getSmartReadToolGuidance("read");
+  if (guidance === undefined) return base;
+  return {
+    ...base,
+    promptSnippet: guidance.snippet,
+    promptGuidelines: [...guidance.guidelines],
+  } as unknown as ToolDefinition;
 }

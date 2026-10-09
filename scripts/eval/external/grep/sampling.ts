@@ -59,7 +59,8 @@ export function seededShuffle<T>(items: T[], seed: string): T[] {
     return out;
 }
 
-function patchSizeBucket(instance: BenchmarkInstance): number {
+/** Patch-size bucket shared by the D15 split and the E15 retrieval holdout: 0 = single-file single-hunk, 1 = small multi-file/hunk, 2 = large. */
+export function patchSizeBucket(instance: BenchmarkInstance): number {
     const hunks = instance.goldHunks.reduce((a, h) => a + h.ranges.length, 0);
     if (hunks <= 1 && instance.goldFiles.length === 1) return 0;
     if (instance.goldFiles.length <= 2 && hunks <= 4) return 1;

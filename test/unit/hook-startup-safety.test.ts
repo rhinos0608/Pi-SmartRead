@@ -59,6 +59,50 @@ describe("startup repo-map safety", () => {
     ) as { systemPrompt?: string } | undefined;
 
     expect(result?.systemPrompt).toContain("Repository Map");
+    expect(result?.systemPrompt).not.toContain("SmartRead Tool Guide");
+  }, 1_000);
+
+  it("writes stable sections on every run without depending on LSP", async () => {
+    const root = mkdtempSync(join(tmpdir(), "smartread-startup-sections-"));
+    roots.push(root);
+    mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
+    writeFileSync(join(root, "index.js"), "export const value = 1;\n");
+
+    const { api, handlers } = makeMockAPI();
+    registerSessionHooks(api);
+    await handlers.session_start?.(
+      { type: "session_start", reason: "startup" },
+      makeContext(root),
+    );
+
+    const firstSections: Record<string, string> = {};
+    const first = await handlers.before_agent_start?.(
+      {
+        type: "before_agent_start",
+        systemPrompt: "base",
+        prompt: "hi",
+        systemPromptOptions: { sections: firstSections },
+      },
+      makeContext(root),
+    );
+    expect(first).toBeUndefined();
+    expect(firstSections["smartread_repo_map"]).toContain("index.js");
+    expect(Object.values(firstSections).join("\n")).not.toContain("SmartRead Tool Guide");
+
+    // Second run sets the same sections again instead of returning a replacement
+    const secondSections: Record<string, string> = {};
+    const second = await handlers.before_agent_start?.(
+      {
+        type: "before_agent_start",
+        systemPrompt: "base",
+        prompt: "hi",
+        systemPromptOptions: { sections: secondSections },
+      },
+      makeContext(root),
+    );
+    expect(second).toBeUndefined();
+    expect(secondSections).toEqual(firstSections);
   }, 1_000);
 
   it("recognizes a non-git project from a parent manifest", async () => {
@@ -82,6 +126,7 @@ describe("startup repo-map safety", () => {
     ) as { systemPrompt?: string } | undefined;
 
     expect(result?.systemPrompt).toContain("Repository Map");
+    expect(result?.systemPrompt).not.toContain("SmartRead Tool Guide");
   });
 
   it("does not scan a directory without project markers", async () => {
@@ -102,6 +147,6 @@ describe("startup repo-map safety", () => {
     ) as { systemPrompt?: string } | undefined;
 
     expect(result?.systemPrompt).not.toContain("Repository Map");
-    expect(result?.systemPrompt).toContain("SmartRead Tool Guide");
+    expect(result?.systemPrompt).not.toContain("SmartRead Tool Guide");
   });
 });
