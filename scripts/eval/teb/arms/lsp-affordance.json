@@ -1,0 +1,16 @@
+{
+  "baseline": {
+    "expectedIdentity": { "general": false, "inspect": false },
+    "env": {
+      "PI_SMARTREAD_AFFORDANCES": "0",
+      "PI_SMARTREAD_INSPECT_AFFORDANCES": "0"
+    }
+  },
+  "lsp-affordance": {
+    "expectedIdentity": { "general": true, "inspect": false },
+    "env": {
+      "PI_SMARTREAD_AFFORDANCES": "1",
+      "PI_SMARTREAD_INSPECT_AFFORDANCES": "0"
+    }
+  }
+}

@@ -5,7 +5,7 @@
  * without --open-holdout/--freeze, freeze arm mismatch, freeze
  * engine-hash mismatch, and holdout redaction (no query text or gold).
  */
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, existsSync, realpathSync, readdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, existsSync, realpathSync, readdirSync, readFileSync, copyFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import {
     d46ReportFileHit,
     isCleanPorcelain,
     parseD46RunArgs,
+    pinnedCohortQueryFileNames,
     redactForHoldout,
     resolveD46ReportsDir,
     resolveD46ScoringTotalHits,
@@ -104,10 +105,22 @@ describe("parseD46RunArgs", () => {
     it("parses the documented CLI surface", () => {
         expect(
             parseD46RunArgs(["--split", "dev", "--config", "off", "--replicate", "2"]),
-        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false, reportsDir: null, existsEvidence: null });
+        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false, reportsDir: null, existsEvidence: null, cohortDir: null });
         expect(
             parseD46RunArgs(["--split", "holdout", "--repo", "a__b", "--freeze", "f", "--open-holdout"]),
-        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true, reportsDir: null, existsEvidence: null });
+        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true, reportsDir: null, existsEvidence: null, cohortDir: null });
+    });
+
+    it("parses --split selection with --cohort-dir", () => {
+        expect(parseD46RunArgs(["--split", "selection", "--cohort-dir", "/tmp/cohort"])).toEqual({
+            split: "selection", repo: null, config: "off", replicate: 1, freeze: null, openHoldout: false, reportsDir: null, existsEvidence: null, cohortDir: "/tmp/cohort",
+        });
+    });
+
+    it("rejects selection without --cohort-dir and --cohort-dir without selection", () => {
+        expect(() => parseD46RunArgs(["--split", "selection"])).toThrow();
+        expect(() => parseD46RunArgs(["--split", "dev", "--cohort-dir", "/tmp/cohort"])).toThrow();
+        expect(() => parseD46RunArgs(["--split", "holdout", "--cohort-dir", "/tmp/cohort"])).toThrow();
     });
 
     it("rejects bad split/config/replicate", () => {
@@ -210,6 +223,7 @@ describe("checkHoldoutGuard refusals", () => {
         rankBm25b: 0.75,
         rankCoverage: false,
         rankStopwords: false,
+        rankStem: false,
     };
     const freeze = { engineSourceHash: "sha256:abc:1-files", arms: [{ config: "off" as const, replicate: 1, ranking }] };
     const base = {
@@ -634,5 +648,100 @@ describe("wrapJudge", () => {
         await expect(wrapped.judgeNouls(input)).rejects.toThrow("judge boom");
         expect(invoked).toBe(1);
         expect(calls).toEqual([]);
+    });
+});
+
+describe("runD46Cli --cohort-dir selection cohort (temp fixture only)", () => {
+    function buildCohort(opts: { tamperQuery?: boolean; dropManifest?: boolean; manifestInsideAdjudicated?: boolean } = {}): {
+        cohortDir: string;
+        reportsDir: string;
+    } {
+        const cohortDir = realpathSync(mkdtempSync(join(tmpdir(), "d46-cohort-")));
+        const reposRoot = join(cohortDir, "repos");
+        const checkout = join(reposRoot, "acme__widget");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(join(checkout, "a.ts"), "export const x = 1;\n");
+        execFileSync("git", ["-C", checkout, "init", "-q"]);
+        execFileSync("git", ["-C", checkout, "config", "user.email", "t@example.invalid"]);
+        execFileSync("git", ["-C", checkout, "config", "user.name", "t"]);
+        execFileSync("git", ["-C", checkout, "add", "."]);
+        execFileSync("git", ["-C", checkout, "commit", "-qm", "init"]);
+        const sha = execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const repos = [
+            {
+                owner: "acme", name: "widget", split: "selection" as const, sha, branch: "main",
+                license: { spdx: "MIT", file: "LICENSE", sha256: "0".repeat(64) },
+                corpusRoot: ".", fileCount: 1, workingTree: "clean",
+            },
+        ];
+        writeFileSync(join(cohortDir, "repos.json"), JSON.stringify({ version: 1, createdAt: "2026-10-07T00:00:00Z", reposDir: reposRoot, repos }));
+        const adj = join(cohortDir, "adjudicated");
+        mkdirSync(adj, { recursive: true });
+        const query = {
+            id: "acme__widget-behaviour-01", repo: "acme/widget", split: "selection", class: "behaviour",
+            query: "synthetic selection query", gold: [{ path: "a.ts", startLine: 1, endLine: 1, grade: 1 }],
+            rationale: "synthetic", author: "adjudicator:test", authoredAt: "2026-10-07T00:00:00Z",
+        };
+        writeFileSync(join(adj, "acme__widget.jsonl"), `${JSON.stringify(query)}\n`);
+        const loaded = loadSplitQueries(adj, pinnedCohortQueryFileNames(repos));
+        expect(loaded.errors).toEqual([]);
+        const manifestPath = writeSplitManifest(adj, "selection", loaded, repos);
+        if (opts.dropManifest) {
+            unlinkSync(manifestPath);
+        } else if (!opts.manifestInsideAdjudicated) {
+            copyFileSync(manifestPath, join(cohortDir, "MANIFEST.sha256.json"));
+        }
+        if (opts.tamperQuery) {
+            writeFileSync(join(adj, "acme__widget.jsonl"), `${JSON.stringify({ ...query, id: "tampered" })}\n`);
+        }
+        const reportsDir = realpathSync(mkdtempSync(join(tmpdir(), "d46-cohort-reports-")));
+        return { cohortDir, reportsDir };
+    }
+
+    it("fails closed when the cohort manifest is missing", async () => {
+        const { cohortDir, reportsDir } = buildCohort({ dropManifest: true });
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(2);
+    });
+
+    it("fails closed when an adjudicated file hash mismatches the seal", async () => {
+        const { cohortDir, reportsDir } = buildCohort({ tamperQuery: true });
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(2);
+    });
+
+    it("runs the selection cohort with dev-shaped metrics and a fresh-cohort report", async () => {
+        const { cohortDir, reportsDir } = buildCohort();
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(0);
+        const files = readdirSync(reportsDir).filter((f) => f.endsWith(".json"));
+        expect(files.length).toBe(1);
+        const report = JSON.parse(readFileSync(join(reportsDir, files[0] as string), "utf8"));
+        // Selection query text MAY appear in reports (no holdout redaction):
+        // rows carry `query`/`gold` exactly like --split dev.
+        expect(report.queries[0].query).toBe("synthetic selection query");
+        expect(report.queries[0].gold).toEqual([{ path: "a.ts", startLine: 1, endLine: 1, grade: 1 }]);
+        expect(report.split).toBe("selection");
+        expect(report.manifest.corpusKind).toBe("fresh-cohort-checkouts");
+        expect(report.summary.overall.queries).toBe(1);
+        expect(report.summary.overall).toHaveProperty("successAt5");
+    });
+
+    it("supports the manifest inside the adjudicated dir", async () => {
+        const { cohortDir, reportsDir } = buildCohort({ manifestInsideAdjudicated: true });
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(0);
     });
 });
