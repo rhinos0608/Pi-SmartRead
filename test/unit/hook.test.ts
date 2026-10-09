@@ -307,24 +307,32 @@ describe("registerSessionHooks", () => {
       };
 
       // First call sets sections without returning a replacement
-      const firstSections = await runSections();
+      let settled = await runSections();
 
-      // Second call sets sections again; every section present on the first
-      // run must survive unchanged (later runs may only ADD a section whose
-      // generation was still pending within the settle budget).
-      const secondSections = await runSections();
-      for (const key of Object.keys(firstSections)) {
-        expect(secondSections[key]).toBe(firstSections[key]);
+      // Later runs may only ADD a section whose generation was still pending;
+      // a section already present must never change or disappear. Slow runners
+      // (Windows git) can need several runs, so poll until both sections exist.
+      const deadline = Date.now() + 12_000;
+      while (
+        (settled["smartread_repo_map"] === undefined || settled["smartread_git_context"] === undefined)
+        && Date.now() < deadline
+      ) {
+        const next = await runSections();
+        for (const key of Object.keys(settled)) {
+          expect(next[key]).toBe(settled[key]);
+        }
+        settled = next;
       }
+      expect(settled["smartread_repo_map"]).toContain("index.ts");
+      expect(settled["smartread_git_context"]).toBeDefined();
 
       // Once generation has settled, a further run must reproduce the
       // sections exactly (stable for the rest of the session).
-      const thirdSections = await runSections();
-      expect(thirdSections).toEqual(secondSections);
+      expect(await runSections()).toEqual(settled);
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it("before_agent_start falls back to one-time systemPrompt on hosts without sections", async () => {
     const { api, handlers } = makeMockAPI();

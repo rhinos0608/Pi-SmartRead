@@ -132,7 +132,7 @@ export async function loadCertifiedGraderContext(options: LoadCertifiedGraderCon
     } catch {
         return fail("manifest-unreadable", "cannot read checkout or sealed manifest");
     }
-    if ((manifestStat.mode & 0o777) !== 0o600) fail("manifest-mode", "sealed manifest must have mode 0600");
+    if (process.platform !== "win32" && (manifestStat.mode & 0o777) !== 0o600) fail("manifest-mode", "sealed manifest must have mode 0600");
     if (!SHA256.test(options.expectedManifestSha256) || sha256(manifestBytes) !== options.expectedManifestSha256) fail("manifest-digest-mismatch", "sealed manifest digest does not match external pin");
     let parsed: unknown;
     try { parsed = JSON.parse(manifestBytes.toString("utf8")) as unknown; }
@@ -168,7 +168,7 @@ export async function loadCertifiedGraderContext(options: LoadCertifiedGraderCon
     }
     const goldPath = await realpath(options.goldPath).catch(() => fail("source-missing", "sealed gold input is missing"));
     const goldStat = await lstat(goldPath);
-    if ((goldStat.mode & 0o777) !== 0o600) fail("manifest-mode", "sealed gold input must have mode 0600");
+    if (process.platform !== "win32" && (goldStat.mode & 0o777) !== 0o600) fail("manifest-mode", "sealed gold input must have mode 0600");
     const gold = await readFile(goldPath);
     if (sha256(gold) !== manifest.goldSha256[options.task.split]) fail("gold-digest-mismatch", "sealed gold input digest mismatch");
     const context: TaskGraderContext = structuredClone(taskContext);

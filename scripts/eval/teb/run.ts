@@ -708,7 +708,7 @@ export function toolCallArgsIn(event: unknown): TebToolCallArgs[] {
 export function extraContaminationMarkers(markers: string[]): string[] {
     const extra = new Set<string>([TEB_CONTAMINATION_BENCH_MARKER]);
     for (const marker of markers) {
-        const base = marker.split("/").pop() ?? "";
+        const base = marker.split(/[\\/]/).pop() ?? "";
         if (base.length > 0) extra.add(base);
     }
     return [...extra];
@@ -752,7 +752,12 @@ export function scanLogForContamination(logText: string, markers: string[]): { c
         if (calls.length === 0) continue;
         for (const call of calls) {
             const haystack = expandHomeSpelling(`${call.name} ${JSON.stringify(call.args)}`, homeDir);
-            const hit = active.find((marker) => haystack.includes(marker));
+            // Windows paths are case-insensitive and JSON.stringify escapes each
+            // backslash, so collapse backslash runs before comparing.
+            const normalizeForMatch = (value: string): string =>
+                process.platform === "win32" ? value.replace(/\\+/g, "/").toLowerCase() : value;
+            const normalizedHaystack = normalizeForMatch(haystack);
+            const hit = active.find((marker) => normalizedHaystack.includes(normalizeForMatch(marker)));
             if (hit !== undefined) return { contaminated: true, hit };
         }
     }
