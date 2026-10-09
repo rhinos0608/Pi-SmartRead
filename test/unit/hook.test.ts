@@ -34,7 +34,6 @@ function makeMockAPI(): {
   return { api, handlers };
 }
 
-
 describe("createExtendedReadTool", () => {
   let tmpDir: string;
 
@@ -222,7 +221,7 @@ describe("registerSessionHooks", () => {
     // Should not throw — no-op path
   });
 
-  it("before_agent_start returns system prompt with SmartRead guidance on first turn", async () => {
+  it("before_agent_start sets stable sections on every run without returning systemPrompt", async () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
@@ -239,28 +238,29 @@ describe("registerSessionHooks", () => {
         makeMockContext(projectDir),
       );
 
-      // Then trigger before_agent_start
+      // Then trigger before_agent_start with mutable sections available
+      const sections: Record<string, string> = {};
       const result = await handlers.before_agent_start!(
-        { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
+        {
+          type: "before_agent_start",
+          systemPrompt: "You are a helpful agent.",
+          prompt: "hi",
+          systemPromptOptions: { sections },
+        },
         makeMockContext(projectDir),
       );
 
-      // Should have appended repo map
-      const typed = result as { systemPrompt?: string } | undefined;
-      expect(typed).toBeDefined();
-      expect(typeof typed!.systemPrompt).toBe("string");
-      const promptText = typed!.systemPrompt;
-      expect(promptText).toContain("SmartRead Tool Guide");
-      expect(promptText).toContain("grep discovers candidates");
-      expect(promptText).toContain("read has no natural-language query mode");
-      expect(promptText).toContain("Inspect does not expose LSP navigation or diagnostics");
-      expect(promptText).toContain("LSP { operation, ... }");
+      // No forced systemPrompt replacement on the sections path
+      expect(result).toBeUndefined();
+      // Repo map section is set; the tool guide is no longer injected here
+      expect(sections["smartread_repo_map"]).toContain("index.ts");
+      expect(Object.values(sections).join("\n")).not.toContain("SmartRead Tool Guide");
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }
   }, 15_000);
 
-  it("before_agent_start returns undefined for subsequent turns", async () => {
+  it("before_agent_start sets sections on every run (no first-run-only gate)", async () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
@@ -270,22 +270,62 @@ describe("registerSessionHooks", () => {
       makeMockContext(process.cwd()),
     );
 
-    // First call returns map
+    // First call sets sections without returning a replacement
+    const firstSections: Record<string, string> = {};
     const first = await handlers.before_agent_start!(
-      { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
+      {
+        type: "before_agent_start",
+        systemPrompt: "You are a helpful agent.",
+        prompt: "hi",
+        systemPromptOptions: { sections: firstSections },
+      },
       makeMockContext(process.cwd()),
     );
-    expect(first as { systemPrompt?: string }).toBeDefined();
+    expect(first).toBeUndefined();
 
-    // Second call returns undefined (already injected)
+    // Second call sets sections again (content survives across runs)
+    const secondSections: Record<string, string> = {};
+    const second = await handlers.before_agent_start!(
+      {
+        type: "before_agent_start",
+        systemPrompt: "You are a helpful agent.",
+        prompt: "hi",
+        systemPromptOptions: { sections: secondSections },
+      },
+      makeMockContext(process.cwd()),
+    );
+    expect(second).toBeUndefined();
+    expect(secondSections).toEqual(firstSections);
+  });
+
+  it("before_agent_start falls back to one-time systemPrompt on hosts without sections", async () => {
+    const { api, handlers } = makeMockAPI();
+    registerSessionHooks(api);
+
+    // Prime cache
+    await handlers.session_start!(
+      { type: "session_start", reason: "startup" },
+      makeMockContext(process.cwd()),
+    );
+
+    // Legacy host: no systemPromptOptions on the event. First run appends
+    // map/git/microagents but never the tool guide.
+    const first = (await handlers.before_agent_start!(
+      { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
+      makeMockContext(process.cwd()),
+    )) as { systemPrompt?: string } | undefined;
+    expect(first?.systemPrompt).toContain("You are a helpful agent.");
+    expect(first?.systemPrompt).not.toContain("SmartRead Tool Guide");
+
+    // Second run returns undefined (already injected)
     const second = await handlers.before_agent_start!(
       { type: "before_agent_start", systemPrompt: "You are a helpful agent.", prompt: "hi" },
       makeMockContext(process.cwd()),
     );
-    expect(second as { systemPrompt?: string } | undefined).toBeUndefined();
+    expect(second).toBeUndefined();
   });
 
-  it("session_shutdown resets injection flag", async () => {
+  it("session_shutdown resets injection flag so the legacy fallback injects again", async () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
