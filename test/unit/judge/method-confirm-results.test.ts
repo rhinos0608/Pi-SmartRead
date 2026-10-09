@@ -179,6 +179,23 @@ describe("analyzeMethodConfirmResults", () => {
         expect(driftedModel.adoptionReason).toBe("blocked by incomplete/integrity");
     }, 120_000);
 
+    it("blocks successful retries whose answer-object key order differs", () => {
+        const f = fixture();
+        const first = f.wires.find((record) => record.arm === MODELS[0] && record.method === "M0" && record.queryGroup === "q0" && record.replica === 0)!;
+        const retryWireId = `${first.wireId}-key-order-retry`;
+        const retry = {
+            ...first,
+            wireId: retryWireId,
+            attemptIndex: 2,
+            answers: first.answers.map(({ candidateId, probability }) => ({ probability, candidateId })),
+        };
+        f.wires.push(retry);
+        for (const cell of (f.results as any).completed.filter((entry: any) => entry.arm === MODELS[0] && entry.method === "M0" && entry.queryGroup === "q0" && entry.replica === 0)) cell.wireIds.push(retryWireId);
+
+        expect((f.results as any).integrity.retryAnswerDrift).toEqual([]);
+        expect(modelsOf(analyze(f))[0]!.status).toBe("blocked");
+    });
+
     it("blocks A3 capture gaps and records without the A3 stamp", () => {
         const gap = fixture();
         const record = gap.wires.find((entry) => entry.arm === MODELS[0] && entry.method === "M0" && entry.queryGroup === "q0" && entry.replica === 0)!;

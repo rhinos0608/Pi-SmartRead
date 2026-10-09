@@ -141,7 +141,13 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
     const { roster } = input;
     const queries = new Map(roster.queries.map((q) => [q.qid, q]));
     const candidates = new Map(roster.candidates.map((c) => [c.cid, c]));
-    assert(roster.queries.length === 400 && roster.candidates.length === 2_800 && roster.queries.every((query) => roster.candidates.filter((candidate) => candidate.qid === query.qid).length === 7), "verified roster must contain 400 queries × 7 candidates");
+    const candidatesByQuery = new Map<string, Array<(typeof roster.candidates)[number]>>();
+    for (const candidate of roster.candidates) {
+        const queryCandidates = candidatesByQuery.get(candidate.qid) ?? [];
+        queryCandidates.push(candidate);
+        candidatesByQuery.set(candidate.qid, queryCandidates);
+    }
+    assert(roster.queries.length === 400 && roster.candidates.length === 2_800 && roster.queries.every((query) => candidatesByQuery.get(query.qid)?.length === 7), "verified roster must contain 400 queries × 7 candidates");
     const rawPlan = input.plan;
     if (!isObject(rawPlan)) throw new Error("invalid confirmation plan");
     assert(typeof rawPlan.candidateCount === "number" && rawPlan.candidateCount === roster.candidates.length, "plan candidate count does not match verified corpus");
@@ -169,10 +175,15 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
     if (!Array.isArray(completedRows) || !Array.isArray(blockedRows)) throw new Error("invalid result artifact shape");
     const plannedCandidates = new Map<string, Set<string>>();
     const plannedRequests = new Map<string, ParsedConfirmRequest>();
+    const plannedRequestsByCell = new Map<string, ParsedConfirmRequest[]>();
     for (const req of plan.requests) {
         assert(typeof req.arm === "string" && typeof req.method === "string" && typeof req.replica === "number" && Number.isInteger(req.replica) && typeof req.warmup === "boolean", "invalid planned request identity");
         const requestArm = req.arm, requestMethod = req.method, requestQid = req.queryGroup;
         plannedRequests.set(stable([requestArm, requestMethod, req.replica, requestQid, req.warmup, req.payloadSha256]), req);
+        const cellKey = stable([requestArm, requestMethod, req.replica, requestQid]);
+        const cellRequests = plannedRequestsByCell.get(cellKey) ?? [];
+        cellRequests.push(req);
+        plannedRequestsByCell.set(cellKey, cellRequests);
         if (req.warmup === true) continue;
         const arm = String(req.arm), method = String(req.method), qid = String(req.queryGroup);
         const key = [arm, method, req.replica, qid].join("|");
@@ -182,12 +193,12 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         plannedCandidates.set(key, cellCandidates);
     }
     for (const config of METHOD_CONFIRM_MODELS) for (const query of roster.queries) {
-        const candidateIds = roster.candidates.filter((candidate) => candidate.qid === query.qid).map((candidate) => candidate.cid);
+        const candidateIds = candidatesByQuery.get(query.qid)!.map((candidate) => candidate.cid);
         for (let replica = 0; replica < 3; replica += 1) for (const method of ["M0", config.challenger]) {
             const key = [config.arm, method, replica, query.qid].join("|");
             const planned = plannedCandidates.get(key);
             assert(planned !== undefined && planned.size === candidateIds.length && candidateIds.every((cid) => planned.has(cid)), `plan candidate coverage mismatch ${key}`);
-            const requests = plan.requests.filter((request) => request.arm === config.arm && request.method === method && request.replica === replica && request.queryGroup === query.qid && request.warmup === false);
+            const requests = plannedRequestsByCell.get(stable([config.arm, method, replica, query.qid])) ?? [];
             if (method === "M1") assert(requests.length === candidateIds.length && requests.every((request) => Array.isArray(request.candidateIds) && request.candidateIds.length === 1), `M1 plan must contain one request per candidate ${key}`);
             else {
                 assert(requests.length === 1, `packed plan must contain one request per query ${key}`);
@@ -226,12 +237,21 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
 
     const wireIds = new Map<string, MethodWireRecord>();
     const uniqueWires: MethodWireRecord[] = [];
+    const wiresByQueryReplica = new Map<string, MethodWireRecord[]>();
+    const wiresByArm = new Map<string, MethodWireRecord[]>();
     const integrityFailureArms = new Set<string>();
     for (const raw of input.wireRecords) {
         assert(isMethodWireRecord(raw), "invalid wire record");
         const prior = wireIds.get(raw.wireId);
         if (prior) { assert(JSON.stringify(prior) === JSON.stringify(raw), `conflicting duplicate wireId ${raw.wireId}`); continue; }
         wireIds.set(raw.wireId, raw); uniqueWires.push(raw);
+        const queryReplicaKey = stable([raw.arm, raw.replica, raw.queryGroup]);
+        const queryReplicaRecords = wiresByQueryReplica.get(queryReplicaKey) ?? [];
+        queryReplicaRecords.push(raw);
+        wiresByQueryReplica.set(queryReplicaKey, queryReplicaRecords);
+        const armRecords = wiresByArm.get(raw.arm) ?? [];
+        armRecords.push(raw);
+        wiresByArm.set(raw.arm, armRecords);
         assert(raw.phase === "confirmation", "wire record is not confirmation data");
         if (raw.rulesetVersion !== "A3") integrityFailureArms.add(raw.arm);
         const planned = plannedRequests.get(stable([raw.arm, raw.method, raw.replica, raw.queryGroup, raw.warmup, raw.payloadSha256]));
@@ -255,7 +275,7 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         const links = cell.wireIds.map((id) => wireIds.get(id));
         assert(links.every((record) => record !== undefined), `unknown result wireId (${key})`);
         const expectedMethods = method === "M2" ? ["M0", "M2"] : [method];
-        const relevant = uniqueWires.filter((record) => record.arm === arm && record.replica === replica && record.queryGroup === qid && expectedMethods.includes(record.method) && record.candidateIds.includes(cid!));
+        const relevant = (wiresByQueryReplica.get(stable([arm, replica, qid])) ?? []).filter((record) => expectedMethods.includes(record.method) && record.candidateIds.includes(cid!));
         const expectedIds = new Set(relevant.map((record) => record.wireId));
         assert(expectedIds.size === cell.wireIds.length && cell.wireIds.every((id) => expectedIds.has(id)), `result wire binding mismatch (${key})`);
         const allowlisted = (record: MethodWireRecord): boolean => record.rulesetVersion === "A3" && record.errorClass === null && record.httpStatus !== null && record.httpStatus >= 200 && record.httpStatus < 300 && record.servedModel === COMPARISON_SERVED_MODEL_ALLOWLIST[record.arm];
@@ -272,18 +292,21 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         if (Math.abs(computed - cell.probability) > 1e-12) integrityFailureArms.add(arm!);
     }
     for (const [arm, method] of [["~typesafe/jev-latest", "M0"], ["~typesafe/jev-latest", "M1"], ["perplexity/pplx-decider-v1.1-27b", "M0"], ["perplexity/pplx-decider-v1.1-27b", "M2"], ["openai/gpt-6-luna-decisions", "M0"], ["openai/gpt-6-luna-decisions", "M1"]] as const) {
-        for (const qid of queries.keys()) for (const c of roster.candidates.filter((x) => x.qid === qid)) for (let replica = 0; replica < 3; replica += 1) {
+        for (const qid of queries.keys()) for (const c of candidatesByQuery.get(qid)!) for (let replica = 0; replica < 3; replica += 1) {
             const key = [arm, method, replica, qid, c.cid].join("|");
             if (!completed.has(key) && !blockedKeys.has(key)) blockedKeys.add(key);
         }
     }
 
     assert(typeof integritySummary.aborted === "boolean", "result integrity.aborted missing");
+    const finalAttemptFailureArms = new Set<string>();
     const computedFinalAttemptUnverified = plan.requests.filter((request) => {
         const key = stable([request.arm, request.method, request.replica, request.queryGroup, request.warmup, request.payloadSha256, request.candidateIds]);
         const attempts = attemptsByPlannedRequest.get(key) ?? [];
         const latest = attempts[attempts.length - 1];
-        return latest === undefined || latest.rulesetVersion !== "A3" || latest.errorClass !== null || latest.httpStatus === null || latest.httpStatus < 200 || latest.httpStatus >= 300 || latest.servedModel !== COMPARISON_SERVED_MODEL_ALLOWLIST[request.arm as keyof typeof COMPARISON_SERVED_MODEL_ALLOWLIST];
+        const unverified = latest === undefined || latest.rulesetVersion !== "A3" || latest.errorClass !== null || latest.httpStatus === null || latest.httpStatus < 200 || latest.httpStatus >= 300 || latest.servedModel !== COMPARISON_SERVED_MODEL_ALLOWLIST[request.arm as keyof typeof COMPARISON_SERVED_MODEL_ALLOWLIST];
+        if (unverified) finalAttemptFailureArms.add(request.arm);
+        return unverified;
     }).map(confirmationDispatchKey);
     for (const reference of integritySummary.finalAttemptUnverified) assert(computedFinalAttemptUnverified.includes(reference), "result integrity.finalAttemptUnverified references unknown or verified planned request");
     assert(JSON.stringify([...(integritySummary.finalAttemptUnverified)].sort()) === JSON.stringify([...computedFinalAttemptUnverified].sort()), "result integrity.finalAttemptUnverified summary disagrees with wire ledger");
@@ -294,11 +317,15 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
     for (const reference of integritySummary.payloadDrift) assert(computedPayloadDrift.includes(reference), "result integrity.payloadDrift references unknown or payload-verified wire");
     assert(JSON.stringify([...(integritySummary.payloadDrift)].sort()) === JSON.stringify(computedPayloadDrift), "result integrity.payloadDrift summary disagrees with wire ledger");
     const computedRetryAnswerDrift: string[] = [];
+    const retryDriftArms = new Set<string>();
     for (const attempts of attemptsByPlannedRequest.values()) {
         const successes = attempts.filter((record) => record.errorClass === null);
+        if (new Set(successes.map((record) => JSON.stringify(record.answers))).size > 1) retryDriftArms.add(attempts[0]!.arm);
         for (const candidateId of attempts[0]!.candidateIds) {
             const answers = successes.map((record) => record.answers.find((answer) => answer.candidateId === candidateId)?.probability);
-            if (new Set(answers).size > 1) computedRetryAnswerDrift.push(...successes.map((record) => record.wireId));
+            if (new Set(answers).size > 1) {
+                computedRetryAnswerDrift.push(...successes.map((record) => record.wireId));
+            }
         }
     }
     for (const reference of integritySummary.retryAnswerDrift) assert(computedRetryAnswerDrift.includes(reference), "result integrity.retryAnswerDrift references unknown or answer-consistent wire");
@@ -316,7 +343,7 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
             const lossesByMethod: Record<string, { loss: number; fn: number; fp: number }> = {};
             for (const method of ["M0", challenger]) {
                 let fn = 0, fp = 0;
-                for (const candidate of roster.candidates.filter((c) => c.qid === qid)) {
+                for (const candidate of candidatesByQuery.get(qid)!) {
                     const values = Array.from({ length: 3 }, (_, replica) => completed.get([arm, method, replica, qid, candidate.cid].join("|"))?.probability);
                     if (values.some((v) => v === undefined)) { blocked = true; continue; }
                     const keep = mean(values as number[]) >= FROZEN_KEEP_THRESHOLD;
@@ -333,13 +360,9 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
             const repoValues = perRepo.get(query.repo) ?? []; repoValues.push(d); perRepo.set(query.repo, repoValues);
         }
         const hasIntegrity = integritySummary;
-        const modelWires = uniqueWires.filter((r) => r.arm === arm);
-        const finalAttemptFailure = plan.requests.filter((r) => r.arm === arm).some((request) => {
-            const attempts = modelWires.filter((r) => r.method === request.method && r.replica === request.replica && r.queryGroup === request.queryGroup && r.warmup === request.warmup && r.payloadSha256 === request.payloadSha256 && JSON.stringify(r.candidateIds) === JSON.stringify(request.candidateIds));
-            const latest = attempts.sort((a, b) => b.attemptIndex - a.attemptIndex)[0];
-            return latest === undefined || latest.rulesetVersion !== "A3" || latest.errorClass !== null || latest.httpStatus === null || latest.httpStatus < 200 || latest.httpStatus >= 300 || latest.servedModel !== COMPARISON_SERVED_MODEL_ALLOWLIST[arm];
-        });
-        const retryDrift = modelWires.some((record) => record.errorClass === null && modelWires.some((other) => other !== record && other.method === record.method && other.replica === record.replica && other.warmup === record.warmup && other.queryGroup === record.queryGroup && other.payloadSha256 === record.payloadSha256 && JSON.stringify(other.candidateIds) === JSON.stringify(record.candidateIds) && other.errorClass === null && JSON.stringify(other.answers) !== JSON.stringify(record.answers)));
+        const modelWires = wiresByArm.get(arm) ?? [];
+        const finalAttemptFailure = finalAttemptFailureArms.has(arm);
+        const retryDrift = retryDriftArms.has(arm);
         const expectedIntegrity = modelWires.some((r) => r.errorClass === "capture_gap") || Boolean(hasIntegrity.aborted) || finalAttemptFailure || retryDrift || integrityFailureArms.has(arm);
         const modelBlocked = blocked || vectors.length !== 400 || expectedIntegrity;
         const internalP = modelBlocked ? 1 : signFlipOneSidedPValue(vectors, vectors.reduce((a, b) => a + b, 0), SIGN_MATRIX);
