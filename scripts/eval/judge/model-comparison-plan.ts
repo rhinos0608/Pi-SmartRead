@@ -126,16 +126,22 @@ export function loadSetRows(set: "a" | "b", dataDir: string): { rows: PlanFixtur
     return { rows, rawBytes };
 }
 
-function sourceRange(repoRoot: string, file: string, startLine: number, endLine: number, symbol: string | null): string {
-    if (file.startsWith("/") || file.split(/[\\/]/).includes("..") || !(file.startsWith("src/") || file.startsWith("test/"))) {
-        throw new Error(`Refusing non-repository eval path: ${file}`);
-    }
-    const source = execFileSync("git", ["show", `${PLAN_SOURCE_REF}:${file}`], {
+type PinnedSourceReader = (repoRoot: string, file: string) => string;
+
+function readPinnedSource(repoRoot: string, file: string): string {
+    return execFileSync("git", ["show", `${PLAN_SOURCE_REF}:${file}`], {
         cwd: repoRoot,
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
         stdio: ["ignore", "pipe", "ignore"],
     });
+}
+
+function sourceRange(repoRoot: string, file: string, startLine: number, endLine: number, symbol: string | null, sourceReader: PinnedSourceReader): string {
+    if (file.startsWith("/") || file.split(/[\\/]/).includes("..") || !(file.startsWith("src/") || file.startsWith("test/"))) {
+        throw new Error(`Refusing non-repository eval path: ${file}`);
+    }
+    const source = sourceReader(repoRoot, file);
     const lines = source.split(/\r?\n/);
     if (endLine > lines.length || endLine - startLine + 1 > 120) {
         throw new Error(`Invalid pinned source range ${file}:${startLine}-${endLine}`);
@@ -144,11 +150,11 @@ function sourceRange(repoRoot: string, file: string, startLine: number, endLine:
     return `${file}:${startLine}-${endLine}${symbol ? ` ${symbol}` : ""}\n${code}`.slice(0, 3500);
 }
 
-function toItems(rows: PlanFixtureRow[], repoRoot: string): { query: string; items: JudgeNoulItem[] } {
+function toItems(rows: PlanFixtureRow[], repoRoot: string, sourceReader: PinnedSourceReader): { query: string; items: JudgeNoulItem[] } {
     const query = rows[0]!.query;
     const items: JudgeNoulItem[] = rows.map((row, index) => ({
         id: `u${index}`,
-        state: { path: row.file, symbol: row.symbol ?? "", text: sourceRange(repoRoot, row.file, row.startLine, row.endLine, row.symbol) },
+        state: { path: row.file, symbol: row.symbol ?? "", text: sourceRange(repoRoot, row.file, row.startLine, row.endLine, row.symbol, sourceReader) },
         question: (stateRef: string) => unitRelevanceQuestion(query, stateRef),
     }));
     return { query, items };
@@ -159,10 +165,11 @@ function toItems(rows: PlanFixtureRow[], repoRoot: string): { query: string; ite
  * `git show` source materialization (same as the scored runner).
  */
 export async function deriveFullRunPlan(
-    opts: { repoRoot: string; dataDir?: string; models?: ComparisonModel[] } ,
+    opts: { repoRoot: string; dataDir?: string; models?: ComparisonModel[]; sourceReader?: PinnedSourceReader },
 ): Promise<DerivedFullRunPlan> {
     const dataDir = opts.dataDir ?? PLAN_DATA_DIR;
     const models = opts.models ?? [...COMPARISON_MODELS];
+    const sourceReader = opts.sourceReader ?? readPinnedSource;
     if (models.length !== COMPARISON_MODELS.length || !COMPARISON_MODELS.every((m) => models.includes(m))) {
         throw new Error("Plan derivation requires exactly the 3 requested models (no score-chosen subset)");
     }
@@ -191,7 +198,7 @@ export async function deriveFullRunPlan(
 
     // Planned warmup mirrors the scored runner: first row, single item.
     const warmRow = allRows[0]!;
-    const warmBuilt = toItems([{ ...warmRow }], opts.repoRoot);
+    const warmBuilt = toItems([{ ...warmRow }], opts.repoRoot, sourceReader);
 
     for (const model of models) {
         // Warmup requests (one per model arm per single run).
@@ -203,7 +210,7 @@ export async function deriveFullRunPlan(
             warmupWire += n;
         }
         for (const [groupKey, rows] of groups) {
-            const { query, items } = toItems(rows, opts.repoRoot);
+            const { query, items } = toItems(rows, opts.repoRoot, sourceReader);
             let n = 0;
             const stub = capturingStub((obs) => {
                 n += 1;

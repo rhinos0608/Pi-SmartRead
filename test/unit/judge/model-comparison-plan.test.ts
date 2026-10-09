@@ -11,6 +11,7 @@ import {
 } from "../../../scripts/eval/judge/model-comparison-plan.js";
 
 const REPO_ROOT = new URL("../../../..", import.meta.url).pathname.replace(/\/$/, "") || "/";
+const PINNED_SOURCE_FIXTURE = "export function fixtureSymbol() { return true; }";
 
 function fixtureDataDir(): string {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "judge-plan-test-")));
@@ -30,7 +31,7 @@ function fixtureDataDir(): string {
 describe("deriveFullRunPlan (offline, no network)", () => {
     it("covers all 314 items in 44 namespaced query groups with the normal question builder", async () => {
         const dataDir = fixtureDataDir();
-        const plan = await deriveFullRunPlan({ repoRoot: REPO_ROOT, dataDir });
+        const plan = await deriveFullRunPlan({ repoRoot: REPO_ROOT, dataDir, sourceReader: () => PINNED_SOURCE_FIXTURE });
         rmSync(dataDir, { recursive: true });
         expect(plan.totalUnits).toBe(314);
         expect(plan.totalQueryGroups).toBe(44);
@@ -59,7 +60,7 @@ describe("deriveFullRunPlan (offline, no network)", () => {
 
     it("counts the planned warmup plus every group batch per arm (measured, not hardcoded)", async () => {
         const dataDir = fixtureDataDir();
-        const plan = await deriveFullRunPlan({ repoRoot: REPO_ROOT, dataDir });
+        const plan = await deriveFullRunPlan({ repoRoot: REPO_ROOT, dataDir, sourceReader: () => PINNED_SOURCE_FIXTURE });
         rmSync(dataDir, { recursive: true });
         // 3 arms x (1 warmup + 44 groups); each group currently packs to one batch.
         expect(plan.warmupRequestsSingleRun).toBe(3);
@@ -70,6 +71,16 @@ describe("deriveFullRunPlan (offline, no network)", () => {
             plan.fiveReplicatePlannedRequests * PLAN_CLIENT_ATTEMPTS_PER_REQUEST + 6,
         );
         expect(plan.groupsRequiringSplit).toEqual([]);
+    });
+
+    it.skipIf(process.env.PI_SMARTREAD_PRIVATE_ARTIFACT_AUDIT !== "1")("reads the actual pinned source from git history", async () => {
+        const dataDir = fixtureDataDir();
+        try {
+            const plan = await deriveFullRunPlan({ repoRoot: REPO_ROOT, dataDir });
+            expect(plan.totalUnits).toBe(314);
+        } finally {
+            rmSync(dataDir, { recursive: true, force: true });
+        }
     });
 
     it("RED: an oversized query group splits into multiple batches (one-batch is measured, not assumed)", async () => {
