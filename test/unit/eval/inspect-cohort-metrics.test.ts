@@ -22,12 +22,13 @@ describe("inspect cohort metrics", () => {
             modelCost: 0, toolCost: 0, coldLatencyMs: null, warmLatencyMs: null,
             inputTokens: 0, outputTokens: 0, invalidCalls: 0, overRouting: 0,
             lostPrior: false, falseCompleteness: false };
-        const taskA = [base, { ...base, passed: true, falseCompleteness: true }, { ...base, passed: true, falseCompleteness: true }];
+        const taskA = [base, base, { ...base, passed: true, falseCompleteness: true }];
         const taskB = [{ ...base, taskId: "b", eligiblePositive: false, passed: true, lostPrior: true }];
         const aggregate = aggregateInspectMetrics([...taskA, ...taskB]);
         expect(aggregate.falseCompletenessDenominator).toBe(1);
-        expect(aggregate.falseCompletenessRate).toBe(1);
-        expect(aggregate.taskSuccessRate).toBe(1);
+        expect(aggregate.falseCompletenessRate).toBe(0);
+        expect(aggregate.positiveTaskSuccessRate).toBe(0);
+        expect(aggregate.negativeTaskSuccessRate).toBe(1);
         expect(aggregate.lostPriors).toBe(1);
     });
 

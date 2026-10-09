@@ -66,6 +66,16 @@ describe("frozen inspect source enumeration", () => {
         expect(result.candidates).toHaveLength(1);
     });
 
+    it("excludes regex literals in ambiguous expression contexts and JSX", () => {
+        const root = fixture({
+            "src/regex.tsx": `if (flag) /app.get("\\/after-paren", fn)/.test(value);\nfunction read() { return /import fake from "fake"|require\\("fake"\\)|router\\.post\\("\\/return", fn\\)/.test(value); }\nconst assigned = /api.get("\\/equals", fn)/;\nconst grouped = (/server.post("\\/open", fn)/.test(value));\nconst tuple = (value, /fastify.get("\\/comma", fn)/.test(other));\nconst division = (value) / app.get("/real", handler);\nconst jsx = <div>{/app.get("\\/jsx", fn)/.test(value)}</div>;`,
+            "package.json": "{}",
+        });
+        const result = enumerateRepository(root, "owner__repo");
+        expect(result.candidates.filter((item) => item.kind === "route").map((item) => item.path)).toEqual(["/real"]);
+        expect(result.candidates.some((item) => item.specifier === "fake")).toBe(false);
+    });
+
     it("uses frozen alias mappings and deterministic ids, ordering, and digest", () => {
         const root = fixture({ "src/a.ts": `import a from "@/a";\nimport b from "./absent";`, "src/a/index.ts": "export default 1;", "package.json": "{}" });
         const aliases = { "@/*": "src/*" };

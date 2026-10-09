@@ -20,7 +20,8 @@ export interface InspectRunMetrics {
 
 export interface InspectAggregateMetrics {
     runs: number;
-    taskSuccessRate: number;
+    positiveTaskSuccessRate: number;
+    negativeTaskSuccessRate: number;
     outerAgentCalls: number;
     innerEngineSteps: number;
     indexSetupMs: number;
@@ -58,11 +59,13 @@ export function aggregateInspectMetrics(runs: InspectRunMetrics[]): InspectAggre
         falseCompleteness: majority(taskRuns.map((run) => run.falseCompleteness)),
     }));
     const positives = taskOutcomes.filter((task) => task.eligiblePositive);
+    const negatives = taskOutcomes.filter((task) => !task.eligiblePositive);
     const calls = runs.reduce((sum, run) => sum + run.outerAgentCalls, 0);
     const invalid = runs.reduce((sum, run) => sum + run.invalidCalls, 0);
     return {
         runs: runs.length,
-        taskSuccessRate: taskOutcomes.length === 0 ? 0 : taskOutcomes.filter((task) => task.passed).length / taskOutcomes.length,
+        positiveTaskSuccessRate: positives.length === 0 ? 0 : positives.filter((task) => task.passed).length / positives.length,
+        negativeTaskSuccessRate: negatives.length === 0 ? 0 : negatives.filter((task) => task.passed).length / negatives.length,
         outerAgentCalls: calls,
         innerEngineSteps: runs.reduce((sum, run) => sum + run.innerEngineSteps, 0),
         indexSetupMs: runs.reduce((sum, run) => sum + run.indexSetupMs, 0),

@@ -2,11 +2,19 @@
 /** Frozen, engine-independent source enumerator for the inspect cohort. */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import type * as TypeScript from "typescript";
 
-export const ENUMERATOR_VERSION = 1;
+const require = createRequire(import.meta.url);
+const ts = require("typescript") as typeof TypeScript;
+const ENUMERATOR_TYPESCRIPT_VERSION = "5.9.3";
+if (ts.version !== ENUMERATOR_TYPESCRIPT_VERSION) {
+    throw new Error(`enumerator expects TypeScript ${ENUMERATOR_TYPESCRIPT_VERSION}, loaded ${ts.version}`);
+}
+export const ENUMERATOR_VERSION = `1-typescript-${ENUMERATOR_TYPESCRIPT_VERSION}`;
 export type UnresolvedReason = "dynamic-specifier" | "re-export-ambiguous" | "generated" | "out-of-scope";
 export interface Candidate {
     id: string;
@@ -21,14 +29,14 @@ export interface Candidate {
     manifestKey?: string;
 }
 export interface Enumeration {
-    version: number;
+    version: string;
     repo: string;
     candidates: Candidate[];
     universe: { id: string; sha256: string; count: number };
 }
 
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".d.ts"] as const;
-const SUPPORTED = new Set([".ts", ".tsx", ".js"]);
+const SUPPORTED = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
 const ROUTERS = new Set(["app", "fastify", "router", "server", "api"]);
 const METHODS = new Set(["get", "post", "put", "delete", "patch", "options", "head", "all"]);
 
@@ -46,76 +54,37 @@ function walk(root: string): string[] {
     return out;
 }
 
-// Replace comments with spaces while preserving newlines/offsets and quoted strings.
-function withoutComments(source: string): string {
-    return source.replace(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
-        (match, literal: string | undefined) => literal ?? match.replace(/[^\r\n]/g, " "));
-}
-function maskRegexLiterals(source: string): string {
-    const chars = [...source];
-    const regexPrefixWords = new Set(["return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "of", "yield", "await"]);
-    let previous = "";
-    for (let index = 0; index < source.length;) {
-        const char = source[index]!;
-        if (char.charCodeAt(0) === 34 || char.charCodeAt(0) === 39 || char.charCodeAt(0) === 96) {
-            const quote = char;
-            index += 1;
-            while (index < source.length) {
-                if (source.charCodeAt(index) === 92) index += 2;
-                else if (source[index++] === quote) break;
-                else continue;
-            }
-            previous = "value";
-            continue;
-        }
-        if (char === "/" && source[index + 1] !== "/" && source[index + 1] !== "*" && canStartRegex(previous, regexPrefixWords)) {
-            let cursor = index + 1;
-            let inClass = false;
-            let closed = false;
-            while (cursor < source.length && source[cursor] !== "\n") {
-                const current = source[cursor]!;
-                if (current.charCodeAt(0) === 92) cursor += 2;
-                else if (current === "[") { inClass = true; cursor += 1; }
-                else if (current === "]") { inClass = false; cursor += 1; }
-                else if (current === "/" && !inClass) { cursor += 1; closed = true; break; }
-                else cursor += 1;
-            }
-            if (closed) {
-                while (/[A-Za-z]/.test(source[cursor] ?? "")) cursor += 1;
-                for (let masked = index; masked < cursor; masked += 1) if (chars[masked]?.charCodeAt(0) !== 10) chars[masked] = " ";
-                index = cursor;
-                previous = "value";
-                continue;
-            }
-        }
-        if (/\s/.test(char)) { index += 1; continue; }
-        if (/[A-Za-z_$]/.test(char)) {
-            const start = index++;
-            while (/[A-Za-z0-9_$]/.test(source[index] ?? "")) index += 1;
-            previous = source.slice(start, index);
-        } else {
-            previous = char;
-            index += 1;
-        }
-    }
-    return chars.join("");
-}
-function canStartRegex(previous: string, prefixWords: Set<string>): boolean {
-    return previous === "" || prefixWords.has(previous) || "([{=,:;!?&|+-*%^~<>".includes(previous);
-}
 function lineAt(source: string, offset: number): number { return source.slice(0, offset).split("\n").length; }
-function inLiteral(source: string, offset: number): boolean {
-    let quote = "";
-    let escaped = false;
-    for (let index = 0; index < offset; index += 1) {
-        const char = source[index]!;
-        if (quote) {
-            if (escaped) escaped = false;
-            else if (char === "\\") escaped = true;
-            else if (char === quote) quote = "";
-        } else if (char === '"' || char === "'" || char === "`") quote = char;
+function sourceScriptKind(file: string): TypeScript.ScriptKind {
+    switch (extname(file).toLowerCase()) {
+        case ".tsx": return ts.ScriptKind.TSX;
+        case ".jsx": return ts.ScriptKind.JSX;
+        case ".js": case ".mjs": case ".cjs": return ts.ScriptKind.JS;
+        default: return ts.ScriptKind.TS;
     }
-    return quote.length > 0;
+}
+function sourceFile(file: string, source: string): TypeScript.SourceFile {
+    return ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, sourceScriptKind(file));
+}
+function isStringModule(value: TypeScript.Expression): value is TypeScript.StringLiteral {
+    return ts.isStringLiteral(value);
+}
+function expressionText(value: TypeScript.Expression): string | null {
+    if (ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value)) return value.text;
+    return null;
+}
+function isRouterExpression(expression: TypeScript.Expression): expression is TypeScript.PropertyAccessExpression {
+    return ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression) &&
+        ROUTERS.has(expression.expression.text) && METHODS.has(expression.name.text);
+}
+function isTrpcRouter(expression: TypeScript.Expression): boolean {
+    return (ts.isIdentifier(expression) && expression.text === "router") ||
+        (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression) && expression.expression.text === "t" && expression.name.text === "router");
+}
+function propertyKeyName(name: TypeScript.PropertyName | undefined): string | null {
+    if (!name) return null;
+    if (!ts.isComputedPropertyName(name) && (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name))) return name.text;
+    return null;
 }
 function portable(path: string): string { return path.split(sep).join("/"); }
 
@@ -147,42 +116,54 @@ function add(candidates: Candidate[], candidate: Omit<Candidate, "id">): void {
 
 function scanSource(file: string, root: string, aliases: Record<string, string>, candidates: Candidate[]): void {
     const original = readFileSync(file, "utf8");
-    const code = maskRegexLiterals(withoutComments(original));
+    const source = sourceFile(file, original);
     const rel = portable(relative(root, file));
-    const addRelation = (offset: number, specifier: string, kind: Candidate["kind"], dynamic = false): void => {
-        const resolved = dynamic ? { path: null, reason: "dynamic-specifier" as const } : resolveImport(file, specifier, root, aliases);
-        add(candidates, { kind, file: rel, line: lineAt(original, offset), specifier, resolved: resolved.path ? portable(relative(root, resolved.path)) : null, ...(resolved.reason ? { unresolvedReason: resolved.reason } : {}) });
+    const addRelation = (node: TypeScript.Node, specifier: string, kind: Candidate["kind"], reason?: UnresolvedReason): void => {
+        const resolution = reason ? { path: null, reason } : resolveImport(file, specifier, root, aliases);
+        add(candidates, {
+            kind,
+            file: rel,
+            line: lineAt(original, node.getStart(source)),
+            specifier,
+            resolved: resolution.path ? portable(relative(root, resolution.path)) : null,
+            ...(resolution.reason ? { unresolvedReason: resolution.reason } : {}),
+        });
     };
-    const importExport = /\b(import|export)\s+(?:type\s+)?(?:[^;\n]*?\s+from\s*)?(["'])([^"']+)\2/g;
-    for (const match of code.matchAll(importExport)) {
-        if (inLiteral(code, match.index!)) continue;
-        const specifier = match[3]!;
-        // `import(` is outside the closed static syntax; bare side-effect imports are accepted.
-        if (match[0].includes("import(") || match[0].includes("export *")) continue;
-        addRelation(match.index!, specifier, match[1] === "export" ? "re-export" : "import");
-    }
-    const dynamic = /\b(?:import|export)\s*(?:\([^"'`]|[^;\n]*?\s+from\s*[^"'`\s])/g;
-    for (const match of code.matchAll(dynamic)) if (!inLiteral(code, match.index!)) addRelation(match.index!, "<dynamic>", "import", true);
-    const requirePattern = /\brequire\s*\(\s*(["'])([^"']+)\1\s*\)/g;
-    for (const match of code.matchAll(requirePattern)) if (!inLiteral(code, match.index!)) addRelation(match.index!, match[2]!, "require");
-    const dynamicRequire = /\brequire\s*\(\s*(?!["'])[^)]+\)/g;
-    for (const match of code.matchAll(dynamicRequire)) if (!inLiteral(code, match.index!)) addRelation(match.index!, "<dynamic>", "require", true);
-
-    const route = /\b(app|fastify|router|server|api)\s*\.\s*(get|post|put|delete|patch|options|head|all)\s*\(\s*(["'])([^"']+)\3/g;
-    for (const match of code.matchAll(route)) {
-        if (inLiteral(code, match.index!)) continue;
-        if (!ROUTERS.has(match[1]!) || !METHODS.has(match[2]!)) continue;
-        add(candidates, { kind: "route", file: rel, line: lineAt(original, match.index!), method: match[2]!.toUpperCase(), path: match[4]! });
-    }
-    // Template-string and computed route paths are retained as unsupported candidates.
-    const dynamicRoute = /\b(app|fastify|router|server|api)\s*\.\s*(get|post|put|delete|patch|options|head|all)\s*\(\s*(?:`|[A-Za-z_$][\w$]*)/g;
-    for (const match of code.matchAll(dynamicRoute)) if (!inLiteral(code, match.index!)) add(candidates, { kind: "route", file: rel, line: lineAt(original, match.index!), method: match[2]!.toUpperCase(), path: "<dynamic>", unresolvedReason: "dynamic-specifier" });
-    const trpc = /\b(?:router|t\.router)\s*\(\s*\{([^}]*)\}/g;
-    for (const match of code.matchAll(trpc)) {
-        if (inLiteral(code, match.index!)) continue;
-        const keys = match[1]!.matchAll(/(?:^|[,\n])\s*([A-Za-z_$][\w$]*)\s*:/g);
-        for (const key of keys) add(candidates, { kind: "trpc", file: rel, line: lineAt(original, match.index! + match[0].indexOf(match[1]!) + key.index!), specifier: key[1] });
-    }
+    const visit = (node: TypeScript.Node): void => {
+        if (ts.isImportDeclaration(node) && isStringModule(node.moduleSpecifier)) {
+            addRelation(node, node.moduleSpecifier.text, "import");
+        } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && isStringModule(node.moduleSpecifier)) {
+            const ambiguous = !node.exportClause || ts.isNamespaceExport(node.exportClause);
+            addRelation(node, node.moduleSpecifier.text, "re-export", ambiguous ? "re-export-ambiguous" : undefined);
+        } else if (ts.isCallExpression(node)) {
+            if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+                const specifier = node.arguments[0] ? expressionText(node.arguments[0]) : null;
+                addRelation(node, specifier ?? "<dynamic>", "import", "dynamic-specifier");
+            } else if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
+                const arg = node.arguments.length === 1 ? node.arguments[0] : undefined;
+                const specifier = arg ? expressionText(arg) : null;
+                addRelation(node, specifier ?? "<dynamic>", "require", specifier === null ? "dynamic-specifier" : undefined);
+            } else if (isRouterExpression(node.expression)) {
+                const first = node.arguments[0];
+                const path = first && ts.isStringLiteral(first) ? first.text : null;
+                add(candidates, {
+                    kind: "route", file: rel, line: lineAt(original, node.getStart(source)),
+                    method: node.expression.name.text.toUpperCase(), path: path ?? "<dynamic>",
+                    ...(path === null ? { unresolvedReason: "dynamic-specifier" as const } : {}),
+                });
+            } else if (isTrpcRouter(node.expression)) {
+                const arg = node.arguments[0];
+                if (arg && ts.isObjectLiteralExpression(arg)) {
+                    for (const property of arg.properties) {
+                        const key = propertyKeyName(property.name);
+                        if (key !== null) add(candidates, { kind: "trpc", file: rel, line: lineAt(original, property.getStart(source)), specifier: key });
+                    }
+                }
+            }
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(source);
 }
 
 function walkPackagePaths(value: unknown, prefix: string, out: Array<[string, string]>): void {
@@ -204,21 +185,37 @@ function scanPackage(file: string, root: string, candidates: Candidate[]): void 
     }
 }
 
+const NEXT_METHODS = new Set(["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]);
+function hasExportModifier(node: TypeScript.Node): boolean {
+    return ts.canHaveModifiers(node) && (ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false);
+}
+function isNextMethod(name: string): boolean { return NEXT_METHODS.has(name); }
+
 export function enumerateRepository(rootPath: string, repo: string, aliases: Record<string, string> = {}): Enumeration {
     const root = realpathSync(rootPath);
     const candidates: Candidate[] = [];
     for (const file of walk(root)) {
         const rel = portable(relative(root, file));
         if (file.endsWith("package.json")) scanPackage(file, root, candidates);
-        if (!SUPPORTED.has(file.endsWith(".d.ts") ? ".d.ts" : file.slice(file.lastIndexOf(".")))) continue;
+        if (!SUPPORTED.has(extname(file).toLowerCase()) || file.endsWith(".d.ts")) continue;
         scanSource(file, root, aliases, candidates);
         if (/^app\/(?:.+\/)?route\.(ts|tsx)$/.test(rel)) {
-            const source = maskRegexLiterals(withoutComments(readFileSync(file, "utf8")));
-            for (const method of source.matchAll(/\bexport\s+(?:async\s+)?function\s+(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\b/g)) {
-                add(candidates, { kind: "next-route", file: rel, line: lineAt(source, method.index!), method: method[1]!, path: `/${rel.replace(/^app\//, "").replace(/\/route\.(ts|tsx)$/, "")}` });
+            const source = sourceFile(file, readFileSync(file, "utf8"));
+            const routePath = `/${rel.replace(/^app\//, "").replace(/\/route\.(ts|tsx)$/, "")}`;
+            for (const statement of source.statements) {
+                if (!hasExportModifier(statement)) continue;
+                if (ts.isFunctionDeclaration(statement) && statement.name && isNextMethod(statement.name.text)) {
+                    add(candidates, { kind: "next-route", file: rel, line: lineAt(source.text, statement.getStart(source)), method: statement.name.text, path: routePath });
+                } else if (ts.isVariableStatement(statement)) {
+                    for (const declaration of statement.declarationList.declarations) {
+                        if (ts.isIdentifier(declaration.name) && isNextMethod(declaration.name.text)) {
+                            add(candidates, { kind: "next-route", file: rel, line: lineAt(source.text, declaration.getStart(source)), method: declaration.name.text, path: routePath });
+                        }
+                    }
+                }
             }
         }
-        if (/^pages\/api\/.+\.(ts|tsx|js)$/.test(rel)) add(candidates, { kind: "next-route", file: rel, line: 1, method: "PAGES", path: `/${rel.replace(/\.(ts|tsx|js)$/, "")}` });
+        if (/^pages\/api\/.+\.(ts|tsx|js|mjs|cjs)$/.test(rel)) add(candidates, { kind: "next-route", file: rel, line: 1, method: "PAGES", path: `/${rel.replace(/\.(ts|tsx|js|mjs|cjs)$/, "")}` });
     }
     candidates.sort((a, b) => `${a.file}\0${a.line}\0${a.kind}\0${a.specifier ?? ""}\0${a.method ?? ""}\0${a.path ?? ""}`.localeCompare(`${b.file}\0${b.line}\0${b.kind}\0${b.specifier ?? ""}\0${b.method ?? ""}\0${b.path ?? ""}`));
     const seen = new Map<string, number>();
