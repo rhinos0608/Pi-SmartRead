@@ -270,38 +270,60 @@ describe("registerSessionHooks", () => {
     const { api, handlers } = makeMockAPI();
     registerSessionHooks(api);
 
-    // Prime cache
-    await handlers.session_start!(
-      { type: "session_start", reason: "startup" },
-      makeMockContext(process.cwd()),
-    );
+    // Tiny isolated project so map + git generation settles well within the
+    // 750ms production startup budget deterministically (the whole checkout
+    // races the budget under full-suite load). Per E1-B/E3 sections are
+    // stable once resolved: a section may appear on a later run if still
+    // pending, but must never change content or disappear.
+    const projectDir = mkdtempSync(join(tmpdir(), "hook-sections-stable-"));
+    writeFileSync(join(projectDir, "package.json"), '{"name":"hook-sections-stable"}\n');
+    writeFileSync(join(projectDir, "index.ts"), "export const ready = true;\n");
+    execFileSync("git", ["init"], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["add", "."], { cwd: projectDir, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd: projectDir, stdio: "ignore" });
 
-    // First call sets sections without returning a replacement
-    const firstSections: Record<string, string> = {};
-    const first = await handlers.before_agent_start!(
-      {
-        type: "before_agent_start",
-        systemPrompt: "You are a helpful agent.",
-        prompt: "hi",
-        systemPromptOptions: { sections: firstSections },
-      },
-      makeMockContext(process.cwd()),
-    );
-    expect(first).toBeUndefined();
+    try {
+      // Prime cache
+      await handlers.session_start!(
+        { type: "session_start", reason: "startup" },
+        makeMockContext(projectDir),
+      );
 
-    // Second call sets sections again (content survives across runs)
-    const secondSections: Record<string, string> = {};
-    const second = await handlers.before_agent_start!(
-      {
-        type: "before_agent_start",
-        systemPrompt: "You are a helpful agent.",
-        prompt: "hi",
-        systemPromptOptions: { sections: secondSections },
-      },
-      makeMockContext(process.cwd()),
-    );
-    expect(second).toBeUndefined();
-    expect(secondSections).toEqual(firstSections);
+      const runSections = async (): Promise<Record<string, string>> => {
+        const sections: Record<string, string> = {};
+        const result = await handlers.before_agent_start!(
+          {
+            type: "before_agent_start",
+            systemPrompt: "You are a helpful agent.",
+            prompt: "hi",
+            systemPromptOptions: { sections },
+          },
+          makeMockContext(projectDir),
+        );
+        expect(result).toBeUndefined();
+        return sections;
+      };
+
+      // First call sets sections without returning a replacement
+      const firstSections = await runSections();
+
+      // Second call sets sections again; every section present on the first
+      // run must survive unchanged (later runs may only ADD a section whose
+      // generation was still pending within the settle budget).
+      const secondSections = await runSections();
+      for (const key of Object.keys(firstSections)) {
+        expect(secondSections[key]).toBe(firstSections[key]);
+      }
+
+      // Once generation has settled, a further run must reproduce the
+      // sections exactly (stable for the rest of the session).
+      const thirdSections = await runSections();
+      expect(thirdSections).toEqual(secondSections);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it("before_agent_start falls back to one-time systemPrompt on hosts without sections", async () => {

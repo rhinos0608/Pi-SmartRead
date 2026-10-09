@@ -322,7 +322,7 @@ export async function runGatherRecipe(view: InspectTaskView, input: Omit<GatherI
                         const importedPackage = packageName(ref.specifier);
                         const workspaceManifest = [...packagePaths].find(([name, manifestPath]) => name === importedPackage && manifestPath !== rootManifestPath?.path && matchesWorkspacePattern(manifestPath.replace(/\\/g, "/").slice(0, -"/package.json".length), declaredWorkspaces))?.[1];
                         if (workspaceManifest) {
-                            const entry = resolve(dirname(workspaceManifest), manifestEntry(manifests.get(workspaceManifest)!));
+                            const entry = resolve(scopeRoot, dirname(workspaceManifest), manifestEntry(manifests.get(workspaceManifest)!));
                             let target = targetCandidates(entry).map((candidate) => admittedFiles.find((file) => resolve(scopeRoot, file.path) === resolve(candidate))?.path).find((candidate) => candidate !== undefined);
                             if (target) {
                                 target = target.replace(/\\/g, "/");

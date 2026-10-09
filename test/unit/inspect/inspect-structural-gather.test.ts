@@ -110,8 +110,8 @@ describe("bounded inspect structural gather", () => {
         expect(result.sections.flatMap((section) => section.items)).toEqual(expect.arrayContaining([
             expect.objectContaining({ path: "routes.ts", route: "/users", range: { start: 1, end: 1 } }),
         ]));
-        expect(result.heuristics).toContain(expect.stringMatching(/not.*mounted/i));
-        expect(result.sections.find((section) => section.name === "routes")?.heuristics).toContain(expect.stringMatching(/not.*mounted/i));
+        expect(result.heuristics.some((heuristic) => /not.*mounted/i.test(heuristic))).toBe(true);
+        expect(result.sections.find((section) => section.name === "routes")?.heuristics?.some((heuristic) => /not.*mounted/i.test(heuristic))).toBe(true);
     });
 
     it("stops later sequential stages on cancellation", async () => {
@@ -145,7 +145,7 @@ describe("bounded inspect structural gather", () => {
         const root = fixture({ "a.ts": 'import "./b";', "b.ts": "" });
         const result = await runGatherRecipe("dependencies", { mode: "directory", root, budget: { ...budget, outputBytes: 1 } });
         expect(result.status).toBe("partial");
-        expect(result.followups).toContain(expect.stringMatching(/output/i));
+        expect(result.followups.some((followup) => /output/i.test(followup))).toBe(true);
         expect(result.relations).toEqual([]);
     });
 
