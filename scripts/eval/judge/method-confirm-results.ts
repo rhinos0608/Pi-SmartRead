@@ -62,6 +62,10 @@ interface ParsedConfirmRequest {
     requestBytes: number;
 }
 
+function confirmationDispatchKey(request: ParsedConfirmRequest): string {
+    return [request.arm, request.method, request.replica, request.queryGroup ?? "warmup", request.warmup, request.payloadSha256].join("|");
+}
+
 function parsePlan(value: unknown, manifestSha256: string): { hash: string; requests: ParsedConfirmRequest[] } {
     if (!isObject(value)) throw new Error("invalid confirmation plan");
     assert(value.version === 1 && value.kind === "method-confirm-plan", "invalid confirmation plan");
@@ -280,7 +284,7 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         const attempts = attemptsByPlannedRequest.get(key) ?? [];
         const latest = attempts[attempts.length - 1];
         return latest === undefined || latest.rulesetVersion !== "A3" || latest.errorClass !== null || latest.httpStatus === null || latest.httpStatus < 200 || latest.httpStatus >= 300 || latest.servedModel !== COMPARISON_SERVED_MODEL_ALLOWLIST[request.arm as keyof typeof COMPARISON_SERVED_MODEL_ALLOWLIST];
-    }).map((request) => stable([request.arm, request.method, request.replica, request.queryGroup ?? "warmup", request.warmup, request.payloadSha256]));
+    }).map(confirmationDispatchKey);
     for (const reference of integritySummary.finalAttemptUnverified) assert(computedFinalAttemptUnverified.includes(reference), "result integrity.finalAttemptUnverified references unknown or verified planned request");
     assert(JSON.stringify([...(integritySummary.finalAttemptUnverified)].sort()) === JSON.stringify([...computedFinalAttemptUnverified].sort()), "result integrity.finalAttemptUnverified summary disagrees with wire ledger");
     const computedServedIdentityDrift = uniqueWires.filter((record) => record.servedModel !== null && record.servedModel !== COMPARISON_SERVED_MODEL_ALLOWLIST[record.arm]).map((record) => record.wireId).sort();

@@ -1,3 +1,6 @@
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CloudJudge } from "../../../src/judge/cloud-judge.js";
 import {
@@ -9,9 +12,26 @@ import {
 
 const REPO_ROOT = new URL("../../../..", import.meta.url).pathname.replace(/\/$/, "") || "/";
 
+function fixtureDataDir(): string {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "judge-plan-test-")));
+    const rows = Array.from({ length: 314 }, (_, index) => {
+        const set = index < 159 ? "a" : "b";
+        const localIndex = set === "a" ? index : index - 159;
+        const count = set === "a" ? 159 : 155;
+        const queryIndex = Math.floor(localIndex * 22 / count);
+        const label = index < 78 ? "gold" : index < 226 ? "hard_negative" : "easy_negative";
+        return JSON.stringify({ qid: `${set}-${queryIndex + 1}`, query: `fixture query ${queryIndex + 1}`, file: "src/search/grep-cascade.ts", startLine: 1, endLine: 1, symbol: null, label });
+    });
+    writeFileSync(join(root, "set-a.jsonl"), `${rows.slice(0, 159).join("\n")}\n`);
+    writeFileSync(join(root, "set-b.jsonl"), `${rows.slice(159).join("\n")}\n`);
+    return root;
+}
+
 describe("deriveFullRunPlan (offline, no network)", () => {
     it("covers all 314 items in 44 namespaced query groups with the normal question builder", async () => {
-        const plan = await deriveFullRunPlan({ repoRoot: "/Users/rhinesharar/Pi-SmartRead-judges" });
+        const dataDir = fixtureDataDir();
+        const plan = await deriveFullRunPlan({ repoRoot: REPO_ROOT, dataDir });
+        rmSync(dataDir, { recursive: true });
         expect(plan.totalUnits).toBe(314);
         expect(plan.totalQueryGroups).toBe(44);
         expect(plan.labelCounts).toEqual({ gold: 78, hard_negative: 148, easy_negative: 88 });
@@ -38,7 +58,9 @@ describe("deriveFullRunPlan (offline, no network)", () => {
     });
 
     it("counts the planned warmup plus every group batch per arm (measured, not hardcoded)", async () => {
-        const plan = await deriveFullRunPlan({ repoRoot: "/Users/rhinesharar/Pi-SmartRead-judges" });
+        const dataDir = fixtureDataDir();
+        const plan = await deriveFullRunPlan({ repoRoot: REPO_ROOT, dataDir });
+        rmSync(dataDir, { recursive: true });
         // 3 arms x (1 warmup + 44 groups); each group currently packs to one batch.
         expect(plan.warmupRequestsSingleRun).toBe(3);
         expect(plan.groupWireRequestsSingleRun).toBe(44 * 3);

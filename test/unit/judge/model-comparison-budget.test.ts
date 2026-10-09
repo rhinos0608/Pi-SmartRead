@@ -455,7 +455,28 @@ describe("writePrivateFileExclusive (no overwrite, no swallowed chmod)", () => {
 });
 
 describe("verifyLegacyCanonicalSidecar (historical provenance, read-only)", () => {
-    it("the two 2026-10-07 sidecars match the ORIGINAL compact-canonical digest, not file bytes", () => {
+    it("verifies synthetic canonical sidecars and rejects changed inputs", () => {
+        const root = freshRoot();
+        const artifact = join(root, "artifact.json");
+        const sidecar = `${artifact}.sha256`;
+        const bytes = '{\n  "a": 1\n}\n';
+        const canonical = createHash("sha256").update(JSON.stringify(JSON.parse(bytes))).digest("hex");
+        writeFileSync(artifact, bytes);
+        writeFileSync(sidecar, `${canonical}  ${artifact}\n`);
+        const proof = verifyLegacyCanonicalSidecar(artifact, sidecar);
+        expect(proof.sidecarMatchesCanonical).toBe(true);
+        expect(proof.canonicalDigest).toBe(canonical);
+        expect(proof.byteDigest).not.toBe(canonical);
+        writeFileSync(artifact, '{\n  "a": 2\n}\n');
+        expect(verifyLegacyCanonicalSidecar(artifact, sidecar).sidecarMatchesCanonical).toBe(false);
+        writeFileSync(artifact, bytes);
+        writeFileSync(sidecar, `${"0".repeat(64)}  ${artifact}\n`);
+        expect(verifyLegacyCanonicalSidecar(artifact, sidecar).sidecarMatchesCanonical).toBe(false);
+        unlinkIfExists(sidecar);
+        expect(() => verifyLegacyCanonicalSidecar(artifact, sidecar)).toThrow();
+    });
+
+    it.skipIf(process.env.PI_SMARTREAD_PRIVATE_ARTIFACT_AUDIT !== "1")("the two 2026-10-07 private sidecars match the ORIGINAL compact-canonical digest, not file bytes", () => {
         const dir = "/var/folders/n1/w_721hvs2tsc0l0hpf37wnwm0000gn/T/";
         const cases = [
             { artifact: `${dir}judge-model-comparison-2026-10-07T17-30-25-596Z.json`, canonical: "e73f5de56501be808fceb59059e6dca7debabf2350126b7cfdf3b0cdec69f6a2", bytes: "d0416423a1264a0a8ac3c2bf7f4ecf55af6b0cb72b017fd8da3b168c55505af5" },
