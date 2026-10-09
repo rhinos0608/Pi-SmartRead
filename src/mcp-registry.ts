@@ -21,7 +21,7 @@ import { createGrepTool } from "./search/grep-tool.js";
 import { createFindTool } from "./search/find-tool.js";
 import { resolveMcpJudge } from "./judge/judge-runtime.js";
 import { createLspTool } from "./lsp/lsp-tool.js";
-import { captureAffordanceSelectors, recordEffectiveAffordanceIdentity, selectSurfaceVariants } from "./runtime/affordances.js";
+import { captureAffordanceSelectors, logEffectiveAffordanceIdentity, recordEffectiveAffordanceIdentity, selectSurfaceVariants } from "./runtime/affordances.js";
 import { getSmartReadToolGuidance } from "./runtime/tool-guidance.js";
 import { createEvidenceResolver } from "./evidence/workspace-evidence-resolver.js";
 import { RPC_CHANNELS } from "@rhinos0608/pi-workspace-protocol";
@@ -157,7 +157,7 @@ reg("skill", () => toToolDefinition(createSkillTool()), ToolCategory.SKILL);
 // path (buildInspectToolForExtension / registerInspectToolWithBus) always
 // takes precedence when a live bus is available; `reg()` is a no-op if
 // the tool is already present in the registry.
-reg("inspect", () => buildInspectToolForExtension(() => null), ToolCategory.READ);
+reg("inspect", () => buildInspectToolForExtension(() => null, undefined, undefined, affordanceSelectors.inspect.enabled), ToolCategory.READ);
 reg("grep", () => createGrepTool({
     contextGraph: (root) => getSharedContextGraphAsync(root),
     getWorkspaceRevision,
@@ -170,9 +170,7 @@ reg("grep", () => createGrepTool({
 reg("find", () => createFindTool({ resolveJudge: (root, _ctx, signal) => resolveMcpJudge(root, signal) }), ToolCategory.READ);
 reg("LSP", () => {
     const affordances = affordanceSelectors.general.enabled;
-    const guidance = getSmartReadToolGuidance("LSP", affordances)!;
     const def = createLspTool({ affordances });
-    recordEffectiveAffordanceIdentity(affordanceSelectors, surfaceVariants, def.parameters, def.description, [guidance.snippet, ...guidance.guidelines].join("\n"));
     return def;
 }, ToolCategory.READ);
 
@@ -182,6 +180,7 @@ reg("LSP", () => {
 export function registerInspectToolWithBus(bus: { emit: (c: string, d: unknown) => void; on: (c: string, h: (d: unknown) => void) => () => void }): void {
     const resolver = getSharedEvidenceResolver(bus);
     const def = createInspectTool({
+        affordances: affordanceSelectors.inspect.enabled,
         resolver: {
             publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
                 resolver.publishInspection(envelope as any, sessionFilePath, workspaceRoot);
@@ -209,8 +208,10 @@ export function buildInspectToolForExtension(
     getSessionFilePath: () => string | null,
     contextGraphOverride?: ContextGraph | (() => ContextGraph | Promise<ContextGraph>),
     lspInspectionProviderOverride?: LspInspectionProvider,
+    affordances = false,
 ): ToolDefinition {
     return createInspectTool({
+        affordances,
         resolver: {
             publishInspection: (envelope, sessionFilePath, workspaceRoot) => {
                 getSharedEvidenceResolver().publishInspection(envelope as any, sessionFilePath, workspaceRoot);
@@ -240,5 +241,21 @@ if (experimental.gitNotes) {
  * Build and return the full MCP tool list for the stdio server.
  */
 export function buildToolRegistry(): ToolDefinition[] {
-    return ToolRegistry.getInstance().getToolDefinitions();
+    const tools = ToolRegistry.getInstance().getToolDefinitions();
+    const lsp = tools.find((tool) => tool.name === "LSP");
+    const inspect = tools.find((tool) => tool.name === "inspect");
+    if (lsp && inspect) {
+        const lspGuidance = getSmartReadToolGuidance("LSP", affordanceSelectors.general.enabled)!;
+        const inspectGuidance = getSmartReadToolGuidance("inspect", affordanceSelectors.general.enabled, affordanceSelectors.inspect.enabled, true)!;
+        recordEffectiveAffordanceIdentity(
+            affordanceSelectors, surfaceVariants, lsp.parameters, lsp.description,
+            [lspGuidance.snippet, ...lspGuidance.guidelines].join("\n"),
+        );
+        recordEffectiveAffordanceIdentity(
+            affordanceSelectors, surfaceVariants, inspect.parameters, inspect.description,
+            [inspectGuidance.snippet, ...inspectGuidance.guidelines].join("\n"), "inspect",
+        );
+        logEffectiveAffordanceIdentity();
+    }
+    return tools;
 }

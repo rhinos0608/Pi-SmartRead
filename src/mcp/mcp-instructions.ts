@@ -18,7 +18,7 @@ export const MCP_READ_NOTE =
 export const SMARTREAD_MCP_INSTRUCTIONS = [
   SMARTREAD_TOOL_GUIDE_TITLE,
   MCP_READ_NOTE,
-  renderSmartReadToolGuide(undefined, getMcpAffordanceSelectors().general.enabled),
+  renderSmartReadToolGuide(undefined, getMcpAffordanceSelectors().general.enabled, getMcpAffordanceSelectors().inspect.enabled, true),
 ].join("\n");
 
 /** Second argument for `new Server(info, options)`. */

@@ -260,6 +260,8 @@ are listed in `details.rankingKnobs`.
 `inspect` analyzes structure. You must set `mode`, and it is never
 inferred from the path.
 
+With `PI_SMARTREAD_INSPECT_AFFORDANCES=1`, opt-in task views select one isolated view (`overview`, `dependencies`, `architecture`, `change-review`, or `routes`); add `gather: true` for bounded source corroboration. Views cannot be combined with `analysis` or script mode, and `change-review` requires `diff`. Results are discovery-only; read cited source for strong evidence. This selector is independent of `PI_SMARTREAD_AFFORDANCES`.
+
 **File mode** reports a file's dependencies, dependents, callers, type
 relationships and quality signals.
 

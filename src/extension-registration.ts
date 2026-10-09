@@ -38,7 +38,7 @@ import { createLanguageIntelligenceProvider } from "./language-intelligence/lang
 import { setWorkspaceEditBus } from "./lsp/lsp-workspace-edit.js";
 import { resetDoomLoopState } from "./runtime/doom-loop.js";
 import { getSmartReadToolGuidance } from "./runtime/tool-guidance.js";
-import { recordEffectiveAffordanceIdentity, selectSurfaceVariants, type AffordanceSelectors } from "./runtime/affordances.js";
+import { logEffectiveAffordanceIdentity, recordEffectiveAffordanceIdentity, selectSurfaceVariants, type AffordanceSelectors } from "./runtime/affordances.js";
 import type { ActivationState } from "./extension-lifecycle.js";
 
 // ── Symbol resolution for read { symbol } (WP-5) ────────────────
@@ -100,6 +100,8 @@ async function resolveSymbolForReadTool(
 
 // ── Ordered registration steps ───────────────────────────────────────
 
+let piAffordanceSelectors: AffordanceSelectors | undefined;
+
 export function initInternalUrlHandlers(): void {
   initHandlers();
 }
@@ -122,8 +124,10 @@ export function registerSessionHooksWithDoomReset(pi: ExtensionAPI, state: Activ
 export function registerInspectTool(state: ActivationState): void {
   // Unconditionally replace the eager MCP fallback with a Pi-runtime
   // definition wired to the dirty-aware freshGraphGetter.
-  const inspectDef = buildInspectTool(() => null, state.freshGraphGetter, getSharedLspInspectionProvider());
-  const guidance = getSmartReadToolGuidance("inspect");
+  const selectors = state.affordanceSelectors;
+  piAffordanceSelectors = selectors;
+  const inspectDef = buildInspectTool(() => null, state.freshGraphGetter, getSharedLspInspectionProvider(), selectors.inspect.enabled);
+  const guidance = getSmartReadToolGuidance("inspect", selectors.general.enabled, selectors.inspect.enabled);
   ToolRegistry.getInstance().registerOrReplace({
     name: "inspect",
     description: inspectDef.description,
@@ -171,15 +175,6 @@ export function registerLspTool(state: ActivationState, selectors: AffordanceSel
   void state;
   const lspDef = createLspTool({ affordances: selectors.general.enabled });
   const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled);
-  if (lspGuidance) {
-    recordEffectiveAffordanceIdentity(
-      selectors,
-      selectSurfaceVariants(selectors),
-      lspDef.parameters,
-      lspDef.description,
-      [lspGuidance.snippet, ...lspGuidance.guidelines].join("\n"),
-    );
-  }
   ToolRegistry.getInstance().registerOrReplace({
     name: "LSP",
     description: lspDef.description,
@@ -214,6 +209,25 @@ export function registerCoreTools(pi: ExtensionAPI): void {
         ...(promptGuidelines !== undefined ? { promptGuidelines } : {}),
       }),
     );
+  }
+  if (piAffordanceSelectors) {
+    const selectors = piAffordanceSelectors;
+    const inspect = reg.get("inspect");
+    const lsp = reg.get("LSP");
+    if (inspect && lsp) {
+      const inspectGuidance = getSmartReadToolGuidance("inspect", selectors.general.enabled, selectors.inspect.enabled)!;
+      const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled)!;
+      const variants = selectSurfaceVariants(selectors);
+      recordEffectiveAffordanceIdentity(
+        selectors, variants, lsp.inputSchema, lsp.description,
+        [lspGuidance.snippet, ...lspGuidance.guidelines].join("\n"),
+      );
+      recordEffectiveAffordanceIdentity(
+        selectors, variants, inspect.inputSchema, inspect.description,
+        [inspectGuidance.snippet, ...inspectGuidance.guidelines].join("\n"), "inspect",
+      );
+      logEffectiveAffordanceIdentity();
+    }
   }
 }
 

@@ -40,6 +40,8 @@ export interface EffectiveAffordanceIdentity {
 
 let effectiveIdentity: EffectiveAffordanceIdentity | undefined;
 let identityLogged = false;
+let identitySelectorKey = "";
+const identitySurfaces = new Map<string, { schema: unknown; description: string; guidance: string }>();
 
 export function getEffectiveAffordanceIdentity(): EffectiveAffordanceIdentity | undefined {
   return effectiveIdentity;
@@ -51,21 +53,33 @@ export function recordEffectiveAffordanceIdentity(
   schema: unknown,
   description: string,
   guidance: string,
+  surface = "LSP",
 ): EffectiveAffordanceIdentity {
   const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+  const selectorKey = canonicalJson(selectors);
+  if (identitySelectorKey !== selectorKey) {
+    identitySurfaces.clear();
+    identitySelectorKey = selectorKey;
+  }
+  identitySurfaces.set(surface, { schema, description, guidance });
+  const lsp = identitySurfaces.get("LSP") ?? { schema, description, guidance };
+  const inspect = identitySurfaces.get("inspect");
+  const surfaceInputs = inspect ? { ...lsp, inspect } : lsp;
   const value = Object.freeze({
     selectors,
     variants,
-    surfaceIdentity: surfaceIdentity(selectors, variants, { schema, description, guidance }),
-    schemaHash: hash(schema),
-    guidanceHash: hash(guidance),
+    surfaceIdentity: surfaceIdentity(selectors, variants, surfaceInputs),
+    schemaHash: hash(inspect ? { lsp: lsp.schema, inspect: inspect.schema } : lsp.schema),
+    guidanceHash: hash(inspect ? { lsp: lsp.guidance, inspect: inspect.guidance } : lsp.guidance),
   });
   effectiveIdentity = value;
-  if (!identityLogged && process.env.PI_SMARTREAD_SURFACE_IDENTITY_LOG === "1") {
-    process.stderr.write(`[pi-smartread:surface-identity] ${JSON.stringify(value)}\n`);
-    identityLogged = true;
-  }
   return value;
+}
+
+export function logEffectiveAffordanceIdentity(): void {
+  if (identityLogged || process.env.PI_SMARTREAD_SURFACE_IDENTITY_LOG !== "1" || !effectiveIdentity) return;
+  process.stderr.write(`[pi-smartread:surface-identity] ${JSON.stringify(effectiveIdentity)}\n`);
+  identityLogged = true;
 }
 
 export interface SurfaceVariants {

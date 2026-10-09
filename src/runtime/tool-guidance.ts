@@ -50,6 +50,23 @@ const FIND_GUIDELINES = [
 const INSPECT_SNIPPET =
   "inspect analyzes aggregate structure/architecture of a known file or the repository — never raw content reads.";
 
+const INSPECT_AFFORDANCE_GUIDANCE: SmartReadToolGuidance = {
+  snippet: "inspect runs one isolated bounded structural view, optionally with source corroboration.",
+  guidelines: [
+    "Choose view overview, dependencies, architecture, change-review, or routes; change-review requires diff: unstaged, staged, or HEAD. The selected view must match file or directory mode and cannot be combined with analysis or script mode.",
+    "Add gather: true to run bounded source checks for that view. Results report coverage, omissions, unresolved references, and heuristic limits; gathered relations are discovery only, not evidence that authorizes edits or proof of runtime architecture.",
+    "Read cited source with focused read for strong evidence. Graph-dependent work that cannot meet bounds is unsupported; no full-graph fallback is used.",
+  ],
+};
+
+const INSPECT_AFFORDANCE_MCP_GUIDANCE: SmartReadToolGuidance = {
+  snippet: INSPECT_AFFORDANCE_GUIDANCE.snippet,
+  guidelines: [
+    ...INSPECT_AFFORDANCE_GUIDANCE.guidelines.slice(0, 2),
+    "Use your host's file reader on cited source for strong evidence.",
+  ],
+};
+
 const INSPECT_GUIDELINES = [
   "inspect analyzes aggregate structure/architecture: file mode gives dependencies/dependents, call graph, impact, dead code, routes, and quality signals; directory mode gives the ranked map, clusters, layers, service boundaries, and hotspots.",
   "Inspect does not expose LSP navigation or diagnostics: for compiler-known facts about an exact symbol/location use LSP instead.",
@@ -95,8 +112,9 @@ export const SMARTREAD_GUIDED_TOOLS = ["read", "grep", "find", "inspect", "LSP",
 export type SmartReadGuidedTool = (typeof SMARTREAD_GUIDED_TOOLS)[number];
 
 /** Look up per-tool guidance by tool name; undefined when no guidance exists. */
-export function getSmartReadToolGuidance(toolName: string, affordances = false): SmartReadToolGuidance | undefined {
+export function getSmartReadToolGuidance(toolName: string, affordances = false, inspectAffordances = false, hostReader = false): SmartReadToolGuidance | undefined {
   if (toolName === "LSP" && affordances) return LSP_AFFORDANCE_GUIDANCE;
+  if (toolName === "inspect" && inspectAffordances) return hostReader ? INSPECT_AFFORDANCE_MCP_GUIDANCE : INSPECT_AFFORDANCE_GUIDANCE;
   return SMARTREAD_TOOL_GUIDANCE[toolName];
 }
 
@@ -119,11 +137,12 @@ const TOOL_GUIDE_LINES: string[] = [
   GUIDE_CLOSING,
 ];
 
-export function renderSmartReadToolGuide(task?: string, affordances = false): string {
+export function renderSmartReadToolGuide(task?: string, affordances = false, inspectAffordances = false, hostReader = false): string {
   const trimmedTask = task?.trim();
   const taskLine = trimmedTask ? [`Task: ${trimmedTask}`, ""] : [];
-  const lines = affordances
-    ? [...SMARTREAD_GUIDED_TOOLS.flatMap((toolName) => guideSection(toolName, getSmartReadToolGuidance(toolName, true)!))]
+  const lines = affordances || inspectAffordances
+    ? [...SMARTREAD_GUIDED_TOOLS.flatMap((toolName) => guideSection(toolName, getSmartReadToolGuidance(toolName, affordances, inspectAffordances, hostReader)!))]
     : TOOL_GUIDE_LINES.slice(1, -1);
-  return [...taskLine, affordances ? GUIDE_LEAD.replace("LSP answers exact compiler/language-server semantic questions", "LSP resolves exact declarations and compiler-known locations") : GUIDE_LEAD, ...lines, GUIDE_CLOSING].join("\n");
+  const lead = affordances ? GUIDE_LEAD.replace("LSP answers exact compiler/language-server semantic questions", "LSP resolves exact declarations and compiler-known locations") : GUIDE_LEAD;
+  return [...taskLine, lead, ...lines, GUIDE_CLOSING].join("\n");
 }
