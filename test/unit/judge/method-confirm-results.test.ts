@@ -5,7 +5,7 @@ import { COMPARISON_SERVED_MODEL_ALLOWLIST, type ComparisonModelId } from "../..
 import type { ConfirmCorpusRoster } from "../../../scripts/eval/judge/method-confirm-fixture.js";
 import type { MethodWireRecord } from "../../../scripts/eval/judge/method-comparison-contract.js";
 
-const MODELS: ComparisonModelId[] = ["~typesafe/jev-latest", "perplexity/pplx-decider-v1.1-27b", "openai/gpt-6-luna-decisions"];
+const MODELS = ["~typesafe/jev-latest", "perplexity/pplx-decider-v1.1-27b", "openai/gpt-6-luna-decisions"] as const satisfies readonly ComparisonModelId[];
 const sha = (s: string): string => createHash("sha256").update(s).digest("hex");
 // This synthetic roster exercises the pure analysis core only. Production CLI trust comes from loadVerifiedConfirmCorpus; these fixtures do not claim to test that loader gate.
 const roster = (): ConfirmCorpusRoster => ({

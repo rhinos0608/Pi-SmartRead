@@ -9,7 +9,7 @@ import { buildSignMatrix, CONFIRM_SIGN_FLIP_DRAWS, CONFIRM_SIGN_FLIP_SEED, holmS
 import { FROZEN_KEEP_THRESHOLD } from "./model-comparison-stats.js";
 import { METHOD_CONFIRM_MODELS } from "./method-confirm.js";
 import { EXPLORATORY_WEIGHTED_FN_PENALTY } from "./method-pilot-exploratory.js";
-import { COMPARISON_SERVED_MODEL_ALLOWLIST } from "./model-comparison-types.js";
+import { COMPARISON_SERVED_MODEL_ALLOWLIST, isComparisonModelId, type ComparisonModelId } from "./model-comparison-types.js";
 
 export const CONFIRM_RESULTS_MODEL_ORDER = Object.freeze([
     { arm: "~typesafe/jev-latest", method: "M1" },
@@ -32,25 +32,90 @@ function assert(condition: unknown, message: string): asserts condition {
     if (!condition) throw new Error(message);
 }
 
-function parsePlan(value: unknown, manifestSha256: string): { hash: string; requests: Array<Record<string, unknown>> } {
-    assert(isObject(value) && value.version === 1 && value.kind === "method-confirm-plan", "invalid confirmation plan");
+interface ConfirmResultsIntegritySummary {
+    aborted: boolean;
+    captureGaps: string[];
+    finalAttemptUnverified: string[];
+    servedIdentityDrift: string[];
+    payloadDrift: string[];
+    retryAnswerDrift: string[];
+}
+
+function parseIntegrityReferences(value: unknown, field: string): string[] {
+    if (!Array.isArray(value)) throw new Error(`invalid result integrity.${field}`);
+    const references: string[] = [];
+    for (const reference of value) {
+        if (typeof reference !== "string") throw new Error(`invalid result integrity.${field}`);
+        references.push(reference);
+    }
+    return references;
+}
+
+interface ParsedConfirmRequest {
+    arm: ComparisonModelId;
+    method: "M0" | "M1" | "M2";
+    replica: number;
+    queryGroup: string | null;
+    warmup: boolean;
+    candidateIds: string[];
+    payloadSha256: string;
+    requestBytes: number;
+}
+
+function parsePlan(value: unknown, manifestSha256: string): { hash: string; requests: ParsedConfirmRequest[] } {
+    if (!isObject(value)) throw new Error("invalid confirmation plan");
+    assert(value.version === 1 && value.kind === "method-confirm-plan", "invalid confirmation plan");
     assert(value.manifestSha256 === manifestSha256, "plan manifest hash does not match verified corpus");
-    assert(value.queryCount === 400 && value.candidateCount > 0 && value.replicaCount === 3, "plan composition mismatch");
-    assert(Array.isArray(value.requests), "plan requests missing");
+    assert(typeof value.queryCount === "number" && value.queryCount === 400
+        && typeof value.candidateCount === "number" && value.candidateCount > 0
+        && typeof value.replicaCount === "number" && value.replicaCount === 3, "plan composition mismatch");
+    const rawRequests = value.requests;
+    if (!Array.isArray(rawRequests)) throw new Error("plan requests missing");
     const bytes = `${JSON.stringify(value, null, 2)}\n`;
-    const requests = value.requests as Array<Record<string, unknown>>;
+    const requests: ParsedConfirmRequest[] = [];
     const seen = new Set<string>();
-    for (const request of requests) {
-        assert(isObject(request) && typeof request.arm === "string" && typeof request.method === "string" && typeof request.replica === "number" && Number.isInteger(request.replica), "invalid planned request");
-        assert(request.warmup === true || request.warmup === false, "invalid planned warmup flag");
-        assert(request.method === "M0" || request.method === "M1" || request.method === "M2", "invalid planned method");
-        assert(request.replica >= 0 && request.replica < 3, "invalid planned replica");
-        assert(typeof request.payloadSha256 === "string" && /^[a-f0-9]{64}$/.test(request.payloadSha256), "invalid planned payload hash");
-        assert(typeof request.requestBytes === "number" && Number.isSafeInteger(request.requestBytes) && request.requestBytes >= 0, "invalid planned requestBytes");
-        assert(request.warmup ? request.queryGroup === null : typeof request.queryGroup === "string" && request.queryGroup.length > 0, "invalid planned query group");
-        assert(Array.isArray(request.candidateIds) && request.candidateIds.length > 0 && request.candidateIds.every((cid) => typeof cid === "string" && cid.length > 0) && new Set(request.candidateIds).size === request.candidateIds.length, "invalid planned candidate list");
-        const key = stable([request.arm, request.method, request.replica, request.queryGroup, request.warmup, request.payloadSha256]);
-        assert(!seen.has(key), "duplicate planned component"); seen.add(key);
+    for (const rawRequest of rawRequests) {
+        if (!isObject(rawRequest)) throw new Error("invalid planned request");
+        const request = rawRequest;
+        const rawArm = request.arm;
+        if (!isComparisonModelId(rawArm)) throw new Error("invalid planned request arm");
+        const rawMethod = request.method;
+        if (rawMethod !== "M0" && rawMethod !== "M1" && rawMethod !== "M2") throw new Error("invalid planned method");
+        const rawReplica = request.replica;
+        if (typeof rawReplica !== "number" || !Number.isInteger(rawReplica) || rawReplica < 0 || rawReplica >= 3) throw new Error("invalid planned replica");
+        const rawWarmup = request.warmup;
+        if (typeof rawWarmup !== "boolean") throw new Error("invalid planned warmup flag");
+        const rawQueryGroup = request.queryGroup;
+        let queryGroup: string | null;
+        if (rawWarmup) {
+            if (rawQueryGroup !== null) throw new Error("invalid planned warmup query group");
+            queryGroup = null;
+        } else {
+            if (typeof rawQueryGroup !== "string" || rawQueryGroup.length === 0) throw new Error("invalid planned query group");
+            queryGroup = rawQueryGroup;
+        }
+        const rawPayloadSha256 = request.payloadSha256;
+        if (typeof rawPayloadSha256 !== "string" || !/^[a-f0-9]{64}$/.test(rawPayloadSha256)) throw new Error("invalid planned payload hash");
+        const rawRequestBytes = request.requestBytes;
+        if (typeof rawRequestBytes !== "number" || !Number.isSafeInteger(rawRequestBytes) || rawRequestBytes < 0) throw new Error("invalid planned requestBytes");
+        const rawCandidateIds = request.candidateIds;
+        if (!Array.isArray(rawCandidateIds) || rawCandidateIds.length === 0) throw new Error("invalid planned candidate list");
+        const candidateIds: string[] = [];
+        for (const candidateId of rawCandidateIds) {
+            if (typeof candidateId !== "string" || candidateId.length === 0) throw new Error("invalid planned candidate list");
+            candidateIds.push(candidateId);
+        }
+        if (new Set(candidateIds).size !== candidateIds.length) throw new Error("invalid planned candidate list");
+        const arm = rawArm;
+        const method = rawMethod;
+        const replica = rawReplica;
+        const warmup = rawWarmup;
+        const payloadSha256 = rawPayloadSha256;
+        const requestBytes = rawRequestBytes;
+        const key = stable([arm, method, replica, queryGroup, warmup, payloadSha256]);
+        assert(!seen.has(key), "duplicate planned component");
+        seen.add(key);
+        requests.push({ arm, method, replica, queryGroup, warmup, candidateIds, payloadSha256, requestBytes });
     }
     return { hash: sha256(bytes), requests };
 }
@@ -73,18 +138,33 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
     const queries = new Map(roster.queries.map((q) => [q.qid, q]));
     const candidates = new Map(roster.candidates.map((c) => [c.cid, c]));
     assert(roster.queries.length === 400 && roster.candidates.length === 2_800 && roster.queries.every((query) => roster.candidates.filter((candidate) => candidate.qid === query.qid).length === 7), "verified roster must contain 400 queries × 7 candidates");
-    const plan = parsePlan(input.plan, roster.manifestSha256);
-    assert(isObject(input.plan) && input.plan.candidateCount === roster.candidates.length, "plan candidate count does not match verified corpus");
+    const rawPlan = input.plan;
+    if (!isObject(rawPlan)) throw new Error("invalid confirmation plan");
+    assert(typeof rawPlan.candidateCount === "number" && rawPlan.candidateCount === roster.candidates.length, "plan candidate count does not match verified corpus");
+    const plan = parsePlan(rawPlan, roster.manifestSha256);
     const result = input.results;
-    assert(isObject(result) && result.version === 1 && result.kind === "method-confirm-results", "invalid result artifact");
+    if (!isObject(result) || result.version !== 1 || result.kind !== "method-confirm-results") throw new Error("invalid result artifact");
     assert(result.manifestSha256 === roster.manifestSha256 && result.planSha256 === plan.hash, "result hash binding mismatch");
-    assert(Array.isArray(result.completed) && Array.isArray(result.blocked) && isObject(result.integrity), "invalid result artifact shape");
+    const rawIntegritySummary = result.integrity;
+    if (!Array.isArray(result.completed) || !Array.isArray(result.blocked) || !isObject(rawIntegritySummary)) throw new Error("invalid result artifact shape");
     assert(JSON.stringify(Object.keys(result).sort()) === JSON.stringify(["blocked", "completed", "integrity", "kind", "manifestSha256", "planSha256", "version"].sort()), "unexpected result artifact fields");
     const integrityKeys = ["aborted", "captureGaps", "finalAttemptUnverified", "servedIdentityDrift", "payloadDrift", "retryAnswerDrift"];
-    assert(JSON.stringify(Object.keys(result.integrity).sort()) === JSON.stringify([...integrityKeys].sort()) && typeof result.integrity.aborted === "boolean" && integrityKeys.slice(1).every((key) => Array.isArray(result.integrity[key]) && (result.integrity[key] as unknown[]).every((id) => typeof id === "string")), "invalid result integrity summary");
+    assert(JSON.stringify(Object.keys(rawIntegritySummary).sort()) === JSON.stringify([...integrityKeys].sort()), "invalid result integrity summary");
+    if (typeof rawIntegritySummary.aborted !== "boolean") throw new Error("invalid result integrity.aborted");
+    const integritySummary: ConfirmResultsIntegritySummary = {
+        aborted: rawIntegritySummary.aborted,
+        captureGaps: parseIntegrityReferences(rawIntegritySummary.captureGaps, "captureGaps"),
+        finalAttemptUnverified: parseIntegrityReferences(rawIntegritySummary.finalAttemptUnverified, "finalAttemptUnverified"),
+        servedIdentityDrift: parseIntegrityReferences(rawIntegritySummary.servedIdentityDrift, "servedIdentityDrift"),
+        payloadDrift: parseIntegrityReferences(rawIntegritySummary.payloadDrift, "payloadDrift"),
+        retryAnswerDrift: parseIntegrityReferences(rawIntegritySummary.retryAnswerDrift, "retryAnswerDrift"),
+    };
 
+    const completedRows = result.completed;
+    const blockedRows = result.blocked;
+    if (!Array.isArray(completedRows) || !Array.isArray(blockedRows)) throw new Error("invalid result artifact shape");
     const plannedCandidates = new Map<string, Set<string>>();
-    const plannedRequests = new Map<string, Record<string, unknown>>();
+    const plannedRequests = new Map<string, ParsedConfirmRequest>();
     for (const req of plan.requests) {
         assert(typeof req.arm === "string" && typeof req.method === "string" && typeof req.replica === "number" && Number.isInteger(req.replica) && typeof req.warmup === "boolean", "invalid planned request identity");
         const requestArm = req.arm, requestMethod = req.method, requestQid = req.queryGroup;
@@ -94,7 +174,7 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         const key = [arm, method, req.replica, qid].join("|");
         assert(Array.isArray(req.candidateIds), "planned candidate list missing");
         const cellCandidates = plannedCandidates.get(key) ?? new Set<string>();
-        for (const cid of req.candidateIds as unknown[]) { assert(typeof cid === "string" && candidates.get(cid)?.qid === qid, "unexpected planned candidate"); cellCandidates.add(cid); }
+        for (const cid of req.candidateIds) { assert(candidates.get(cid)?.qid === qid, "unexpected planned candidate"); cellCandidates.add(cid); }
         plannedCandidates.set(key, cellCandidates);
     }
     for (const config of METHOD_CONFIRM_MODELS) for (const query of roster.queries) {
@@ -114,24 +194,27 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
     }
     const completed = new Map<string, { probability: number; wireIds: string[] }>();
     const blockedKeys = new Set<string>();
-    for (const [kind, rows] of [["completed", result.completed], ["blocked", result.blocked]] as const) {
-        for (const raw of rows as unknown[]) {
+    for (const [kind, rows] of [["completed", completedRows], ["blocked", blockedRows]] as const) {
+        for (const raw of rows) {
             assert(isObject(raw), `invalid ${kind} cell`);
             const { arm, method, queryGroup, candidateId, replica } = raw;
-            assert(typeof arm === "string" && typeof method === "string" && typeof queryGroup === "string" && Number.isInteger(replica), `invalid ${kind} identity`);
-            assert(queries.has(queryGroup) && candidates.get(String(candidateId))?.qid === queryGroup, `unexpected ${kind} candidate/query`);
+            assert(typeof arm === "string" && typeof method === "string" && typeof queryGroup === "string" && typeof candidateId === "string" && typeof replica === "number" && Number.isInteger(replica), `invalid ${kind} identity`);
+            assert(queries.has(queryGroup) && candidates.get(candidateId)?.qid === queryGroup, `unexpected ${kind} candidate/query`);
             assert(METHOD_CONFIRM_MODELS.some((m) => m.arm === arm && (m.challenger === method || method === "M0")), `unexpected ${kind} model/method`);
-            assert((replica as number) >= 0 && (replica as number) < 3, `unexpected replica`);
+            assert(replica >= 0 && replica < 3, "unexpected replica");
             const key = [arm, method, replica, queryGroup, candidateId].join("|");
             assert(!completed.has(key) && !blockedKeys.has(key), `duplicate result cell ${key}`);
             const hashKey = [arm, method, replica, queryGroup].join("|");
             assert(plannedCandidates.get(hashKey)?.has(String(candidateId)), `unplanned result cell ${key}`);
             if (kind === "completed") {
-                assert(typeof raw.probability === "number" && Number.isFinite(raw.probability) && raw.probability >= 0 && raw.probability <= 1, `invalid probability ${key}`);
-                assert(Array.isArray(raw.wireIds) && raw.wireIds.length > 0 && raw.wireIds.every((id) => typeof id === "string"), `invalid wire links ${key}`);
-                completed.set(key, { probability: raw.probability, wireIds: raw.wireIds as string[] });
+                const probability = raw.probability;
+                assert(typeof probability === "number" && Number.isFinite(probability) && probability >= 0 && probability <= 1, `invalid probability ${key}`);
+                const rawWireIds = raw.wireIds;
+                assert(Array.isArray(rawWireIds) && rawWireIds.length > 0 && rawWireIds.every((id): id is string => typeof id === "string"), `invalid wire links ${key}`);
+                completed.set(key, { probability, wireIds: rawWireIds });
             } else {
-                assert(raw.probability === null && Array.isArray(raw.wireIds) && raw.wireIds.every((id) => typeof id === "string") && typeof raw.reason === "string", `invalid blocked cell ${key}`);
+                const rawWireIds = raw.wireIds;
+                assert(raw.probability === null && Array.isArray(rawWireIds) && rawWireIds.every((id) => typeof id === "string") && typeof raw.reason === "string", `invalid blocked cell ${key}`);
                 blockedKeys.add(key);
             }
         }
@@ -191,7 +274,6 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         }
     }
 
-    const integritySummary = input.results.integrity as Record<string, unknown>;
     assert(typeof integritySummary.aborted === "boolean", "result integrity.aborted missing");
     const computedFinalAttemptUnverified = plan.requests.filter((request) => {
         const key = stable([request.arm, request.method, request.replica, request.queryGroup, request.warmup, request.payloadSha256, request.candidateIds]);
@@ -199,14 +281,14 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         const latest = attempts[attempts.length - 1];
         return latest === undefined || latest.rulesetVersion !== "A3" || latest.errorClass !== null || latest.httpStatus === null || latest.httpStatus < 200 || latest.httpStatus >= 300 || latest.servedModel !== COMPARISON_SERVED_MODEL_ALLOWLIST[request.arm as keyof typeof COMPARISON_SERVED_MODEL_ALLOWLIST];
     }).map((request) => stable([request.arm, request.method, request.replica, request.queryGroup ?? "warmup", request.warmup, request.payloadSha256]));
-    for (const reference of integritySummary.finalAttemptUnverified as string[]) assert(computedFinalAttemptUnverified.includes(reference), "result integrity.finalAttemptUnverified references unknown or verified planned request");
-    assert(JSON.stringify([...(integritySummary.finalAttemptUnverified as string[])].sort()) === JSON.stringify([...computedFinalAttemptUnverified].sort()), "result integrity.finalAttemptUnverified summary disagrees with wire ledger");
+    for (const reference of integritySummary.finalAttemptUnverified) assert(computedFinalAttemptUnverified.includes(reference), "result integrity.finalAttemptUnverified references unknown or verified planned request");
+    assert(JSON.stringify([...(integritySummary.finalAttemptUnverified)].sort()) === JSON.stringify([...computedFinalAttemptUnverified].sort()), "result integrity.finalAttemptUnverified summary disagrees with wire ledger");
     const computedServedIdentityDrift = uniqueWires.filter((record) => record.servedModel !== null && record.servedModel !== COMPARISON_SERVED_MODEL_ALLOWLIST[record.arm]).map((record) => record.wireId).sort();
-    for (const reference of integritySummary.servedIdentityDrift as string[]) assert(computedServedIdentityDrift.includes(reference), "result integrity.servedIdentityDrift references unknown or identity-verified wire");
-    assert(JSON.stringify([...(integritySummary.servedIdentityDrift as string[])].sort()) === JSON.stringify(computedServedIdentityDrift), "result integrity.servedIdentityDrift summary disagrees with wire ledger");
+    for (const reference of integritySummary.servedIdentityDrift) assert(computedServedIdentityDrift.includes(reference), "result integrity.servedIdentityDrift references unknown or identity-verified wire");
+    assert(JSON.stringify([...(integritySummary.servedIdentityDrift)].sort()) === JSON.stringify(computedServedIdentityDrift), "result integrity.servedIdentityDrift summary disagrees with wire ledger");
     const computedPayloadDrift = uniqueWires.filter((record) => !plannedRequests.has(stable([record.arm, record.method, record.replica, record.queryGroup, record.warmup, record.payloadSha256]))).map((record) => record.wireId).sort();
-    for (const reference of integritySummary.payloadDrift as string[]) assert(computedPayloadDrift.includes(reference), "result integrity.payloadDrift references unknown or payload-verified wire");
-    assert(JSON.stringify([...(integritySummary.payloadDrift as string[])].sort()) === JSON.stringify(computedPayloadDrift), "result integrity.payloadDrift summary disagrees with wire ledger");
+    for (const reference of integritySummary.payloadDrift) assert(computedPayloadDrift.includes(reference), "result integrity.payloadDrift references unknown or payload-verified wire");
+    assert(JSON.stringify([...(integritySummary.payloadDrift)].sort()) === JSON.stringify(computedPayloadDrift), "result integrity.payloadDrift summary disagrees with wire ledger");
     const computedRetryAnswerDrift: string[] = [];
     for (const attempts of attemptsByPlannedRequest.values()) {
         const successes = attempts.filter((record) => record.errorClass === null);
@@ -215,8 +297,8 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
             if (new Set(answers).size > 1) computedRetryAnswerDrift.push(...successes.map((record) => record.wireId));
         }
     }
-    for (const reference of integritySummary.retryAnswerDrift as string[]) assert(computedRetryAnswerDrift.includes(reference), "result integrity.retryAnswerDrift references unknown or answer-consistent wire");
-    assert(JSON.stringify([...(integritySummary.retryAnswerDrift as string[])].sort()) === JSON.stringify([...computedRetryAnswerDrift].sort()), "result integrity.retryAnswerDrift summary disagrees with wire ledger");
+    for (const reference of integritySummary.retryAnswerDrift) assert(computedRetryAnswerDrift.includes(reference), "result integrity.retryAnswerDrift references unknown or answer-consistent wire");
+    assert(JSON.stringify([...(integritySummary.retryAnswerDrift)].sort()) === JSON.stringify([...computedRetryAnswerDrift].sort()), "result integrity.retryAnswerDrift summary disagrees with wire ledger");
     const computedCaptureGaps = uniqueWires.filter((r) => r.errorClass === "capture_gap").map((r) => r.wireId).sort();
     assert(Array.isArray(integritySummary.captureGaps) && JSON.stringify([...integritySummary.captureGaps].sort()) === JSON.stringify(computedCaptureGaps), "result capture-gap summary disagrees with wire ledger");
     const models: Record<string, unknown>[] = [];
@@ -246,8 +328,7 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
             fn0 += baseline.fn; fp0 += baseline.fp; fnc += changed.fn; fpc += changed.fp;
             const repoValues = perRepo.get(query.repo) ?? []; repoValues.push(d); perRepo.set(query.repo, repoValues);
         }
-        const hasIntegrity = input.results && isObject(input.results) && isObject(input.results.integrity)
-            ? input.results.integrity : {};
+        const hasIntegrity = integritySummary;
         const modelWires = uniqueWires.filter((r) => r.arm === arm);
         const finalAttemptFailure = plan.requests.filter((r) => r.arm === arm).some((request) => {
             const attempts = modelWires.filter((r) => r.method === request.method && r.replica === request.replica && r.queryGroup === request.queryGroup && r.warmup === request.warmup && r.payloadSha256 === request.payloadSha256 && JSON.stringify(r.candidateIds) === JSON.stringify(request.candidateIds));
