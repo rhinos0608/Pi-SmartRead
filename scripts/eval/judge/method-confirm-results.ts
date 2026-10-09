@@ -227,7 +227,7 @@ export function analyzeMethodConfirmResults(input: ConfirmResultsAnalysisOptions
         let fn0 = 0, fp0 = 0, fnc = 0, fpc = 0, wins = 0, ties = 0, losses = 0;
         let blocked = false;
         for (const [qid, query] of queries) {
-            let lossesByMethod: Record<string, { loss: number; fn: number; fp: number }> = {};
+            const lossesByMethod: Record<string, { loss: number; fn: number; fp: number }> = {};
             for (const method of ["M0", challenger]) {
                 let fn = 0, fp = 0;
                 for (const candidate of roster.candidates.filter((c) => c.qid === qid)) {
