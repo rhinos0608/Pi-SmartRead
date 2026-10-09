@@ -157,6 +157,10 @@ describe("inspect bounded source-scope enumerator", () => {
     });
 
     it("unreadable entry is recorded as omitted, traversal continues", async () => {
+        if (process.platform === "win32") {
+            // Windows does not enforce POSIX chmod read restrictions on directories.
+            return;
+        }
         if (process.geteuid?.() === 0) {
             // Root bypasses permission bits; the error path cannot trigger.
             return;

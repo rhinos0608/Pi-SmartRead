@@ -442,7 +442,10 @@ async function executeInvestigation(params: Record<string, unknown>, opts: LspTo
     status: output.status,
     operation: "investigate",
     result: output.result,
-    meta: { truncated: output.steps.some((step) => step.envelope.meta.truncated) },
+    meta: {
+      truncated: Boolean(isRecord(output.result) && output.result.truncated === true)
+        || output.steps.some((step) => step.envelope.meta.truncated),
+    },
   };
   return strictEnvelopeResult(envelope, output.steps);
 }

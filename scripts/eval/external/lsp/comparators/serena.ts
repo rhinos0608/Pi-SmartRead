@@ -197,7 +197,7 @@ function toPointLoc(
 ): BenchLocation | null {
   if (typeof entry.relative_path !== "string") return null;
   if (typeof entry.body_location?.start_line !== "number") return null;
-  const file = canonicalize(join(root, entry.relative_path));
+  const file = canonicalize(join(root, entry.relative_path).replace(/\\/g, "/"));
   if (!file) return null;
   return pointLoc(file, entry.body_location.start_line, 0);
 }
@@ -240,7 +240,7 @@ const REF_MARKER = /^\s*(?:\.\.\.\s+)?>\s+(\d+)\s*:/;
 
 function markerLines(snippet: string): number[] {
   const out: number[] = [];
-  for (const line of snippet.split("\n")) {
+  for (const line of snippet.split(/\r?\n/)) {
     const m = REF_MARKER.exec(line);
     if (m) out.push(Number(m[1]));
   }
@@ -270,7 +270,7 @@ export function parseSerenaReferences(
   const seen = new Set<string>();
   for (const [rel, groups] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof groups !== "object" || groups === null) continue;
-    const file = canonicalize(join(root, rel));
+    const file = canonicalize(join(root, rel).replace(/\\/g, "/"));
     if (!file) continue;
     const symbols = Object.values(groups as Record<string, unknown>).flatMap((g) =>
       Array.isArray(g) ? g : [],

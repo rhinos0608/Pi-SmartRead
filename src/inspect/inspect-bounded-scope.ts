@@ -237,20 +237,32 @@ export async function enumerateBoundedScope(
                     omitted.push({ path: relative(canonicalRoot, dir) || ".", reason: "limit" });
                     return finish("partial", performance.now() - startedAt);
                 }
-                const rel = relative(canonicalRoot, join(dir, entry.name)) || entry.name;
+                const entryPath = join(dir, entry.name);
+                const rel = relative(canonicalRoot, entryPath) || entry.name;
                 const entryDepth = depth + 1;
-
-                if (entry.isSymbolicLink()) {
+                let entryStat;
+                try {
+                    // Dirent metadata alone is insufficient for Windows junctions.
+                    entryStat = await lstat(entryPath);
+                } catch (err) {
+                    omitted.push({
+                        path: rel,
+                        reason: "unreadable",
+                        detail: err instanceof Error ? err.message : String(err),
+                    });
+                    continue;
+                }
+                if (entry.isSymbolicLink() || entryStat.isSymbolicLink()) {
                     omitted.push({ path: rel, reason: "symlink-skipped" });
                     continue;
                 }
-                if (entry.isDirectory()) {
+                if (entryStat.isDirectory()) {
                     if (entryDepth > limits.maxDepth) {
                         omitted.push({ path: rel, reason: "depth-exceeded" });
                         continue;
                     }
                     stack.push({ dir: join(dir, entry.name), depth: entryDepth });
-                } else if (entry.isFile()) {
+                } else if (entryStat.isFile()) {
                     if (entryDepth > limits.maxDepth) {
                         omitted.push({ path: rel, reason: "depth-exceeded" });
                         continue;
