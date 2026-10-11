@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
     EXTERNAL_STATE_MARKER,
@@ -525,7 +525,7 @@ describe("snapshot deletion guards", () => {
         );
         expect("root" in out).toBe(true);
         if ("root" in out) {
-            expect(realpathSync(out.root).startsWith(`${root}/`)).toBe(true);
+            expect(realpathSync(out.root).startsWith(`${root}${sep}`)).toBe(true);
             expect(existsSync(join(out.root, "src", "a.ts"))).toBe(true);
         }
     });
