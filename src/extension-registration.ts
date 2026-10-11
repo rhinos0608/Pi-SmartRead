@@ -34,7 +34,7 @@ import { registerLanguageIntelligenceCommand } from "./language-intelligence/lan
 import { registerJudgeCommand } from "./judge/judge-command.js";
 import { getSharedVonSidecarManager } from "./judge/von-sidecar.js";
 import { resolvePiJudge } from "./judge/judge-runtime.js";
-import { createLanguageIntelligenceProvider } from "./language-intelligence/language-intelligence-provider.js";
+import { createLanguageIntelligenceProvider, noteLanguageIntelligenceSessionFromContext } from "./language-intelligence/language-intelligence-provider.js";
 import { setWorkspaceEditBus } from "./lsp/lsp-workspace-edit.js";
 import { resetDoomLoopState } from "./runtime/doom-loop.js";
 import { getSmartReadToolGuidance } from "./runtime/tool-guidance.js";
@@ -327,7 +327,9 @@ export function installResolverAndProviderBestEffort(pi: ExtensionAPI, state: Ac
   } catch {
     /* non-fatal */
   }
-  // Language intelligence RPC provider (post-edit diagnostics)
+  // Language intelligence RPC provider (post-edit diagnostics + staged proposals).
+  // D-81: proposal RPCs stage through SmartEdit under this session's identity,
+  // captured from the live extension context (same Pi session SmartEdit serves).
   try {
     const liBus = pi.events as {
       emit: (c: string, d: unknown) => void;
@@ -335,6 +337,19 @@ export function installResolverAndProviderBestEffort(pi: ExtensionAPI, state: Ac
     };
     const provider = createLanguageIntelligenceProvider(liBus as any);
     state.languageIntelligenceDispose = () => provider.dispose();
+    try {
+      const capture = (_event: unknown, ctx: unknown) => {
+        try {
+          noteLanguageIntelligenceSessionFromContext(ctx as Parameters<typeof noteLanguageIntelligenceSessionFromContext>[0]);
+        } catch {
+          /* non-fatal: proposal staging stays unavailable */
+        }
+      };
+      (pi.on as unknown as (event: string, handler: (event: unknown, ctx: unknown) => void) => void)("session_start", capture);
+      (pi.on as unknown as (event: string, handler: (event: unknown, ctx: unknown) => void) => void)("before_agent_start", capture);
+    } catch {
+      /* non-fatal: proposal staging stays unavailable until identity is captured */
+    }
   } catch {
     /* non-fatal */
   }

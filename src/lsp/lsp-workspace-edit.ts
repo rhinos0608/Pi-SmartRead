@@ -15,7 +15,6 @@ import {
   createRpcClient,
   type ApplyStagedEditResponse,
   type LspWorkspaceEdit,
-  type StageWorkspaceEditResponse,
 } from "@rhinos0608/pi-workspace-protocol";
 import { invalidateFsScanCache } from "../workspace/fs-scan-cache.js";
 import { getSemanticIndex } from "../indexing/semantic-index-registry.js";
@@ -28,13 +27,10 @@ export interface BusLike {
   on(channel: string, handler: (data: unknown) => void): () => void;
 }
 
-/** Short RPC timeout: staging must never stall a read-only answer. */
-export const WORKSPACE_EDIT_RPC_TIMEOUT_MS = 2000;
-
 /**
  * Apply commits the write and then runs SmartEdit's post-edit lanes
- * (diagnostics, LSP waits), exactly like the edit tool, so it needs the
- * same patience rather than the staging timeout.
+ * (diagnostics, LSP waits), exactly like the edit tool, so it needs a
+ * patient timeout.
  */
 export const WORKSPACE_EDIT_APPLY_TIMEOUT_MS = 120_000;
 
@@ -204,8 +200,12 @@ export function envelopeResultToWorkspaceEdit(result: unknown, fallbackFilePath?
   return null;
 }
 
-function isStageOk(payload: unknown): payload is StageWorkspaceEditResponse & { ok: true } {
-  return isRecord(payload) && payload.ok === true && typeof payload.proposalId === "string";
+export interface ApplyInput {
+  bus: BusLike | null;
+  proposalId: string;
+  toolCallId: string;
+  sessionFilePath: string | null;
+  cwd: string;
 }
 
 function isApplyPayload(payload: unknown): payload is ApplyStagedEditResponse {
@@ -217,48 +217,6 @@ function isApplyPayload(payload: unknown): payload is ApplyStagedEditResponse {
     Array.isArray(payload.diagnostics) &&
     Array.isArray(payload.changedFiles)
   );
-}
-
-export interface StageInput {
-  bus: BusLike | null;
-  workspaceEdit: LspWorkspaceEdit;
-  operation: string;
-  serverDescriptorId?: string;
-  sessionFilePath: string | null;
-  cwd: string;
-}
-
-/** Stage a workspace edit with SmartEdit. Null on any failure — never throws. */
-export async function stageWorkspaceEdit(input: StageInput): Promise<StageWorkspaceEditResponse | null> {
-  if (!input.bus || !input.sessionFilePath) return null;
-  const client = createRpcClient({ bus: input.bus, channel: RPC_CHANNELS.workspaceEdit, timeoutMs: WORKSPACE_EDIT_RPC_TIMEOUT_MS });
-  try {
-    const reply = await client.request(WORKSPACE_EDIT_RPC_METHODS.stage, {
-      workspaceEdit: input.workspaceEdit,
-      source: {
-        operation: input.operation,
-        ...(input.serverDescriptorId ? { serverDescriptorId: input.serverDescriptorId } : {}),
-      },
-      sessionFilePath: input.sessionFilePath,
-      cwd: input.cwd,
-    });
-    if (!reply.ok) return null;
-    const payload = reply.payload as StageWorkspaceEditResponse;
-    if (isStageOk(payload)) return payload;
-    return isRecord(payload) && payload.ok === false ? payload : null;
-  } catch {
-    return null;
-  } finally {
-    client.dispose();
-  }
-}
-
-export interface ApplyInput {
-  bus: BusLike | null;
-  proposalId: string;
-  toolCallId: string;
-  sessionFilePath: string | null;
-  cwd: string;
 }
 
 export type ApplyStagedProposalOutcome =

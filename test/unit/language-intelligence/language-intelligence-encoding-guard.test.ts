@@ -12,7 +12,11 @@ import {
     createLanguageIntelligenceProvider,
     isRpcProposalEncodingSupported,
     rpcProposalEncodingError,
+    __setLanguageIntelligenceProducersForTests,
+    __resetLanguageIntelligenceProducersForTests,
 } from "../../../src/language-intelligence/language-intelligence-provider.js";
+import type { executeBoundSemanticEdit } from "../../../src/lsp/lsp-semantic-edit-origin.js";
+import type { executeBoundAction } from "../../../src/lsp/lsp-action-adapter.js";
 
 // executor seam (provider sources proposals from executeLspOperation)
 const mockExecutor = vi.fn();
@@ -20,8 +24,12 @@ vi.mock("../../../src/lsp/lsp-executor.js", () => ({
     executeLspOperation: (...args: unknown[]) => mockExecutor(...args),
 }));
 
-function execEnv(status: string, result: unknown, encoding = "utf-16") {
-    return { status, operation: "rename", method: "m", server: { descriptorId: "ts", name: "ts", languageId: "typescript", projectRoot: "/repo", positionEncoding: encoding }, result, meta: { truncated: false, freshness: { state: "fresh" } } };
+function serverFor(encoding: "utf-16" | "utf-8" | "utf-32") {
+    return { descriptorId: "ts", name: "ts", languageId: "typescript", projectRoot: "/repo", positionEncoding: encoding };
+}
+
+function releasedCleanup() {
+    return Promise.resolve(Object.freeze({ state: "released" as const }));
 }
 
 function makeBus() {
@@ -48,27 +56,31 @@ function makeBus() {
 let dir: string;
 let file: string;
 let canon: string;
-function fileUri(c: string) { return "file://" + c; }
-function renameResult() {
-    return { changes: [{ uri: fileUri(canon), edits: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } }, newText: "y" }] }] };
-}
-
 beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "li-enc-"));
     file = join(dir, "sample.ts");
     writeFileSync(file, "const x = 1;\n");
     canon = realpathSync(file);
     mockExecutor.mockReset();
+    __resetLanguageIntelligenceProducersForTests();
 });
 
 afterEach(() => {
+    __resetLanguageIntelligenceProducersForTests();
     try { rmSync(dir, { recursive: true, force: true }); } catch {}
     vi.resetAllMocks();
 });
 
 async function rpcClient() {
     const bus = makeBus();
-    const provider = createLanguageIntelligenceProvider(bus as never);
+    // Staging identity present; the injected bound-producer fakes below
+    // return staged outcomes directly (exact stage-RPC assertions live in
+    // language-intelligence-proposals.test.ts).
+    const provider = createLanguageIntelligenceProvider(bus as never, {
+        getSessionFilePath: () => join(dir, "session.jsonl"),
+        getCwd: () => dir,
+        getStageBus: () => makeBus() as never,
+    });
     const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
     return { bus, provider, client };
 }
@@ -76,7 +88,13 @@ async function rpcClient() {
 describe("rpc proposal encoding guard (fail-closed)", () => {
     it("utf-16 passes on renamePreview", async () => {
         const { provider, client } = await rpcClient();
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", renameResult(), "utf-16"));
+        const fakeSemantic: typeof executeBoundSemanticEdit = async () => ({
+            kind: "result",
+            envelope: { status: "ok", operation: "rename", method: "textDocument/rename", server: serverFor("utf-16"), result: null, meta: { truncated: false } },
+            proposal: { proposalId: "p-enc", files: [canon], diff: "@@ enc" },
+            cleanup: releasedCleanup(),
+        });
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: canon, line: 1, character: 1, newName: "y" });
         expect(reply.ok).toBe(true);
         expect((reply.payload as { ok: boolean }).ok).toBe(true);
@@ -86,7 +104,12 @@ describe("rpc proposal encoding guard (fail-closed)", () => {
 
     it("utf-8 rejected on renamePreview with unsupported-encoding", async () => {
         const { provider, client } = await rpcClient();
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", renameResult(), "utf-8"));
+        const fakeSemantic: typeof executeBoundSemanticEdit = async () => ({
+            kind: "result",
+            envelope: { status: "ok", operation: "rename", method: "textDocument/rename", server: serverFor("utf-8"), result: null, meta: { truncated: false } },
+            cleanup: releasedCleanup(),
+        });
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: canon, line: 1, character: 1, newName: "y" });
         expect(reply.ok).toBe(true);
         const p = reply.payload as { ok: boolean; error?: string };
@@ -98,7 +121,12 @@ describe("rpc proposal encoding guard (fail-closed)", () => {
 
     it("utf-32 rejected on codeAction with unsupported-encoding", async () => {
         const { provider, client } = await rpcClient();
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", [], "utf-32"));
+        const fakeAction: typeof executeBoundAction = async () => ({
+            kind: "result",
+            envelope: { status: "ok", operation: "codeActions", method: "textDocument/codeAction", server: serverFor("utf-32"), result: [], meta: { truncated: false } },
+            cleanup: releasedCleanup(),
+        });
+        __setLanguageIntelligenceProducersForTests({ executeAction: fakeAction });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction, { filePath: canon, line: 1, character: 1, endLine: 1, endCharacter: 1 });
         expect(reply.ok).toBe(true);
         const p = reply.payload as { ok: boolean; error?: string };
@@ -108,32 +136,41 @@ describe("rpc proposal encoding guard (fail-closed)", () => {
         provider.dispose();
     });
 
-    it("utf-8 rejected on formatting and organizeImports", async () => {
+    it("utf-8 rejected on formatting", async () => {
         const { provider, client } = await rpcClient();
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, newText: "const" }], "utf-8"));
+        const fakeSemantic: typeof executeBoundSemanticEdit = async () => ({
+            kind: "result",
+            envelope: { status: "ok", operation: "formatDocument", method: "textDocument/formatting", server: serverFor("utf-8"), result: null, meta: { truncated: false } },
+            cleanup: releasedCleanup(),
+        });
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const r1 = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting, { filePath: canon });
         expect((r1.payload as { ok: boolean }).ok).toBe(false);
         expect((r1.payload as { error?: string }).error).toMatch(/^unsupported-encoding/);
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", [{ title: "Organize imports", kind: "source.organizeImports", edit: renameResult() }], "utf-8"));
-        const r2 = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.organizeImports, { filePath: canon });
-        expect((r2.payload as { ok: boolean }).ok).toBe(false);
-        expect((r2.payload as { error?: string }).error).toMatch(/^unsupported-encoding/);
         client.dispose();
         provider.dispose();
     });
 
-    it("strict path unaffected: utf-8 envelope still reaches executor unconverted", async () => {
-        // Direct strict executor path retains negotiated encoding — the guard
-        // lives only in the RPC proposal layer, never in lsp-executor/lsp-tool.
+    it("bound producer receives 0-based coords, no conversion on the RPC layer", async () => {
+        // The guard lives only in the RPC proposal layer; the bound producer
+        // receives the coordinates the provider derived from the DTO.
         const { provider, client } = await rpcClient();
-        mockExecutor.mockImplementationOnce(async (req: unknown) => {
-            const r = req as { position: { line: number; character: number } };
-            // 1-based RPC input forwarded as 0-based with no conversion
-            expect(r.position).toEqual({ line: 0, character: 0 });
-            return execEnv("ok", renameResult(), "utf-16");
-        });
+        const seen: unknown[] = [];
+        const fakeSemantic: typeof executeBoundSemanticEdit = async (req) => {
+            seen.push(req);
+            return {
+                kind: "result",
+                envelope: { status: "ok", operation: "rename", method: "textDocument/rename", server: serverFor("utf-16"), result: null, meta: { truncated: false } },
+                proposal: { proposalId: "p-coords", files: [canon], diff: "@@ coords" },
+                cleanup: releasedCleanup(),
+            };
+        };
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: canon, line: 1, character: 1, newName: "y" });
         expect((reply.payload as { ok: boolean }).ok).toBe(true);
+        expect(seen).toHaveLength(1);
+        // 1-based RPC input forwarded as 0-based with no conversion
+        expect((seen[0] as { position: unknown }).position).toEqual({ line: 0, character: 0 });
         client.dispose();
         provider.dispose();
     });
@@ -173,25 +210,6 @@ describe("rpc proposal encoding guard (fail-closed)", () => {
         provider.dispose();
     });
 
-    it("ambiguous-server envelope preserved with candidates (no generic rename failed)", async () => {
-        const { provider, client } = await rpcClient();
-        const msg = "ambiguous server selection: typescript and eslint both match (candidates: ts-server, eslint-server)";
-        mockExecutor.mockResolvedValueOnce({
-            status: "ambiguous", operation: "rename", method: "m",
-            server: { descriptorId: "unknown", name: "unknown", languageId: "typescript", projectRoot: "/repo", positionEncoding: "utf-16" },
-            result: null,
-            meta: { truncated: false },
-            error: { code: "ambiguous", message: msg },
-        });
-        const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: canon, line: 1, character: 1, newName: "y" });
-        expect(reply.ok).toBe(true);
-        const p = reply.payload as { ok: boolean; error?: string };
-        expect(p.ok).toBe(false);
-        expect(p.error).toContain("ambiguous");
-        expect(p.error).toContain("ts-server");
-        expect(p.error).toContain("eslint-server");
-        expect(p.error).not.toBe("rename failed");
-        client.dispose();
-        provider.dispose();
-    });
+    // D-81: bound producers use exact lease-bound routing and never emit
+    // ambiguous envelopes, so there is no ambiguous passthrough to test.
 });

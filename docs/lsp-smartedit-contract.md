@@ -93,10 +93,12 @@ On every envelope, before using a proposal:
    buffer with a different encoding.
 3. `meta.freshness.state`: direct strict-`LSP` consumers MUST use a
    proposal only when `meta.freshness.state === "fresh"`. The
-   language-intelligence RPC does not expose the strict envelope; SmartRead
-   therefore enforces the same gate before returning any rename/format/
-   organize-imports/code-action WorkspaceEdit. `stale`/`unknown` becomes
-   RPC error `unconfirmed`, never a usable proposal.
+   language-intelligence RPC does not expose the strict envelope; freshness
+   there is structural — the bound producers hold the session lease and
+   revalidate source + receipt around the query and the stage, refusing
+   stale (`not_ready`) instead of returning it. A refused proposal becomes
+   RPC error `unconfirmed` (rename/format/discovery) or `stale`
+   (code_action selection), never a usable proposal.
 4. `meta.documentVersion` + `meta.readiness`: for direct strict-`LSP`
    use, if `documentVersion` does not match the buffer SmartEdit is about
    to mutate, discard the proposal and re-request. `readiness`, when
@@ -109,35 +111,45 @@ On every envelope, before using a proposal:
    caller error: restart pagination.
 6. `result` shape: `rename` and code-action embedded edits arrive
    as normalized `{ changes: [{ uri, edits }] }` with `file://` URIs.
-   Formatting follows LSP and returns normalized `TextEdit[]`; the
-   SmartRead RPC adapter wraps those edits into a one-file WorkspaceEdit
-   before `validateWorkspaceEdit`. Null/empty results mean nothing
-   actionable — surface "no proposal", not an empty edit.
+   Formatting follows LSP and returns normalized `TextEdit[]`. The bound
+   producers (`executeBoundSemanticEdit` / `executeBoundAction`) convert
+   these into SmartEdit staged proposals under the source-document
+   precondition; the language-intelligence RPC replies
+   `{ ok: true, proposalId, files, diff }` — never raw edits and never a
+   `WorkspaceEdit`. Null/empty results mean nothing actionable — surface
+   "no proposal", not an empty edit.
 7. `error` on non-`ok` envelopes carries `code`/`message`/`data` — log
    `server.descriptorId` + `method` + `error.code` for routing bugs.
 
-## 4. Language-intelligence RPC mapping (existing handlers to executor ops)
+## 4. Language-intelligence RPC mapping (D-81: staged proposals, never raw edits)
 
 Transport: RPC channel `languageIntelligence`
 (`RPC_CHANNELS.languageIntelligence`), method names from
 `LANGUAGE_INTELLIGENCE_RPC_METHODS` in
-`@rhinos0608/pi-workspace-protocol`. Every handler below already sources
-via `runExecutor -> executeLspOperation` with zero disk writes
+`@rhinos0608/pi-workspace-protocol`. Proposal handlers source via the bound
+producers (`executeBoundSemanticEdit` / `executeBoundAction`) and stage
+through SmartEdit `stage_workspace_edit` with the source-document
+precondition, with zero disk writes
 (`src/language-intelligence/language-intelligence-provider.ts`).
+`organize_imports` is removed (breaking clean cut): callers use
+`code_action` discovery filtered to kind `"source.organizeImports"` plus an
+explicit selection. Every response is validated with the protocol's
+validators before replying.
 
-| RPC method (wire string) | Executor op + params | Handler behavior |
+| RPC method (wire string) | Bound producer + params | Handler behavior |
 | --- | --- | --- |
 | `language_intelligence_capabilities` (`capabilities`) | none (static capability advertisement) | returns provider capabilities; no LSP call |
 | `check_post_edit_diagnostics` (`checkPostEditDiagnostics`) | `diagnostics` with `{ path: canonicalPath, workspace: canonicalWorkspaceRoot, timeoutMs: 10000 }` | pre-hash file, require `expectedContentSha256` match; executor call; only `fresh` + `ok`/`empty` count as `confirmed`/`empty`, everything else `unconfirmed`/`unavailable`; post-hash re-check; normalize diagnostics (severity 1-4, ranges, source cap 256, message cap 16384, maxDiagnostics cap with `truncated`) |
-| `rename_preview` (`renamePreview`) | `rename` with `{ path: filePath, position: 0-based {line, character}, newName, workspace: workspaceRoot, timeoutMs: 10000 }` | requires fresh envelope; converts normalized edit to file edits, `validateWorkspaceEdit`, returns `{ ok: true, workspaceEdit }` or `{ ok: false, error }`; never writes |
-| `organize_imports` (`organizeImports`) | `codeActions` with full-document range + `context: { only: [\"source.organizeImports\"] }` | requires fresh envelope; takes first actionable edit, `validateWorkspaceEdit`, returns `{ ok: true, workspaceEdit }`; never writes |
-| `formatting` (`formatting`) | `formatDocument` with `{ path: filePath, formatting: { tabSize, insertSpaces }, workspace: workspaceRoot, timeoutMs: 10000 }` | requires fresh envelope; converts protocol `TextEdit[]` into one-file WorkspaceEdit, validates it, returns `{ ok: true, workspaceEdit }`; never writes |
-| `code_action` (`codeAction`) | `codeActions` with `{ path: filePath, range, context, workspace: workspaceRoot, timeoutMs: 10000 }` | requires fresh envelope; returns action list with per-action validated `workspaceEdit` where present; never writes |
+| `rename_preview` (`renamePreview`) | `executeBoundSemanticEdit` with `{ operation: "rename", path: filePath, position: 0-based {line, character}, newName }`, route `{ projectRoot, languageId }`, absolute deadline, stage requester (session identity + workspace-edit bus) | stages via `stage_workspace_edit`; returns `{ ok: true, proposalId, files, diff, serverDescriptorId? }` or `{ ok: false, error }`; never writes, never returns raw edits |
+| `formatting` (`formatting`) | `executeBoundSemanticEdit` with `{ operation: "formatDocument", path: filePath, formatting: { tabSize, insertSpaces } }`, same route/deadline/stage | stages via `stage_workspace_edit`; returns `{ ok: true, proposalId, files, diff, serverDescriptorId? }` or `{ ok: false, error }`; never writes, never returns raw edits |
+| `code_action` (`codeAction`) | discovery: `executeBoundAction` with `{ operation: "codeActions", path, range, context }` (no stage dependency — discovery never stages); selection: `{ operation: "resolveCodeAction", path, range, context, selection: { actionId, sourceSha256 } }` with stage | discovery returns `{ ok: true, actions: [{ title, kind?, isPreferred?, actionId, sourceSha256 }] }` (exactly five fields — never the normalized edit/data); selection stages via `stage_workspace_edit` and returns the staged-proposal shape; stale `sourceSha256` refuses without staging; never writes |
 
-All six handlers inject a fake executor in unit tests via
+The diagnostics handler injects a fake executor in unit tests via
 `__setLanguageIntelligenceExecutorForTests`; production dynamically
-imports the canonical executor. That seam is the integration point
-SmartEdit mirrors on its side (inject fake envelopes in SmartEdit tests).
+imports the canonical executor. The proposal handlers inject fake bound
+producers via `__setLanguageIntelligenceProducersForTests` and a fake
+SmartEdit stage endpoint over the workspace-edit channel. These seams are
+the integration points SmartEdit mirrors on its side.
 
 ## 5. Explicit UNMET needs — SmartEdit-side approval required (PENDING sister-repo owner decision)
 

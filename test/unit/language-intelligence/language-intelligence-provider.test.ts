@@ -9,9 +9,16 @@ import {
     LANGUAGE_INTELLIGENCE_RPC_METHODS,
 } from "@rhinos0608/pi-workspace-protocol";
 import { createRpcClient } from "@rhinos0608/pi-workspace-protocol";
-import { createLanguageIntelligenceProvider } from "../../../src/language-intelligence/language-intelligence-provider.js";
+import {
+    createLanguageIntelligenceProvider,
+    __setLanguageIntelligenceProducersForTests,
+    __resetLanguageIntelligenceProducersForTests,
+} from "../../../src/language-intelligence/language-intelligence-provider.js";
+import type { executeBoundSemanticEdit } from "../../../src/lsp/lsp-semantic-edit-origin.js";
+import type { executeBoundAction } from "../../../src/lsp/lsp-action-adapter.js";
 
-// executor seam (provider sources proposals/diagnostics from executeLspOperation)
+// executor seam (provider sources post-edit diagnostics from executeLspOperation;
+// proposals go through the bound producers via __setLanguageIntelligenceProducersForTests)
 const mockExecutor = vi.fn();
 vi.mock("../../../src/lsp/lsp-executor.js", () => ({
     executeLspOperation: (...args: unknown[]) => mockExecutor(...args),
@@ -412,11 +419,11 @@ describe("language-intelligence-provider", () => {
     });
 });
 
-describe("language-intelligence-provider executor sourcing", () => {
+describe("language-intelligence-provider bound-producer sourcing", () => {
     let pdir: string;
     let pfile: string;
     let pcanon: string;
-    let _psha = "";
+    let sessionFile: string;
     function makeBus2() {
         const handlers = new Map<string, Array<(d: unknown) => void>>();
         return {
@@ -436,132 +443,158 @@ describe("language-intelligence-provider executor sourcing", () => {
             },
         };
     }
+    function serverInfo() {
+        return { descriptorId: "ts", name: "ts", languageId: "typescript", projectRoot: pdir, positionEncoding: "utf-16" as const };
+    }
+    function resultEnvelope(operation: "rename" | "formatDocument" | "codeActions", status: "ok" | "unsupported" | "empty", result: unknown) {
+        return { status, operation, method: "m", server: serverInfo(), result, meta: { truncated: false } };
+    }
+    function releasedCleanup() {
+        return Promise.resolve(Object.freeze({ state: "released" as const }));
+    }
+    // Provider with a staging identity; the injected fakes return staged
+    // outcomes directly (exact stage-RPC assertions live in
+    // language-intelligence-proposals.test.ts).
+    function rpcHarness() {
+        const bus = makeBus2();
+        const stageBus = makeBus2();
+        const provider = createLanguageIntelligenceProvider(bus as never, {
+            getSessionFilePath: () => sessionFile,
+            getCwd: () => pdir,
+            getStageBus: () => stageBus as never,
+        });
+        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
+        return { provider, client, dispose: () => { client.dispose(); provider.dispose(); } };
+    }
     beforeEach(() => {
         pdir = mkdtempSync(join(tmpdir(), "li-exec-"));
         pfile = join(pdir, "sample.ts");
         writeFileSync(pfile, "const x = 1;\n");
         pcanon = realpathSync(pfile);
-        _psha = createHash("sha256").update(readFileSync(pfile)).digest("hex");
-        void _psha;
+        sessionFile = join(pdir, "session.jsonl");
         mockExecutor.mockReset();
+        __resetLanguageIntelligenceProducersForTests();
     });
     afterEach(() => {
+        __resetLanguageIntelligenceProducersForTests();
         try { rmSync(pdir, { recursive: true, force: true }); } catch {}
         vi.resetAllMocks();
     });
-    function fileUri(canon: string) {
-        return "file://" + canon;
-    }
-    it("rename proposal sourced from executor rename op, 0-based coords, validation passes", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
-        mockExecutor.mockImplementationOnce(async (req: unknown) => {
-            const r = req as { operation: string; position: { line: number; character: number } };
-            expect(r.operation).toBe("rename");
-            expect(r.position).toEqual({ line: 0, character: 0 });
-            return execEnv("ok", { changes: [{ uri: fileUri(pcanon), edits: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } }, newText: "y" }] }] });
-        });
+    it("rename proposal sourced from bound semantic producer, 0-based coords, validated", async () => {
+        const { dispose, client } = rpcHarness();
+        const seen: Array<{ req: unknown; route: unknown; hasStage: boolean }> = [];
+        const fakeSemantic: typeof executeBoundSemanticEdit = async (req, route, deps) => {
+            seen.push({ req, route, hasStage: !!deps.stage });
+            return {
+                kind: "result",
+                envelope: resultEnvelope("rename", "ok", null),
+                proposal: { proposalId: "p-rename", files: [pcanon], diff: "@@ rename" },
+                cleanup: releasedCleanup(),
+            };
+        };
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: pcanon, line: 1, character: 1, newName: "y" });
         expect(reply.ok).toBe(true);
-        const payload = reply.payload as { ok: boolean; workspaceEdit?: { fileEdits: Array<{ filePath: string }> } };
+        const payload = reply.payload as { ok: boolean; proposalId?: string; files?: string[] };
         expect(payload.ok).toBe(true);
-        expect(payload.workspaceEdit!.fileEdits[0]!.filePath).toBe(pcanon);
+        expect(reply.payload).not.toHaveProperty("workspaceEdit");
+        expect(payload.proposalId).toBe("p-rename");
+        expect(payload.files).toEqual([pcanon]);
+        expect(seen).toHaveLength(1);
+        expect(seen[0]!.req).toMatchObject({ operation: "rename", position: { line: 0, character: 0 }, newName: "y" });
+        expect(seen[0]!.route).toMatchObject({ languageId: "typescript" });
+        expect(seen[0]!.hasStage).toBe(true);
         expect(readFileSync(pcanon, "utf-8")).toBe("const x = 1;\n");
-        client.dispose();
-        provider.dispose();
+        dispose();
     });
-    it("stale proposal envelope is rejected before returning a WorkspaceEdit", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", {
-            changes: [{ uri: fileUri(pcanon), edits: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } }, newText: "y" }] }],
-        }, "stale"));
+    it("bound refusal not_ready surfaces unconfirmed (stale source, no proposal)", async () => {
+        const { dispose, client } = rpcHarness();
+        const fakeSemantic: typeof executeBoundSemanticEdit = async () => ({
+            kind: "refusal", status: "not_ready", cleanup: releasedCleanup(),
+        });
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: pcanon, line: 1, character: 1, newName: "y" });
         expect(reply.ok).toBe(true);
         expect(reply.payload).toEqual({ ok: false, error: "unconfirmed" });
-        client.dispose();
-        provider.dispose();
+        dispose();
     });
 
-    it("malformed executor proposal still rejected by validation", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", { changes: [{ uri: fileUri(pcanon), edits: [{ range: { start: { line: 5, character: 0 }, end: { line: 1, character: 0 } }, newText: "y" }] }] }));
+    it("bound producer throw surfaces rename failed", async () => {
+        const { dispose, client } = rpcHarness();
+        const fakeSemantic: typeof executeBoundSemanticEdit = async () => { throw new Error("boom"); };
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: pcanon, line: 1, character: 1, newName: "y" });
         expect(reply.ok).toBe(true);
         expect((reply.payload as { ok: boolean }).ok).toBe(false);
-        client.dispose();
-        provider.dispose();
+        expect((reply.payload as { error?: string }).error).toBe("rename failed");
+        dispose();
     });
-    it("reversed codeAction range rejected as caller error before executor call", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
+    it("reversed codeAction range rejected as caller error before bound producer call", async () => {
+        const { dispose, client } = rpcHarness();
+        let calls = 0;
+        const fakeAction: typeof executeBoundAction = async () => {
+            calls++;
+            return { kind: "refusal", status: "unavailable", cleanup: releasedCleanup() };
+        };
+        __setLanguageIntelligenceProducersForTests({ executeAction: fakeAction });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction, { filePath: pcanon, line: 5, character: 1, endLine: 2, endCharacter: 1 });
         expect(reply.ok).toBe(false);
-        expect(mockExecutor).not.toHaveBeenCalled();
+        expect(calls).toBe(0);
         const reply2 = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction, { filePath: pcanon, line: 1, character: 5, endLine: 1, endCharacter: 2 });
         expect(reply2.ok).toBe(false);
-        expect(mockExecutor).not.toHaveBeenCalled();
-        client.dispose();
-        provider.dispose();
+        expect(calls).toBe(0);
+        dispose();
     });
-    it("zero-length codeAction range passes validation and reaches executor", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
-        mockExecutor.mockResolvedValueOnce(execEnv("ok", []));
+    it("zero-length codeAction range passes validation and reaches bound producer", async () => {
+        const { dispose, client } = rpcHarness();
+        const seen: unknown[] = [];
+        const fakeAction: typeof executeBoundAction = async (req) => {
+            seen.push(req);
+            return { kind: "result", envelope: resultEnvelope("codeActions", "empty", []), cleanup: releasedCleanup() };
+        };
+        __setLanguageIntelligenceProducersForTests({ executeAction: fakeAction });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction, { filePath: pcanon, line: 1, character: 1, endLine: 1, endCharacter: 1 });
         expect(reply.ok).toBe(true);
-        expect(mockExecutor).toHaveBeenCalledTimes(1);
-        client.dispose();
-        provider.dispose();
+        expect(reply.payload).toEqual({ ok: true, actions: [], serverDescriptorId: "ts" });
+        expect(seen).toHaveLength(1);
+        expect((seen[0] as { range: unknown }).range).toEqual({ start: { line: 0, character: 0 }, end: { line: 0, character: 0 } });
+        dispose();
     });
-    it("executor unsupported → no-edits empty shape; unavailable → no-server", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
-        mockExecutor.mockResolvedValueOnce(execEnv("unsupported", null));
+    it("result unsupported → no-edits empty shape; refusal unavailable → no-server", async () => {
+        const { dispose, client } = rpcHarness();
+        let calls = 0;
+        const fakeSemantic: typeof executeBoundSemanticEdit = async () => {
+            calls++;
+            if (calls === 1) {
+                return { kind: "result", envelope: resultEnvelope("rename", "unsupported", null), cleanup: releasedCleanup() };
+            }
+            return { kind: "refusal", status: "unavailable", cleanup: releasedCleanup() };
+        };
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const r1 = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: pcanon, line: 1, character: 1, newName: "y" });
         expect(r1.payload).toEqual({ ok: false, error: "no edits" });
-        mockExecutor.mockResolvedValueOnce(execEnv("unavailable", null));
         const r2 = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting, { filePath: pcanon });
         expect(r2.payload).toEqual({ ok: false, error: "no-server" });
-        client.dispose();
-        provider.dispose();
+        dispose();
     });
-    it("formatting sourced from executor formatDocument op with tabSize passthrough", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
-        mockExecutor.mockImplementationOnce(async (req: unknown) => {
-            const r = req as { operation: string; formatting: { tabSize: number; insertSpaces: boolean } };
-            expect(r.operation).toBe("formatDocument");
-            expect(r.formatting).toEqual({ tabSize: 4, insertSpaces: false });
-            return execEnv("ok", [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, newText: "const" }]);
-        });
+    it("formatting sourced from bound semantic producer with tabSize passthrough", async () => {
+        const { dispose, client } = rpcHarness();
+        const seen: unknown[] = [];
+        const fakeSemantic: typeof executeBoundSemanticEdit = async (req) => {
+            seen.push(req);
+            return {
+                kind: "result",
+                envelope: resultEnvelope("formatDocument", "ok", null),
+                proposal: { proposalId: "p-format", files: [pcanon], diff: "@@ format" },
+                cleanup: releasedCleanup(),
+            };
+        };
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting, { filePath: pcanon, tabSize: 4, insertSpaces: false });
         expect((reply.payload as { ok: boolean }).ok).toBe(true);
-        client.dispose();
-        provider.dispose();
-    });
-    it("organizeImports sourced from executor codeActions op filtered to source.organizeImports", async () => {
-        const bus = makeBus2();
-        const provider = createLanguageIntelligenceProvider(bus as never);
-        const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
-        mockExecutor.mockImplementationOnce(async (req: unknown) => {
-            const r = req as { operation: string; context: { only: string[] }; range: { start: { line: number; character: number }; end: { line: number; character: number } } };
-            expect(r.operation).toBe("codeActions");
-            expect(r.context).toEqual({ only: ["source.organizeImports"] });
-            expect(r.range).toEqual({ start: { line: 0, character: 0 }, end: { line: Number.MAX_SAFE_INTEGER, character: 0 } });
-            return execEnv("ok", [{ title: "Organize imports", kind: "source.organizeImports", edit: { changes: [{ uri: fileUri(pcanon), edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, newText: "const" }] }] } }]);
-        });
-        const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.organizeImports, { filePath: pcanon });
-        expect((reply.payload as { ok: boolean }).ok).toBe(true);
-        client.dispose();
-        provider.dispose();
+        expect((reply.payload as { proposalId?: string }).proposalId).toBe("p-format");
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toMatchObject({ operation: "formatDocument", formatting: { tabSize: 4, insertSpaces: false } });
+        dispose();
     });
 });

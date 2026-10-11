@@ -18,7 +18,10 @@ import {
     PROPOSAL_TIMEOUT_MS,
     __setLanguageIntelligenceExecutorForTests,
     __resetLanguageIntelligenceExecutorForTests,
+    __setLanguageIntelligenceProducersForTests,
+    __resetLanguageIntelligenceProducersForTests,
 } from "../../../src/language-intelligence/language-intelligence-provider.js";
+import type { executeBoundSemanticEdit } from "../../../src/lsp/lsp-semantic-edit-origin.js";
 import { executeLspOperation } from "../../../src/lsp/lsp-executor.js";
 
 // Wave B Round 2: timeout threading (clamp 250..30000, per-branch defaults,
@@ -44,6 +47,25 @@ function makeBus() {
     };
 }
 
+function releasedCleanup() {
+    return Promise.resolve(Object.freeze({ state: "released" as const }));
+}
+
+function stagedProposal(operation: "rename" | "formatDocument", file: string) {
+    return {
+        kind: "result" as const,
+        envelope: {
+            status: "ok" as const,
+            operation,
+            method: "m",
+            server: { descriptorId: "ts", name: "ts", languageId: "typescript", projectRoot: "/repo", positionEncoding: "utf-16" as const },
+            result: null,
+            meta: { truncated: false },
+        },
+        proposal: { proposalId: "p-timeout", files: [file], diff: "@@ timeout" },
+        cleanup: releasedCleanup(),
+    };
+}
 function execEnv(status: string, result: unknown) {
     return {
         status,
@@ -103,49 +125,66 @@ describe("provider→executor timeout propagation", () => {
         seen = [];
         __setLanguageIntelligenceExecutorForTests(async (req: unknown) => {
             seen.push(req);
-            const op = (req as { operation: string }).operation;
-            if (op === "diagnostics") {
-                return execEnv("empty", []) as never;
-            }
-            if (op === "rename") {
-                return execEnv("ok", {
-                    changes: [{ uri: "file://" + canon, edits: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } }, newText: "y" }] }],
-                }) as never;
-            }
-            if (op === "formatDocument") {
-                return execEnv("ok", [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, newText: "const" }]) as never;
-            }
-            return execEnv("ok", []) as never;
+            return execEnv("empty", []) as never;
         });
+        __resetLanguageIntelligenceProducersForTests();
     });
 
     afterEach(() => {
         __resetLanguageIntelligenceExecutorForTests();
+        __resetLanguageIntelligenceProducersForTests();
         try { rmSync(dir, { recursive: true, force: true }); } catch {}
         vi.resetAllMocks();
     });
 
     async function rpc() {
         const bus = makeBus();
-        const provider = createLanguageIntelligenceProvider(bus as never);
+        const provider = createLanguageIntelligenceProvider(bus as never, {
+            getSessionFilePath: () => join(dir, "session.jsonl"),
+            getCwd: () => dir,
+            getStageBus: () => makeBus() as never,
+        });
         const client = createRpcClient({ bus: bus as never, channel: RPC_CHANNELS.languageIntelligence, timeoutMs: 2000 });
         return { provider, client, dispose: () => { client.dispose(); provider.dispose(); } };
     }
 
-    it("rename defaults to 10s and threads exact value", async () => {
+    // Rename/format go through the bound semantic producer with an absolute
+    // deadline (started + clamped timeoutMs); diagnostics still use the executor.
+    function captureSemanticDeadline(deadlines: number[]) {
+        const fakeSemantic: typeof executeBoundSemanticEdit = async (_req, _route, deps) => {
+            deadlines.push(deps.deadlineMs);
+            return stagedProposal("rename", canon);
+        };
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
+    }
+
+    it("rename defaults to 10s absolute deadline on the bound producer", async () => {
+        const deadlines: number[] = [];
+        captureSemanticDeadline(deadlines);
         const { client, dispose } = await rpc();
+        const before = Date.now();
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: canon, line: 1, character: 1, newName: "y" });
+        const after = Date.now();
         expect(reply.ok).toBe(true);
-        expect(seen).toHaveLength(1);
-        expect((seen[0] as { timeoutMs: number }).timeoutMs).toBe(10_000);
+        expect((reply.payload as { ok: boolean }).ok).toBe(true);
+        expect(deadlines).toHaveLength(1);
+        expect(deadlines[0]).toBeGreaterThanOrEqual(before + 10_000);
+        expect(deadlines[0]).toBeLessThanOrEqual(after + 10_000);
+        expect(seen).toHaveLength(0);
         dispose();
     });
 
-    it("rename explicit 5000 propagates exactly", async () => {
+    it("rename explicit 5000 propagates as absolute deadline", async () => {
+        const deadlines: number[] = [];
+        captureSemanticDeadline(deadlines);
         const { client, dispose } = await rpc();
+        const before = Date.now();
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: canon, line: 1, character: 1, newName: "y", timeoutMs: 5000 });
+        const after = Date.now();
         expect(reply.ok).toBe(true);
-        expect((seen[0] as { timeoutMs: number }).timeoutMs).toBe(5000);
+        expect(deadlines).toHaveLength(1);
+        expect(deadlines[0]).toBeGreaterThanOrEqual(before + 5000);
+        expect(deadlines[0]).toBeLessThanOrEqual(after + 5000);
         dispose();
     });
 
@@ -170,19 +209,30 @@ describe("provider→executor timeout propagation", () => {
         dispose();
     });
 
-    it("formatting defaults to 10s", async () => {
+    it("formatting defaults to 10s absolute deadline on the bound producer", async () => {
+        const deadlines: number[] = [];
+        const fakeSemantic: typeof executeBoundSemanticEdit = async (_req, _route, deps) => {
+            deadlines.push(deps.deadlineMs);
+            return stagedProposal("formatDocument", canon);
+        };
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const { client, dispose } = await rpc();
+        const before = Date.now();
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting, { filePath: canon });
+        const after = Date.now();
         expect(reply.ok).toBe(true);
-        expect((seen[0] as { timeoutMs: number }).timeoutMs).toBe(10_000);
+        expect(deadlines).toHaveLength(1);
+        expect(deadlines[0]).toBeGreaterThanOrEqual(before + 10_000);
+        expect(deadlines[0]).toBeLessThanOrEqual(after + 10_000);
         dispose();
     });
 
-    it("invalid timeoutMs rejected before executor on every method (protocol envelope)", async () => {
+    it("invalid timeoutMs rejected before any producer on every method (protocol envelope)", async () => {
+        const deadlines: number[] = [];
+        captureSemanticDeadline(deadlines);
         const { client, dispose } = await rpc();
         const cases: Array<{ method: RpcMethod; payload: Record<string, unknown> }> = [
             { method: LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, payload: { filePath: canon, line: 1, character: 1, newName: "y" } },
-            { method: LANGUAGE_INTELLIGENCE_RPC_METHODS.organizeImports, payload: { filePath: canon } },
             { method: LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting, payload: { filePath: canon } },
             { method: LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction, payload: { filePath: canon, line: 1, character: 1 } },
             { method: LANGUAGE_INTELLIGENCE_RPC_METHODS.checkPostEditDiagnostics, payload: { canonicalPath: canon, canonicalWorkspaceRoot: dir, expectedContentSha256: sha, waitMs: 10, maxDiagnostics: 10 } },
@@ -194,26 +244,33 @@ describe("provider→executor timeout propagation", () => {
             }
         }
         expect(seen).toHaveLength(0);
+        expect(deadlines).toHaveLength(0);
         dispose();
     });
 
-    it("rename proposal emits positionEncoding utf-16 (protocol v0.6 wire)", async () => {
+    it("rename proposal carries proposalId/files/diff and no workspaceEdit", async () => {
+        captureSemanticDeadline([]);
         const { client, dispose } = await rpc();
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.renamePreview, { filePath: canon, line: 1, character: 1, newName: "y" });
         expect(reply.ok).toBe(true);
-        const payload = reply.payload as { ok: boolean; workspaceEdit?: { positionEncoding?: string; fileEdits?: unknown[] } };
+        const payload = reply.payload as { ok: boolean; proposalId?: string; files?: string[]; diff?: string };
         expect(payload.ok).toBe(true);
-        // Required by protocol validateLspWorkspaceEdit (v0.6): must be 'utf-16'.
-        expect(payload.workspaceEdit?.positionEncoding).toBe("utf-16");
-        expect(Array.isArray(payload.workspaceEdit?.fileEdits)).toBe(true);
+        // D-81 staged-proposal shape: never raw edits.
+        expect(payload.proposalId).toBe("p-timeout");
+        expect(payload.files).toEqual([canon]);
+        expect(typeof payload.diff).toBe("string");
+        expect(reply.payload).not.toHaveProperty("workspaceEdit");
         dispose();
     });
 
-    it("formatting proposal emits positionEncoding utf-16", async () => {
+    it("formatting proposal carries proposalId and no workspaceEdit", async () => {
+        const fakeSemantic: typeof executeBoundSemanticEdit = async (_req, _route, _deps) => stagedProposal("formatDocument", canon);
+        __setLanguageIntelligenceProducersForTests({ executeSemanticEdit: fakeSemantic });
         const { client, dispose } = await rpc();
         const reply = await client.request(LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting, { filePath: canon });
         expect(reply.ok).toBe(true);
-        expect((reply.payload as { workspaceEdit?: { positionEncoding?: string } }).workspaceEdit?.positionEncoding).toBe("utf-16");
+        expect((reply.payload as { proposalId?: string }).proposalId).toBe("p-timeout");
+        expect(reply.payload).not.toHaveProperty("workspaceEdit");
         dispose();
     });
 });

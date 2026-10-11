@@ -934,33 +934,6 @@ export class LSPConnection {
     return asWrappedPrepareRenameRange(r);
   }
 
-  async organizeImports(filePath: string): Promise<LspWorkspaceEdit | null> {
-    if (!this.serverCapabilities?.codeActionProvider) return null;
-    await this.prepareDocument(filePath);
-    const uri = pathToFileURL(resolve(filePath)).href;
-    let result: unknown;
-    try {
-      result = await this.request("textDocument/codeAction", {
-        textDocument: { uri },
-        range: { start: { line: 0, character: 0 }, end: { line: Number.MAX_SAFE_INTEGER, character: 0 } },
-        context: { only: ["source.organizeImports"] },
-      });
-    } catch {
-      return null;
-    }
-    if (!Array.isArray(result)) return null;
-    const actions = result as Array<Record<string, unknown>>;
-    let editRaw: unknown = null;
-    for (const a of actions) {
-      if (a && typeof a === "object" && "edit" in a && (a as Record<string, unknown>).edit) {
-        editRaw = (a as Record<string, unknown>).edit;
-        break;
-      }
-    }
-    if (!editRaw) return null;
-    return convertWorkspaceEdit(editRaw);
-  }
-
   async formatting(filePath: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null> {
     if (!this.serverCapabilities?.documentFormattingProvider) return null;
     await this.prepareDocument(filePath);
