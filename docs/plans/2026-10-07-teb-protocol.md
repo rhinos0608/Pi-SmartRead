@@ -870,3 +870,12 @@ comparator mechanism/pin/hypothesis/borrow logged BEFORE implementation.
 Residual risk (accepted): six repos + TS-centric gold limit
 generalisation; the holdout evidences these pinned tasks and this
 pinned model, not universal specialist superiority.
+
+## 16. Amendment D-79/D-80 — pre-data session model, cost basis, pilot scope, and rate-limit risk (owner-approved 2026-10-12, pre-data)
+
+Adopted before any TEB or inspect benchmark session ran on the pilot under these configs, so no outcome informed it.
+
+- **Session model (both benchmarks).** Every session runs on the exact model id `openai-codex/gpt-6-luna`, held constant across all arms. Dispatch passes `--model openai-codex/gpt-6-luna`; the harness defaults (`scripts/eval/teb/run.ts:122`, `scripts/eval/inspect-cohort/run.ts:190`) are NOT edited by this amendment. The §13 primary/transfer split loses meaning this round: there is no transfer arm — the §13 transfer-slice row is out of scope and only baseline vs lsp-affordance is compared.
+- **Cost basis.** Existing cost metrics (§10: model tokens from `message_end` usage × actual pricing, tool-nested usage summed separately) are unchanged. The §13 dollar spending-ceiling/projection basis is replaced for this round: the owner authorized subscription sessions with no dollar threshold (D-79). Contingency: if usage cost is absent or zero, report token counts and wall time, and bring any gate change back to the owner before dev (no silent substitution).
+- **Pilot scope.** The pilot runs on the 20 adjudicated tasks (4 slots dropped as inadmissible: `implementations-001`, `callers-001`, `http-routes-001`, `http-routes-002`); only the built arms — baseline vs lsp-affordance — are compared. WP-B advisory actions and WP-C routes-only remain unbuilt and are out of scope this round.
+- **Rate-limit risk.** A subscription 429 after the first assistant token grades as task failure (`scripts/eval/teb/run.ts:572-603`: only pre-first-token provider/auth failure, extension load failure, or runner crash is excluded; anything later is graded, never excluded). Dispatch runs at low concurrency to avoid it. No grading-code change is made by this amendment.

@@ -9,9 +9,9 @@
         "guidance": "baseline",
         "mcpInstructions": "baseline"
       },
-      "surfaceIdentity": "2dde24005558de2ba3061e83768ee617e9ba15dea9fcd2e1b5b377968ef5a187",
-      "schemaHash": "5b8c2e02aa9ed828ddf70ccd98dd7824f9cde7a8707c5f2591f1d7a5c83177c4",
-      "guidanceHash": "ad2e9a659ea5b991d7cf291d265c74cde1bc1d4e0b36fbd88e2d696d9221a8e3"
+      "surfaceIdentity": "b72fc43dd1b58dfe36cf64938e77fc5536c991d7d48ffa61e1ad7b46eec34148",
+      "schemaHash": "b262fa1cb6b24f3943f57287d8d07e0b5dc2e98ff2bab442c6705e23410c1966",
+      "guidanceHash": "0d3e79e23ece2949f06101d7d5c0250962fbbcac59f244c22fd04e9dede13ff2"
     },
     "env": {
       "PI_SMARTREAD_AFFORDANCES": "0",
@@ -29,9 +29,9 @@
         "mcpInstructions": "affordance-bundle",
         "note": "wp-c-unbuilt"
       },
-      "surfaceIdentity": "a87e963db76c800d12fe0b41d7ae778d7be2c9c233e02b2c47d72c5d218c6a7c",
-      "schemaHash": "cb75ac7ada7633892ed1d860c5da020ac143e1f927cb5259bc9ba5c9028b7902",
-      "guidanceHash": "d0f335909d347b93bf8e8ddedc06a1b8cb475cf843f9f1f4a3f444e36cdce002"
+      "surfaceIdentity": "9cdc151c60f779809b4c4ff4b92282c55de31d22108616489923fc13e01163d1",
+      "schemaHash": "90eb9ae645f171b91e08ff4dbc8822cba9571ab0b046fa5b99c9a5ba4ab42b2d",
+      "guidanceHash": "16f517a78e1a6385ead16f9925e79c5fa309d2977023a08115a575b278618593"
     },
     "env": {
       "PI_SMARTREAD_AFFORDANCES": "1",

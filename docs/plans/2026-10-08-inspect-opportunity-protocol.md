@@ -182,3 +182,13 @@ Adopted after the pilot was labelled and adjudicated, because 22 of 28 sealed ta
 - **Patch sha.** `gold.patch.sha` is the git blob sha of the exact sealed diff bytes (`git hash-object --stdin`).
 - **Result.** Frozen `validateInspectDoc`: 28/28, 0 errors (was 27). Frozen `grade.ts` gold self-check: 28/28. Labeler-vs-final agreement: A 24/28, B 25/28, the difference from v1 being the 4 non-comparable N5 cells.
 - **Still open before dev freeze.** Prettier has no pilot task (dev and holdout must include prettier negatives); §8 gates are uncalibrated; the pilot session count and cost ceiling (§11) need owner approval.
+
+## 17. Amendment A4 — pre-data session model, cost contingency, pilot set, prettier allocation, and rate-limit risk (owner rulings D-79/D-80, 2026-10-12, pre-data)
+
+Adopted before any inspect or TEB benchmark session ran on the pilot under these configs, so no outcome informed it.
+
+- **Session model.** Every session runs on the exact model id `openai-codex/gpt-6-luna`, held constant across all arms. Dispatch passes `--model openai-codex/gpt-6-luna`; the runner default (`scripts/eval/inspect-cohort/run.ts:190`) is NOT edited by this amendment.
+- **Cost.** Existing cost metrics and the §8(c) cost gate stay as written. Contingency: if usage cost is absent or zero, report token counts and wall time, and bring any gate change back to the owner before dev (no silent substitution).
+- **Pilot set.** The pilot is the 28-task sealed v2 set (§16).
+- **Prettier negatives.** Prettier negatives are required in dev and holdout (A3 §16 already says so). Recommendation only, pending owner confirmation (not a frozen rule): allocate >=4 prettier negatives in dev and >=8 in holdout, spread across N1/N2/N3/N5.
+- **Rate-limit risk.** A subscription 429 after the first assistant token grades as task failure (same rule as TEB: only pre-first-token provider/auth failure, extension load failure, or runner crash is excluded; anything later is graded, never excluded). Dispatch runs at low concurrency to avoid it. No grading-code change is made by this amendment.
