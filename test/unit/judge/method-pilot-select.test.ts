@@ -571,7 +571,10 @@ describe("method-pilot-select CLI", () => {
             }
             expect(code).toBe(METHOD_PILOT_SELECT_EXIT_OK);
 
-            expect(statSync(outPath).mode & 0o777).toBe(0o600);
+            expect(statSync(outPath).isFile()).toBe(true);
+            if (process.platform !== "win32") {
+                expect(statSync(outPath).mode & 0o777).toBe(0o600);
+            }
             const verdict = JSON.parse(readFileSync(outPath, "utf-8")) as MethodPilotSelectVerdict;
             expect(verdict.kind).toBe(METHOD_PILOT_SELECT_VERDICT_KIND);
             expect(verdict.chosenMethod).toBe("M1");

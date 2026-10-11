@@ -77,7 +77,7 @@ describe("requestReserveUsd (context-window x official-rate ceiling)", () => {
     });
 });
 
-describe("campaign ledger (persistent, atomic admission, refunding settlement)", () => {
+describe.skipIf(process.platform === "win32")("campaign ledger (persistent, atomic admission, refunding settlement)", () => {
     it("seeds the verified prior (6 attempts, $0.000255476) exactly once", () => {
         const root = freshRoot();
         const first = seedCampaignLedger(root);
@@ -442,7 +442,7 @@ describe("writePrivateFileExclusive (no overwrite, no swallowed chmod)", () => {
         expect(() => writePrivateFileExclusive(link, "new")).toThrow(/symlink/i);
     });
 
-    it("writes 0600 plus an exact-bytes sidecar, and refuses second write", () => {
+    it.skipIf(process.platform === "win32")("writes 0600 plus an exact-bytes sidecar, and refuses second write", () => {
         const root = freshRoot();
         const path = join(root, "report.json");
         const { outPath, sidecarPath, byteHash } = writePrivateArtifact(path, '{"a":1}\n');

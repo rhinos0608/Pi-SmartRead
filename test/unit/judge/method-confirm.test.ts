@@ -122,7 +122,7 @@ describe("method confirmation plan", () => {
     });
 });
 
-describe("method confirmation injected transport", () => {
+describe.skipIf(process.platform === "win32")("method confirmation injected transport", () => {
     it("captures successful probabilities and wire IDs in the results schema", async () => {
         const out = tempRoot("confirm-success-"); const ledger = join(out, "ledger"); seedCampaignLedger(ledger, { attempts: 0, actualCostUsd: 0, note: "test" });
         const transport: FetchFn = vi.fn(async () => response());

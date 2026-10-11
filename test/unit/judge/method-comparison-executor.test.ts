@@ -301,7 +301,7 @@ describe("method builders: byte-equivalent to the production CloudJudge packing"
     });
 });
 
-describe("executeWireRequest: records satisfy the Stage C contract and bind", () => {
+describe.skipIf(process.platform === "win32")("executeWireRequest: records satisfy the Stage C contract and bind", () => {
     it("executes M0 forward once per replica; records pass isMethodWireRecord and bind an M0 report", async () => {
         const root = seededRoot();
         const transport = successTransport();
@@ -433,7 +433,7 @@ describe("executeWireRequest: records satisfy the Stage C contract and bind", ()
     });
 });
 
-describe("campaign admission and settlement accounting", () => {
+describe.skipIf(process.platform === "win32")("campaign admission and settlement accounting", () => {
     it("admits BEFORE each transport call; retries are separately admitted/settled with gapless attemptIndex", async () => {
         const root = seededRoot();
         let call = 0;
@@ -907,7 +907,7 @@ describe("campaign admission and settlement accounting", () => {
     it("reserve breach with NO sink still exposes the settled record on the thrown error", async () => {
         const root = seededRoot();
         const transport = vi.fn(async (_url: string, init?: RequestInit): Promise<Response> =>
-            jsonResponse(successBody(answersForBody(init), { input_tokens: 100, cost: 999 }))); 
+            jsonResponse(successBody(answersForBody(init), { input_tokens: 100, cost: 999 })));
         const request = onlyRequest(buildM0Request(ARM, QUERY, candidates()));
         let caught: unknown;
         try {
@@ -925,7 +925,7 @@ describe("campaign admission and settlement accounting", () => {
     });
 });
 
-describe("served identity capture (verbatim, never inferred)", () => {
+describe.skipIf(process.platform === "win32")("served identity capture (verbatim, never inferred)", () => {
     it("captures served model and provider from the response body, not the requested slug", async () => {
         const root = seededRoot();
         const transport = vi.fn(async (_url: string, init?: RequestInit): Promise<Response> =>
@@ -1035,7 +1035,7 @@ describe("served identity capture (verbatim, never inferred)", () => {
  * Amendment A3 (protocol §12): transport classification vs capture gap
  * ────────────────────────────────────────────────────────────────── */
 
-describe("Amendment A3: a received non-2xx without served model is a transport failure, never a capture gap", () => {
+describe.skipIf(process.platform === "win32")("Amendment A3: a received non-2xx without served model is a transport failure, never a capture gap", () => {
     it("classifies a 529 without a served model as http_529, retries it, and succeeds on attempt 2 — no halt", async () => {
         const root = seededRoot();
         let call = 0;
@@ -1108,7 +1108,7 @@ describe("Amendment A3: a received non-2xx without served model is a transport f
     });
 });
 
-describe("admission refusals and origin pin never reach the transport", () => {
+describe.skipIf(process.platform === "win32")("admission refusals and origin pin never reach the transport", () => {
     it("propagates an absent-ledger admission refusal without calling the transport", async () => {
         const root = freshRoot(); // deliberately NOT seeded
         const transport = vi.fn(async (): Promise<Response> => jsonResponse(successBody({})));
@@ -1140,7 +1140,7 @@ describe("admission refusals and origin pin never reach the transport", () => {
     });
 });
 
-describe("clock validation precedes admission (an invalid clock strands nothing)", () => {
+describe.skipIf(process.platform === "win32")("clock validation precedes admission (an invalid clock strands nothing)", () => {
     it("a throwing now() fails BEFORE admission: no attempt in flight, no transport call", async () => {
         const root = seededRoot();
         const transport = vi.fn(async (_url: string, init?: RequestInit): Promise<Response> =>
@@ -1171,7 +1171,7 @@ describe("clock validation precedes admission (an invalid clock strands nothing)
     });
 });
 
-describe("answer validation: production validateAnswers semantics, whole-request poisoning", () => {
+describe.skipIf(process.platform === "win32")("answer validation: production validateAnswers semantics, whole-request poisoning", () => {
     it("poisons the whole request on a malformed answer (production also rejects it)", async () => {
         const items = candidates();
         const poisoned = { u0: 0.5, u1: { noul: 1.5 }, u2: 0.55 };

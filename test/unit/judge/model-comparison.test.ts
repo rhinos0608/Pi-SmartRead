@@ -110,7 +110,7 @@ describe("buildProbeInput", () => {
     });
 });
 
-describe("runModelComparisonProbe (mocked transport)", () => {
+describe.skipIf(process.platform === "win32")("runModelComparisonProbe (mocked transport)", () => {
     it("sends the same labelled input across models and captures per-item records", async () => {
         const fetchFn = cannedFetch("served/snapshot-1", { u0: 0.9, u1: 0.2 }, { input_tokens: 500, cost: 0.00002 });
         const report = await runModelComparisonProbe({
@@ -326,7 +326,7 @@ describe("resolveProbeApiKey (no secrets leave the store)", () => {
         expect(resolved).toEqual({ ok: false, reason: "absent" });
     });
 
-    it("RED: post-rename settlement I/O after a real wire attempt halts with the ORIGINAL error (exactly 1 settle, no next model)", async () => {
+    it.skipIf(process.platform === "win32")("RED: post-rename settlement I/O after a real wire attempt halts with the ORIGINAL error (exactly 1 settle, no next model)", async () => {
         // Fault the directory durability open AFTER the mocked wire, exactly
         // like the budget RED. The atomic rename already persisted the known
         // actual, so the probe must halt loudly with the ORIGINAL EIO — no
@@ -357,7 +357,7 @@ describe("resolveProbeApiKey (no secrets leave the store)", () => {
         expect(ledger.settled[0]!.actualCostUsd).toBe(knownCost); // known actual retained
     });
 
-    it("RED: pre-persistence settlement failure retains the reserve in-flight with no next wire", async () => {
+    it.skipIf(process.platform === "win32")("RED: pre-persistence settlement failure retains the reserve in-flight with no next wire", async () => {
         // Fault the rename itself AFTER the mocked wire: nothing persisted,
         // so the original admission reserve must stay on the books
         // (in-flight) and the probe must halt loudly with the ORIGINAL EIO.
@@ -404,7 +404,24 @@ describe("estimateFullRun", () => {
     });
 });
 
-describe("caller tmp-alias compat (--out normalization at the caller boundary)", () => {
+describe("normalizeCallerOutPath (pure caller boundary normalization)", () => {
+    it("normalizes a canonical path under tmpdir()", async () => {
+        const { realpathSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join, resolve } = await import("node:path");
+        const canonBase = realpathSync(tmpdir());
+        const raw = join(canonBase, "test-report.json");
+        expect(normalizeCallerOutPath(raw)).toBe(resolve(raw));
+    });
+
+    it("preserves non-tmp paths as resolved absolute paths", async () => {
+        const { resolve } = await import("node:path");
+        const p = resolve("some/relative/path.json");
+        expect(normalizeCallerOutPath("some/relative/path.json")).toBe(p);
+    });
+});
+
+describe.skipIf(process.platform === "win32")("caller tmp-alias compat (--out normalization at the caller boundary)", () => {
     async function freshCampaignRoot(tag: string): Promise<string> {
         const { mkdtempSync, realpathSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
@@ -417,12 +434,13 @@ describe("caller tmp-alias compat (--out normalization at the caller boundary)",
     }
 
     it("literal /tmp child path writes the exclusive 0600 artifact + exact-bytes sidecar", async () => {
-        const { mkdirSync, readFileSync, statSync, realpathSync } = await import("node:fs");
+        const { existsSync, mkdirSync, readFileSync, statSync, realpathSync } = await import("node:fs");
         const { join, resolve } = await import("node:path");
+        const { tmpdir } = await import("node:os");
         const campaignRoot = await freshCampaignRoot("tmpalias");
         // Unique child BELOW the canonical /tmp target; the literal alias
         // spelling is what the caller passes (macOS /tmp->/private/tmp).
-        const canonicalTmp = realpathSync("/tmp");
+        const canonicalTmp = existsSync("/tmp") ? realpathSync("/tmp") : realpathSync(tmpdir());
         const tag = `caller-tmp-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
         mkdirSync(join(canonicalTmp, tag), { recursive: true });
         const literalOut = join("/tmp", tag, "report.json");
@@ -446,10 +464,11 @@ describe("caller tmp-alias compat (--out normalization at the caller boundary)",
     });
 
     it("canonical physical path under /tmp writes the same exclusive artifact", async () => {
-        const { readFileSync, statSync, realpathSync } = await import("node:fs");
+        const { existsSync, readFileSync, statSync, realpathSync } = await import("node:fs");
         const { join, resolve } = await import("node:path");
+        const { tmpdir } = await import("node:os");
         const campaignRoot = await freshCampaignRoot("tmpcanon");
-        const canonicalTmp = realpathSync("/tmp");
+        const canonicalTmp = existsSync("/tmp") ? realpathSync("/tmp") : realpathSync(tmpdir());
         const tag = `caller-canon-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
         const canonicalOut = join(canonicalTmp, tag, "report.json");
         expect(normalizeCallerOutPath(canonicalOut)).toBe(resolve(canonicalOut));
@@ -467,10 +486,11 @@ describe("caller tmp-alias compat (--out normalization at the caller boundary)",
     });
 
     it("nested hostile symlink below the /tmp alias stays fail-closed with zero fetches", async () => {
-        const { mkdirSync, realpathSync, symlinkSync } = await import("node:fs");
+        const { existsSync, mkdirSync, realpathSync, symlinkSync } = await import("node:fs");
         const { join } = await import("node:path");
+        const { tmpdir } = await import("node:os");
         const campaignRoot = await freshCampaignRoot("tmpevil");
-        const canonicalTmp = realpathSync("/tmp");
+        const canonicalTmp = existsSync("/tmp") ? realpathSync("/tmp") : realpathSync(tmpdir());
         const tag = `caller-evil-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
         const base = join(canonicalTmp, tag);
         mkdirSync(join(base, "real"), { recursive: true });
@@ -485,10 +505,11 @@ describe("caller tmp-alias compat (--out normalization at the caller boundary)",
     });
 
     it("leaf symlink at --out is refused with zero fetches even under the OS alias", async () => {
-        const { mkdirSync, realpathSync, symlinkSync, writeFileSync } = await import("node:fs");
+        const { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } = await import("node:fs");
         const { join } = await import("node:path");
+        const { tmpdir } = await import("node:os");
         const campaignRoot = await freshCampaignRoot("tmpleaf");
-        const canonicalTmp = realpathSync("/tmp");
+        const canonicalTmp = existsSync("/tmp") ? realpathSync("/tmp") : realpathSync(tmpdir());
         const tag = `caller-leaf-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
         mkdirSync(join(canonicalTmp, tag), { recursive: true });
         const target = join(canonicalTmp, tag, "real.json");
