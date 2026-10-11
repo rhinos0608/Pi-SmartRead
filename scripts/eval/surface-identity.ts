@@ -1,5 +1,5 @@
 export interface SurfaceIdentity {
-    selectors: { general: boolean; inspect: boolean; invalid?: string[] };
+    selectors: { general: { enabled: boolean; invalid?: string }; inspect: { enabled: boolean; invalid?: string } };
     variants: { lsp: string; inspect: string; grep: string; guidance: string; mcpInstructions: string; note?: string };
     surfaceIdentity: string;
     schemaHash: string;
@@ -31,10 +31,14 @@ export function parseSurfaceIdentity(stderr: string): SurfaceIdentity {
 
 function isIdentity(value: unknown): value is SurfaceIdentity {
     if (!isRecord(value) || !exactKeys(value, ["selectors", "variants", "surfaceIdentity", "schemaHash", "guidanceHash"])) return false;
-    if (!isRecord(value.selectors) || !("general" in value.selectors) || !("inspect" in value.selectors) || !Object.keys(value.selectors).every((key) => ["general", "inspect", "invalid"].includes(key))) return false;
+    if (!isRecord(value.selectors) || !exactKeys(value.selectors, ["general", "inspect"])) return false;
     const selectors = value.selectors;
-    if (typeof selectors.general !== "boolean" || typeof selectors.inspect !== "boolean") return false;
-    if (selectors.invalid !== undefined && (!Array.isArray(selectors.invalid) || !selectors.invalid.every((item) => typeof item === "string" && !containsAbsolutePath(item)))) return false;
+    for (const key of ["general", "inspect"]) {
+        const selector = selectors[key];
+        if (!isRecord(selector) || !("enabled" in selector) || typeof selector.enabled !== "boolean") return false;
+        if (!Object.keys(selector).every((field) => ["enabled", "invalid"].includes(field))) return false;
+        if (selector.invalid !== undefined && (typeof selector.invalid !== "string" || containsAbsolutePath(selector.invalid))) return false;
+    }
     if (!isRecord(value.variants)) return false;
     const variants = value.variants;
     if (!["lsp", "inspect", "grep", "guidance", "mcpInstructions"].every((key) => typeof variants[key] === "string")) return false;

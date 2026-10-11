@@ -1,13 +1,38 @@
 {
   "baseline": {
-    "expectedIdentity": { "general": false, "inspect": false },
+    "expectedIdentity": {
+      "selectors": { "general": false, "inspect": false },
+      "variants": {
+        "lsp": "baseline",
+        "inspect": "baseline",
+        "grep": "baseline",
+        "guidance": "baseline",
+        "mcpInstructions": "baseline"
+      },
+      "surfaceIdentity": "2dde24005558de2ba3061e83768ee617e9ba15dea9fcd2e1b5b377968ef5a187",
+      "schemaHash": "5b8c2e02aa9ed828ddf70ccd98dd7824f9cde7a8707c5f2591f1d7a5c83177c4",
+      "guidanceHash": "ad2e9a659ea5b991d7cf291d265c74cde1bc1d4e0b36fbd88e2d696d9221a8e3"
+    },
     "env": {
       "PI_SMARTREAD_AFFORDANCES": "0",
       "PI_SMARTREAD_INSPECT_AFFORDANCES": "0"
     }
   },
   "lsp-affordance": {
-    "expectedIdentity": { "general": true, "inspect": false },
+    "expectedIdentity": {
+      "selectors": { "general": true, "inspect": false },
+      "variants": {
+        "lsp": "affordance-bundle",
+        "inspect": "baseline",
+        "grep": "baseline",
+        "guidance": "affordance-bundle",
+        "mcpInstructions": "affordance-bundle",
+        "note": "wp-c-unbuilt"
+      },
+      "surfaceIdentity": "a87e963db76c800d12fe0b41d7ae778d7be2c9c233e02b2c47d72c5d218c6a7c",
+      "schemaHash": "cb75ac7ada7633892ed1d860c5da020ac143e1f927cb5259bc9ba5c9028b7902",
+      "guidanceHash": "d0f335909d347b93bf8e8ddedc06a1b8cb475cf843f9f1f4a3f444e36cdce002"
+    },
     "env": {
       "PI_SMARTREAD_AFFORDANCES": "1",
       "PI_SMARTREAD_INSPECT_AFFORDANCES": "0"

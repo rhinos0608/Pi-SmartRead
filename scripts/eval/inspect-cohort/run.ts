@@ -11,7 +11,7 @@ import { claimHoldoutOpening, classifyInfraFailure, extractSessionIdentity, pars
 
 export const INSPECT_RUNNER_VERSION = 1;
 export const INSPECT_TOOL_ALLOWLIST = "read,bash,grep,find,inspect,LSP";
-export type InspectSelectorIdentity = SurfaceIdentity;
+export type InspectSelectorIdentity = Omit<SurfaceIdentity, "selectors"> & { selectors: { general: boolean; inspect: boolean; invalid?: string[] } };
 
 export interface InspectSessionValidityInput {
     identityMismatch: string | null;
@@ -92,9 +92,10 @@ export function checkInspectSessionIdentity(
     return { ok: true, reason: null };
 }
 
-export function selectorIdentityMismatch(actual: InspectSelectorIdentity, expected: InspectSelectorIdentity): string | null {
-    if (actual.selectors.invalid?.length) return `invalid selector value: ${actual.selectors.invalid.join(", ")}`;
-    if (JSON.stringify(actual.selectors) !== JSON.stringify(expected.selectors)) return "effective selector mismatch";
+export function selectorIdentityMismatch(actual: SurfaceIdentity, expected: InspectSelectorIdentity): string | null {
+    const actualInvalid = [actual.selectors.general.invalid, actual.selectors.inspect.invalid].filter((value): value is string => value !== undefined);
+    if (actualInvalid.length) return `invalid selector value: ${actualInvalid.join(", ")}`;
+    if (actual.selectors.general.enabled !== expected.selectors.general || actual.selectors.inspect.enabled !== expected.selectors.inspect) return "effective selector mismatch";
     if (JSON.stringify(actual.variants) !== JSON.stringify(expected.variants)) return "surface variants mismatch";
     if (actual.surfaceIdentity !== expected.surfaceIdentity) return "surface identity mismatch";
     if (actual.schemaHash !== expected.schemaHash) return "schema hash mismatch";
@@ -314,12 +315,12 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
                 const log = readFileSync(eventLog, "utf8"), stderr = readFileSync(stderrLog, "utf8"), identity = extractInspectSessionIdentity(log);
                 record.provider = identity.provider; record.resolvedModel = identity.model; record.thinkingResolved = identity.thinking;
                 const expected = expectedIdentityByArm.get(arm.name)!;
-                let actual: InspectSelectorIdentity | null = null;
+                let actual: SurfaceIdentity | null = null;
                 let surfaceMismatch: string | null = null;
                 try { actual = parseSurfaceIdentity(stderr); }
                 catch (error) { surfaceMismatch = error instanceof Error ? error.message : "surface identity malformed"; }
                 if (actual) {
-                    record.selectorIdentity = actual;
+                    record.selectorIdentity = { ...actual, selectors: { general: actual.selectors.general.enabled, inspect: actual.selectors.inspect.enabled, ...(actual.selectors.general.invalid !== undefined || actual.selectors.inspect.invalid !== undefined ? { invalid: [actual.selectors.general.invalid, actual.selectors.inspect.invalid].filter((value): value is string => value !== undefined) } : {}) } };
                     surfaceMismatch = selectorIdentityMismatch(actual, expected);
                 }
                 const sessionIdentity = checkInspectSessionIdentity(identity, { model: args.model, thinking: args.thinking });

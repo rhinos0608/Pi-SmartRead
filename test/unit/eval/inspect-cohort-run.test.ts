@@ -110,10 +110,10 @@ describe("inspect cohort runner contracts", () => {
 
     it("excludes selector or guidance identity mismatch and invalid selectors for rerun", () => {
         const expected: InspectSelectorIdentity = { selectors: { general: false, inspect: true }, variants: { lsp: "baseline", inspect: "inspect-bundle", grep: "baseline", guidance: "inspect-bundle", mcpInstructions: "inspect-bundle" }, surfaceIdentity: "surface-a", schemaHash: "schema-a", guidanceHash: "guide-a" };
-        expect(selectorIdentityMismatch(expected, expected)).toBeNull();
-        expect(selectorIdentityMismatch({ ...expected, guidanceHash: "guide-b" }, expected)).toMatch(/guidance/);
-        expect(selectorIdentityMismatch({ ...expected, selectors: { general: false, inspect: false } }, expected)).toMatch(/selector/);
-        const invalidReason = selectorIdentityMismatch({ ...expected, selectors: { general: false, inspect: true, invalid: ["PI_SMARTREAD_INSPECT_AFFORDANCES=on"] } }, expected);
+        expect(selectorIdentityMismatch({ ...expected, selectors: { general: { enabled: false }, inspect: { enabled: true } } }, expected)).toBeNull();
+        expect(selectorIdentityMismatch({ ...expected, selectors: { general: { enabled: false }, inspect: { enabled: true } }, guidanceHash: "guide-b" }, expected)).toMatch(/guidance/);
+        expect(selectorIdentityMismatch({ ...expected, selectors: { general: { enabled: false }, inspect: { enabled: false } } }, expected)).toMatch(/selector/);
+        const invalidReason = selectorIdentityMismatch({ ...expected, selectors: { general: { enabled: false }, inspect: { enabled: true, invalid: "on" } } }, expected);
         expect(invalidReason).toMatch(/invalid selector/);
         expect(sessionValidity({ identityMismatch: invalidReason, infraFailure: null, contaminated: false, timedOut: false }))
             .toEqual({ excluded: true, exclusionReason: invalidReason, rerunRequired: true, gradedFailure: false });

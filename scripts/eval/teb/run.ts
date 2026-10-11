@@ -29,7 +29,7 @@ import { FAMILY_TABLE, parseTebJsonl, toRunnerView, type RunnerTaskView, type Te
 // Static import is cycle-safe: score.ts imports run.ts type-only
 // (erased at runtime), and both CLI mains are argv-guarded.
 import { classifySessionValidity } from "./score.js";
-import { parseSurfaceIdentity, SurfaceIdentityError } from "../surface-identity.js";
+import { parseSurfaceIdentity, SurfaceIdentityError, type SurfaceIdentity } from "../surface-identity.js";
 import {
     buildPiArgs,
     killActivePiGroups,
@@ -282,8 +282,46 @@ export function buildTaskPrompt(view: RunnerTaskView, arm: TebArm): string {
 /** Built-in arm names. Anything else must come from --arms-config. */
 export const TEB_BUILTIN_ARMS: readonly string[] = ["baseline", "instructed"] as const;
 
+/** Complete externally frozen product identity required for an opted-in arm. */
+export interface TebExpectedIdentity {
+    selectors: { general: boolean; inspect: false };
+    variants: SurfaceIdentity["variants"];
+    surfaceIdentity: string;
+    schemaHash: string;
+    guidanceHash: string;
+}
+
+export function surfaceIdentityMismatch(actual: SurfaceIdentity, expected: TebExpectedIdentity): string | null {
+    if (actual.selectors.general.enabled !== expected.selectors.general || actual.selectors.inspect.enabled !== expected.selectors.inspect ||
+        actual.selectors.general.invalid !== undefined || actual.selectors.inspect.invalid !== undefined) return "surface identity selectors do not match frozen arm expectation";
+    if (["lsp", "inspect", "grep", "guidance", "mcpInstructions", "note"].some((key) => actual.variants[key as keyof SurfaceIdentity["variants"]] !== expected.variants[key as keyof SurfaceIdentity["variants"]])) return "surface identity variants do not match frozen arm expectation";
+    if (actual.surfaceIdentity !== expected.surfaceIdentity) return "surface identity hash does not match frozen arm expectation";
+    if (actual.schemaHash !== expected.schemaHash) return "surface schema hash does not match frozen arm expectation";
+    if (actual.guidanceHash !== expected.guidanceHash) return "surface guidance hash does not match frozen arm expectation";
+    return null;
+}
+
 /** Per-arm overrides from a --arms-config JSON file. */
-export type TebArmsConfig = Record<string, Partial<Pick<TebArm, "extensionPath" | "env" | "promptSuffix">> & { expectedIdentity?: { general: boolean; inspect: false } }>;
+export type TebArmsConfig = Record<string, Partial<Pick<TebArm, "extensionPath" | "env" | "promptSuffix">> & { expectedIdentity?: TebExpectedIdentity }>;
+
+function isExpectedIdentity(value: unknown): value is TebExpectedIdentity {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const identity = value as Record<string, unknown>;
+    if (Object.keys(identity).some((key) => !["selectors", "variants", "surfaceIdentity", "schemaHash", "guidanceHash"].includes(key))) return false;
+    if (!["selectors", "variants", "surfaceIdentity", "schemaHash", "guidanceHash"].every((key) => key in identity)) return false;
+    const selectors = identity["selectors"];
+    if (typeof selectors !== "object" || selectors === null || Array.isArray(selectors)) return false;
+    const selectorRecord = selectors as Record<string, unknown>;
+    if (Object.keys(selectorRecord).length !== 2 || typeof selectorRecord["general"] !== "boolean" || selectorRecord["inspect"] !== false) return false;
+    const variants = identity["variants"];
+    if (typeof variants !== "object" || variants === null || Array.isArray(variants)) return false;
+    const variantRecord = variants as Record<string, unknown>;
+    const variantKeys = ["lsp", "inspect", "grep", "guidance", "mcpInstructions"];
+    const variantValues = ["baseline", "affordance-bundle", "inspect-bundle"];
+    if (!variantKeys.every((key) => typeof variantRecord[key] === "string" && variantValues.includes(variantRecord[key] as string)) || Object.keys(variantRecord).some((key) => ![...variantKeys, "note"].includes(key))) return false;
+    if (variantRecord["note"] !== undefined && variantRecord["note"] !== "wp-c-unbuilt") return false;
+    return ["surfaceIdentity", "schemaHash", "guidanceHash"].every((key) => typeof identity[key] === "string" && /^[a-f\d]{64}$/.test(identity[key] as string));
+}
 
 /** Load a --arms-config JSON file: {"<arm>": {extensionPath?, env?, promptSuffix?}}. */
 export function loadArmsConfig(path: string): TebArmsConfig {
@@ -1008,6 +1046,11 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
     if (expectedIdentityArms.length > 0 && expectedIdentityArms.length !== args.arms.length) {
         throw new Error("surface identity expectations must be configured for every arm or none");
     }
+    for (const name of expectedIdentityArms) {
+        if (!isExpectedIdentity(armConfigs[name]?.expectedIdentity)) {
+            throw new Error(`surface identity expectation for arm ${name} must pin selectors, variants, surfaceIdentity, schemaHash, and guidanceHash`);
+        }
+    }
     const piBin = opts.piBin ?? args.piBin;
     // E11b: the resolved binary and its version are part of the record.
     const piVersion = opts.piVersion ?? (args.dryRun ? "unknown" : getPiVersion(piBin));
@@ -1333,19 +1376,18 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
                             model: args.model,
                             thinking: args.thinking,
                         });
-                        record.identityOk = identityCheck.ok && record.selectors?.invalid === undefined;
-                        record.identityReason = record.selectors?.invalid === undefined
-                            ? identityCheck.reason
-                            : `invalid affordance selector value(s): ${record.selectors.invalid.join(", ")}`;
                         const expectedIdentity = armConfigs[arm.name]?.expectedIdentity;
+                        const invalidSelectors = expectedIdentity ? record.selectors?.invalid : undefined;
+                        record.identityOk = identityCheck.ok && invalidSelectors === undefined;
+                        record.identityReason = invalidSelectors === undefined
+                            ? identityCheck.reason
+                            : `invalid affordance selector value(s): ${invalidSelectors.join(", ")}`;
                         if (expectedIdentity) {
                             try {
                                 const surface = parseSurfaceIdentity(stderrText);
                                 record.surfaceIdentity = surface.surfaceIdentity;
-                                const mismatch = surface.selectors.general !== expectedIdentity.general ||
-                                    surface.selectors.inspect !== expectedIdentity.inspect ||
-                                    surface.selectors.invalid !== undefined;
-                                if (mismatch) throw new Error("surface identity selectors do not match frozen arm expectation");
+                                const mismatch = surfaceIdentityMismatch(surface, expectedIdentity);
+                                if (mismatch) throw new Error(mismatch);
                             } catch (error) {
                                 const reason = error instanceof SurfaceIdentityError ? `surface identity ${error.code}` : error instanceof Error ? error.message : String(error);
                                 record.identityOk = false;

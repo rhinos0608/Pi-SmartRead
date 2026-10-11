@@ -35,13 +35,14 @@ import {
     runTebShutdown,
     scanLogForContamination,
     stableTaskParity,
+    surfaceIdentityMismatch,
     trackScratchDir,
     untrackScratchDir,
     type TebManifest,
 } from "../../../scripts/eval/teb/run.js";
 import { activePiGroupPids, buildPiArgs, killActivePiGroups, launchPiSession, type PiSpawnFn } from "../../../scripts/eval/teb/launch.js";
 import { toRunnerView, type TebTask } from "../../../scripts/eval/teb/schema.js";
-import { parseSurfaceIdentity } from "../../../scripts/eval/surface-identity.js";
+import { parseSurfaceIdentity, type SurfaceIdentity } from "../../../scripts/eval/surface-identity.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -694,13 +695,42 @@ describe("runTebCli dry-run", () => {
         )).rejects.toThrow(/every arm or none/);
     });
 
+    it("rejects selector-only identity pins before dispatch", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-identity-incomplete-"));
+        const tasksFile = join(dir, "tasks.jsonl");
+        writeFileSync(tasksFile, `${JSON.stringify(definitionTask())}\n`);
+        const configPath = join(dir, "arms.json");
+        writeFileSync(configPath, JSON.stringify({ gamma: { expectedIdentity: { general: true, inspect: false } } }));
+        let spawned = 0;
+        const spawnFn: PiSpawnFn = () => { spawned += 1; return fakeSpawn([])({ command: "pi", args: [], cwd: dir, env: {} }); };
+        await expect(runTebCli(
+            parseTebRunArgs(["--tasks", tasksFile, "--split", "pilot", "--out", join(dir, "out"), "--arms", "gamma", "--arms-config", configPath]),
+            { spawnFn, extensionPath: join(dir, "index.ts"), piVersion: "test" },
+        )).rejects.toThrow(/must pin selectors, variants, surfaceIdentity, schemaHash, and guidanceHash/);
+        expect(spawned).toBe(0);
+    });
+
     it("parses canonical product identity and rejects missing or malformed lines", () => {
         const hash = "a".repeat(64);
-        const payload = { selectors: { general: true, inspect: false }, variants: { lsp: "affordance-bundle", inspect: "baseline", grep: "baseline", guidance: "affordance-bundle", mcpInstructions: "affordance-bundle", note: "wp-c-unbuilt" }, surfaceIdentity: hash, schemaHash: hash, guidanceHash: hash };
+        const payload = { selectors: { general: { enabled: true }, inspect: { enabled: false } }, variants: { lsp: "affordance-bundle", inspect: "baseline", grep: "baseline", guidance: "affordance-bundle", mcpInstructions: "affordance-bundle", note: "wp-c-unbuilt" }, surfaceIdentity: hash, schemaHash: hash, guidanceHash: hash };
         expect(parseSurfaceIdentity(`[pi-smartread:surface-identity] ${JSON.stringify(payload)}\n`).surfaceIdentity).toBe(hash);
         expect(() => parseSurfaceIdentity("")).toThrow(/missing/);
         expect(() => parseSurfaceIdentity("[pi-smartread:surface-identity] nope\n")).toThrow(/malformed/);
     });
+    it("rejects product identity variants and hashes that differ from the full frozen pin", () => {
+        const identity: SurfaceIdentity = {
+            selectors: { general: { enabled: true }, inspect: { enabled: false } },
+            variants: { lsp: "affordance-bundle", inspect: "baseline", grep: "baseline", guidance: "affordance-bundle", mcpInstructions: "affordance-bundle", note: "wp-c-unbuilt" },
+            surfaceIdentity: "a".repeat(64), schemaHash: "b".repeat(64), guidanceHash: "c".repeat(64),
+        };
+        const expected = { selectors: { general: true, inspect: false as const }, variants: identity.variants, surfaceIdentity: identity.surfaceIdentity, schemaHash: identity.schemaHash, guidanceHash: identity.guidanceHash };
+        expect(surfaceIdentityMismatch(identity, expected)).toBeNull();
+        expect(surfaceIdentityMismatch({ ...identity, variants: { ...identity.variants, lsp: "baseline" } }, expected)).toMatch(/variants/);
+        expect(surfaceIdentityMismatch({ ...identity, surfaceIdentity: "d".repeat(64) }, expected)).toMatch(/surface identity/);
+        expect(surfaceIdentityMismatch({ ...identity, schemaHash: "d".repeat(64) }, expected)).toMatch(/schema hash/);
+        expect(surfaceIdentityMismatch({ ...identity, guidanceHash: "d".repeat(64) }, expected)).toMatch(/guidance hash/);
+    });
+
     it("writes prompts and a manifest without spawning", async () => {
         const dir = mkdtempSync(join(tmpdir(), "teb-run-"));
         const tasksFile = join(dir, "tasks.jsonl");
@@ -751,6 +781,27 @@ describe("runTebCli dry-run", () => {
             { piVersion: "test" },
         );
         expect(existsSync(openingPathFor(freeze, tasksSha256(tasksFile)))).toBe(false);
+    });
+
+    it("preserves legacy session validity with an invalid ambient affordance selector", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-legacy-selector-"));
+        const repos = join(dir, "repos");
+        const { sha } = makeGitRepo(repos, "fake__repo");
+        process.env["TEB_REPOS_DIR"] = repos;
+        const prior = process.env["PI_SMARTREAD_AFFORDANCES"];
+        process.env["PI_SMARTREAD_AFFORDANCES"] = "maybe";
+        const tasksFile = join(dir, "tasks.jsonl");
+        writeFileSync(tasksFile, `${JSON.stringify(definitionTask({ commit: sha }))}\n`);
+        const spawnFn: PiSpawnFn = (opts) => fakeSpawn([JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "provider", model: "provider/model-v2", thinkingLevel: "high" } })])({ command: "pi", args: [], cwd: opts.cwd, env: {} });
+        try {
+            const { manifestPath } = await runTebCli(parseTebRunArgs(["--tasks", tasksFile, "--out", join(dir, "out"), "--replicates", "1", "--model", "provider/model-v2"]), { spawnFn, extensionPath: join(dir, "index.ts"), piVersion: "test" });
+            const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { sessions: Array<{ identityOk: boolean; identityReason: string | null }> };
+            expect(manifest.sessions[0]).toMatchObject({ identityOk: true, identityReason: null });
+        } finally {
+            delete process.env["TEB_REPOS_DIR"];
+            if (prior === undefined) delete process.env["PI_SMARTREAD_AFFORDANCES"];
+            else process.env["PI_SMARTREAD_AFFORDANCES"] = prior;
+        }
     });
 
     it("records AB/BA order and replicates with a fake pi", async () => {
