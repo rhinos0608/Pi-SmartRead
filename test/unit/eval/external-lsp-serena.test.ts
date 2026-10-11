@@ -43,6 +43,15 @@ describe("parseSerenaFindSymbol", () => {
       parseSerenaFindSymbol(JSON.stringify([{ name_path: "x" }]), "/repo").status,
     ).toBe("empty");
   });
+
+  it("handles Windows paths with backslashes in find_symbol", () => {
+    const raw = JSON.stringify([
+      { name_path: "greet", kind: "Function", relative_path: "src\\a.ts", body_location: { start_line: 0, end_line: 2 } },
+    ]);
+    const parsed = parseSerenaFindSymbol(raw, "C:\\repo", ident("C:/repo/src/a.ts"));
+    expect(parsed.status).toBe("ok");
+    expect(parsed.locations[0]?.file).toBe("C:/repo/src/a.ts");
+  });
 });
 
 describe("parseSerenaReferences", () => {
@@ -94,5 +103,22 @@ describe("parseSerenaReferences", () => {
 
   it("documents the references candidate cap", () => {
     expect(SERENA_REF_CANDIDATE_CAP).toBe(3);
+  });
+
+  it("handles Windows paths and CRLF snippets in references", () => {
+    const raw = JSON.stringify({
+      "src\\b.ts": {
+        File: [
+          {
+            name_path: "b",
+            content_around_reference: "  >   0:import { greet } from \"./a\";\r\n...   1:code",
+          },
+        ],
+      },
+    });
+    const parsed = parseSerenaReferences(raw, "C:\\repo", ident("C:/repo/src/b.ts"));
+    expect(parsed.status).toBe("ok");
+    expect(parsed.locations[0]?.file).toBe("C:/repo/src/b.ts");
+    expect(parsed.locations[0]?.start.line).toBe(0);
   });
 });
