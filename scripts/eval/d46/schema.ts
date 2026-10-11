@@ -7,7 +7,7 @@
  * this schema, the validator, and the authoring protocol live in the repo.
  */
 
-export type D46Split = "dev" | "holdout";
+export type D46Split = "dev" | "holdout" | "selection";
 
 export type D46QueryClass =
     | "behaviour"
@@ -98,4 +98,33 @@ export interface D46RepoManifest {
     createdAt: string;
     reposDir: string;
     repos: D46RepoPin[];
+}
+
+/**
+ * One cold-start refusal: an examined checkout root (always a member of
+ * `D46ColdStartReceipt.checkedRoots`) whose runtime-cache deletion was
+ * refused, with the refusal reason. Per-entry refusals name the checkout
+ * root and describe the offending target inside `reason`.
+ */
+export interface D46ColdStartRefusal {
+    root: string;
+    reason: string;
+}
+
+/**
+ * Cold-start ownership receipt: EVERY canonical checkout root checked and
+ * EVERY planned deletion target, recorded BEFORE execution alongside what
+ * was actually deleted and EVERY refusal with its reason. An empty
+ * `deleted` list alone proves nothing about ownership — only `checkedRoots`
+ * + `planned` + `refused` bound the claim: a root either appears in
+ * `refused` (cold start disabled, run proceeds warm) or its planned targets
+ * were eligible for the ownership-gated deletion.
+ */
+export interface D46ColdStartReceipt {
+    deleted: string[];
+    skippedTracked: string[];
+    count: number;
+    checkedRoots: string[];
+    planned: string[];
+    refused: D46ColdStartRefusal[];
 }

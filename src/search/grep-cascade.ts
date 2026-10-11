@@ -17,15 +17,18 @@ import { handleSymbol } from "./find-symbol-tool.js";
 import { getSemanticIndex } from "../indexing/semantic-index-registry.js";
 import { pathPrefixForDirectory } from "../indexing/semantic-index.js";
 import { recordDegradation } from "../runtime/runtime-health.js";
-import { compileBm25Corpus, type Bm25Corpus } from "../scoring.js";
+import { compileBm25Corpus, tokenize, type Bm25Corpus } from "../scoring.js";
 import {
     resolveGrepRankingOptions,
     tokenizeRankingQuery,
+    rankingTokenizer,
     withFilenameHeader,
     coverageBoostFactor,
     isTestOrDocPath,
     activeRankingKnobs,
     rankingCorpusKeySegment,
+    resolveRankingForQuery,
+    stemRankingTokens,
     type GrepRankingOptions,
 } from "./grep-ranking.js";
 import { buildSymbolUnitHits, resolveGrepUnitMode, type GrepUnitMode } from "./grep-units.js";
@@ -655,7 +658,11 @@ async function buildCorpus(
     const corpusDocs = ranking?.filenamePrepend
         ? fileList.map((f, i) => withFilenameHeader(contents[i]!, relativeToSearchDir(searchDir, f)))
         : contents;
-    return { fileList, contents, corpus: compileBm25Corpus(corpusDocs, { k1: ranking?.bm25k1, b: ranking?.bm25b }) };
+    // The NL stemming knob changes the indexed token stream, so the
+    // compiled corpus must use the same stemmed tokenizer the scorer
+    // applies to queries; off (default) keeps the plain shared tokenizer.
+    const tokenizer = ranking ? rankingTokenizer(ranking) : undefined;
+    return { fileList, contents, corpus: compileBm25Corpus(corpusDocs, { k1: ranking?.bm25k1, b: ranking?.bm25b, ...(tokenizer ? { tokenizer } : {}) }) };
 }
 
 /**
@@ -741,13 +748,21 @@ export interface FallbackBm25Input {
     root: string;
 }
 
-function findBestLine(lines: string[], queryTokens: string[]): number {
+function findBestLine(lines: string[], queryTokens: string[], stem = false): number {
     let bestLine = 1;
     let bestCount = -1;
+    // Stemmed query tokens rarely occur as raw substrings, so compare
+    // stemmed token sets per line when stemming is on. Off (default)
+    // keeps the byte-identical substring check.
+    const querySet = stem ? new Set(queryTokens) : null;
     for (let i = 0; i < lines.length; i++) {
         const lower = lines[i]!.toLowerCase();
         let count = 0;
-        for (const tok of queryTokens) if (lower.includes(tok)) count++;
+        if (querySet) {
+            for (const tok of stemRankingTokens(tokenize(lower))) if (querySet.has(tok)) count++;
+        } else {
+            for (const tok of queryTokens) if (lower.includes(tok)) count++;
+        }
         if (count > bestCount) {
             bestCount = count;
             bestLine = i + 1;
@@ -788,7 +803,7 @@ function rankCorpusFiles(
             score *= ranking.testDemoteFactor;
         }
         if (ranking?.coverageBoost) {
-            score *= coverageBoostFactor(queryTokens, contents[i]!.toLowerCase());
+            score *= coverageBoostFactor(queryTokens, contents[i]!.toLowerCase(), ranking.stemming);
         }
         if (score > 0) ranked.push({ file: fileList[i]!, score, content: contents[i]! });
     }
@@ -800,7 +815,9 @@ export async function runFallbackBm25(
     input: FallbackBm25Input,
 ): Promise<Map<string, GrepHit>> {
     const { pattern, searchDir, topK, contextLines, cwd, signal, scopedFile, fileGlob, deps: opts, root } = input;
-    const ranking = resolveGrepRankingOptions();
+    // Stemming is NL-only: resolve per-query so identifier-shaped queries
+    // reuse the unstemmed corpus and scorer (byte-identical to knob-off).
+    const ranking = resolveRankingForQuery(pattern, resolveGrepRankingOptions());
     const hits = new Map<string, GrepHit>();
     if (signal?.aborted) throw new Error("Operation aborted");
 
@@ -835,7 +852,7 @@ export async function runFallbackBm25(
                 continue;
             }
         }
-        const bestLine = findBestLine(lines, queryTokens);
+        const bestLine = findBestLine(lines, queryTokens, ranking.stemming);
         hits.set(`${absPath}:${bestLine}`, {
             file: absPath,
             relFile: relToDisplayRoot(cwd, absPath),

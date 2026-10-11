@@ -9,8 +9,22 @@
  *
  * Usage:
  *   npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>]
-  *     [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout]
-  *     [--reports-dir <dir>] ($PI_SMARTREAD_D46_REPORTS_DIR overrides the default)
+ *     [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout]
+ *     [--reports-dir <dir>] ($PI_SMARTREAD_D46_REPORTS_DIR overrides the default)
+ *     [--exists-evidence excerpts|count|off]
+ *   npx tsx scripts/eval/d46/run.ts --split selection --cohort-dir <dir> [same query flags]
+ *
+ * Fresh selection cohort (--cohort-dir <dir>, --split selection):
+ * - bench root = the flag value; pins from <cohort-dir>/repos.json, queries
+ *   from <cohort-dir>/adjudicated/<owner>__<name>.jsonl.
+ * - the adjudicated files are verified (fail-closed, exit 2) against the
+ *   frozen manifest at <cohort-dir>/MANIFEST.sha256.json (fallback:
+ *   <cohort-dir>/adjudicated/MANIFEST.sha256.json); entries are bare
+ *   adjudicated-dir file names verified with verifySplitManifest.
+ * - checkout pin checks, per-query execution/scoring, and the dev report
+ *   shape are reused unchanged; only corpusKind differs
+ *   ("fresh-cohort-checkouts"). Selection query text MAY appear in
+ *   stdout/reports; judge config flags are unchanged.
  *
  * Integrity (fail-closed, exit 2):
  * - the split's sealed MANIFEST.sha256.json is re-verified against current
@@ -25,6 +39,13 @@
  * engineSourceHash. Holdout query text is never printed to stdout/stderr,
  * and holdout reports carry ids, outcomes and rendered system output but
  * NOT query text or gold.
+ *
+ * Cold start (ownership receipt): runtime-cache deletion happens only for
+ * a root physically contained in a state root validated by
+ * `ensureOwnedStateRoot` AND carrying a canonical `.snapshot-commit`
+ * completion marker. Every examined root is receipted
+ * (`checkedRoots`/`planned`/`deleted`/`refused`); non-owned roots run warm
+ * with an explicit refusal, never a silent deletion.
  *
  * Report JSON (0600) lands under
  * ~/.cache/pi-smartread-bench/reports/d46-<split>-<config>-<ts>-<rand>.json.
@@ -42,9 +63,9 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
 import {
     GREP_JUDGE_EXISTS_EVIDENCE_ENV_VAR,
@@ -82,7 +103,13 @@ import {
     pinnedQueryFileNames,
     type D46SplitManifest,
 } from "./validate.js";
-import type { D46GoldSpan, D46Query, D46Split } from "./schema.js";
+import {
+    assertCanonicalBaseCommit,
+    assertPathWithinRoot,
+    ensureOwnedStateRoot,
+    SNAPSHOT_COMMIT_MARKER,
+} from "../external/grep/repos.js";
+import type { D46ColdStartReceipt, D46ColdStartRefusal, D46GoldSpan, D46Query, D46Split } from "./schema.js";
 import { aggregateD46, scoreD46Query, summarizeD46, type D46RenderedUnit } from "./score.js";
 
 export const D46_REPORTS_DIR = join(homedir(), ".cache", "pi-smartread-bench", "reports");
@@ -114,6 +141,7 @@ export interface D46RunArgs {
     openHoldout: boolean;
     reportsDir: string | null;
     existsEvidence: D46ExistsEvidence | null;
+    cohortDir: string | null;
 }
 
 export interface D46JudgeUnitProb {
@@ -193,6 +221,7 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
     let openHoldout = false;
     let reportsDir: string | null = null;
     let existsEvidence: D46ExistsEvidence | null = null;
+    let cohortDir: string | null = null;
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i] as string;
         if (arg === "--split") split = argv[++i];
@@ -202,23 +231,33 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
         else if (arg === "--freeze") freeze = argv[++i] ?? "";
         else if (arg === "--open-holdout") openHoldout = true;
         else if (arg === "--reports-dir") reportsDir = argv[++i] ?? "";
+        else if (arg === "--cohort-dir") cohortDir = argv[++i] ?? "";
         else if (arg === "--exists-evidence") existsEvidence = (argv[++i] ?? "") as D46ExistsEvidence;
         else if (arg === "--help" || arg === "-h") {
             console.log(
                 "Usage: npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout] [--reports-dir <dir>] [--exists-evidence excerpts|count|off]",
+            );
+            console.log(
+                "   or: npx tsx scripts/eval/d46/run.ts --split selection --cohort-dir <dir> [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--reports-dir <dir>] [--exists-evidence excerpts|count|off]",
             );
             process.exit(0);
         } else {
             throw new Error(`Unknown argument: ${arg}`);
         }
     }
-    if (split !== "dev" && split !== "holdout") throw new Error("--split must be dev|holdout");
+    if (split !== "dev" && split !== "holdout" && split !== "selection") throw new Error("--split must be dev|holdout|selection");
     if (config !== "off" && config !== "t040") throw new Error("--config must be off|t040");
     if (!Number.isInteger(replicate) || replicate < 1) throw new Error("--replicate must be a positive integer");
     if (existsEvidence !== null && existsEvidence !== "excerpts" && existsEvidence !== "count" && existsEvidence !== "off") {
         throw new Error("--exists-evidence must be excerpts|count|off");
     }
-    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout, reportsDir, existsEvidence };
+    if (split === "selection" && (cohortDir === null || cohortDir.length === 0)) {
+        throw new Error("--split selection requires --cohort-dir <dir>");
+    }
+    if (cohortDir !== null && cohortDir.length > 0 && split !== "selection") {
+        throw new Error("--cohort-dir requires --split selection");
+    }
+    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout, reportsDir, existsEvidence, cohortDir };
 }
 
 /** Re-verify the sealed manifest against current split-dir files. Returns error strings. */
@@ -297,6 +336,10 @@ export function isCleanPorcelain(porcelain: string): boolean {
         if (line.trim().length === 0) continue;
         if (line.slice(0, 2) !== "??") return false;
         const raw = line.length > 3 ? line.slice(3) : "";
+        // The snapshot completion marker at the repo root is owned-state
+        // provenance, not source: it must not dirty a pinned checkout. Only
+        // the exact top-level name is tolerated; nested lookalikes are dirt.
+        if (raw.trim().replace(/^"|"$/g, "") === SNAPSHOT_COMMIT_MARKER) continue;
         // Renames/copies: 'old -> new'; ignore only when every side is a cache path.
         const sides = raw.includes(" -> ") ? raw.split(" -> ") : [raw];
         const allCache = sides.length > 0 && sides.every((s) => s.trim().length > 0 && isRuntimeCachePath(s.trim()));
@@ -400,9 +443,161 @@ function walkCacheCandidates(root: string, cacheNames: Set<string>, out: string[
 }
 
 /**
- * Cold start, phase 2: delete the runtime-cache directories classified by
- * {@link planColdStartRuntimeCaches}. Callers must plan every checkout
- * first and only delete when all plans are error-free.
+ * Ownership proof for cold-start deletion: `ok` only when the CANONICAL
+ * checkout root is physically contained (symlink-safe `assertPathWithinRoot`)
+ * in a state root validated by `ensureOwnedStateRoot` AND carries a valid
+ * `.snapshot-commit` completion marker whose content is a canonical sha.
+ * Anything else is `ok: false` with a refusal reason: callers record the
+ * refusal and delete nothing.
+ */
+export type ColdStartOwnership =
+    | { ok: true; stateRoot: string; root: string }
+    | { ok: false; reason: string };
+
+function coldRefusalDetail(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Prove cold-start ownership for one checkout (read-only). Walks the
+ * canonical checkout root's ancestor chain nearest-first: every candidate
+ * exists (the root is canonical), so `ensureOwnedStateRoot` never
+ * claims/creates a directory here — a pre-existing unmarked dir throws
+ * foreign and the walk continues upward. A valid owned root must still
+ * satisfy physical containment and the snapshot completion marker; any gap
+ * is refused with nothing deleted.
+ */
+export function proveColdStartOwnership(checkoutDir: string): ColdStartOwnership {
+    let root: string;
+    try {
+        root = realpathSync(checkoutDir);
+    } catch {
+        return { ok: false, reason: `cold start refused: cannot resolve checkout: ${checkoutDir}` };
+    }
+    const candidates: string[] = [];
+    for (let cursor = root; ; ) {
+        candidates.push(cursor);
+        const parent = dirname(cursor);
+        if (parent === cursor) break;
+        cursor = parent;
+    }
+    for (const candidate of candidates) {
+        let stateRoot: string;
+        try {
+            stateRoot = ensureOwnedStateRoot(candidate).root;
+        } catch {
+            continue;
+        }
+        try {
+            assertPathWithinRoot(stateRoot, root, "cold-start root");
+        } catch (error) {
+            return {
+                ok: false,
+                reason: `cold start refused: ${root} is not contained in owned state root ${stateRoot}: ${coldRefusalDetail(error)}`,
+            };
+        }
+        const marker = join(root, SNAPSHOT_COMMIT_MARKER);
+        let markerStat: ReturnType<typeof lstatSync>;
+        try {
+            markerStat = lstatSync(marker);
+        } catch {
+            return { ok: false, reason: `cold start refused: missing snapshot completion marker: ${marker}` };
+        }
+        if (markerStat.isSymbolicLink() || !markerStat.isFile()) {
+            return { ok: false, reason: `cold start refused: snapshot completion marker is not a regular file: ${marker}` };
+        }
+        let sha: string;
+        try {
+            sha = readFileSync(marker, "utf8").trim();
+        } catch (error) {
+            return {
+                ok: false,
+                reason: `cold start refused: unreadable snapshot completion marker: ${marker}: ${coldRefusalDetail(error)}`,
+            };
+        }
+        try {
+            assertCanonicalBaseCommit(sha);
+        } catch (error) {
+            return {
+                ok: false,
+                reason: `cold start refused: snapshot completion marker is not a canonical sha: ${coldRefusalDetail(error)}`,
+            };
+        }
+        return { ok: true, stateRoot, root };
+    }
+    return { ok: false, reason: `cold start refused: no owned state root contains ${root}` };
+}
+
+/**
+ * Cold start, phase 2 — the ONLY runtime-cache deletion site. Removes the
+ * planned cache entries for an ownership-proven root: the plan root must
+ * match the proven root, only SmartRead runtime-cache paths are targets
+ * (never the repo itself), and each target is re-checked for physical
+ * containment and lstat'd (never following the leaf) immediately before
+ * `rmSync`. A failing target is refused and retained; a failed `rmSync`
+ * stops the loop and surfaces as an error with prior deletions recorded.
+ */
+export function deleteOwnedColdStartTargets(
+    ownership: Extract<ColdStartOwnership, { ok: true }>,
+    plan: { root: string; toDelete: string[] },
+): { deleted: string[]; refused: D46ColdStartRefusal[]; error: string | null } {
+    const deleted: string[] = [];
+    const refused: D46ColdStartRefusal[] = [];
+    if (plan.root !== ownership.root) {
+        refused.push({
+            root: plan.root,
+            reason: `cold start refused: plan root ${plan.root} differs from ownership root ${ownership.root}`,
+        });
+        return { deleted, refused, error: null };
+    }
+    for (const rel of plan.toDelete) {
+        const full = join(plan.root, rel);
+        if (!isRuntimeCachePath(rel)) {
+            refused.push({
+                root: ownership.root,
+                reason: `cold start refused: ${full} is not a SmartRead runtime-cache entry`,
+            });
+            continue;
+        }
+        try {
+            assertPathWithinRoot(ownership.stateRoot, full, "cold-start target");
+        } catch (error) {
+            refused.push({
+                root: ownership.root,
+                reason: `cold start refused: ${full} is not contained in owned state root: ${coldRefusalDetail(error)}`,
+            });
+            continue;
+        }
+        let st: ReturnType<typeof lstatSync>;
+        try {
+            st = lstatSync(full);
+        } catch {
+            continue; // Already gone: nothing to delete, nothing to refuse.
+        }
+        if (st.isSymbolicLink()) {
+            refused.push({
+                root: ownership.root,
+                reason: `cold start refused: ${full} is a symlinked cache entry; link target untouched`,
+            });
+            continue;
+        }
+        try {
+            rmSync(full, { recursive: true, force: true });
+        } catch (error) {
+            return { deleted, refused, error: `cannot delete runtime cache: ${rel}: ${coldRefusalDetail(error)}` };
+        }
+        deleted.push(rel);
+    }
+    return { deleted, refused, error: null };
+}
+
+/**
+ * Cold start for one checkout: plan (read-only), prove ownership, then
+ * delete ONLY ownership-proven runtime-cache targets. Callers must plan
+ * every checkout first and only delete when all plans are error-free.
+ * A non-owned root is refused (recorded in `refused`, nothing deleted) but
+ * is NOT an error — the caller may proceed warm with the receipt. Plan/git
+ * failures stay fail-closed errors with nothing deleted.
  */
 export function coldStartRuntimeCaches(
     checkoutDir: string,
@@ -410,20 +605,36 @@ export function coldStartRuntimeCaches(
 ): {
     deleted: string[];
     skippedTracked: string[];
+    planned: string[];
+    refused: D46ColdStartRefusal[];
+    stateRoot: string | null;
     error: string | null;
 } {
     const plan = planColdStartRuntimeCaches(checkoutDir, git);
-    if (plan.error) return { deleted: [], skippedTracked: [], error: plan.error };
-    const deleted: string[] = [];
-    try {
-        for (const rel of plan.toDelete) {
-            rmSync(join(plan.root, rel), { recursive: true, force: true });
-            deleted.push(rel);
-        }
-    } catch (error) {
-        return { deleted, skippedTracked: [], error: error instanceof Error ? error.message : String(error) };
+    if (plan.error) {
+        return { deleted: [], skippedTracked: [], planned: [], refused: [], stateRoot: null, error: plan.error };
     }
-    return { deleted, skippedTracked: plan.skippedTracked, error: null };
+    const planned = plan.toDelete.map((rel) => `${plan.root}/${rel}`);
+    const ownership = proveColdStartOwnership(plan.root);
+    if (!ownership.ok) {
+        return {
+            deleted: [],
+            skippedTracked: plan.skippedTracked,
+            planned,
+            refused: [{ root: plan.root, reason: ownership.reason }],
+            stateRoot: null,
+            error: null,
+        };
+    }
+    const removal = deleteOwnedColdStartTargets(ownership, { root: plan.root, toDelete: plan.toDelete });
+    return {
+        deleted: removal.deleted,
+        skippedTracked: plan.skippedTracked,
+        planned,
+        refused: removal.refused,
+        stateRoot: ownership.stateRoot,
+        error: removal.error,
+    };
 }
 
 /** Injectable git access for the cold-start path (tests stub failures). */
@@ -525,7 +736,8 @@ function rankingsEqual(a: RankReportSettings, b: RankReportSettings): boolean {
         a.rankBm25k1 === b.rankBm25k1 &&
         a.rankBm25b === b.rankBm25b &&
         a.rankCoverage === b.rankCoverage &&
-        a.rankStopwords === b.rankStopwords
+        a.rankStopwords === b.rankStopwords &&
+        a.rankStem === b.rankStem
     );
 }
 
@@ -714,6 +926,15 @@ async function runD46Query(input: {
     };
 }
 
+/** Best-effort canonical path for receipts (null when the path is missing). */
+export function tryCanonicalD46(path: string): string | null {
+    try {
+        return realpathSync(path);
+    } catch {
+        return null;
+    }
+}
+
 function gitRootFromScript(): string | null {
     try {
         const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -727,29 +948,85 @@ function gitRootFromScript(): string | null {
     }
 }
 
+/**
+ * Fresh selection cohort helpers (`--cohort-dir <dir>`).
+ *
+ * Layout (see the fresh-cohort AUTHORING.md loader note): pins from
+ * `<cohortDir>/repos.json`, queries from
+ * `<cohortDir>/adjudicated/<owner>__<name>.jsonl`, frozen seal at
+ * `<cohortDir>/MANIFEST.sha256.json` (fallback:
+ * `<cohortDir>/adjudicated/MANIFEST.sha256.json`). Manifest entries use
+ * bare adjudicated-dir file names and are verified with
+ * verifySplitManifest (fail-closed).
+ */
+export function resolveCohortSplitDir(cohortDir: string): string {
+    return join(cohortDir, "adjudicated");
+}
+
+export function resolveCohortManifestPath(cohortDir: string): string {
+    const rootLevel = join(cohortDir, "MANIFEST.sha256.json");
+    if (existsSync(rootLevel)) return rootLevel;
+    return join(resolveCohortSplitDir(cohortDir), "MANIFEST.sha256.json");
+}
+
+/** Query-file names for a fresh cohort: one `<owner>__<name>.jsonl` per pinned repo. */
+export function pinnedCohortQueryFileNames(pins: ReadonlyArray<{ owner: string; name: string }>): Set<string> {
+    return new Set(pins.map((p) => `${p.owner}__${p.name}.jsonl`));
+}
+
+export function readCohortManifest(cohortDir: string): { manifest: D46SplitManifest; splitDir: string } {
+    const splitDir = resolveCohortSplitDir(cohortDir);
+    const manifestPath = resolveCohortManifestPath(cohortDir);
+    if (!existsSync(manifestPath)) {
+        throw new Error(`sealed manifest missing: ${manifestPath}`);
+    }
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as D46SplitManifest;
+    if (manifest.split !== undefined && manifest.split !== "selection") {
+        throw new Error(`cohort manifest split is ${JSON.stringify(manifest.split)}, want "selection"`);
+    }
+    const manifestErrors = verifySplitManifest(splitDir, manifest);
+    if (manifestErrors.length > 0) throw new Error(manifestErrors.join("; "));
+    return { manifest, splitDir };
+}
+
 export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_ROOT, overrides: { engineSourceHash?: string; reportsDir?: string } = {}): Promise<number> {
     const args = parseD46RunArgs(argv);
     const holdout = args.split === "holdout";
-    const splitDir = join(benchRoot, args.split);
-    const manifestPath = join(splitDir, "MANIFEST.sha256.json");
-    if (!existsSync(manifestPath)) {
-        console.error(`error: sealed manifest missing: ${manifestPath}`);
-        return 2;
-    }
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as D46SplitManifest;
-    const manifestErrors = verifySplitManifest(splitDir, manifest);
-    if (manifestErrors.length > 0) {
-        for (const e of manifestErrors) console.error(`error: ${e}`);
-        return 2;
+    // Selection cohort: bench root is the --cohort-dir flag value.
+    const effectiveRoot = args.cohortDir ?? benchRoot;
+    const splitDir = args.cohortDir ? resolveCohortSplitDir(args.cohortDir) : join(benchRoot, args.split);
+    let manifest: D46SplitManifest;
+    if (args.cohortDir) {
+        try {
+            manifest = readCohortManifest(args.cohortDir).manifest;
+        } catch (error) {
+            console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+            return 2;
+        }
+    } else {
+        const manifestPath = join(splitDir, "MANIFEST.sha256.json");
+        if (!existsSync(manifestPath)) {
+            console.error(`error: sealed manifest missing: ${manifestPath}`);
+            return 2;
+        }
+        manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as D46SplitManifest;
+        const manifestErrors = verifySplitManifest(splitDir, manifest);
+        if (manifestErrors.length > 0) {
+            for (const e of manifestErrors) console.error(`error: ${e}`);
+            return 2;
+        }
     }
     let repoManifest: ReturnType<typeof loadRepoManifest>;
     try {
-        repoManifest = loadRepoManifest(benchRoot);
+        repoManifest = loadRepoManifest(effectiveRoot);
     } catch {
-        console.error(`error: cannot load ${benchRoot}/repos.json`);
+        console.error(`error: cannot load ${effectiveRoot}/repos.json`);
         return 2;
     }
-    const loaded = loadSplitQueries(splitDir, pinnedQueryFileNames(repoManifest.repos, args.split));
+    const queryFiles = args.cohortDir
+        ? pinnedCohortQueryFileNames(repoManifest.repos)
+        : pinnedQueryFileNames(repoManifest.repos, args.split);
+    const loaded = loadSplitQueries(splitDir, queryFiles);
     if (loaded.errors.length > 0) {
         for (const e of loaded.errors) console.error(`error: ${e}`);
         return 2;
@@ -763,9 +1040,12 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
             return 2;
         }
     }
-    const reposRoot = repoManifest.reposDir.startsWith("~")
-        ? join(homedir(), repoManifest.reposDir.slice(1))
-        : repoManifest.reposDir;
+    const rawReposDir = repoManifest.reposDir;
+    const reposRoot = rawReposDir.startsWith("~")
+        ? join(homedir(), rawReposDir.slice(1))
+        : isAbsolute(rawReposDir)
+          ? rawReposDir
+          : join(effectiveRoot, rawReposDir);
     const pinErrors = verifyCheckoutPins(queries, repoManifest.repos, reposRoot);
     if (pinErrors.length > 0) {
         for (const e of pinErrors) console.error(`error: ${e}`);
@@ -818,11 +1098,22 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
     }
     const coldDeleted: string[] = [];
     const coldSkippedTracked: string[] = [];
+    const coldCheckedRoots: string[] = [];
+    const coldPlanned: string[] = [];
+    const coldRefused: D46ColdStartRefusal[] = [];
     {
-        // Two phases: plan EVERY checkout (full cleanliness re-check + full
-        // tracked classification, no deletion) before deleting anything.
+        // Three phases: (1) record and plan EVERY checkout (full tracked
+        // classification, no deletion) and prove ownership per root,
+        // (2) record every planned target, (3) delete ONLY
+        // ownership-proven targets through the single lstat-guarded helper.
+        // A refused root keeps the run possible (warm) with an explicit
+        // receipt entry — never a silent deletion.
         const seen = new Set<string>();
-        const plans: { root: string; toDelete: string[]; skippedTracked: string[] }[] = [];
+        const ownedPlans: {
+            ownership: Extract<ColdStartOwnership, { ok: true }>;
+            plan: { root: string; toDelete: string[] };
+            skippedTracked: string[];
+        }[] = [];
         for (const q of queries) {
             const pin = repoManifest.repos.find((p) => `${p.owner}/${p.name}` === q.repo);
             if (!pin) continue;
@@ -835,27 +1126,40 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
             }
             if (seen.has(dir)) continue;
             seen.add(dir);
+            // Every examined root is receipted before its outcome is known.
+            coldCheckedRoots.push(dir);
             const plan = planColdStartRuntimeCaches(dir);
             if (plan.error) {
                 console.error(`error: ${plan.error}`);
                 return 2;
             }
-            plans.push({ root: plan.root, toDelete: plan.toDelete, skippedTracked: plan.skippedTracked });
-        }
-        for (const plan of plans) {
-            for (const p of plan.toDelete) {
-                try {
-                    rmSync(join(plan.root, p), { recursive: true, force: true });
-                } catch {
-                    console.error(`error: cannot delete runtime cache: ${p}`);
-                    return 2;
-                }
-                coldDeleted.push(`${plan.root}/${p}`);
+            for (const p of plan.toDelete) coldPlanned.push(`${plan.root}/${p}`);
+            const ownership = proveColdStartOwnership(dir);
+            if (!ownership.ok) {
+                coldRefused.push({ root: plan.root, reason: ownership.reason });
+                continue;
             }
-            for (const p of plan.skippedTracked) coldSkippedTracked.push(`${plan.root}/${p}`);
+            ownedPlans.push({
+                ownership,
+                plan: { root: plan.root, toDelete: plan.toDelete },
+                skippedTracked: plan.skippedTracked,
+            });
+        }
+        coldCheckedRoots.sort();
+        coldPlanned.sort();
+        for (const entry of ownedPlans) {
+            const removal = deleteOwnedColdStartTargets(entry.ownership, entry.plan);
+            if (removal.error !== null) {
+                console.error(`error: ${removal.error}`);
+                return 2;
+            }
+            for (const r of removal.refused) coldRefused.push(r);
+            for (const p of removal.deleted) coldDeleted.push(`${entry.plan.root}/${p}`);
+            for (const p of entry.skippedTracked) coldSkippedTracked.push(`${entry.plan.root}/${p}`);
         }
         coldDeleted.sort();
         coldSkippedTracked.sort();
+        coldRefused.sort((a, b) => (a.root === b.root ? a.reason.localeCompare(b.reason) : a.root.localeCompare(b.root)));
     }
 
     if (args.config === "off") delete process.env[GREP_JUDGE_THRESHOLD_ENV_VAR];
@@ -954,13 +1258,26 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         elapsedMs: r["elapsedMs"] as number,
     }));
     const summary = summarizeD46(scoredRows);
+    // Ownership receipt: EVERY canonical checkout root checked, EVERY planned
+    // deletion target (recorded BEFORE execution), what was actually deleted,
+    // and EVERY refusal with its reason. An empty `deleted` list alone proves
+    // nothing: checkedRoots + planned + refused together bound the claim, and
+    // a root in `refused` is an explicitly warm run, never a silent deletion.
+    const coldReceipt: D46ColdStartReceipt = {
+        deleted: coldDeleted,
+        skippedTracked: coldSkippedTracked,
+        count: coldDeleted.length,
+        checkedRoots: coldCheckedRoots,
+        planned: coldPlanned,
+        refused: coldRefused,
+    };
     const report = {
         generatedAt: new Date().toISOString(),
         split: args.split,
         config: args.config,
         status: "complete",
         replicate: args.replicate,
-        coldStart: { deleted: coldDeleted, skippedTracked: coldSkippedTracked, count: coldDeleted.length },
+        coldStart: coldReceipt,
         threshold: args.config === "off" ? null : CONFIG_THRESHOLD[args.config],
         model: {
             alias: args.config === "off" ? "off" : (process.env.PI_SMARTREAD_JUDGE_MODEL ?? CLOUD_JUDGE_DEFAULT_MODEL),
@@ -969,8 +1286,13 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         manifest: {
             fixtureSha: manifest.queriesSha256,
             inventoryHashBefore: manifest.queriesSha256,
-            corpusKind: "d46-pinned-checkouts",
+            corpusKind: args.cohortDir ? "fresh-cohort-checkouts" : "d46-pinned-checkouts",
             sourceRef: null,
+            // Canonical input/state/report roots for the ownership receipt.
+            splitDir: tryCanonicalD46(splitDir) ?? splitDir,
+            reposRoot: tryCanonicalD46(reposRoot) ?? reposRoot,
+            reportsDir: tryCanonicalD46(resolveD46ReportsDir(args.reportsDir ?? overrides.reportsDir ?? null)) ??
+                resolveD46ReportsDir(args.reportsDir ?? overrides.reportsDir ?? null),
             gateConstants: { ...GATE_CONSTANTS },
             retrievalConditions: {
                 perQueryLimit: 20,

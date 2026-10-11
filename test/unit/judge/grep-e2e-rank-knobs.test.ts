@@ -41,6 +41,7 @@ describe("ranking-knob run identity", () => {
             "rankBm25k1",
             "rankCoverage",
             "rankFilename",
+            "rankStem",
             "rankStopwords",
             "rankTestDemote",
         ]);
@@ -54,6 +55,7 @@ describe("ranking-knob run identity", () => {
             bm25b: 0.75,
             coverageBoost: false,
             stopwords: true,
+            stemming: false,
         })).toEqual({
             rankTestDemote: 0.7,
             rankFilename: true,
@@ -61,6 +63,7 @@ describe("ranking-knob run identity", () => {
             rankBm25b: 0.75,
             rankCoverage: false,
             rankStopwords: true,
+            rankStem: false,
         });
     });
 
@@ -73,6 +76,7 @@ describe("ranking-knob run identity", () => {
             bm25b: 0.75,
             coverageBoost: false,
             stopwords: false,
+            stemming: false,
         });
         expect(computeRunFingerprint(identity({ params: { perQueryLimit: 20, ...knobbed } }))).not.toBe(base);
     });

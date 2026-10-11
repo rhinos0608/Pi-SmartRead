@@ -4,7 +4,7 @@
  * local temp repo; snapshots land under a test instance id and are removed.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -489,25 +489,130 @@ describe("gold-at-base with a temp git fixture", () => {
         });
         const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
 
-        const present = materializeInstance(
-            makeInstance({ instanceId: `test-ext-grep-present-${process.pid}`, baseCommit: sha }),
-            join(repo, ".git"),
-        );
-        expect("root" in present).toBe(true);
+        // Legacy materializeInstance resolves snapshotsDir() via homedir() at
+        // CALL time, so redirect HOME/USERPROFILE to a canonical temp dir for
+        // the materialize + cleanup sequence: the real ~/.cache tree is never
+        // written. realpath first (as in external-owned-state-root.test.ts):
+        // the legacy path fail-closes on symlinked ancestors (/var on macOS).
+        const home = realpathSync(tempDir("ext-grep-home-"));
+        const prevHome = process.env.HOME;
+        const prevProfile = process.env.USERPROFILE;
+        process.env.HOME = home;
+        process.env.USERPROFILE = home;
+        try {
+            const present = materializeInstance(
+                makeInstance({ instanceId: `test-ext-grep-present-${process.pid}`, baseCommit: sha }),
+                join(repo, ".git"),
+            );
+            expect("root" in present).toBe(true);
+            // The temp HOME was the one written to.
+            const presentId = `test-ext-grep-present-${process.pid}`;
+            expect(snapshotDir(presentId)).toBe(join(home, ".cache", "pi-smartread-bench", "snapshots", presentId));
+            expect(existsSync(snapshotDir(presentId))).toBe(true);
 
-        const absent = materializeInstance(
-            makeInstance({
-                instanceId: `test-ext-grep-absent-${process.pid}`,
-                baseCommit: sha,
-                goldFiles: ["src/does-not-exist.ts"],
-                goldHunks: [],
-            }),
-            join(repo, ".git"),
-        );
-        expect(absent).toEqual({ excluded: true, reason: "missing-at-base", missing: ["src/does-not-exist.ts"] });
+            const absent = materializeInstance(
+                makeInstance({
+                    instanceId: `test-ext-grep-absent-${process.pid}`,
+                    baseCommit: sha,
+                    goldFiles: ["src/does-not-exist.ts"],
+                    goldHunks: [],
+                }),
+                join(repo, ".git"),
+            );
+            expect(absent).toEqual({ excluded: true, reason: "missing-at-base", missing: ["src/does-not-exist.ts"] });
 
-        rmSync(snapshotDir(`test-ext-grep-present-${process.pid}`), { recursive: true, force: true });
-        rmSync(snapshotDir(`test-ext-grep-absent-${process.pid}`), { recursive: true, force: true });
+            rmSync(snapshotDir(presentId), { recursive: true, force: true });
+            rmSync(snapshotDir(`test-ext-grep-absent-${process.pid}`), { recursive: true, force: true });
+        } finally {
+            if (prevHome === undefined) delete process.env.HOME;
+            else process.env.HOME = prevHome;
+            if (prevProfile === undefined) delete process.env.USERPROFILE;
+            else process.env.USERPROFILE = prevProfile;
+        }
+    });
+});
+
+describe("legacy snapshot dir reuse (regression: an unmarked dir is never deleted)", () => {
+    /** Local git fixture with src/a.ts at HEAD (gold at base), no network. */
+    function legacyFixture(): { repo: string; sha: string } {
+        const repo = tempDir("ext-grep-legacy-fixture-");
+        execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+        execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"], {
+            cwd: repo,
+            stdio: "ignore",
+        });
+        mkdirSync(join(repo, "src"), { recursive: true });
+        writeFileSync(join(repo, "src", "a.ts"), "export const a = 1;\n");
+        execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
+        execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "add a"], {
+            cwd: repo,
+            stdio: "ignore",
+        });
+        const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+        return { repo, sha };
+    }
+
+    /** Redirect HOME/USERPROFILE to a canonical temp dir for the legacy
+     *  materialize: snapshotDir() resolves homedir() at CALL time, and the
+     *  legacy path fail-closes on symlinked ancestors (/var on macOS). */
+    function withTempHome<T>(fn: () => T): T {
+        const home = realpathSync(tempDir("ext-grep-legacy-home-"));
+        const prevHome = process.env.HOME;
+        const prevProfile = process.env.USERPROFILE;
+        process.env.HOME = home;
+        process.env.USERPROFILE = home;
+        try {
+            return fn();
+        } finally {
+            if (prevHome === undefined) delete process.env.HOME;
+            else process.env.HOME = prevHome;
+            if (prevProfile === undefined) delete process.env.USERPROFILE;
+            else process.env.USERPROFILE = prevProfile;
+        }
+    }
+
+    it("reuses a pre-existing empty unmarked dir in place: inode unchanged, then populated and marked", () => {
+        const { repo, sha } = legacyFixture();
+        withTempHome(() => {
+            const id = `test-ext-grep-legacy-empty-${process.pid}`;
+            const snap = snapshotDir(id);
+            mkdirSync(snap, { recursive: true });
+            const inodeBefore = statSync(snap).ino;
+            if (process.platform !== "win32") expect(inodeBefore).not.toBe(0);
+            try {
+                const out = materializeInstance(makeInstance({ instanceId: id, baseCommit: sha }), join(repo, ".git"));
+                expect("root" in out).toBe(true);
+                if ("root" in out) expect(out.root).toBe(snap);
+                // Reused in place: the directory was never rmSync'd + recreated.
+                expect(statSync(snap).ino).toBe(inodeBefore);
+                // Populated and marked.
+                expect(readFileSync(join(snap, "src", "a.ts"), "utf8")).toContain("const a = 1");
+                expect(readFileSync(join(snap, ".snapshot-commit"), "utf8").trim()).toBe(sha);
+            } finally {
+                rmSync(snap, { recursive: true, force: true });
+            }
+        });
+    });
+
+    it("still refuses a non-empty unmarked dir: refuses-unowned-snapshot, files retained", () => {
+        const { repo, sha } = legacyFixture();
+        withTempHome(() => {
+            const id = `test-ext-grep-legacy-nonempty-${process.pid}`;
+            const snap = snapshotDir(id);
+            mkdirSync(snap, { recursive: true });
+            writeFileSync(join(snap, "foreign.txt"), "retain me");
+            try {
+                expect(() =>
+                    materializeInstance(makeInstance({ instanceId: id, baseCommit: sha }), join(repo, ".git")),
+                ).toThrow(/refuses-unowned-snapshot/);
+                // Files retained exactly, no marker, no deletion.
+                expect(readdirSync(snap)).toEqual(["foreign.txt"]);
+                expect(readFileSync(join(snap, "foreign.txt"), "utf8")).toBe("retain me");
+                expect(existsSync(join(snap, ".snapshot-commit"))).toBe(false);
+            } finally {
+                rmSync(snap, { recursive: true, force: true });
+            }
+        });
     });
 });
 

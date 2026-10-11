@@ -39,6 +39,7 @@ import {
     GREP_RANK_BM25_ENV_VAR,
     GREP_RANK_COVERAGE_ENV_VAR,
     GREP_RANK_FILENAME_ENV_VAR,
+    GREP_RANK_STEM_ENV_VAR,
     GREP_RANK_STOPWORDS_ENV_VAR,
     GREP_RANK_TEST_DEMOTE_ENV_VAR,
 } from "../../../src/search/grep-ranking.js";
@@ -50,6 +51,7 @@ const RANK_ENV_VARS = [
     GREP_RANK_BM25_ENV_VAR,
     GREP_RANK_COVERAGE_ENV_VAR,
     GREP_RANK_STOPWORDS_ENV_VAR,
+    GREP_RANK_STEM_ENV_VAR,
 ];
 
 const DOCS = [
@@ -68,6 +70,7 @@ describe("grep ranking knobs default off (equivalence)", () => {
             bm25b: DEFAULT_BM25_B,
             coverageBoost: false,
             stopwords: false,
+            stemming: false,
         });
         expect(isDefaultRankingOptions(options)).toBe(true);
         expect(activeRankingKnobs(options)).toEqual(["testDemote=0.7"]);
@@ -82,6 +85,7 @@ describe("grep ranking knobs default off (equivalence)", () => {
         }
         expect(parseDemoteFactor("0.7")).toBe(0.7);
         expect(parseDemoteFactor("0.5")).toBe(0.5);
+        expect(parseDemoteFactor("0.3")).toBe(0.3);
         for (const fallback of ["abc", "2", "1", "-0.5", "NaN", "0.7x"]) {
             expect(parseDemoteFactor(fallback)).toBe(DEFAULT_TEST_DEMOTE_FACTOR);
         }

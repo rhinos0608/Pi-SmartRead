@@ -121,6 +121,9 @@ export const DEFAULT_BM25_B = BM25_B;
 export interface Bm25Options {
   k1?: number;
   b?: number;
+  /** Tokenizer override (default {@link tokenize}). Used by the NL-only
+   * stemming knob so documents and queries share one stemmed token stream. */
+  tokenizer?: (text: string) => string[];
 }
 
 /**
@@ -130,7 +133,8 @@ export interface Bm25Options {
 export function compileBm25Corpus(documents: string[], options: Bm25Options = {}): Bm25Corpus {
   const k1 = options.k1 ?? BM25_K1;
   const b = options.b ?? BM25_B;
-  const tokenizedDocs = documents.map(tokenize);
+  const tokenizeFn = options.tokenizer ?? tokenize;
+  const tokenizedDocs = documents.map(tokenizeFn);
   const n = documents.length;
   const totalTokens = tokenizedDocs.reduce((sum, d) => sum + d.length, 0);
   const avgDocLen = n === 0 ? 0 : Math.max(1, totalTokens / n);
@@ -157,7 +161,7 @@ export function compileBm25Corpus(documents: string[], options: Bm25Options = {}
     df,
     score(query: string): number[] {
       if (n === 0) return [];
-      const queryTokens = tokenize(query);
+      const queryTokens = tokenizeFn(query);
       const idf = new Map<string, number>();
       for (const token of queryTokens) {
         const d = df.get(token) ?? 0;
