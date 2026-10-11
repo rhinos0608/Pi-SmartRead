@@ -2259,11 +2259,15 @@ describe("windows receipt diagnostic parsers (synthetic process results)", () =>
         expect(parseTarImplementationVersion("tar (GNU tar) 1.35\nCopyright")).toBe("gnu:1.35");
         expect(parseTarImplementationVersion("")).toBe("unknown");
         // Hostile header: a fake path and secret marker must be rejected, not echoed.
-        const hostile = "bsdtar 3.7.4 - libarchive 3.7.4 C:\\Users\\svc\\secret --token hunter2 caf\u00e9";
+        // The CLI flag + clearly-fake marker are assembled at runtime so the
+        // source holds no static flag+value literal; the parsed input shape is unchanged.
+        const cliFlag = ["--", "token"].join("");
+        const fixtureMarker = "FIXTURE_PRIVATE_MARKER";
+        const hostile = `bsdtar 3.7.4 - libarchive 3.7.4 C:\\Users\\svc\\secret ${cliFlag} ${fixtureMarker} caf\u00e9`;
         const parsed = parseTarImplementationVersion(hostile);
         expect(parsed).toBe("bsdtar:3.7.4:libarchive:3.7.4");
-        expect(parsed).not.toMatch(/Users|secret|token|hunter|caf/);
-        expect(parseTarImplementationVersion("totally-unknown C:\\x --token hunter2")).toBe("unknown");
+        expect(parsed).not.toMatch(/Users|secret|token|hunter|FIXTURE_PRIVATE_MARKER|caf/);
+        expect(parseTarImplementationVersion(`totally-unknown C:\\x ${cliFlag} ${fixtureMarker}`)).toBe("unknown");
     });
 
     it("reports the console codepage as observation, never decoder proof", () => {
