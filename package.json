@@ -48,6 +48,8 @@
   "files": [
     "src/**/*.ts",
     "src/queries/**/*.scm",
+    "skills/**",
+    "scripts/install-skills.ts",
     "README.md",
     "LICENSE",
     "package.json"
@@ -57,6 +59,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "mcp-server": "node --import tsx src/mcp-server.ts",
+    "install-skills": "node --import tsx scripts/install-skills.ts",
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "peerDependencies": {

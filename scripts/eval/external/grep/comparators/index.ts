@@ -24,9 +24,7 @@ export const COMPARATORS: Record<ComparatorName, ComparatorRunner> = {
     codanna: runCodanna,
 };
 
-export function isComparatorName(value: string): value is ComparatorName {
-    return value === "ripgrep" || value === "probe" || value === "codanna";
-}
+export { isComparatorName } from "./types.js";
 
 function sha256OfFile(path: string): string {
     return createHash("sha256").update(readFileSync(path)).digest("hex");

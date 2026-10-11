@@ -10,6 +10,10 @@ import type { BenchmarkInstance, Formulation } from "../instance.js";
 
 export type ComparatorName = "ripgrep" | "probe" | "codanna";
 
+export function isComparatorName(value: string): value is ComparatorName {
+    return value === "ripgrep" || value === "probe" || value === "codanna";
+}
+
 /** One ranked hit: file plus optional line range and match text. */
 export interface ComparatorUnit {
     relFile: string;

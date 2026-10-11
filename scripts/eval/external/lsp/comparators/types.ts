@@ -9,7 +9,7 @@
 import type { BenchLocation } from "../metrics.js";
 import type { SampledPosition } from "../sample.js";
 
-export type ComparatorId = "pi-lsp" | "mcp-language-server";
+export type ComparatorId = "pi-lsp" | "mcp-language-server" | "serena";
 
 export type ComparatorOp = "definition" | "references" | "hover" | "workspaceSymbols";
 
