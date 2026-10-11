@@ -133,10 +133,6 @@ describe("handleSymbol with an LSP search that never settles", () => {
   const neverSettles = () => new Promise<any[]>(() => {});
   const PENDING = Symbol("pending");
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("rejects with the caller's abort instead of waiting for the LSP search", async () => {
     write("a.ts", `export function stuckOne() {\n  return 1;\n}\n`);
     const handleSymbol = await loadHandleSymbol(neverSettles);
@@ -157,16 +153,17 @@ describe("handleSymbol with an LSP search that never settles", () => {
   it("returns tree-sitter results after a bounded wait when no caller signal is supplied", async () => {
     write("a.ts", `export function stuckTwo() {\n  return 2;\n}\n`);
     const handleSymbol = await loadHandleSymbol(neverSettles);
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-
-    let result: Awaited<ReturnType<HandleSymbol>> | undefined;
-    void handleSymbol("stuckTwo", 30, false, workdir, workdir).then((value) => { result = value; });
-    // Interleave real I/O (setImmediate is not faked) with fake time until the call settles.
-    for (let i = 0; i < 300 && result === undefined; i++) {
-      await new Promise((resolve) => setImmediate(resolve));
-      await vi.advanceTimersByTimeAsync(1_000);
+    // Shorten only the LSP timer: fake time must not race ahead of real scan I/O.
+    const realSetTimeout = globalThis.setTimeout;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      (handler, delay, ...args) => realSetTimeout(handler, delay === 30_000 ? 50 : delay, ...args),
+    );
+    try {
+      const result = await handleSymbol("stuckTwo", 30, false, workdir, workdir);
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
+      expect(result.matches.some((m) => m.name === "stuckTwo")).toBe(true);
+    } finally {
+      setTimeoutSpy.mockRestore();
     }
-
-    expect(result?.matches.some((m) => m.name === "stuckTwo")).toBe(true);
-  });
+  }, 15_000);
 });
