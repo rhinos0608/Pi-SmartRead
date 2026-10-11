@@ -184,6 +184,15 @@ function expectSentinelUnchanged(s: { file: string; bytes: Buffer; mode: number 
     if (process.platform !== "win32") expect(statSync(s.file).mode & 0o777).toBe(s.mode);
 }
 
+// Failed and excluded receipts retain partial roots; root presence is not success.
+function successReceiptDetail(out: ReturnType<typeof materializeInstance>): string {
+    if ("failed" in out) {
+        return `expected snapshot success (completedStage=${out.completedStage.slice(0, 40)} error=${out.error.slice(0, 200)})`;
+    }
+    if ("excluded" in out) return `expected snapshot success (excluded=${out.reason.slice(0, 200)})`;
+    return "expected snapshot success";
+}
+
 describe("preflight rejects unsafe trees before any archive write", () => {
     it("rejects a symlink with an absolute target: no tar, no snapshot, outside state untouched", () => {
         const { root } = freshRoot();
@@ -373,6 +382,8 @@ describe("positive materialization preserves executables and odd names", () => {
             makeInstance({ instanceId: id, baseCommit: sha, goldFiles: ["src/a.ts"] }),
             { bareDir: bare, stateRoot: root },
         );
+        expect("failed" in out, successReceiptDetail(out)).toBe(false);
+        expect("excluded" in out, successReceiptDetail(out)).toBe(false);
         expect("root" in out).toBe(true);
         if ("root" in out) {
             for (const name of oddNames) expect(existsSync(join(out.root, "src", name))).toBe(true);
@@ -1035,6 +1046,8 @@ describe("owner decision 2026-10-08: safe in-tree symlinks and gitlinks", () => 
             makeInstance({ instanceId: "parity__owned-1", baseCommit: sha, goldFiles: ["src/link.ts", "src/sub/f.ts"] }),
             { bareDir: bare, stateRoot: root },
         );
+        expect("failed" in owned, successReceiptDetail(owned)).toBe(false);
+        expect("excluded" in owned, successReceiptDetail(owned)).toBe(false);
         expect("root" in owned).toBe(true);
         if ("root" in owned) {
             expect(lstatSync(join(owned.root, "src", "link.ts")).isSymbolicLink()).toBe(true);

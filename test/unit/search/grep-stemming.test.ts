@@ -12,7 +12,7 @@
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tokenize } from "../../../src/scoring.js";
 import { porterStem } from "../../../src/search/english-stemmer.js";
 import {
@@ -237,9 +237,14 @@ describe("stemming end-to-end (NL BM25 channel)", () => {
     });
 
     it("does not alter exact-channel results", async () => {
-        const normalize = (text: string): string => text.replace(/\d+\.\d+s\)/g, "Ts)");
-        const before = normalize(await runGrep("serializeResponse", { literal: true }));
-        process.env[GREP_RANK_STEM_ENV_VAR] = "on";
-        expect(normalize(await runGrep("serializeResponse", { literal: true }))).toBe(before);
+        // Compare the entire output without elapsed-header drift; keep real filesystem I/O.
+        const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+        try {
+            const before = await runGrep("serializeResponse", { literal: true });
+            process.env[GREP_RANK_STEM_ENV_VAR] = "on";
+            expect(await runGrep("serializeResponse", { literal: true })).toBe(before);
+        } finally {
+            nowSpy.mockRestore();
+        }
     });
 });
