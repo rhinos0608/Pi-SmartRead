@@ -169,4 +169,29 @@ describe("LSP action tool early-exit disposal", () => {
       if (call) await call;
     }
   });
+
+  it("contains an unhandled rejection from cleanup promise on refusal outcomes", async () => {
+    let unhandled: unknown = null;
+    const onUnhandled = (err: unknown) => { unhandled = err; };
+    process.on("unhandledRejection", onUnhandled);
+    const cleanupError = new Error("cleanup-failure-in-refusal");
+    const cleanup = Promise.reject(cleanupError);
+    const dispatch = vi.fn(async (): Promise<BoundActionOutcome> => ({
+      kind: "refusal",
+      status: "unavailable",
+      cleanup,
+    }));
+    const tool = createLspTool({
+      executorDeps: { now: () => 0, executeBoundAction: dispatch },
+    });
+    try {
+      const response = await tool.execute("call", request, undefined, undefined, context);
+      expect(readEnvelope(response).status).toBe("unavailable");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBeNull();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await cleanup.catch(() => undefined);
+    }
+  });
 });

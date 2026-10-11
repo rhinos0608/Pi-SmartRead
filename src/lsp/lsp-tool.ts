@@ -398,40 +398,45 @@ async function executeBoundToolOperation(args: {
       candidateEnvelope = stoppedEnvelope(entryStop);
     } else {
       const actionCwd = resolveExecuteCwd(actionOpts, ctx);
-      const deps = resolveExecutorDeps(actionOpts, actionCwd, originalSignal);
-      const bus = resolveBus(actionOpts, ctx);
-      const afterBus = stopped();
-      if (afterBus) {
-        candidateEnvelope = stoppedEnvelope(afterBus);
+      const afterCwd = stopped();
+      if (afterCwd) {
+        candidateEnvelope = stoppedEnvelope(afterCwd);
       } else {
-        const sessionFilePath = resolveSessionFilePath(actionOpts, ctx);
-        const afterSession = stopped();
-        if (afterSession) {
-          candidateEnvelope = stoppedEnvelope(afterSession);
+        const deps = resolveExecutorDeps(actionOpts, actionCwd, originalSignal);
+        const bus = resolveBus(actionOpts, ctx);
+        const afterBus = stopped();
+        if (afterBus) {
+          candidateEnvelope = stoppedEnvelope(afterBus);
         } else {
-          const stage = bus && sessionFilePath
-            ? createBoundActionStageRequester({ bus, sessionFilePath, cwd: actionCwd })
-            : undefined;
-          outcome = await dispatch({ stage, deps, actionCwd, scheduledNow, deadlineMs });
-          if (outcome.kind === "result") {
-            void outcome.cleanup.catch(() => undefined);
-            candidateEnvelope = outcome.envelope;
+          const sessionFilePath = resolveSessionFilePath(actionOpts, ctx);
+          const afterSession = stopped();
+          if (afterSession) {
+            candidateEnvelope = stoppedEnvelope(afterSession);
           } else {
-            candidateEnvelope = {
-              status: outcome.status,
-              operation,
-              method,
-              ...(outcome.server ? { server: outcome.server } : {}),
-              result: null,
-              meta: { truncated: false },
-            };
-          }
-          const stop = stopped();
-          if (stop) candidateEnvelope = stoppedEnvelope(stop);
-          candidate = unstagedResult(candidateEnvelope);
-          if (!stop && outcome.kind === "result" && outcome.proposal) {
-            const { proposalId, files, diff } = outcome.proposal;
-            candidate = stagedResult(candidateEnvelope, { proposalId, files: [...files], diff });
+            const stage = bus && sessionFilePath
+              ? createBoundActionStageRequester({ bus, sessionFilePath, cwd: actionCwd })
+              : undefined;
+            outcome = await dispatch({ stage, deps, actionCwd, scheduledNow, deadlineMs });
+            void outcome.cleanup.catch(() => undefined);
+            if (outcome.kind === "result") {
+              candidateEnvelope = outcome.envelope;
+            } else {
+              candidateEnvelope = {
+                status: outcome.status,
+                operation,
+                method,
+                ...(outcome.server ? { server: outcome.server } : {}),
+                result: null,
+                meta: { truncated: false },
+              };
+            }
+            const stop = stopped();
+            if (stop) candidateEnvelope = stoppedEnvelope(stop);
+            candidate = unstagedResult(candidateEnvelope);
+            if (!stop && outcome.kind === "result" && outcome.proposal) {
+              const { proposalId, files, diff } = outcome.proposal;
+              candidate = stagedResult(candidateEnvelope, { proposalId, files: [...files], diff });
+            }
           }
         }
       }

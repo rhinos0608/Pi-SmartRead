@@ -78,6 +78,35 @@ describe("LSP action tool schedule controls", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("does not invoke subsequent context callbacks when cwd resolution consumes the budget", async () => {
+    let clock = 0;
+    let busCalled = false;
+    let sessionCalled = false;
+    const dispatch = vi.fn(async (): Promise<BoundActionOutcome> => result());
+    const tool = createLspTool({
+      executorDeps: { now: () => clock, executeBoundAction: dispatch },
+      getCwd: () => {
+        clock = 20;
+        return "/tmp/action-tool-schedule";
+      },
+      getBus: () => {
+        busCalled = true;
+        return { on: () => () => {}, emit: () => {} };
+      },
+      getSessionFilePath: () => {
+        sessionCalled = true;
+        return "/tmp/session.json";
+      },
+    });
+
+    const response = await tool.execute("call", { ...request, timeoutMs: 10 }, undefined, undefined, context);
+
+    expect(busCalled).toBe(false);
+    expect(sessionCalled).toBe(false);
+    expect(readEnvelope(response).status).toBe("timeout");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it("passes the original absolute deadline and clock through context callbacks", async () => {
     let clock = 0;
     let callbackReached = false;
