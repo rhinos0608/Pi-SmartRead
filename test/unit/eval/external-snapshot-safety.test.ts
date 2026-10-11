@@ -88,7 +88,8 @@ vi.mock("node:fs", async (importOriginal) => {
         writeFileSync: ((...args: unknown[]) => {
             const flags = (globalThis as unknown as { __snapFlags: typeof SNAP_FLAGS }).__snapFlags;
             const p = String(args[0]);
-            if (p.endsWith("/.snapshot-commit") && flags.failMarkerWrite) throw new Error("injected marker failure");
+            const normalized = p.split("\\").join("/");
+            if (normalized.endsWith("/.snapshot-commit") && flags.failMarkerWrite) throw new Error("injected marker failure");
             return (actual.writeFileSync as (...a: unknown[]) => unknown)(...args);
         }) as typeof actual.writeFileSync,
         rmSync: ((...args: unknown[]) => {
@@ -354,14 +355,14 @@ describe("preflight record validator (raw metadata edge cases)", () => {
 });
 
 describe("positive materialization preserves executables and odd names", () => {
-    it("materializes executable files and tab/newline names", () => {
+    it("materializes executable files and odd names (platform-valid names)", () => {
         const { root } = freshRoot();
         ensureOwnedStateRoot(root);
         const { work, bare } = localWorkRepo();
-        const tabName = "tab\there.ts";
-        const nlName = "new\nline.ts";
-        writeFileSync(join(work, "src", tabName), "tab\n");
-        writeFileSync(join(work, "src", nlName), "nl\n");
+        // Windows forbids control-character filenames; POSIX retains NUL-safe listing coverage.
+        const oddNames =
+            process.platform === "win32" ? ["sp ace.ts", "caf\u00e9.ts"] : ["tab\there.ts", "new\nline.ts"];
+        for (const name of oddNames) writeFileSync(join(work, "src", name), `${name}\n`);
         writeFileSync(join(work, "run.sh"), "#!/bin/sh\necho hi\n");
         if (process.platform !== "win32") chmodSync(join(work, "run.sh"), 0o755);
         execFileSync("git", ["add", "."], { cwd: work, stdio: "ignore" });
@@ -374,8 +375,7 @@ describe("positive materialization preserves executables and odd names", () => {
         );
         expect("root" in out).toBe(true);
         if ("root" in out) {
-            expect(existsSync(join(out.root, "src", tabName))).toBe(true);
-            expect(existsSync(join(out.root, "src", nlName))).toBe(true);
+            for (const name of oddNames) expect(existsSync(join(out.root, "src", name))).toBe(true);
             expect(existsSync(join(out.root, "run.sh"))).toBe(true);
             if (process.platform !== "win32") {
                 expect(statSync(join(out.root, "run.sh")).mode & 0o111).not.toBe(0);
@@ -1010,16 +1010,20 @@ describe("owner decision 2026-10-08: safe in-tree symlinks and gitlinks", () => 
         process.env.HOME = home;
         process.env.USERPROFILE = home;
         try {
-            const goldLink = materializeInstance(
-                makeInstance({ instanceId: "parity__legacy-link", baseCommit: sha, goldFiles: ["src/link.ts"] }),
-                bare,
-            );
-            expect("root" in goldLink).toBe(true);
-            const goldViaDirLink = materializeInstance(
-                makeInstance({ instanceId: "parity__legacy-dirlink", baseCommit: sha, goldFiles: ["src/dirlink/f.ts"] }),
-                bare,
-            );
-            expect("root" in goldViaDirLink).toBe(true);
+            // Legacy walks the entire archive, hitting the restored dirlink's EPERM on Windows
+            // even for file-link gold. Owned non-traversal checks below remain cross-platform.
+            if (process.platform !== "win32") {
+                const goldLink = materializeInstance(
+                    makeInstance({ instanceId: "parity__legacy-link", baseCommit: sha, goldFiles: ["src/link.ts"] }),
+                    bare,
+                );
+                expect("root" in goldLink).toBe(true);
+                const goldViaDirLink = materializeInstance(
+                    makeInstance({ instanceId: "parity__legacy-dirlink", baseCommit: sha, goldFiles: ["src/dirlink/f.ts"] }),
+                    bare,
+                );
+                expect("root" in goldViaDirLink).toBe(true);
+            }
         } finally {
             process.env.HOME = prevHome;
             process.env.USERPROFILE = prevProfile;
