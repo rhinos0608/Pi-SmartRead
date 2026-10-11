@@ -550,28 +550,6 @@ async function prepareRename(
   }
 }
 
-async function organizeImports(filePath: string, root: string): Promise<LspWorkspaceEdit | null> {
-  if (!detectLanguageFromExtension(filePath)) return null;
-  try {
-    // organizeImports has no executor op: reuse the codeActions proposal and
-    // take the first action carrying an edit (legacy selection rule).
-    const env = await runStrict({
-      operation: "codeActions", path: filePath,
-      range: { start: { line: 0, character: 0 }, end: { line: Number.MAX_SAFE_INTEGER, character: 0 } },
-      context: { only: ["source.organizeImports"] },
-      workspace: root, timeoutMs: PROPOSAL_TIMEOUT_MS,
-    });
-    if ((env.status !== "ok" && env.status !== "empty") || env.result === null) return null;
-    const actions = (env.result ?? []) as NormalizedCodeAction[];
-    for (const a of actions) {
-      if (a && a.edit) return toLegacyWorkspaceEdit(a.edit);
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 async function formatting(
   filePath: string, root: string, tabSize?: number, insertSpaces?: boolean,
 ): Promise<LspWorkspaceEdit | null> {
@@ -728,7 +706,6 @@ async function createBridge(): Promise<LSPBridge> {
 
     rename,
     prepareRename,
-    organizeImports,
     formatting,
     codeActions,
     goToDefinitionOutcome,

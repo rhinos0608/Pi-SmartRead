@@ -1,6 +1,5 @@
 import { realpathSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import {
     RPC_CHANNELS,
     LANGUAGE_INTELLIGENCE_RPC_METHODS,
@@ -11,24 +10,40 @@ import {
     validateCheckPostEditDiagnosticsRequest,
     validateCheckPostEditDiagnosticsResponse,
     validateRenamePreviewRequest,
-    validateOrganizeImportsRequest,
     validateFormattingRequest,
     validateCodeActionRequest,
+    validateRenamePreviewResponse,
+    validateFormattingResponse,
+    validateCodeActionResponse,
     type CheckPostEditDiagnosticsResponse,
     type LanguageDiagnostic,
+    type RenamePreviewResponse,
+    type FormattingResponse,
+    type CodeActionResponse,
 } from "@rhinos0608/pi-workspace-protocol";
 import { createRpcServer, type BusLike, type RequestEvent } from "@rhinos0608/pi-workspace-protocol";
 import type { StrictEnvelope, StrictRequest } from "../lsp/lsp-strict-contract.js";
-import { resolveLanguageServer, detectProjectRoot } from "./language-intelligence-runtime.js";
-import { validateWorkspaceEdit } from "../workspace/workspace-edit-validator.js";
-import type { RenamePreviewResponse, LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
+import { resolveLanguageServer, detectProjectRoot, detectLanguageId } from "./language-intelligence-runtime.js";
+import { createBoundActionStageRequester } from "../lsp/lsp-action-stage-rpc.js";
+import { getWorkspaceEditBus } from "../lsp/lsp-workspace-edit.js";
+import type { BoundActionRequest } from "../lsp/lsp-action-origin.js";
+import type {
+    BoundSemanticEditDependencies,
+    BoundSemanticEditRoute,
+    executeBoundSemanticEdit as ExecuteBoundSemanticEdit,
+} from "../lsp/lsp-semantic-edit-origin.js";
+import type {
+    BoundActionAdapterDependencies,
+    BoundActionRoute,
+    executeBoundAction as ExecuteBoundAction,
+} from "../lsp/lsp-action-adapter.js";
 
 export interface LanguageIntelligenceProviderBus extends BusLike {}
 
 type ExecutorFn = (req: unknown, deps?: Record<string, unknown>) => Promise<StrictEnvelope>;
 
 // Test seam: unit tests inject a fake executor; production dynamically
-// imports the canonical executor. All proposal/diagnostic sourcing below
+// imports the canonical executor. Post-edit diagnostics sourcing below
 // goes through executeLspOperation — zero disk writes (proposals only).
 let executorOverride: ExecutorFn | null = null;
 
@@ -50,6 +65,139 @@ async function runExecutor(req: StrictRequest, opts: { cwd: string }): Promise<S
     return executeLspOperation(req, { cwd: opts.cwd });
 }
 
+// ── D-81 bound producers (staged proposals, never raw edits) ─────────
+// rename_preview/formatting go through executeBoundSemanticEdit; code_action
+// discovery and selection go through executeBoundAction. Both stage via
+// SmartEdit's stage_workspace_edit RPC with the producer-held
+// source-document precondition; the provider only supplies the request,
+// route, deadline, and a stage requester wired with this session's identity.
+
+export interface LanguageIntelligenceProducers {
+    readonly executeSemanticEdit: typeof ExecuteBoundSemanticEdit;
+    readonly executeAction: typeof ExecuteBoundAction;
+}
+
+let producerOverride: LanguageIntelligenceProducers | null = null;
+
+/** Test seam: inject fake bound producers. Production dynamically imports the canonical modules. */
+export function __setLanguageIntelligenceProducersForTests(producers: Partial<LanguageIntelligenceProducers> | null): void {
+    producerOverride = producers === null ? null : { ...producerOverride, ...producers } as LanguageIntelligenceProducers;
+}
+
+export function __resetLanguageIntelligenceProducersForTests(): void {
+    producerOverride = null;
+}
+
+async function runSemanticEdit(
+    request: StrictRequest,
+    route: BoundSemanticEditRoute,
+    dependencies: BoundSemanticEditDependencies,
+): Promise<Awaited<ReturnType<typeof ExecuteBoundSemanticEdit>>> {
+    const fn = producerOverride?.executeSemanticEdit;
+    if (fn) return fn(request, route, dependencies);
+    const { executeBoundSemanticEdit } = await import("../lsp/lsp-semantic-edit-origin.js");
+    return executeBoundSemanticEdit(request, route, dependencies);
+}
+
+async function runBoundAction(
+    request: BoundActionRequest,
+    route: BoundActionRoute,
+    dependencies: BoundActionAdapterDependencies,
+): Promise<Awaited<ReturnType<typeof ExecuteBoundAction>>> {
+    const fn = producerOverride?.executeAction;
+    if (fn) return fn(request, route, dependencies);
+    const { executeBoundAction } = await import("../lsp/lsp-action-adapter.js");
+    return executeBoundAction(request, route, dependencies);
+}
+
+// ── Staging session identity ─────────────────────────────────────────
+// The shared rename/formatting/code_action DTOs carry no session fields,
+// but stage_workspace_edit requires sessionFilePath + cwd. The provider
+// cannot invent the caller's session: it stages under SmartRead's own
+// current session (the same Pi process/session SmartEdit serves), captured
+// from the live extension context at session_start / before_agent_start
+// and refreshed per run. Per-instance options (tests, alternate hosts)
+// override the captured identity. Without an identity the proposal paths
+// refuse fail-closed; discovery (which never stages) still runs.
+
+export interface LanguageIntelligenceSessionIdentity {
+    readonly sessionFilePath: string | null;
+    readonly cwd: string;
+}
+
+let capturedIdentity: LanguageIntelligenceSessionIdentity | null = null;
+
+export function noteLanguageIntelligenceSession(identity: LanguageIntelligenceSessionIdentity | null): void {
+    capturedIdentity = identity;
+}
+
+/** Registration hook: capture the staging identity from the live extension context. */
+export function noteLanguageIntelligenceSessionFromContext(ctx: {
+    readonly cwd?: unknown;
+    readonly sessionManager?: { getSessionFile?: () => string | undefined };
+} | null | undefined): void {
+    if (!ctx || typeof ctx !== "object") {
+        // A missing context carries no session identity: clear any prior
+        // capture so proposal staging fails closed (staging-unavailable)
+        // instead of reusing a stale session.
+        noteLanguageIntelligenceSession(null);
+        return;
+    }
+    let sessionFilePath: string | null = null;
+    try {
+        const file = ctx.sessionManager?.getSessionFile?.();
+        if (typeof file === "string" && file.length > 0) sessionFilePath = file;
+    } catch {
+        /* ephemeral identity: proposal staging stays unavailable */
+    }
+    const cwd = typeof ctx.cwd === "string" && ctx.cwd.length > 0 ? ctx.cwd : process.cwd();
+    noteLanguageIntelligenceSession({ sessionFilePath, cwd });
+}
+
+export interface LanguageIntelligenceProviderOptions {
+    readonly getSessionFilePath?: () => string | null;
+    readonly getCwd?: () => string;
+    readonly getStageBus?: () => BusLike | null;
+}
+
+function resolveStagingIdentity(options?: LanguageIntelligenceProviderOptions): {
+    readonly sessionFilePath: string | null;
+    readonly cwd: string;
+    readonly stageBus: BusLike | null;
+} {
+    let sessionFilePath: string | null = null;
+    try {
+        sessionFilePath = options?.getSessionFilePath?.() ?? capturedIdentity?.sessionFilePath ?? null;
+    } catch {
+        sessionFilePath = null;
+    }
+    let cwd = process.cwd();
+    try {
+        cwd = options?.getCwd?.() ?? capturedIdentity?.cwd ?? process.cwd();
+    } catch {
+        /* keep process.cwd() */
+    }
+    let stageBus: BusLike | null = null;
+    try {
+        stageBus = options?.getStageBus?.() ?? getWorkspaceEditBus();
+    } catch {
+        stageBus = null;
+    }
+    return { sessionFilePath, cwd, stageBus };
+}
+
+type StageRequester = ReturnType<typeof createBoundActionStageRequester>;
+
+function stageRequesterFor(identity: {
+    readonly sessionFilePath: string | null;
+    readonly cwd: string;
+    readonly stageBus: BusLike | null;
+}): StageRequester | null {
+    const { sessionFilePath, cwd, stageBus } = identity;
+    if (!stageBus || !sessionFilePath) return null;
+    return createBoundActionStageRequester({ bus: stageBus, sessionFilePath, cwd });
+}
+
 function envelopeIsFresh(e: { meta?: { freshness?: { state?: string } } }): boolean {
     return e.meta?.freshness?.state === "fresh";
 }
@@ -58,7 +206,7 @@ function envelopeIsFresh(e: { meta?: { freshness?: { state?: string } } }): bool
  * RPC proposal-path encoding guard (fail-closed).
  *
  * RPC edit DTOs carry no encoding and the SmartEdit planner assumes UTF-16
- * coordinates, so proposal paths (rename/format/organizeImports/codeAction)
+ * coordinates, so proposal paths (rename/format/codeAction)
  * must not forward or return coordinates negotiated in any other encoding.
  * Non-UTF-16 negotiated encoding rejects with an `unsupported-encoding`
  * error — never converts. Missing encoding defaults to utf-16 (LSP default).
@@ -105,47 +253,103 @@ function rpcProposalEncodingOf(env: StrictEnvelope): string | undefined {
     return (env.server as { positionEncoding?: string } | undefined)?.positionEncoding;
 }
 
-/** Ambiguous-server envelope passthrough: preserve candidates/message so the
- * caller can disambiguate. No DTO selector field (out of scope) — the
- * candidates ride in the free-form error string. */
-function envelopeAmbiguityMessage(env: StrictEnvelope): string {
-    const raw = (env.error as { message?: unknown } | undefined)?.message;
-    const detail = typeof raw === "string" && raw.length > 0 ? raw : "ambiguous server selection";
-    return detail.startsWith("ambiguous") ? detail : `ambiguous: ${detail}`;
+/** D-81: bound producers never emit ambiguous envelopes (exact lease-bound
+ * routing, no candidate selection), so the old ambiguous passthrough is gone
+ * with the executor-sourced proposal paths. */
+
+/** D-81 discovery narrowing: candidates carry exactly
+ * {title, kind?, isPreferred?, actionId, sourceSha256}. The bound layer
+ * spreads the normalized action (which may carry edit/command/data) into
+ * the discovery envelope, so the provider must NOT forward it verbatim. */
+const HEX64 = /^[0-9a-f]{64}$/;
+
+function narrowDiscoveryItem(raw: unknown): {
+    readonly title: string;
+    readonly kind?: string;
+    readonly isPreferred?: boolean;
+    readonly actionId: string;
+    readonly sourceSha256: string;
+} | null {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.title !== "string" || r.title.length === 0) return null;
+    if (typeof r.actionId !== "string" || !HEX64.test(r.actionId)) return null;
+    if (typeof r.sourceSha256 !== "string" || !HEX64.test(r.sourceSha256)) return null;
+    return {
+        title: r.title,
+        ...(typeof r.kind === "string" ? { kind: r.kind } : {}),
+        ...(typeof r.isPreferred === "boolean" ? { isPreferred: r.isPreferred } : {}),
+        actionId: r.actionId,
+        sourceSha256: r.sourceSha256,
+    };
 }
 
-/** Executor normalized WorkspaceEdit ({changes:[{uri,edits}]}) → validator input ({fileEdits:[{filePath,edits}]}). URIs resolved to absolute paths; returns null when nothing actionable. */
-function normalizedTextEditsToFileEdits(
-    result: unknown,
-    filePath: string,
-): { fileEdits: Array<{ filePath: string; edits: unknown[] }> } | null {
-    if (!Array.isArray(result) || result.length === 0) return null;
-    return { fileEdits: [{ filePath, edits: result }] };
+/** Bound result/refusal statuses mapped onto the RPC error vocabulary.
+ * ok/empty/unsupported keep the legacy shapes (proposals vs no-edits vs
+ * empty discovery); unavailable/not_ready/timeout/cancelled are honest
+ * refusals; everything else (error, stale envelopes) is an op failure. */
+type ProposalStatusClass = "proceed" | "empty" | "unavailable" | "not_ready" | "timeout" | "cancelled" | "failed";
+
+function classifyProposalStatus(status: string): ProposalStatusClass {
+    if (status === "ok") return "proceed";
+    if (status === "empty" || status === "unsupported") return "empty";
+    if (status === "unavailable") return "unavailable";
+    if (status === "not_ready" || status === "stale") return "not_ready";
+    if (status === "timeout") return "timeout";
+    if (status === "cancelled") return "cancelled";
+    return "failed";
 }
 
-function normalizedEditToFileEdits(result: unknown): { fileEdits: Array<{ filePath: string; edits: Array<{ range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string }> }> } | null {
-    if (!result || typeof result !== "object" || Array.isArray(result)) return null;
-    const changes = (result as Record<string, unknown>).changes;
-    if (!Array.isArray(changes) || changes.length === 0) return null;
-    const fileEdits: Array<{ filePath: string; edits: unknown }> = [];
-    for (const c of changes) {
-        if (!c || typeof c !== "object") return null;
-        const uri = (c as Record<string, unknown>).uri;
-        const edits = (c as Record<string, unknown>).edits;
-        if (typeof uri !== "string" || uri.length === 0 || !Array.isArray(edits)) return null;
-        let filePath: string;
-        try {
-            filePath = uri.startsWith("file://") ? fileURLToPath(uri) : uri;
-        } catch {
-            return null;
-        }
-        fileEdits.push({ filePath, edits });
+/** Bound refusal → RPC error vocabulary. Refusals never take the
+ * empty-shaped branch (that is reserved for result envelopes). */
+function refusalReplyText(status: string, opFailed: string, staleWord: "unconfirmed" | "stale"): string {
+    const cls = classifyProposalStatus(status);
+    if (cls === "unavailable") return "no-server";
+    if (cls === "not_ready") return staleWord;
+    if (cls === "timeout") return "timeout";
+    if (cls === "cancelled") return "cancelled";
+    return opFailed;
+}
+
+/** Result envelope without a staged proposal → RPC error vocabulary.
+ * An ok preview with no proposal means the producer would not (over-cap,
+ * unsupported semantics) or could not (refused stage) stage. */
+function proposalMissText(status: string, opFailed: string, staleWord: "unconfirmed" | "stale"): string {
+    const cls = classifyProposalStatus(status);
+    if (cls === "proceed") return "staging-unavailable";
+    if (cls === "empty") return "no edits";
+    return refusalReplyText(status, opFailed, staleWord);
+}
+
+function routeForProposal(filePath: string, cwd: string): BoundSemanticEditRoute | null {
+    const resolution = resolveLanguageServer(filePath, cwd);
+    if (resolution.status === "available") {
+        return { projectRoot: resolution.root, languageId: resolution.languageId };
     }
-    if (fileEdits.length === 0) return null;
-    return { fileEdits } as { fileEdits: Array<{ filePath: string; edits: Array<{ range: { start: { line: number; character: number }; end: { line: number; character: number } }; newText: string }> }> };
+    const languageId = detectLanguageId(filePath);
+    if (!languageId) return null;
+    return { projectRoot: detectProjectRoot(filePath, cwd), languageId };
 }
 
-export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProviderBus): { dispose(): void } {
+function renameReply(resp: RenamePreviewResponse): RenamePreviewResponse {
+    const v = validateRenamePreviewResponse(resp);
+    if (v.ok) return resp;
+    return { ok: false, error: v.error };
+}
+
+function formattingReply(resp: FormattingResponse): FormattingResponse {
+    const v = validateFormattingResponse(resp);
+    if (v.ok) return resp;
+    return { ok: false, error: v.error };
+}
+
+function codeActionReply(resp: CodeActionResponse): CodeActionResponse {
+    const v = validateCodeActionResponse(resp);
+    if (v.ok) return resp;
+    return { ok: false, error: v.error };
+}
+
+export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProviderBus, options?: LanguageIntelligenceProviderOptions): { dispose(): void } {
     const server = createRpcServer({
         bus,
         channel: RPC_CHANNELS.languageIntelligence,
@@ -311,120 +515,87 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 const v = validateRenamePreviewRequest(payload);
                 if (!v.ok) throw new Error(v.error);
                 const req = v.value;
-                const resolution = resolveLanguageServer(req.filePath, process.cwd());
-                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
-                const line0 = (req.line ?? 1) - 1;
-                const char0 = (req.character ?? 1) - 1;
-                if (line0 < 0 || char0 < 0) {
-                    const resp: RenamePreviewResponse = { ok: false, error: "position-out-of-range" };
-                    return resp;
-                }
-                let rawEdit: LspWorkspaceEdit | null = null;
+                // D-81: staged proposal via the bound semantic producer. Never raw edits.
+                const line0 = req.line - 1;
+                const char0 = req.character - 1;
+                if (line0 < 0 || char0 < 0) return renameReply({ ok: false, error: "position-out-of-range" });
+                const identity = resolveStagingIdentity(options);
+                const route = routeForProposal(req.filePath, identity.cwd);
+                if (!route) return renameReply({ ok: false, error: "no-server" });
+                const stage = stageRequesterFor(identity);
+                if (!stage) return renameReply({ ok: false, error: "staging-unavailable" });
+                const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
+                let outcome: Awaited<ReturnType<typeof runSemanticEdit>>;
                 try {
-                    // Sourced from executeLspOperation (rename op, 0-based protocol coords). Zero disk writes.
-                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
-                    const env = await runExecutor({ operation: "rename", path: req.filePath, position: { line: line0, character: char0 }, newName: req.newName, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
-                    if (env.status === "unavailable") {
-                        const resp: RenamePreviewResponse = { ok: false, error: "no-server" };
-                        return resp;
-                    }
-                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) {
-                        const resp: RenamePreviewResponse = { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
-                        return resp;
-                    }
-                    if (env.status === "ambiguous") {
-                        const resp: RenamePreviewResponse = { ok: false, error: envelopeAmbiguityMessage(env) };
-                        return resp;
-                    }
-                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) {
-                        const resp: RenamePreviewResponse = { ok: false, error: "no edits" };
-                        return resp;
-                    }
-                    if (env.status !== "ok") {
-                        const resp: RenamePreviewResponse = { ok: false, error: "rename failed" };
-                        return resp;
-                    }
-                    if (!envelopeIsFresh(env)) {
-                        const resp: RenamePreviewResponse = { ok: false, error: "unconfirmed" };
-                        return resp;
-                    }
-                    rawEdit = normalizedEditToFileEdits(env.result) as unknown as LspWorkspaceEdit | null;
-                } catch (e) {
-                    const msg = e instanceof Error ? e.message : String(e);
-                    const resp: RenamePreviewResponse = { ok: false, error: msg.includes("timed out") ? "timeout" : "rename failed" };
-                    return resp;
+                    outcome = await runSemanticEdit(
+                        { operation: "rename", path: req.filePath, position: { line: line0, character: char0 }, newName: req.newName },
+                        route,
+                        { deadlineMs: Date.now() + timeoutMs, now: Date.now, stage },
+                    );
+                } catch {
+                    return renameReply({ ok: false, error: "rename failed" });
                 }
-                if (!rawEdit) {
-                    const resp: RenamePreviewResponse = { ok: false, error: "no edits" };
-                    return resp;
+                void outcome.cleanup.catch(() => undefined);
+                if (outcome.kind === "refusal") {
+                    return renameReply({ ok: false, error: refusalReplyText(outcome.status, "rename failed", "unconfirmed") });
                 }
-                const validated = validateWorkspaceEdit(rawEdit);
-                if (!validated.ok) {
-                    const resp: RenamePreviewResponse = { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
-                    return resp;
+                const envelope = outcome.envelope;
+                if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(envelope))) {
+                    return renameReply({ ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(envelope)) });
                 }
-                const resp: RenamePreviewResponse = { ok: true, workspaceEdit: { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...validated.value } as unknown as LspWorkspaceEdit };
-                return resp;
-            }
-
-            if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.organizeImports) {
-                const v = validateOrganizeImportsRequest(payload);
-                if (!v.ok) throw new Error(v.error);
-                const req = v.value;
-                const resolution = resolveLanguageServer(req.filePath, process.cwd());
-                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
-                let rawEdit: LspWorkspaceEdit | null = null;
-                try {
-                    // organizeImports has no dedicated executor op: sourced from the
-                    // codeActions op filtered to source.organizeImports (same wire
-                    // shape the connection uses), first edit wins. Zero disk writes.
-                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
-                    const env = await runExecutor({ operation: "codeActions", path: req.filePath, range: { start: { line: 0, character: 0 }, end: { line: Number.MAX_SAFE_INTEGER, character: 0 } }, context: { only: ["source.organizeImports"] }, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
-                    if (env.status === "unavailable") return { ok: false, error: "no-server" };
-                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) return { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
-                    if (env.status === "ambiguous") return { ok: false, error: envelopeAmbiguityMessage(env) };
-                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) return { ok: false, error: "no edits" };
-                    if (env.status !== "ok") return { ok: false, error: "organize imports failed" };
-                    if (!envelopeIsFresh(env)) return { ok: false, error: "unconfirmed" };
-                    const actions = Array.isArray(env.result) ? env.result as Array<{ edit?: unknown }> : [];
-                    const firstEdit = actions.find((a) => a && typeof a === "object" && (a as Record<string, unknown>).edit)?.edit ?? null;
-                    rawEdit = normalizedEditToFileEdits(firstEdit) as unknown as LspWorkspaceEdit | null;
-                } catch (e) {
-                    const msg = e instanceof Error ? e.message : String(e);
-                    return { ok: false, error: msg.includes("timed out") ? "timeout" : "organize imports failed" };
+                if (outcome.proposal) {
+                    const serverId = envelope.server?.descriptorId;
+                    return renameReply({
+                        ok: true,
+                        proposalId: outcome.proposal.proposalId,
+                        files: [...outcome.proposal.files],
+                        diff: outcome.proposal.diff,
+                        ...(serverId ? { serverDescriptorId: serverId } : {}),
+                    });
                 }
-                if (!rawEdit) return { ok: false, error: "no edits" };
-                const validated = validateWorkspaceEdit(rawEdit);
-                if (!validated.ok) return { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
-                return { ok: true, workspaceEdit: { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...validated.value } as unknown as LspWorkspaceEdit };
+                return renameReply({ ok: false, error: proposalMissText(envelope.status, "rename failed", "unconfirmed") });
             }
 
             if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.formatting) {
                 const v = validateFormattingRequest(payload);
                 if (!v.ok) throw new Error(v.error);
                 const req = v.value;
-                const resolution = resolveLanguageServer(req.filePath, process.cwd());
-                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
-                let rawEdit: LspWorkspaceEdit | null = null;
+                // D-81: staged proposal via the bound semantic producer. Never raw edits.
+                const identity = resolveStagingIdentity(options);
+                const route = routeForProposal(req.filePath, identity.cwd);
+                if (!route) return formattingReply({ ok: false, error: "no-server" });
+                const stage = stageRequesterFor(identity);
+                if (!stage) return formattingReply({ ok: false, error: "staging-unavailable" });
+                const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
+                let outcome: Awaited<ReturnType<typeof runSemanticEdit>>;
                 try {
-                    // Sourced from executeLspOperation (formatDocument op). Zero disk writes.
-                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
-                    const env = await runExecutor({ operation: "formatDocument", path: req.filePath, formatting: { tabSize: req.tabSize ?? 2, insertSpaces: req.insertSpaces ?? true }, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
-                    if (env.status === "unavailable") return { ok: false, error: "no-server" };
-                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) return { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
-                    if (env.status === "ambiguous") return { ok: false, error: envelopeAmbiguityMessage(env) };
-                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) return { ok: false, error: "no edits" };
-                    if (env.status !== "ok") return { ok: false, error: "formatting failed" };
-                    if (!envelopeIsFresh(env)) return { ok: false, error: "unconfirmed" };
-                    rawEdit = normalizedTextEditsToFileEdits(env.result, req.filePath) as unknown as LspWorkspaceEdit | null;
-                } catch (e) {
-                    const msg = e instanceof Error ? e.message : String(e);
-                    return { ok: false, error: msg.includes("timed out") ? "timeout" : "formatting failed" };
+                    outcome = await runSemanticEdit(
+                        { operation: "formatDocument", path: req.filePath, formatting: { tabSize: req.tabSize ?? 2, insertSpaces: req.insertSpaces ?? true } },
+                        route,
+                        { deadlineMs: Date.now() + timeoutMs, now: Date.now, stage },
+                    );
+                } catch {
+                    return formattingReply({ ok: false, error: "formatting failed" });
                 }
-                if (!rawEdit) return { ok: false, error: "no edits" };
-                const validated = validateWorkspaceEdit(rawEdit);
-                if (!validated.ok) return { ok: false, error: validated.errors[0]?.message ?? "validation failed" };
-                return { ok: true, workspaceEdit: { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...validated.value } as unknown as LspWorkspaceEdit };
+                void outcome.cleanup.catch(() => undefined);
+                if (outcome.kind === "refusal") {
+                    return formattingReply({ ok: false, error: refusalReplyText(outcome.status, "formatting failed", "unconfirmed") });
+                }
+                const envelope = outcome.envelope;
+                if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(envelope))) {
+                    return formattingReply({ ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(envelope)) });
+                }
+                if (outcome.proposal) {
+                    const serverId = envelope.server?.descriptorId;
+                    return formattingReply({
+                        ok: true,
+                        proposalId: outcome.proposal.proposalId,
+                        files: [...outcome.proposal.files],
+                        diff: outcome.proposal.diff,
+                        ...(serverId ? { serverDescriptorId: serverId } : {}),
+                    });
+                }
+                return formattingReply({ ok: false, error: proposalMissText(envelope.status, "formatting failed", "unconfirmed") });
             }
 
             if (rpc === LANGUAGE_INTELLIGENCE_RPC_METHODS.codeAction) {
@@ -440,8 +611,12 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                         throw new Error("CodeActionRequest range end must not precede start");
                     }
                 }
-                const resolution = resolveLanguageServer(req.filePath, process.cwd());
-                const workspaceRoot = resolution.status === "available" ? resolution.root : detectProjectRoot(req.filePath, process.cwd());
+                // D-81: discovery narrows bound candidates to exactly
+                // {title, kind?, isPreferred?, actionId, sourceSha256}; an
+                // explicit selection resolves to a staged proposal. Never raw edits.
+                const identity = resolveStagingIdentity(options);
+                const route = routeForProposal(req.filePath, identity.cwd);
+                if (!route) return codeActionReply({ ok: false, error: "no-server" });
                 const line0 = Math.max(0, req.line - 1);
                 const char0 = Math.max(0, req.character - 1);
                 const endLine0 = req.endLine !== undefined ? Math.max(0, req.endLine - 1) : line0;
@@ -450,45 +625,92 @@ export function createLanguageIntelligenceProvider(bus: LanguageIntelligenceProv
                 const context: { diagnostics?: unknown[]; only?: string[] } = {};
                 if (req.diagnostics !== undefined) context.diagnostics = req.diagnostics as unknown as unknown[];
                 if (req.only !== undefined) context.only = req.only as unknown as string[];
-                // Sourced from executeLspOperation (codeActions op, 0-based protocol coords). Zero disk writes.
-                let actionsRaw: Array<{ title: string; kind?: string; edit?: unknown; isPreferred?: boolean }> = [];
-                try {
-                    const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
-                    const env = await runExecutor({ operation: "codeActions", path: req.filePath, range, context, workspace: workspaceRoot, timeoutMs } as unknown as StrictRequest, { cwd: workspaceRoot });
-                    if (env.status === "unavailable") return { ok: false, error: "no-server" };
-                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(env))) return { ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(env)) };
-                    if (env.status === "ambiguous") return { ok: false, error: envelopeAmbiguityMessage(env) };
-                    if (env.status === "unsupported" || env.status === "empty" || env.result == null) return { ok: true, actions: [] };
-                    if (env.status !== "ok") return { ok: false, error: "code action failed" };
-                    if (!envelopeIsFresh(env)) return { ok: false, error: "unconfirmed" };
-                    actionsRaw = (Array.isArray(env.result) ? env.result : []) as typeof actionsRaw;
-                } catch (e) {
-                    const msg = e instanceof Error ? e.message : String(e);
-                    return { ok: false, error: msg.includes("timed out") ? "timeout" : "code action failed" };
-                }
-                if (!actionsRaw || actionsRaw.length === 0) return { ok: true, actions: [] };
-                const actions: Array<{ title: string; kind?: string; workspaceEdit?: LspWorkspaceEdit; isPreferred?: boolean }> = [];
-                for (const a of actionsRaw) {
-                    let workspaceEdit: LspWorkspaceEdit | undefined;
-                    if (a.edit) {
-                        // Executor edits are normalized ({changes:[{uri,edits}]});
-                        // convert to validator input ({fileEdits}) before validation.
-                        const converted = normalizedEditToFileEdits(a.edit);
-                        if (!converted) continue;
-                        const vEdit = validateWorkspaceEdit(converted);
-                        if (vEdit.ok) workspaceEdit = { positionEncoding: RPC_PROPOSAL_POSITION_ENCODING, ...vEdit.value } as unknown as LspWorkspaceEdit;
-                        else continue;
+                const timeoutMs = clampLanguageIntelligenceTimeout(req.timeoutMs, PROPOSAL_TIMEOUT_MS);
+                if (req.selection !== undefined) {
+                    const stage = stageRequesterFor(identity);
+                    if (!stage) return codeActionReply({ ok: false, error: "staging-unavailable" });
+                    let outcome: Awaited<ReturnType<typeof runBoundAction>>;
+                    try {
+                        outcome = await runBoundAction(
+                            {
+                                operation: "resolveCodeAction",
+                                path: req.filePath,
+                                range,
+                                context,
+                                selection: { actionId: req.selection.actionId, sourceSha256: req.selection.sourceSha256 },
+                            },
+                            route,
+                            { deadlineMs: Date.now() + timeoutMs, now: Date.now, stage },
+                        );
+                    } catch {
+                        return codeActionReply({ ok: false, error: "code action failed" });
                     }
-                    actions.push({ title: a.title, kind: a.kind, workspaceEdit, isPreferred: a.isPreferred });
+                    void outcome.cleanup.catch(() => undefined);
+                    if (outcome.kind === "refusal") {
+                        return codeActionReply({ ok: false, error: refusalReplyText(outcome.status, "code action failed", "stale") });
+                    }
+                    const envelope = outcome.envelope;
+                    if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(envelope))) {
+                        return codeActionReply({ ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(envelope)) });
+                    }
+                    if (outcome.proposal) {
+                        const serverId = envelope.server?.descriptorId;
+                        return codeActionReply({
+                            ok: true,
+                            proposalId: outcome.proposal.proposalId,
+                            files: [...outcome.proposal.files],
+                            diff: outcome.proposal.diff,
+                            ...(serverId ? { serverDescriptorId: serverId } : {}),
+                        });
+                    }
+                    const cls = classifyProposalStatus(envelope.status);
+                    if (cls === "empty") return codeActionReply({ ok: false, error: "no edits" });
+                    if (cls === "proceed") return codeActionReply({ ok: false, error: "staging-unavailable" });
+                    return codeActionReply({ ok: false, error: refusalReplyText(envelope.status, "code action failed", "stale") });
                 }
-                return { ok: true, actions };
+                // Discovery never stages: no stage dependency is supplied, so no
+                // selection can be made implicitly. Freshness is structural — the
+                // bound producer holds the session lease and revalidates source
+                // + receipt around the query, refusing stale instead.
+                let outcome: Awaited<ReturnType<typeof runBoundAction>>;
+                try {
+                    outcome = await runBoundAction(
+                        { operation: "codeActions", path: req.filePath, range, context },
+                        route,
+                        { deadlineMs: Date.now() + timeoutMs, now: Date.now },
+                    );
+                } catch {
+                    return codeActionReply({ ok: false, error: "code action failed" });
+                }
+                void outcome.cleanup.catch(() => undefined);
+                if (outcome.kind === "refusal") {
+                    return codeActionReply({ ok: false, error: refusalReplyText(outcome.status, "code action failed", "unconfirmed") });
+                }
+                const envelope = outcome.envelope;
+                if (!isRpcProposalEncodingSupported(rpcProposalEncodingOf(envelope))) {
+                    return codeActionReply({ ok: false, error: rpcProposalEncodingError(rpcProposalEncodingOf(envelope)) });
+                }
+                const serverId = envelope.server?.descriptorId;
+                const withServer = serverId ? { serverDescriptorId: serverId } : {};
+                const cls = classifyProposalStatus(envelope.status);
+                if (cls === "empty") return codeActionReply({ ok: true, actions: [], ...withServer });
+                if (cls !== "proceed") {
+                    return codeActionReply({ ok: false, error: refusalReplyText(envelope.status, "code action failed", "unconfirmed") });
+                }
+                const rawItems = Array.isArray(envelope.result) ? envelope.result : [];
+                const actions = [];
+                for (const raw of rawItems) {
+                    const item = narrowDiscoveryItem(raw);
+                    if (item) actions.push(item);
+                }
+                return codeActionReply({ ok: true, actions, ...withServer });
             }
 
             throw new Error(`unknown rpc method: ${String(rpc)}`);
         },
     });
 
-    return { dispose: () => server.dispose() };
+    return { dispose: () => { server.dispose(); noteLanguageIntelligenceSession(null); } };
 }
 
 function degraded(reason: "file-unreadable" | "content-mismatch" | "unconfirmed"): CheckPostEditDiagnosticsResponse {

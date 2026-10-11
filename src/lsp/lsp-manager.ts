@@ -349,14 +349,6 @@ export class LSPManager {
     return server.prepareRename(filePath, line0, character0);
   }
 
-  async organizeImports(filePath: string): Promise<LspWorkspaceEdit | null> {
-    const langId = detectLanguageFromExtension(filePath);
-    if (!langId) return null;
-    const server = await this.getServer(langId, { purpose: "request" });
-    if (!server) return null;
-    return server.organizeImports(filePath);
-  }
-
   async formatting(filePath: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null> {
     const langId = detectLanguageFromExtension(filePath);
     if (!langId) return null;

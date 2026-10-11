@@ -224,7 +224,6 @@ export interface LSPBridge {
   getFreshDiagnosticsOutcome(filePath: string, root: string, opts?: LspOutcomeOptions): Promise<LspDiagnosticsOutcome>;
   rename(filePath: string, line: number, character: number, newName: string, root: string): Promise<LspWorkspaceEdit | null>;
   prepareRename(filePath: string, line: number, character: number, root: string): Promise<{ range: LSPRange; placeholder?: string } | null>;
-  organizeImports(filePath: string, root: string): Promise<LspWorkspaceEdit | null>;
   formatting(filePath: string, root: string, tabSize?: number, insertSpaces?: boolean): Promise<LspWorkspaceEdit | null>;
   codeActions(filePath: string, range: LSPRange, context: { diagnostics?: unknown[]; only?: string[] }, root: string): Promise<Array<{ title: string; kind?: string; edit?: LspWorkspaceEdit; isPreferred?: boolean }>>;
   // Call hierarchy — raw item-based incoming/outgoing, outcome position-based (internally resolves via prepareCallHierarchy)

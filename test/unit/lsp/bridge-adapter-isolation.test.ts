@@ -191,15 +191,6 @@ describe("S9 conformance: bridge adapter isolation (thin executor adapter)", () 
     expect(managerMock).not.toHaveBeenCalled();
   });
 
-  it("organizeImports calls executeLspOperation with no manager acquisition", async () => {
-    execMock.mockResolvedValueOnce(ok("codeActions", []) as never);
-    const bridge = await getLSPBridge();
-    expect(await bridge!.organizeImports(fp, root)).toBeNull();
-    expect(execMock).toHaveBeenCalledTimes(1);
-    expect(execMock.mock.calls[0]?.[0]).toMatchObject({ operation: "codeActions" });
-    expect(managerMock).not.toHaveBeenCalled();
-  });
-
   it("formatting calls executeLspOperation with no manager acquisition", async () => {
     execMock.mockResolvedValueOnce(ok("formatDocument", null) as never);
     const bridge = await getLSPBridge();
