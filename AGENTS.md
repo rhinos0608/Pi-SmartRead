@@ -22,6 +22,7 @@ Use **npm**. `package-lock.json` is the canonical lockfile and CI runs Node 20.
 | Run MCP server | `npm run mcp-server` |
 | Load extension locally | `pi -e ./src/index.ts` |
 | Opt-in real LSP suite | `PI_SMARTREAD_LSP_CONFORMANCE=1 npx vitest run test/integration/lsp` |
+| Opt-in SmartRead↔SmartEdit suite | `PI_SMARTREAD_SMARTEDIT_INTEGRATION=1 PI_SMARTEDIT_DIR=/path/to/Pi-SmartEdit npx vitest run test/integration/smartedit-workspace-edit.test.ts` |
 
 Before finishing source changes, run the narrowest relevant tests plus `npm run typecheck`. For broad/runtime changes, run `npm test`. CI runs typecheck + full tests on Linux, macOS, and Windows.
 

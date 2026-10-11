@@ -151,6 +151,28 @@ producers via `__setLanguageIntelligenceProducersForTests` and a fake
 SmartEdit stage endpoint over the workspace-edit channel. These seams are
 the integration points SmartEdit mirrors on its side.
 
+Three-repo integration suite
+(`test/integration/smartedit-workspace-edit.test.ts`, opt-in): wires the
+REAL provider plus REAL bound producers against a controlled fake LSP
+connection on SmartRead's side, and SmartEdit's REAL
+`stageWorkspaceEdit` / `applyStagedEdit` handlers (dynamically imported
+from a `PI_SMARTEDIT_DIR` checkout) over a single in-process bus, with
+real temp files behind one shared session file/cwd identity. It covers
+`rename_preview` and `formatting` stage→apply end to end, edit-free
+`code_action` discovery plus selection stage→apply, freshness negatives
+(mutated origin, wrong `sourceSha256`, foreign session), and the absence
+of `organize_imports` on both channels. Run:
+
+```sh
+PI_SMARTREAD_SMARTEDIT_INTEGRATION=1 PI_SMARTEDIT_DIR=/path/to/Pi-SmartEdit \
+  npx vitest run test/integration/smartedit-workspace-edit.test.ts
+```
+
+Without the gate the suite skips cleanly. With the gate on, a missing
+`PI_SMARTEDIT_DIR` or a protocol-build mismatch between the two checkouts
+(both must pin `@rhinos0608/pi-workspace-protocol` 0.8.0 from
+`7861d95d95964f62ca817c96050a5beec86e4ea9`) fails instead of skipping.
+
 ## 5. Explicit UNMET needs — SmartEdit-side approval required (PENDING sister-repo owner decision)
 
 1. **Transaction-owned workspace/applyEdit approval flow.** There is no

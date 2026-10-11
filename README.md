@@ -706,6 +706,7 @@ npm test
 | LSP unit tests               | `npx vitest run test/unit/lsp`                                   |
 | Validate shipped skills      | `node scripts/validate-skills.mjs`                               |
 | Real language-server tests   | `PI_SMARTREAD_LSP_CONFORMANCE=1 npx vitest run test/integration/lsp` |
+| SmartRead↔SmartEdit integration | `PI_SMARTREAD_SMARTEDIT_INTEGRATION=1 PI_SMARTEDIT_DIR=/path/to/Pi-SmartEdit npx vitest run test/integration/smartedit-workspace-edit.test.ts` |
 
 CI runs lint, typecheck and the full suite on Node 20, on Ubuntu, macOS
 and Windows. A second Linux workflow runs the real-server conformance
