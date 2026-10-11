@@ -12,7 +12,7 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, readlinkSync, rmSync, statSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, readlinkSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve, sep, dirname, basename } from "node:path";
 import type { BenchmarkInstance } from "./instance.js";
@@ -123,17 +123,20 @@ function assertNoSymlinkAncestors(p: string, what: string): void {
 /** Injectable filesystem boundary for permission enforcement (tests inject
  *  chmod failures to prove fail-closed behavior; production uses node:fs).
  *  mkdirSync is the fresh-root claim seam: tests inject a racing creator to
- *  prove the leaf claim is exclusive, never recursive-adopting. */
+ *  prove the leaf claim is exclusive, never recursive-adopting. symlinkSync
+ *  is the Windows directory-link restoration seam (failure injection). */
 export const externalStateFsHooks: {
     chmodSync: typeof chmodSync;
     readdirSync: typeof readdirSync;
     lstatSync: typeof lstatSync;
     mkdirSync: typeof mkdirSync;
+    symlinkSync: typeof symlinkSync;
 } = {
     chmodSync,
     readdirSync,
     lstatSync,
     mkdirSync,
+    symlinkSync,
 };
 
 /** True only for missing-path errors. Broader I/O errors are bad state,
@@ -697,6 +700,15 @@ export interface SnapshotTreePreflight {
     canonical: string;
     counts: SnapshotTreeCounts;
     inventory: SnapshotTreeInventory;
+    /** Symlink path -> exact stored target, for every link whose physical
+     *  chain resolution ends at a directory position (or the root). */
+    directoryLinks: ReadonlyMap<string, string>;
+}
+
+/** One validated symlink record: stored target plus its physical resolution. */
+interface ResolvedTreeLink {
+    target: string;
+    resolved: string;
 }
 
 const SNAPSHOT_TREE_FILE_MODES = new Set(["100644", "100755"]);
@@ -996,15 +1008,16 @@ function treeDirPath(path: string): string {
  *  root (refuse, even when the raw lexical target looked contained — a
  *  traversed in-tree link can deepen the path before the pop); more than
  *  SYMLINK_CHAIN_MAX_HOPS expansions mean a cycle or absurd depth (refuse).
- *  The final stack is inside the root by construction. */
-function resolveTreeLinkChain(linkPath: string, linkTarget: string, targets: Map<string, string>): void {
+ *  Returns the final position ("" is the root), inside the root by
+ *  construction and never itself a link. */
+function resolveTreeLinkChain(linkPath: string, linkTarget: string, targets: Map<string, string>): string {
     const dir = treeDirPath(linkPath);
     const stack: string[] = dir.length > 0 ? dir.split("/") : [];
     let queue: string[] = linkTarget.split("/");
     let hops = 0;
     for (;;) {
         const component = queue.shift();
-        if (component === undefined) return;
+        if (component === undefined) return stack.join("/");
         if (component === "" || component === ".") continue;
         if (component === "..") {
             if (stack.length === 0) {
@@ -1036,7 +1049,7 @@ function resolveTreeLinkChain(linkPath: string, linkTarget: string, targets: Map
 function readTreeLinkTargets(
     symlinkRecords: SnapshotTreeRecord[],
     readLinkTarget?: (record: SnapshotTreeRecord) => string,
-): void {
+): Map<string, ResolvedTreeLink> {
     const targets = new Map<string, string>();
     for (const record of symlinkRecords) {
         if (readLinkTarget === undefined) {
@@ -1053,7 +1066,9 @@ function readTreeLinkTargets(
         }
         targets.set(record.path, target);
     }
-    for (const [path, target] of targets) resolveTreeLinkChain(path, target, targets);
+    const links = new Map<string, ResolvedTreeLink>();
+    for (const [path, target] of targets) links.set(path, { target, resolved: resolveTreeLinkChain(path, target, targets) });
+    return links;
 }
 
 /**
@@ -1078,6 +1093,14 @@ export function validateSnapshotTreeRecords(
     records: SnapshotTreeRecord[],
     readLinkTarget?: (record: SnapshotTreeRecord) => string,
 ): SnapshotTreeCounts {
+    return validateTreeRecords(records, readLinkTarget).counts;
+}
+
+/** validateSnapshotTreeRecords plus every validated link's target and resolution. */
+function validateTreeRecords(
+    records: SnapshotTreeRecord[],
+    readLinkTarget?: (record: SnapshotTreeRecord) => string,
+): { counts: SnapshotTreeCounts; links: Map<string, ResolvedTreeLink> } {
     const blobs = new Set<string>();
     const trees = new Set<string>();
     const gitlinks = new Set<string>();
@@ -1172,8 +1195,8 @@ export function validateSnapshotTreeRecords(
         for (const ancestor of ancestors) dirPaths.add(ancestor);
         if (isSymlink) symlinkRecords.push(record);
     }
-    readTreeLinkTargets(symlinkRecords, readLinkTarget);
-    return { symlinks: symlinkRecords.length, gitlinks: gitlinkCount };
+    const links = readTreeLinkTargets(symlinkRecords, readLinkTarget);
+    return { counts: { symlinks: symlinkRecords.length, gitlinks: gitlinkCount }, links };
 }
 
 /** Link-target blob reader wired into preflight: same network-mode env as
@@ -1253,8 +1276,13 @@ export function preflightSnapshotTree(
         if (meta.length !== 3) throw new Error("refuses-unsafe-tree: malformed ls-tree record");
         records.push({ mode: meta[0] as string, kind: meta[1] as string, oid: meta[2] as string, path: entry.slice(tab + 1) });
     }
-    const counts = validateSnapshotTreeRecords(records, makeLinkTargetReader(bare, opts.offline));
-    return { canonical, counts, inventory: expectedExtractionInventory(records) };
+    const { counts, links } = validateTreeRecords(records, makeLinkTargetReader(bare, opts.offline));
+    const inventory = expectedExtractionInventory(records);
+    const directoryLinks = new Map<string, string>();
+    for (const [path, link] of links) {
+        if (link.resolved === "" || inventory.get(link.resolved) === "dir") directoryLinks.set(path, link.target);
+    }
+    return { canonical, counts, inventory, directoryLinks };
 }
 
 /** Expected extraction inventory for VALIDATED tree records (run
@@ -1291,7 +1319,7 @@ export function expectedExtractionInventory(records: SnapshotTreeRecord[]): Snap
  *  legacy would throw ENOENT instead, and owner decision allows the case,
  *  so the link path is listed as a leaf entry (documented deviation). */
 function extractedLinkDisposition(root: string, realRoot: string, full: string): "dir" | "entry" {
-    const target = readlinkSync(full);
+    const target = extractedLinkTarget(full);
     const label = relative(root, full);
     assertLinkTargetSyntax(target, label);
     const lexical = resolve(dirname(full), target);
@@ -1314,6 +1342,58 @@ function extractedLinkDisposition(root: string, realRoot: string, full: string):
     const code = (failure as NodeJS.ErrnoException | null)?.code;
     if (code === "ENOENT" || code === "ENOTDIR") return "entry";
     throw new Error(`refuses-unsafe-entry: unresolvable symlink: ${label}: ${(failure as Error).message}`);
+}
+
+/** An extracted link's target in stored '/' form. libarchive and Node both
+ *  write Windows link targets with '\' separators; preflight already refuses
+ *  a '\' inside any stored win32 target, so mapping it back is unambiguous. */
+function extractedLinkTarget(full: string): string {
+    const raw = readlinkSync(full);
+    return process.platform === "win32" ? raw.split("\\").join("/") : raw;
+}
+
+function resolvesToDirectory(full: string): boolean {
+    try {
+        return statSync(full).isDirectory();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Windows directory-link restoration for a FRESH, INCOMPLETE owned snapshot
+ * (owner decision 2026-10-12, option A). Git trees and tar headers carry no
+ * file-vs-directory link type; libarchive 3.8.4 then creates a file link
+ * unless the target ends in a separator or dot component, and Windows never
+ * traverses a file link to a directory. Every preflight directory link must
+ * already be a link with exactly its stored target, under no symlinked
+ * ancestor; only then is it recreated, same target, as a directory link.
+ * Anything else refuses before touching the entry. Callers run this before
+ * postcheck and the completion marker, so completed snapshots are never
+ * migrated and a refusal leaves an unmarked snapshot.
+ */
+export function restoreDirectoryLinkTypes(root: string, directoryLinks: ReadonlyMap<string, string>): void {
+    for (const rel of [...directoryLinks.keys()].sort()) {
+        const target = directoryLinks.get(rel) as string;
+        const full = join(root, ...rel.split("/"));
+        assertNoSymlinkAncestors(dirname(full), "directory link");
+        let st: Stats;
+        try {
+            st = lstatSync(full);
+        } catch (error) {
+            throw new Error(`refuses-unsafe-entry: directory link missing after extract: ${rel}: ${(error as Error).message.slice(0, 120)}`);
+        }
+        if (!st.isSymbolicLink()) throw new Error(`refuses-unsafe-entry: directory link position is not a symlink: ${rel}`);
+        if (extractedLinkTarget(full) !== target) {
+            throw new Error(`refuses-unsafe-entry: extracted link target differs from preflight: ${rel}`);
+        }
+        if (resolvesToDirectory(full)) continue;
+        unlinkSync(full);
+        externalStateFsHooks.symlinkSync(target, full, "dir");
+        if (!lstatSync(full).isSymbolicLink() || extractedLinkTarget(full) !== target) {
+            throw new Error(`refuses-unsafe-entry: restored directory link does not match preflight: ${rel}`);
+        }
+    }
 }
 
 /**
@@ -1398,6 +1478,26 @@ class SnapshotStageError extends Error {
     constructor(readonly completedStage: SnapshotStage, message: string) {
         super(message);
         this.name = "SnapshotStageError";
+    }
+}
+
+/** Owned extraction into the fresh snapshot root; on win32, also the
+ *  directory-link restoration. Every failure is an "extract" stage error. */
+function extractOwnedArchive(tmpArchive: string, root: string, directoryLinks: ReadonlyMap<string, string>): void {
+    const win32 = process.platform === "win32";
+    // Windows libarchive decodes ustar names through the OEM code page by
+    // default; git archive writes UTF-8 names. Other platforms keep argv.
+    const decoder = win32 ? ["--options", "tar:hdrcharset=UTF-8"] : [];
+    try {
+        execFileSync("tar", [...decoder, "-xf", tmpArchive, "-C", root]);
+    } catch (error) {
+        throw new SnapshotStageError("extract", `tar extract failed: ${(error as Error).message.slice(0, 200)}`);
+    }
+    if (!win32) return;
+    try {
+        restoreDirectoryLinkTypes(root, directoryLinks);
+    } catch (error) {
+        throw new SnapshotStageError("extract", `directory link restore failed: ${(error as Error).message.slice(0, 200)}`);
     }
 }
 
@@ -1580,11 +1680,7 @@ export function materializeInstance(
     try {
         const tmpArchive = join(stageDir, "archive.tar");
         writeFileSync(tmpArchive, archive);
-        try {
-            execFileSync("tar", ["-xf", tmpArchive, "-C", root]);
-        } catch (error) {
-            throw new SnapshotStageError("extract", `tar extract failed: ${(error as Error).message.slice(0, 200)}`);
-        }
+        extractOwnedArchive(tmpArchive, root, preflight.directoryLinks);
         stage = "postcheck";
         try {
             assertSafeExtractedTree(root, preflight.inventory);
