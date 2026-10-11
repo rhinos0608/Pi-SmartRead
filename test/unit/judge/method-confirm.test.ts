@@ -27,7 +27,7 @@ vi.mock("node:fs", async (importOriginal) => {
         },
     };
 });
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,7 +37,7 @@ import { seedCampaignLedger } from "../../../scripts/eval/judge/model-comparison
 import { COMPARISON_SERVED_MODEL_ALLOWLIST, type ComparisonModelId } from "../../../scripts/eval/judge/model-comparison-types.js";
 import {
     METHOD_CONFIRM_DEFERRED_SUITE, METHOD_CONFIRM_MODELS, METHOD_CONFIRM_REPLICAS,
-    METHOD_CONFIRM_EXIT_GATE, buildMethodConfirmPlanFromInputs, executeConfirmPlan, runMethodConfirm,
+    METHOD_CONFIRM_EXIT_ERROR, METHOD_CONFIRM_EXIT_GATE, buildMethodConfirmPlanFromInputs, executeConfirmPlan, runMethodConfirm,
     type BuiltConfirmPlan, type ConfirmPlan, type ConfirmPlanRequest,
 } from "../../../scripts/eval/judge/method-confirm.js";
 import type { FetchFn } from "../../../src/judge/systemone-client.js";
@@ -75,6 +75,16 @@ function rewriteRecordAndReceipt(out: string, mutate: (record: Record<string, un
     const receipt = entries.find((entry) => entry.kind === "receipt" && entry.wireId === record.wireId)!;
     receipt.recordSha256 = createHash("sha256").update(JSON.stringify(changed)).digest("hex");
     writeFileSync(journalPath, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, { mode: 0o600 });
+}
+
+async function withSimulatedWin32<T>(fn: () => Promise<T> | T): Promise<T> {
+    const original = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+        return await fn();
+    } finally {
+        Object.defineProperty(process, "platform", { value: original, configurable: true });
+    }
 }
 
 describe("method confirmation plan", () => {
@@ -119,6 +129,44 @@ describe("method confirmation plan", () => {
         const fake = { roster: { queries: [], candidates: [], manifestSha256: "a".repeat(64) }, queryTexts: new Map(), candidateStates: new Map() } as never;
         const code = await runMethodConfirm(["--dry-run", "--out", root], { loadInputs: () => fake });
         expect(code).not.toBe(0);
+    });
+
+    it("refuses authorized --run on Windows before planning, output mutation, or transport", async () => {
+        const out = join(tempRoot("confirm-cli-win-"), "fresh-out");
+        const loader = vi.fn((): never => { throw new Error("loader must not run on unsupported platform"); });
+        const createTransport = vi.fn((): never => { throw new Error("transport must not be created"); });
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+            const code = await withSimulatedWin32(() =>
+                runMethodConfirm(["--run", "--out", out, "--i-understand-this-spends-money"], { loadInputs: loader, createTransport }),
+            );
+            expect(code).toBe(METHOD_CONFIRM_EXIT_ERROR);
+            expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Campaign ledger unsupported on Windows: atomic rename/exclusive-lock/mode semantics are unverified there; refusing fail-closed"));
+            expect(loader).not.toHaveBeenCalled();
+            expect(createTransport).not.toHaveBeenCalled();
+            expect(existsSync(out)).toBe(false);
+        } finally {
+            errSpy.mockRestore();
+        }
+    });
+
+    it("does not platform-bar --dry-run planning", async () => {
+        const out = join(tempRoot("confirm-cli-win-dry-"), "dry-out");
+        const loader = vi.fn((): never => { throw new Error("dry-run sentinel: planning reached"); });
+        const createTransport = vi.fn((): never => { throw new Error("transport must not be created"); });
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+            const code = await withSimulatedWin32(() =>
+                runMethodConfirm(["--dry-run", "--out", out], { loadInputs: loader, createTransport }),
+            );
+            expect(code).toBe(METHOD_CONFIRM_EXIT_ERROR);
+            expect(loader).toHaveBeenCalledTimes(1);
+            expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("dry-run sentinel: planning reached"));
+            expect(createTransport).not.toHaveBeenCalled();
+            expect(existsSync(out)).toBe(false);
+        } finally {
+            errSpy.mockRestore();
+        }
     });
 });
 

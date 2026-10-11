@@ -273,6 +273,8 @@ describe("method confirmation plan execution refuses Windows with ZERO transport
 
         // Invariant: no results file written
         expect(existsSync(join(outDir, "results.json"))).toBe(false);
+
+        expect(existsSync(outDir)).toBe(false);
     });
 });
 

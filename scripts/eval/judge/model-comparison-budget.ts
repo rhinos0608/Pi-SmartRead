@@ -224,7 +224,7 @@ function sha256Hex(value: string): string {
     return createHash("sha256").update(value, "utf-8").digest("hex");
 }
 
-function assertPosixLedgerPlatform(): void {
+export function assertPosixLedgerPlatform(): void {
     if (process.platform === "win32") {
         throw new Error(
             "Campaign ledger unsupported on Windows: atomic rename/exclusive-lock/mode semantics are unverified there; refusing fail-closed",

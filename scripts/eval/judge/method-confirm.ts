@@ -29,7 +29,7 @@ import {
 import { isMethodWireRecord, type MethodId, type MethodWireRecord } from "./method-comparison-contract.js";
 import type { MethodSleepFn } from "./method-comparison-executor.js";
 import { loadVerifiedConfirmCorpus, isVerifiedConfirmCorpusRoster, type ConfirmCorpusRoster } from "./method-confirm-fixture.js";
-import { defaultCampaignRoot, seedCampaignLedger } from "./model-comparison-budget.js";
+import { assertPosixLedgerPlatform, defaultCampaignRoot, seedCampaignLedger } from "./model-comparison-budget.js";
 import { COMPARISON_MODELS, JUDGE_KEY_ENV } from "./model-comparison.js";
 import { COMPARISON_SERVED_MODEL_ALLOWLIST, type ComparisonModelId } from "./model-comparison-types.js";
 
@@ -347,6 +347,7 @@ function writeResult(path: string, result: unknown): void {
 }
 
 export async function executeConfirmPlan(plan: BuiltConfirmPlan, out: string, transport: FetchFn, campaignRoot = defaultCampaignRoot(), afterRecordPersisted?: () => void, sleep?: MethodSleepFn): Promise<void> {
+    assertPosixLedgerPlatform();
     ensureOutputDirectory(out);
     const paths = resultPaths(out);
     const lockFd = openSync(paths.lock, "wx", 0o600);
@@ -480,6 +481,10 @@ export async function runMethodConfirm(argv: readonly string[], options: MethodC
     try { args = parseArgs(argv); } catch (error) { console.error(`error: ${error instanceof Error ? error.message : String(error)}`); return METHOD_CONFIRM_EXIT_ERROR; }
     if (args.help) { console.log("Usage: method-confirm.ts --dry-run|--run --out DIR [--corpus DIR] [--i-understand-this-spends-money]"); return METHOD_CONFIRM_EXIT_OK; }
     if (args.mode === "run" && !args.authorized) { console.error("paid gate refused: --i-understand-this-spends-money is required; no request sent"); return METHOD_CONFIRM_EXIT_GATE; }
+    if (args.mode === "run") {
+        try { assertPosixLedgerPlatform(); }
+        catch (error) { console.error(`execution refused: ${error instanceof Error ? error.message : String(error)}`); return METHOD_CONFIRM_EXIT_ERROR; }
+    }
     let built: BuiltConfirmPlan;
     try { built = buildMethodConfirmPlanFromInputs((options.loadInputs ?? inputsFromVerifiedRoot)(args.corpus)); }
     catch (error) { console.error(`corpus/plan refused: ${error instanceof Error ? error.message : String(error)}`); return args.mode === "run" ? METHOD_CONFIRM_EXIT_GATE : METHOD_CONFIRM_EXIT_ERROR; }
