@@ -237,8 +237,9 @@ describe("stemming end-to-end (NL BM25 channel)", () => {
     });
 
     it("does not alter exact-channel results", async () => {
-        const before = await runGrep("serializeResponse", { literal: true });
+        const normalize = (text: string): string => text.replace(/\d+\.\d+s\)/g, "Ts)");
+        const before = normalize(await runGrep("serializeResponse", { literal: true }));
         process.env[GREP_RANK_STEM_ENV_VAR] = "on";
-        expect(await runGrep("serializeResponse", { literal: true })).toBe(before);
+        expect(normalize(await runGrep("serializeResponse", { literal: true }))).toBe(before);
     });
 });
