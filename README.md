@@ -49,6 +49,11 @@ pi install github:rhinos0608/Pi-SmartRead
 
 If Pi is already running, load the extension with `/reload`.
 
+On session start, the extension syncs its nine `skills/` into
+`~/.pi/agent/skills` (or `$PI_CODING_AGENT_DIR/skills`), each carrying a
+`.smartread-managed` marker. Directories you edited or that lack the marker
+are left untouched. Opt out with `PI_SMARTREAD_SKILL_SYNC=0`.
+
 To work from a local checkout:
 
 ```bash
@@ -59,7 +64,9 @@ pi -e ./src/index.ts
 ```
 
 To use the tools from Claude Code or another MCP client instead, see
-[MCP server](#mcp-server).
+[MCP server](#mcp-server). MCP-only users get no automatic skill sync;
+run `npm run install-skills [-- --dry-run|--target dir]` to install the
+skills manually.
 
 Nothing else is required. Embeddings, the relevance judge and managed
 language servers are all optional. Without them, search falls back to
@@ -389,8 +396,9 @@ It looks for skills in these places:
 Skills marked `disable-model-invocation: true` are hidden unless you pass
 `includeHidden`.
 
-This repository ships nine skills. Run `node scripts/validate-skills.mjs`
-to check them.
+This repository ships nine skills (see [Skills convention](skills/README.md)).
+Inside Pi they sync into `~/.pi/agent/skills` automatically; run
+`node scripts/validate-skills.mjs` to check them.
 
 | Skill                 | What it does                                                  |
 | --------------------- | ------------------------------------------------------------- |
@@ -541,8 +549,10 @@ the tool name.
 
 Besides its tools, the extension hooks into the Pi session:
 
-- **Startup context.** At the start of a session, it injects a compact
-  repository map and guidance on which tool to use. It also removes Pi's
+- **Startup context.** At the start of a session, it adds a compact
+  repository map and git context as prompt sections on every run, and each
+  tool carries its own routing snippet and guidelines (`promptSnippet` /
+  `promptGuidelines`). It also removes Pi's
   `ls` tool, so the model uses `find` and `grep` instead.
 - **Context hygiene.** After a file changes, earlier reads of that file in
   the context are replaced with a placeholder. The model then stops
@@ -626,6 +636,8 @@ To start it from a checkout, run `npm run mcp-server`.
 
 The MCP server does not install the Pi hooks. Setup for Claude Desktop,
 Cursor and other clients is in [docs/mcp-quickstart.md](docs/mcp-quickstart.md).
+It sends the SmartRead Tool Guide as MCP `instructions` at handshake, so
+clients get tool-routing guidance without the Pi prompt sections.
 
 ## Troubleshooting
 

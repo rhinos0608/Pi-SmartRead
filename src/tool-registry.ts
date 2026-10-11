@@ -36,6 +36,10 @@ export interface ToolRegistration {
   execute: ToolDefinition["execute"];
   category: ToolCategory;
   experimental?: boolean;
+  /** One-line Available-tools snippet; forwarded to pi.registerTool. */
+  promptSnippet?: string;
+  /** Guideline bullets; forwarded to pi.registerTool. */
+  promptGuidelines?: string[];
 }
 
 // ── Registry ───────────────────────────────────────────────────────
@@ -90,6 +94,9 @@ export class ToolRegistry {
       description: t.description,
       parameters: t.inputSchema,
       execute: t.execute,
-    })));
+      // Extra fields are harmless on the MCP path; only pi.registerTool reads them.
+      ...(t.promptSnippet !== undefined ? { promptSnippet: t.promptSnippet } : {}),
+      ...(t.promptGuidelines !== undefined ? { promptGuidelines: t.promptGuidelines } : {}),
+    })));;
   }
 }
