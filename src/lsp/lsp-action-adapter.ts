@@ -91,7 +91,7 @@ function releaseOnce(lease: BoundSessionLease, cleanup: ReturnType<typeof makeCl
   }
 }
 
-async function waitForLease(
+export async function waitForLease(
   route: BoundActionRoute,
   dependencies: BoundActionAdapterDependencies,
   cleanup: ReturnType<typeof makeCleanup>,
@@ -192,7 +192,7 @@ async function runLeaseAction(
     if (!current()) return { server, proposed: { kind: "refusal", status: "not_ready" } };
     if (request.operation === "resolveCodeAction" && engineResult.envelope.status === "ok" && dependencies.stage) {
       if (!engineResult.origin) return { server, proposed: { kind: "refusal", status: "unavailable" } };
-      return { server, continuation: startBoundActionContinuation(engineResult.origin, session, dependencies.stage), proposed: { kind: "result", envelope: engineResult.envelope } };
+      return { server, continuation: startBoundActionContinuation(engineResult.origin, session, dependencies.stage, "resolveCodeAction"), proposed: { kind: "result", envelope: engineResult.envelope } };
     }
     return { server, proposed: { kind: "result", envelope: engineResult.envelope } };
   } catch {

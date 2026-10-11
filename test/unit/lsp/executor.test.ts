@@ -86,9 +86,12 @@ describe("executor", () => {
       requestImpl: async (method, params) => { sent = { method, params }; return []; },
     });
     await executeLspOperation({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 1 }, ch: "}" }, { getManager: () => mgr(c), cwd: ROOT });
+    // Production builds the outgoing URI from the resolved path
+    // (pathToFileURL(resolve(root, path))), so on Windows the URI carries the
+    // drive letter (file:///D:/repo/a.ts) — build the expectation the same way.
     expect(sent).toEqual({
       method: "textDocument/onTypeFormatting",
-      params: { textDocument: { uri: "file:///repo/a.ts" }, position: { line: 0, character: 1 }, ch: "}", options: { tabSize: 2, insertSpaces: true } },
+      params: { textDocument: { uri: pathToFileURL(resolve(ROOT, "a.ts")).href }, position: { line: 0, character: 1 }, ch: "}", options: { tabSize: 2, insertSpaces: true } },
     });
   });
   it("unsupported vs empty: capability absent -> unsupported", async () => {

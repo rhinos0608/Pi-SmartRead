@@ -134,7 +134,7 @@ export function startBoundActionContinuation(
   origin: BoundActionOriginHandoff,
   session: BoundActionSession,
   stage: (packet: BoundActionContinuationPacket) => Promise<BoundActionStageResult>,
-  operation: StageableSemanticOperation = "resolveCodeAction",
+  operation: StageableSemanticOperation,
 ): BoundActionContinuationHandle {
   if (!isStageableSemanticOperation(operation)) return completed(refusal("unsupported"));
   const deadlineMs = session.deadlineMs;

@@ -28,15 +28,16 @@ import { resolveAffordanceAnchor } from "./affordance-anchor.js";
 import { investigateAffordanceTarget, renderBounded } from "./affordance-investigate.js";
 import { executeLspActionDetailed, executeLspOperation, type ExecutorDeps } from "./lsp-executor.js";
 import { createBoundActionStageRequester } from "./lsp-action-stage-rpc.js";
-import { executeBoundAction } from "./lsp-action-adapter.js";
+import { executeBoundAction, type BoundActionOutcome } from "./lsp-action-adapter.js";
 import { createBoundActionBudget } from "./lsp-action-origin.js";
+import { executeBoundSemanticEdit } from "./lsp-semantic-edit-origin.js";
+import { detectLanguageFromExtension } from "./lsp-types.js";
+import type { StrictEnvelope, StrictRequest } from "./lsp-strict-contract.js";
 import { sessionFileFromCtx } from "../evidence/read-evidence.js";
 import {
   applyStagedProposal,
-  envelopeResultToWorkspaceEdit,
   getWorkspaceEditBus,
   invalidateCachesForPaths,
-  stageWorkspaceEdit,
   type BusLike,
 } from "./lsp-workspace-edit.js";
 
@@ -193,8 +194,19 @@ export function getLspToolDescription(affordances = false): string {
   return affordances ? LSP_AFFORDANCE_DESCRIPTION : LSP_DESCRIPTION;
 }
 
-/** Proposal-bearing operations whose results are staged with SmartEdit when it answers. */
-const STAGEABLE_OPERATIONS = new Set(["rename", "formatDocument", "formatRange", "formatOnType"]);
+/** Proposal-bearing semantic operations staged through the bound producer. */
+const SEMANTIC_METHODS = {
+  rename: "textDocument/rename",
+  formatDocument: "textDocument/formatting",
+  formatRange: "textDocument/rangeFormatting",
+  formatOnType: "textDocument/onTypeFormatting",
+} as const;
+
+type SemanticToolOperation = keyof typeof SEMANTIC_METHODS;
+
+function isSemanticToolOperation(operation: string): operation is SemanticToolOperation {
+  return Object.hasOwn(SEMANTIC_METHODS, operation);
+}
 
 function resolveBus(opts: LspToolOptions, _ctx: ExtensionContext): BusLike | null {
   try {
@@ -313,80 +325,128 @@ async function applyProposalResult(args: ApplyProposalArgs) {
   };
 }
 
-type StageableRequest = { operation: string; path?: unknown };
-type StageableEnvelope = {
-  status: string;
-  result: unknown;
-  server?: { descriptorId?: unknown; positionEncoding?: unknown };
-};
-interface StageArgs {
-  request: StageableRequest;
-  envelope: StageableEnvelope;
-  cwd: string;
-  opts: LspToolOptions;
-  ctx: ExtensionContext;
-}
-
-function isStageableEnvelope(request: StageableRequest, envelope: StageableEnvelope): boolean {
-  if (!STAGEABLE_OPERATIONS.has(request.operation)) return false;
-  if (envelope.status !== "ok" || envelope.result == null) return false;
-  return true;
-}
-
-/** Protocol accepts utf-16 only: fail closed on any other negotiated encoding. */
-function hasSupportedEncoding(envelope: StageableEnvelope): boolean {
-  const encoding = envelope.server?.positionEncoding;
-  if (typeof encoding !== "string") return true;
-  return encoding === "utf-16";
-}
-
-/** Pure: convert a stageable envelope result into a workspace edit. Null when nothing actionable. */
-function buildWorkspaceEditFromEnvelope(
-  request: StageableRequest,
-  envelope: StageableEnvelope,
-  cwd: string,
-) {
-  const fallback = typeof request.path === "string" ? resolve(cwd, request.path) : undefined;
-  return envelopeResultToWorkspaceEdit(envelope.result, fallback);
-}
-
-function serverDescriptorOf(envelope: StageableEnvelope): string | undefined {
-  const id = envelope.server?.descriptorId;
-  return typeof id === "string" ? id : undefined;
-}
-
-/** Perform the SmartEdit stage RPC for an already-converted edit. Null on any failure. */
-async function stageConvertedEdit(
-  args: StageArgs & { workspaceEdit: NonNullable<ReturnType<typeof envelopeResultToWorkspaceEdit>> },
-): Promise<{ proposalId: string; files: string[]; diff: string } | null> {
+/** Shared bound-producer discipline for proposal-bearing operations (actions and semantic edits).
+ *
+ * Captures the schedule and dependencies before any context callback runs, dispatches exactly one
+ * bound producer call with staging available only when bus+sessionFilePath resolve, then publishes
+ * the outcome through the same candidate/projection guards: a staged proposal keeps its public
+ * shape, a preview stays read-only, and a refusal publishes a status envelope with result null.
+ */
+async function executeBoundToolOperation(args: {
+  readonly operation: StrictOperation;
+  readonly method: string;
+  readonly validated: StrictRequest;
+  readonly opts: LspToolOptions;
+  readonly ctx: ExtensionContext;
+  readonly signal: AbortSignal | undefined;
+  readonly dispatch: (dispatchArgs: {
+    readonly stage: ReturnType<typeof createBoundActionStageRequester> | undefined;
+    readonly deps: ExecutorDeps;
+    readonly actionCwd: string;
+    readonly scheduledNow: () => number;
+    readonly deadlineMs: number;
+  }) => Promise<BoundActionOutcome>;
+}) {
+  const { operation, method, validated, opts, ctx, signal: originalSignal, dispatch } = args;
+  const actionOpts: LspToolOptions = {
+    ...opts,
+    ...(opts.executorDeps ? { executorDeps: { ...opts.executorDeps } } : {}),
+  };
+  const executorDeps = actionOpts.executorDeps ?? {};
+  const scheduledNow = executorDeps.now ?? Date.now;
+  const timeoutMs = validated.timeoutMs ?? executorDeps.defaultTimeoutMs ?? 15000;
+  let started: number;
   try {
-    const serverDescriptorId = serverDescriptorOf(args.envelope);
-    const staged = await stageWorkspaceEdit({
-      bus: resolveBus(args.opts, args.ctx),
-      workspaceEdit: args.workspaceEdit,
-      operation: args.request.operation,
-      ...(serverDescriptorId ? { serverDescriptorId } : {}),
-      sessionFilePath: resolveSessionFilePath(args.opts, args.ctx),
-      cwd: args.cwd,
-    });
-    if (!staged || !staged.ok) return null;
-    return { proposalId: staged.proposalId, files: staged.files, diff: staged.diff };
+    started = scheduledNow();
   } catch {
-    return null;
+    started = Number.NaN;
   }
-}
-
-/** Stage proposal-bearing results with SmartEdit. Null keeps the read-only result. Never throws. */
-async function maybeStageProposal(args: StageArgs): Promise<{ proposalId: string; files: string[]; diff: string } | null> {
+  const deadlineMs = started + timeoutMs;
+  const budget = createBoundActionBudget(deadlineMs, originalSignal, scheduledNow);
+  const knownUnsupportedEntry = !Number.isFinite(started) || !Number.isFinite(deadlineMs);
+  let outcome: BoundActionOutcome | undefined;
+  let failure: unknown;
+  let candidateEnvelope: StrictEnvelope = {
+    status: "unavailable",
+    operation,
+    method,
+    result: null,
+    meta: { truncated: false },
+  };
+  let failed = false;
+  let candidate: ReturnType<typeof unstagedResult> | undefined;
+  const stopped = (): StrictEnvelope["status"] | null => {
+    if (originalSignal?.aborted) return "cancelled";
+    if (outcome?.kind === "refusal" && outcome.status === "timeout") return "timeout";
+    if (candidateEnvelope.status === "timeout") return "timeout";
+    if (knownUnsupportedEntry) return "unsupported";
+    const stop = budget.check();
+    if (stop === "cancelled") return "cancelled";
+    if (stop === "timeout") return "timeout";
+    if (stop) return "unavailable";
+    return null;
+  };
+  const stoppedEnvelope = (status: StrictEnvelope["status"]): StrictEnvelope => ({
+    ...candidateEnvelope,
+    status,
+    result: null,
+    ...(status === "cancelled" ? { error: { code: "cancelled", message: "Aborted" } } : {}),
+  });
   try {
-    if (!isStageableEnvelope(args.request, args.envelope)) return null;
-    if (!hasSupportedEncoding(args.envelope)) return null;
-    const workspaceEdit = buildWorkspaceEditFromEnvelope(args.request, args.envelope, args.cwd);
-    if (!workspaceEdit) return null;
-    return await stageConvertedEdit({ ...args, workspaceEdit });
-  } catch {
-    return null;
+    const entryStop = originalSignal?.aborted ? "cancelled" : knownUnsupportedEntry ? "unsupported" : stopped();
+    if (entryStop) {
+      candidateEnvelope = stoppedEnvelope(entryStop);
+    } else {
+      const actionCwd = resolveExecuteCwd(actionOpts, ctx);
+      const deps = resolveExecutorDeps(actionOpts, actionCwd, originalSignal);
+      const bus = resolveBus(actionOpts, ctx);
+      const afterBus = stopped();
+      if (afterBus) {
+        candidateEnvelope = stoppedEnvelope(afterBus);
+      } else {
+        const sessionFilePath = resolveSessionFilePath(actionOpts, ctx);
+        const afterSession = stopped();
+        if (afterSession) {
+          candidateEnvelope = stoppedEnvelope(afterSession);
+        } else {
+          const stage = bus && sessionFilePath
+            ? createBoundActionStageRequester({ bus, sessionFilePath, cwd: actionCwd })
+            : undefined;
+          outcome = await dispatch({ stage, deps, actionCwd, scheduledNow, deadlineMs });
+          if (outcome.kind === "result") {
+            void outcome.cleanup.catch(() => undefined);
+            candidateEnvelope = outcome.envelope;
+          } else {
+            candidateEnvelope = {
+              status: outcome.status,
+              operation,
+              method,
+              ...(outcome.server ? { server: outcome.server } : {}),
+              result: null,
+              meta: { truncated: false },
+            };
+          }
+          const stop = stopped();
+          if (stop) candidateEnvelope = stoppedEnvelope(stop);
+          candidate = unstagedResult(candidateEnvelope);
+          if (!stop && outcome.kind === "result" && outcome.proposal) {
+            const { proposalId, files, diff } = outcome.proposal;
+            candidate = stagedResult(candidateEnvelope, { proposalId, files: [...files], diff });
+          }
+        }
+      }
+    }
+  } catch (error) {
+    failed = true;
+    failure = error;
+    candidateEnvelope = stoppedEnvelope(stopped() ?? "unavailable");
+  } finally {
+    budget.dispose();
   }
+  const finalStop = stopped();
+  if (finalStop) return unstagedResult(stoppedEnvelope(finalStop));
+  if (failed) throw failure;
+  return candidate ?? unstagedResult(candidateEnvelope);
 }
 
 export interface LspToolOptions {
@@ -548,118 +608,67 @@ export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
         return applyProposalResult({ toolCallId: _toolCallId, proposalId: validation.value.proposalId as string, cwd, opts, ctx });
       }
       if (validation.value.operation === "codeActions" || validation.value.operation === "resolveCodeAction") {
-        const originalExecutorDeps = opts.executorDeps;
-        const actionOpts: LspToolOptions = {
-          ...opts,
-          ...(originalExecutorDeps ? { executorDeps: { ...originalExecutorDeps } } : {}),
-        };
-        const originalSignal = _signal;
-        const executorDeps = actionOpts.executorDeps ?? {};
-        const scheduledNow = executorDeps.now ?? Date.now;
-        const timeoutMs = validation.value.timeoutMs ?? executorDeps.defaultTimeoutMs ?? 15000;
-        let started: number;
-        try { started = scheduledNow(); } catch { started = Number.NaN; }
-        const deadlineMs = started + timeoutMs;
-        const budget = createBoundActionBudget(deadlineMs, originalSignal, scheduledNow);
-        const knownUnsupportedEntry = !Number.isFinite(started) || !Number.isFinite(deadlineMs);
-        let detailed: Awaited<ReturnType<typeof executeLspActionDetailed>> | undefined;
-        let failure: unknown;
-        let failed = false;
-        let candidate: ReturnType<typeof unstagedResult> | undefined;
-        let candidateEnvelope: import("./lsp-strict-contract.js").StrictEnvelope = {
-          status: "unavailable",
-          operation: validation.value.operation,
-          method: validation.value.operation === "codeActions" ? "textDocument/codeAction" : "codeAction/resolve",
-          result: null,
-          meta: { truncated: false },
-        };
-        const stopped = (): "cancelled" | "timeout" | "unavailable" | "unsupported" | null => {
-          if (originalSignal?.aborted) return "cancelled";
-          if (detailed?.outcome.kind === "refusal" && detailed.outcome.status === "timeout") return "timeout";
-          if (detailed?.outcome.kind === "result" && detailed.outcome.envelope.status === "timeout") return "timeout";
-          if (knownUnsupportedEntry) return "unsupported";
-          const stop = budget.check();
-          if (stop === "cancelled") return "cancelled";
-          if (stop === "timeout") return "timeout";
-          if (stop) return "unavailable";
-          if (detailed?.outcome.kind === "refusal" && detailed.outcome.status === "unsupported") return "unsupported";
-          return null;
-        };
-        const stoppedEnvelope = (status: "cancelled" | "timeout" | "unavailable" | "unsupported") => ({
-          ...candidateEnvelope,
-          status,
-          result: null,
-          ...(status === "cancelled" ? { error: { code: "cancelled", message: "Aborted" } } : {}),
+        const operation = validation.value.operation;
+        const method = operation === "codeActions" ? "textDocument/codeAction" : "codeAction/resolve";
+        return executeBoundToolOperation({
+          operation,
+          method,
+          validated: validation.value,
+          opts,
+          ctx,
+          signal: _signal,
+          dispatch: async ({ stage, deps, scheduledNow, deadlineMs }) => {
+            const baseExecuteBoundAction = deps.executeBoundAction ?? executeBoundAction;
+            const detailed = await executeLspActionDetailed(validation.value, {
+              ...deps,
+              ...(stage ? {
+                executeBoundAction: (request, route, adapterDeps) => baseExecuteBoundAction(request, route, { ...adapterDeps, stage }),
+              } : {}),
+              now: scheduledNow,
+              signal: _signal,
+              actionDeadlineMs: deadlineMs,
+            });
+            return detailed.outcome;
+          },
         });
-        try {
-          const entryStop = originalSignal?.aborted ? "cancelled"
-            : knownUnsupportedEntry ? "unsupported" : budget.check();
-          if (entryStop) {
-            const status = entryStop === "stale" ? "unavailable" : entryStop;
-            candidateEnvelope = { ...candidateEnvelope, status, ...(status === "cancelled" ? { error: { code: "cancelled", message: "Aborted" } } : {}) };
-          } else {
-            const actionCwd = resolveExecuteCwd(actionOpts, ctx);
-            let stop = originalSignal?.aborted ? "cancelled" : budget.check();
-            let bus: BusLike | null = null;
-            let sessionFilePath: string | null = null;
-            if (!stop) {
-              bus = resolveBus(actionOpts, ctx);
-              stop = originalSignal?.aborted ? "cancelled" : budget.check();
+      }
+      if (isSemanticToolOperation(validation.value.operation)) {
+        const operation = validation.value.operation;
+        return executeBoundToolOperation({
+          operation,
+          method: SEMANTIC_METHODS[operation],
+          validated: validation.value,
+          opts,
+          ctx,
+          signal: _signal,
+          dispatch: async ({ stage, actionCwd, scheduledNow, deadlineMs }) => {
+            const root = resolve(validation.value.workspace ?? actionCwd);
+            const path = typeof validation.value.path === "string" ? resolve(root, validation.value.path) : "";
+            const languageId = path ? detectLanguageFromExtension(path) : null;
+            if (!languageId) {
+              return {
+                kind: "refusal",
+                status: "unavailable",
+                cleanup: Promise.resolve({ state: "not-acquired" as const }),
+              };
             }
-            if (!stop) {
-              sessionFilePath = resolveSessionFilePath(actionOpts, ctx);
-              stop = originalSignal?.aborted ? "cancelled" : budget.check();
-            }
-            const deps = resolveExecutorDeps(actionOpts, actionCwd, originalSignal);
-            stop ??= originalSignal?.aborted ? "cancelled" : budget.check();
-            if (stop) {
-              const status = stop === "stale" ? "unavailable" : stop;
-              candidateEnvelope = { ...candidateEnvelope, status, ...(status === "cancelled" ? { error: { code: "cancelled", message: "Aborted" } } : {}) };
-            } else {
-              const stage = bus && sessionFilePath
-                ? createBoundActionStageRequester({ bus, sessionFilePath, cwd: actionCwd })
-                : undefined;
-              const baseExecuteBoundAction = deps.executeBoundAction ?? executeBoundAction;
-              detailed = await executeLspActionDetailed(validation.value, {
-                ...deps,
-                ...(stage ? {
-                  executeBoundAction: (request, route, adapterDeps) => baseExecuteBoundAction(request, route, { ...adapterDeps, stage }),
-                } : {}),
+            return executeBoundSemanticEdit(
+              { ...validation.value, path },
+              { projectRoot: root, languageId, ...(validation.value.server ? { server: validation.value.server } : {}) },
+              {
+                deadlineMs,
+                ...(_signal ? { signal: _signal } : {}),
                 now: scheduledNow,
-                signal: originalSignal,
-                actionDeadlineMs: deadlineMs,
-              });
-              const outcome = detailed.outcome;
-              candidateEnvelope = outcome.kind === "result"
-                ? outcome.envelope
-                : { status: outcome.status, operation: validation.value.operation, method: validation.value.operation === "codeActions" ? "textDocument/codeAction" : "codeAction/resolve", ...(outcome.server ? { server: outcome.server } : {}), result: null, meta: { truncated: false } };
-              if (outcome.kind === "result") void outcome.cleanup.catch(() => undefined);
-            }
-          }
-          const stop = stopped();
-          if (stop) candidateEnvelope = stoppedEnvelope(stop);
-          candidate = unstagedResult(candidateEnvelope);
-          if (!stop && detailed?.outcome.kind === "result" && detailed.outcome.proposal) {
-            const staged = { proposalId: detailed.outcome.proposal.proposalId, files: [...detailed.outcome.proposal.files], diff: detailed.outcome.proposal.diff };
-            candidate = stagedResult(candidateEnvelope, staged);
-          }
-        } catch (error) {
-          failed = true;
-          failure = error;
-        } finally {
-          budget.dispose();
-        }
-        const finalStop = stopped();
-        if (finalStop) return unstagedResult(stoppedEnvelope(finalStop));
-        if (failed) throw failure;
-        return candidate ?? unstagedResult(candidateEnvelope);
+                ...(stage ? { stage } : {}),
+              },
+            );
+          },
+        });
       }
       const cwd = resolveExecuteCwd(opts, ctx);
       const runOperation = opts.executeOperation ?? executeLspOperation;
       const envelope = await runOperation(validation.value, resolveExecutorDeps(opts, cwd, _signal));
-      const staged = await maybeStageProposal({ request: validation.value, envelope, cwd, opts, ctx });
-      if (!staged) return unstagedResult(envelope);
-      return stagedResult(envelope, staged);
+      return unstagedResult(envelope);
     },
   } as unknown as ToolDefinition;
 }

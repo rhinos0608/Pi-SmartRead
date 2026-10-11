@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { resolve } from "node:path";
 import { executeLspActionDetailed, executeLspOperation, type ExecutorDeps } from "../../../src/lsp/lsp-executor.js";
 import type { BoundActionOutcome } from "../../../src/lsp/lsp-action-adapter.js";
 import type { StrictEnvelope } from "../../../src/lsp/lsp-strict-contract.js";
@@ -33,8 +34,10 @@ describe("action executor publication boundary", () => {
     await executeLspActionDetailed({ ...request, server: "ts", context: { only: ["quickfix"] } }, sharedDeps);
     await executeLspOperation({ operation: "resolveCodeAction", path: "a.ts", range, selection: { actionId: "id", sourceSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, server: "ts" }, sharedDeps);
     expect(calls).toHaveLength(2);
-    expect(calls[0]?.[0]).toMatchObject({ operation: "codeActions", path: "/repo/a.ts", range, context: { only: ["quickfix"] } });
-    expect(calls[0]?.[1]).toMatchObject({ projectRoot: "/repo", languageId: "typescript", server: "ts" });
+    // Production resolves both root and path (resolve(cwd) / resolve(root, path)),
+    // so on Windows cwd "/repo" becomes "D:\repo" — build expectations with resolve.
+    expect(calls[0]?.[0]).toMatchObject({ operation: "codeActions", path: resolve("/repo", "a.ts"), range, context: { only: ["quickfix"] } });
+    expect(calls[0]?.[1]).toMatchObject({ projectRoot: resolve("/repo"), languageId: "typescript", server: "ts" });
     expect(calls[0]?.[2]).toMatchObject({ deadlineMs: 15100, signal, now: sharedDeps.now });
     expect(calls[1]?.[0]).toMatchObject({ operation: "resolveCodeAction", selection: { actionId: "id", sourceSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } });
     expect(getManager).not.toHaveBeenCalled();

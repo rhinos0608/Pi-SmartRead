@@ -1,11 +1,10 @@
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
-import type { BoundActionCleanup, BoundActionOutcome } from "./lsp-action-adapter.js";
+import { waitForLease, type BoundActionCleanup, type BoundActionOutcome } from "./lsp-action-adapter.js";
 import type { BoundActionStageResult } from "./lsp-action-continuation.js";
 import { ACTION_SERIALIZED_EDIT_MAX_BYTES, snapshotActionJson } from "./lsp-action-json.js";
 import { convertFormattingTextEdits, convertRawWorkspaceEdit } from "./lsp-action-edit-preparation.js";
-import { awaitBoundAction, createBoundActionBudget, type BoundActionBudget } from "./lsp-action-origin.js";
+import { awaitBoundAction, createBoundActionBudget, receiptMatches, sameReceipt, type BoundActionBudget } from "./lsp-action-origin.js";
 import { ACTION_SEMANTIC_EDIT_MAX_BYTES, snapshotActionSource, type ActionSourceSnapshot } from "./lsp-action-source.js";
 import type { PreparedDocumentReceipt } from "./lsp-document-store.js";
 import { acquireBoundSession, type BoundSessionLease } from "./lsp-manager.js";
@@ -55,7 +54,6 @@ type RefusalStatus = Exclude<StrictStatus, "ok" | "empty" | "error" | "ambiguous
 type Stop = "cancelled" | "timeout" | "unavailable" | "not_ready" | null;
 type CleanupState = BoundActionCleanup["state"];
 type CleanupHandle = { readonly promise: Promise<BoundActionCleanup>; complete(state: CleanupState): void };
-type WaitOutcome = { readonly lease: BoundSessionLease | null; readonly stop: Stop };
 type BoundProposal = { readonly proposalId: string; readonly files: readonly string[]; readonly diff: string };
 type Produced =
   | { readonly kind: "result"; readonly envelope: StrictEnvelope; readonly proposal?: BoundProposal }
@@ -126,23 +124,6 @@ function detachedReceipt(receipt: PreparedDocumentReceipt): PreparedDocumentRece
   return Object.freeze({ ...receipt, syncConfig: Object.freeze({ ...receipt.syncConfig }) });
 }
 
-function receiptMatches(receipt: PreparedDocumentReceipt | null, path: string, textHash: string | undefined, server: StrictServerInfo): receipt is PreparedDocumentReceipt {
-  return !!receipt && receipt.canonicalPath === path && receipt.uri === pathToFileURL(path).href &&
-    (textHash === undefined || receipt.textHash === textHash) && receipt.positionEncoding === server.positionEncoding &&
-    receipt.descriptorId === server.descriptorId && receipt.projectRoot === server.projectRoot &&
-    receipt.version > 0 && receipt.submissionStamp > 0 && receipt.mutationGeneration >= 0 &&
-    receipt.connectionId.length > 0 && receipt.transportId.length > 0 && receipt.storeId.length > 0 && receipt.stateId.length > 0 &&
-    receipt.syncConfig.openClose && receipt.syncConfig.change !== "none";
-}
-
-function sameReceipt(a: PreparedDocumentReceipt, b: PreparedDocumentReceipt | null | undefined): boolean {
-  return !!b && a.canonicalPath === b.canonicalPath && a.uri === b.uri && a.version === b.version && a.textHash === b.textHash &&
-    a.mutationGeneration === b.mutationGeneration && a.submissionStamp === b.submissionStamp &&
-    a.syncConfig.openClose === b.syncConfig.openClose && a.syncConfig.change === b.syncConfig.change &&
-    a.connectionId === b.connectionId && a.transportId === b.transportId && a.storeId === b.storeId && a.stateId === b.stateId &&
-    a.descriptorId === b.descriptorId && a.projectRoot === b.projectRoot && a.positionEncoding === b.positionEncoding;
-}
-
 function stopReason(budget: BoundActionBudget): Stop {
   const status = budget.check();
   return status === "stale" || status === "unsupported" ? "unavailable" : status;
@@ -185,59 +166,6 @@ function releaseOnce(lease: BoundSessionLease, cleanup: CleanupHandle): CleanupS
     cleanup.complete("failed");
     return "failed";
   }
-}
-
-async function waitForLease(
-  route: BoundSemanticEditRoute,
-  acquire: typeof acquireBoundSession,
-  cleanup: CleanupHandle,
-  budget: BoundActionBudget,
-): Promise<WaitOutcome> {
-  let waitDone = false;
-  let resolveWait!: (value: WaitOutcome) => void;
-  const wait = new Promise<WaitOutcome>((done) => { resolveWait = done; });
-  const finishWait = (lease: BoundSessionLease | null, stop: Stop) => {
-    if (waitDone) return;
-    waitDone = true;
-    resolveWait({ lease, stop });
-  };
-  const onAbort = () => finishWait(null, stopReason(budget));
-  budget.signal.addEventListener("abort", onAbort, { once: true });
-
-  const acquisition = Promise.resolve().then(() => {
-    const beforeDispatch = stopReason(budget);
-    if (beforeDispatch) {
-      finishWait(null, beforeDispatch);
-      cleanup.complete("not-acquired");
-      return null;
-    }
-    return acquire(route.projectRoot, route.languageId, {
-      ...(route.server === undefined ? {} : { descriptorId: route.server }), allowInstall: false, purpose: "request",
-    });
-  });
-  void acquisition.then((lease) => {
-    if (!lease) {
-      cleanup.complete("not-acquired");
-      finishWait(null, null);
-      return;
-    }
-    if (waitDone) {
-      releaseOnce(lease, cleanup);
-      return;
-    }
-    finishWait(lease, null);
-  }, () => {
-    cleanup.complete("not-acquired");
-    finishWait(null, null);
-  }).catch(() => {
-    cleanup.complete("failed");
-    finishWait(null, null);
-  });
-
-  if (budget.signal.aborted) finishWait(null, stopReason(budget));
-  const waited = await wait;
-  budget.signal.removeEventListener("abort", onAbort);
-  return { lease: waited.lease, stop: stopReason(budget) ?? waited.stop };
 }
 
 type RequestSettlement = { readonly ok: true; readonly raw: unknown } | { readonly ok: false; readonly error: unknown };
@@ -369,7 +297,8 @@ async function produce(ctx: ProduceContext): Promise<{ readonly server?: StrictS
     if (!prepared.value || !valid()) return refuse("not_ready");
     const target = source?.canonicalPath ?? prepared.value.canonicalPath;
     const before = conn.getDocumentReceipt!(target);
-    if (!receiptMatches(before, target, source?.textSha256, info) || !sameReceipt(before, prepared.value)) return refuse("not_ready");
+    // Without a source snapshot there is no expected hash; reuse the live hash so only that clause is bypassed.
+    if (!receiptMatches(before, target, source?.textSha256 ?? before?.textHash ?? "", info) || !sameReceipt(before, prepared.value)) return refuse("not_ready");
     const receipt = detachedReceipt(before);
     const unchanged = (): boolean => valid() && sameReceipt(receipt, conn.getDocumentReceipt!(target));
 
@@ -444,7 +373,10 @@ async function produce(ctx: ProduceContext): Promise<{ readonly server?: StrictS
     const staged = await awaitBoundAction<unknown>(staging, budget);
     if ("refusal" in staged) return refuse(staged.refusal === "stale" ? "not_ready" : staged.refusal);
     const projected = projectStageResult(staged.value);
-    if (projected.kind === "refused") return refuse(projected.status);
+    if (projected.kind === "refused") {
+      if (projected.status === "cancelled" || projected.status === "timeout" || projected.status === "not_ready") return refuse(projected.status);
+      return publish("unknown");
+    }
     const staleAfterStage = await sourceUnchanged();
     if (staleAfterStage) return refuse(staleAfterStage);
     if (!unchanged()) return refuse("not_ready");
@@ -488,9 +420,9 @@ export async function executeBoundSemanticEdit(
   }
 
   const cleanup = makeCleanup();
-  const waited = await waitForLease(route, acquire, cleanup, budget);
+  const { waited, stop } = await waitForLease(route, { deadlineMs, acquire }, cleanup, budget);
   if (!waited.lease) {
-    const finalStop = stopReason(budget) ?? waited.stop;
+    const finalStop = stopReason(budget) ?? stop;
     budget.dispose();
     return outcomeRefusal(finalStop ?? "unavailable", cleanup.promise);
   }
@@ -500,7 +432,7 @@ export async function executeBoundSemanticEdit(
   let work: Awaited<ReturnType<typeof produce>>;
   try {
     work = await produce({
-      request: captured, route, lease, budget, stop: waited.stop, occupancy,
+      request: captured, route, lease, budget, stop, occupancy,
       deps: { deadlineMs, now, ...(signal ? { signal } : {}), ...(dependencies.stage ? { stage: dependencies.stage } : {}) },
     });
   } catch { work = { produced: { kind: "refusal", status: "unavailable" } }; }
@@ -512,7 +444,7 @@ export async function executeBoundSemanticEdit(
     releaseState = releaseOnce(lease, cleanup);
   }
   const { server, produced } = work;
-  const outerStop = stopReason(budget) ?? waited.stop;
+  const outerStop = stopReason(budget) ?? stop;
   const producedStop = produced.kind === "refusal" ? produced.status : null;
   const finalStop = publicationStop(signal, outerStop, producedStop);
   budget.dispose();

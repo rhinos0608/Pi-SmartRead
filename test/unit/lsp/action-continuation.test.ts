@@ -86,7 +86,7 @@ describe("private bound-action continuation", () => {
       }
       return start;
     };
-    const handle = startBoundActionContinuation(f.origin, { ...f.session, signal: caller.signal, deadlineMs: start + 5_000, now }, async () => staged());
+    const handle = startBoundActionContinuation(f.origin, { ...f.session, signal: caller.signal, deadlineMs: start + 5_000, now }, async () => staged(), "resolveCodeAction");
     lifecycle.handle = handle;
     try {
       const result = await handle.result;
@@ -103,7 +103,7 @@ describe("private bound-action continuation", () => {
       files: ["source.ts"],
       diff: "diff",
     };
-    const handle = startBoundActionContinuation(f.origin, f.session, async () => ({ kind: "staged", proposal }));
+    const handle = startBoundActionContinuation(f.origin, f.session, async () => ({ kind: "staged", proposal }), "resolveCodeAction");
     try {
       const result = await handle.result;
       expect(reads).toBe(0);
@@ -122,7 +122,7 @@ describe("private bound-action continuation", () => {
       files: ["source.ts"],
       get diff() { projectionObserved = true; time = deadlineMs; return "diff"; },
     };
-    const handle = startBoundActionContinuation(f.origin, { ...f.session, deadlineMs, now: () => time }, async () => ({ kind: "staged", proposal }));
+    const handle = startBoundActionContinuation(f.origin, { ...f.session, deadlineMs, now: () => time }, async () => ({ kind: "staged", proposal }), "resolveCodeAction");
     try {
       const result = await handle.result;
       expect(result.kind).toBe("refused");
@@ -138,7 +138,7 @@ describe("private bound-action continuation projection", () => {
     let packet: Parameters<Parameters<typeof startBoundActionContinuation>[2]>[0] | undefined;
     const sourceFiles = ["source.ts"];
     const callbackResult: BoundActionStageResult = { kind: "staged", proposal: { proposalId: "proposal", files: sourceFiles, diff: "diff" } };
-    const handle = startBoundActionContinuation(f.origin, f.session, async (input) => { packet = input; return callbackResult; });
+    const handle = startBoundActionContinuation(f.origin, f.session, async (input) => { packet = input; return callbackResult; }, "resolveCodeAction");
     try {
       const result = await handle.result;
       expect(result).toEqual({ kind: "staged", proposal: { proposalId: "proposal", files: ["source.ts"], diff: "diff" } });
@@ -169,7 +169,7 @@ describe("private bound-action continuation projection", () => {
       Reflect.set(supplied, "deadlineMs", 0);
       Reflect.set(supplied, "now", () => Number.NaN);
       return staged();
-    });
+    }, "resolveCodeAction");
     try {
       expect(await handle.result).toMatchObject({ kind: "staged" });
       expect(packet?.deadlineMs).toBe(deadlineMs);
@@ -184,7 +184,7 @@ describe("private bound-action continuation projection", () => {
     const f = await fixture();
     const origin = { ...f.origin, server: { ...f.origin.server, positionEncoding: "utf-8" as const } };
     const stage = vi.fn(async () => staged());
-    const handle = startBoundActionContinuation(origin, f.session, stage);
+    const handle = startBoundActionContinuation(origin, f.session, stage, "resolveCodeAction");
     try {
       expect((await handle.result).kind).toBe("refused");
       expect(stage).not.toHaveBeenCalled();
@@ -211,7 +211,7 @@ describe("private bound-action continuation revalidation", () => {
       stageCalls++;
       if (when === "during") await mutate();
       return staged();
-    });
+    }, "resolveCodeAction");
     try {
       expect((await handle.result).kind).toBe("refused");
       expect(stageCalls).toBe(when === "during" ? 1 : 0);
@@ -240,7 +240,7 @@ describe("private bound-action continuation revalidation", () => {
     const stage = vi.fn(async () => staged());
     try {
       for (const origin of [commandOrigin, disabledOrigin, noEditOrigin, versionOrigin]) {
-        const handle = startBoundActionContinuation(origin, f.session, stage);
+        const handle = startBoundActionContinuation(origin, f.session, stage, "resolveCodeAction");
         try { expect((await handle.result).kind).toBe("refused"); }
         finally { await Promise.all([handle.result, handle.workSettled]); }
       }
@@ -254,7 +254,7 @@ describe("private bound-action continuation revalidation", () => {
       if (mode === "throw") throw new Error("private failure");
       if (mode === "malformed") return { kind: "staged", proposal: { proposalId: "", files: ["source.ts"], diff: "" } };
       return mode === "staged" ? staged() : { kind: "refused", reason: "unsupported" };
-    });
+    }, "resolveCodeAction");
     try {
       const outcome = await handle.result;
       expect(outcome.kind).toBe(mode === "staged" ? "staged" : "refused");
@@ -266,8 +266,8 @@ describe("private bound-action continuation revalidation", () => {
     const stage = vi.fn(async () => staged());
     const controller = new AbortController();
     controller.abort();
-    const cancelled = startBoundActionContinuation(f.origin, { ...f.session, signal: controller.signal }, stage);
-    const expired = startBoundActionContinuation(f.origin, { ...f.session, deadlineMs: 0, now: () => 0 }, stage);
+    const cancelled = startBoundActionContinuation(f.origin, { ...f.session, signal: controller.signal }, stage, "resolveCodeAction");
+    const expired = startBoundActionContinuation(f.origin, { ...f.session, deadlineMs: 0, now: () => 0 }, stage, "resolveCodeAction");
     try {
       expect(await cancelled.result).toEqual({ kind: "refused", reason: "cancelled" });
       expect(await expired.result).toEqual({ kind: "refused", reason: "timeout" });
@@ -281,7 +281,7 @@ describe("private bound-action continuation revalidation", () => {
   it("refuses an unusable clock before invoking the callback", async () => {
     const f = await fixture();
     const stage = vi.fn(async () => staged());
-    const handle = startBoundActionContinuation(f.origin, { ...f.session, now: () => Number.NaN }, stage);
+    const handle = startBoundActionContinuation(f.origin, { ...f.session, now: () => Number.NaN }, stage, "resolveCodeAction");
     try {
       expect((await handle.result).kind).toBe("refused");
       expect(stage).not.toHaveBeenCalled();
@@ -303,7 +303,7 @@ describe("private bound-action continuation lifetime", () => {
       stageCalls++;
       enter();
       return callback;
-    });
+    }, "resolveCodeAction");
     let callbackSettled = false;
     try {
       await entered;
@@ -336,7 +336,7 @@ describe("private bound-action continuation lifetime", () => {
       let started!: () => void;
       const entered = new Promise<void>((resolve) => { started = resolve; });
       const callback = new Promise<BoundActionStageResult>((_resolve, fail) => { reject = fail; });
-      handle = startBoundActionContinuation(f.origin, { ...f.session, signal: controller.signal, deadlineMs: 10, now: Date.now }, () => { started(); return callback; });
+      handle = startBoundActionContinuation(f.origin, { ...f.session, signal: controller.signal, deadlineMs: 10, now: Date.now }, () => { started(); return callback; }, "resolveCodeAction");
       await entered;
       expect(f.lease.isCurrent()).toBe(true);
       expect(handle.isSettled()).toBe(false);
@@ -366,10 +366,10 @@ describe("private bound-action continuation stageable operations", () => {
     } finally { await handle.workSettled; f.lease.release(); }
   });
 
-  it("defaults to resolveCodeAction when no operation is supplied", async () => {
+  it("carries resolveCodeAction when passed explicitly", async () => {
     const f = await fixture();
     const seen: string[] = [];
-    const handle = startBoundActionContinuation(f.origin, f.session, async (packet) => { seen.push(packet.operation); return staged(); });
+    const handle = startBoundActionContinuation(f.origin, f.session, async (packet) => { seen.push(packet.operation); return staged(); }, "resolveCodeAction");
     try {
       await handle.result;
       expect(seen).toEqual(["resolveCodeAction"]);

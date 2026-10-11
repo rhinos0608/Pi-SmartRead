@@ -193,14 +193,32 @@ describe("snapshotActionSource", () => {
     const replacement = join(file, "..", "replacement.ts");
     await writeFile(replacement, "replacement");
     let replaced = false;
+    let renameThrew: unknown;
     const { io, opened } = instrumentIO({ afterRead: async (_handle, bytesRead) => {
       if (!replaced && bytesRead > 0) {
         replaced = true;
-        await rename(replacement, file);
+        try {
+          await rename(replacement, file);
+        } catch (error) {
+          // Record and rethrow: production maps a read-loop throw to "unavailable".
+          renameThrew = error;
+          throw error;
+        }
       }
     } });
     try {
-      expect(await snapshotActionSource(file, { deadlineMs: Date.now() + 5000, io })).toMatchObject({ ok: false, reason: "stale" });
+      const outcome = await snapshotActionSource(file, { deadlineMs: Date.now() + 5000, io });
+      if (process.platform === "win32" && renameThrew !== undefined) {
+        // Windows cannot rename over a file held open by this process (MoveFile
+        // semantics: the destination is in use, so rename fails with EPERM/EBUSY/
+        // EACCES). The replacement never happens, so production never observes a
+        // stale descriptor — the rename throw surfaces as "unavailable". Assert
+        // that documented Windows outcome; the POSIX "stale" assertion below is
+        // unchanged.
+        expect(outcome).toMatchObject({ ok: false, reason: "unavailable" });
+      } else {
+        expect(outcome).toMatchObject({ ok: false, reason: "stale" });
+      }
       expectClosedExactlyOnce(opened);
       expect(opened[0]!.forwardedBytes).toBe(Buffer.byteLength("original"));
     } finally {

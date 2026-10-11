@@ -164,7 +164,7 @@ function freezeTree<T>(value: T): T {
   return value;
 }
 
-function receiptMatches(receipt: PreparedDocumentReceipt | null, path: string, textHash: string, server: StrictServerInfo): receipt is PreparedDocumentReceipt {
+export function receiptMatches(receipt: PreparedDocumentReceipt | null, path: string, textHash: string, server: StrictServerInfo): receipt is PreparedDocumentReceipt {
   return !!receipt && receipt.canonicalPath === path && receipt.uri === pathToFileURL(path).href &&
     receipt.textHash === textHash && receipt.positionEncoding === server.positionEncoding &&
     receipt.descriptorId === server.descriptorId && receipt.projectRoot === server.projectRoot &&
@@ -173,7 +173,7 @@ function receiptMatches(receipt: PreparedDocumentReceipt | null, path: string, t
     receipt.syncConfig.openClose && receipt.syncConfig.change !== "none";
 }
 
-function sameReceipt(a: PreparedDocumentReceipt, b: PreparedDocumentReceipt | null | undefined): boolean {
+export function sameReceipt(a: PreparedDocumentReceipt, b: PreparedDocumentReceipt | null | undefined): boolean {
   return !!b && a.canonicalPath === b.canonicalPath && a.uri === b.uri && a.version === b.version && a.textHash === b.textHash &&
     a.mutationGeneration === b.mutationGeneration && a.submissionStamp === b.submissionStamp &&
     a.syncConfig.openClose === b.syncConfig.openClose && a.syncConfig.change === b.syncConfig.change &&

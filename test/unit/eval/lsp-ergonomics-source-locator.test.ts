@@ -10,7 +10,11 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function fixture(files: Record<string, string>) {
   const root = mkdtempSync(join(tmpdir(), "source-locator-")); roots.push(root);
   for (const [name, text] of Object.entries(files)) { const path = join(root, name); mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, text); }
-  return realpathSync(root);
+  // Windows: os.tmpdir() can be an 8.3 short path (C:\Users\RUNNER~1\...) while
+  // production canonicalizes via realpath to the long path (C:\Users\runneradmin\...).
+  // Use the native realpath flavor so the expectation matches production on win32;
+  // identical to the fallback flavor on POSIX.
+  return (realpathSync.native ?? realpathSync)(root);
 }
 const run = (path: string, line: number, identifier: string, occurrence?: number, options?: SourceLocatorOptions) =>
   locateSourceIdentifier({ path, line, identifier, ...(occurrence === undefined ? {} : { occurrence }) }, options);

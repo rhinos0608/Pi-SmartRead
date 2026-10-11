@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { executeBoundSemanticEdit, type BoundSemanticEditPacket } from "../../../src/lsp/lsp-semantic-edit-origin.js";
 import type { BoundActionStageResult } from "../../../src/lsp/lsp-action-continuation.js";
@@ -219,12 +219,21 @@ describe("executeBoundSemanticEdit", () => {
   });
 
   it("allows rename edits for other files and uses only the request target as origin", async () => {
-    const f = await fixture({ reply: (uri) => ({ changes: { [uri]: [editAt("a")], "file:///elsewhere/other.ts": [editAt("b")] } }) });
+    // Build the "other file" URI by resolving a sibling of the real fixture URI:
+    // a hardcoded POSIX "file:///elsewhere/other.ts" throws ERR_INVALID_FILE_URL_PATH
+    // under fileURLToPath on Windows, so production refuses the reply and stages no
+    // proposal. Deriving via URL keeps a valid file: URI (with drive letter) on win32.
+    let otherPath = "";
+    const f = await fixture({ reply: (uri) => {
+      const otherUri = new URL("./other.ts", uri).href;
+      otherPath = fileURLToPath(otherUri);
+      return { changes: { [uri]: [editAt("a")], [otherUri]: [editAt("b")] } };
+    } });
     const outcome = await run(f, renameRequest(f));
     expect(outcome.kind === "result" && outcome.proposal).toBeTruthy();
     const packet = f.stage.mock.calls[0]![0];
     expect(packet.document).toEqual({ canonicalPath: f.path, sha256: hash(f.content) });
-    expect(packet.prepared.fileEdits.map((file) => file.filePath).sort()).toEqual([f.path, "/elsewhere/other.ts"].sort());
+    expect(packet.prepared.fileEdits.map((file) => file.filePath).sort()).toEqual([f.path, otherPath].sort());
     await outcome.cleanup;
   });
 
@@ -442,17 +451,53 @@ describe("executeBoundSemanticEdit", () => {
     await outcome.cleanup;
   });
 
-  it("maps stage refusals and throws to refusals and still releases", async () => {
+  it("returns a preview for stage refusals, maps stage throws to refusals, and still releases", async () => {
     const f = await fixture();
     f.stage.mockResolvedValueOnce({ kind: "refused", reason: "unsupported" });
     const refused = await run(f, f.formatRequest);
-    expect(refused).toMatchObject({ kind: "refusal", status: "unsupported" });
+    expect(refused.kind).toBe("result");
+    if (refused.kind !== "result") return;
+    expect(refused.envelope).toMatchObject({ status: "ok", operation: "formatDocument" });
+    expect(refused).not.toHaveProperty("proposal");
     await expect(refused.cleanup).resolves.toEqual({ state: "released" });
     f.stage.mockRejectedValueOnce(new Error("rpc exploded"));
     const thrown = await run(f, f.formatRequest);
     expect(thrown).toMatchObject({ kind: "refusal", status: "unavailable" });
     await expect(thrown.cleanup).resolves.toEqual({ state: "released" });
     expect(f.release).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns a read-only preview without a proposal when staging is unavailable", async () => {
+    const f = await fixture();
+    f.stage.mockResolvedValueOnce({ kind: "refused", reason: "unavailable" });
+    const outcome = await run(f, f.formatRequest);
+    expect(outcome.kind).toBe("result");
+    if (outcome.kind !== "result") return;
+    expect(outcome.envelope).toMatchObject({ status: "ok", operation: "formatDocument" });
+    expect(outcome).not.toHaveProperty("proposal");
+    expect(f.wires).toHaveLength(1);
+    expect(f.stage).toHaveBeenCalledTimes(1);
+    await expect(outcome.cleanup).resolves.toEqual({ state: "released" });
+  });
+
+  it.each(["not_ready", "stale"] as const)("refuses with no proposal when staging reports %s", async (reason) => {
+    const f = await fixture();
+    f.stage.mockResolvedValueOnce({ kind: "refused", reason } as unknown as BoundActionStageResult);
+    const outcome = await run(f, f.formatRequest);
+    expect(outcome).toMatchObject({ kind: "refusal", status: "not_ready" });
+    expect(outcome).not.toHaveProperty("proposal");
+    expect(f.stage).toHaveBeenCalledTimes(1);
+    await expect(outcome.cleanup).resolves.toEqual({ state: "released" });
+  });
+
+  it("reports a cancelled staging refusal as cancelled with no proposal", async () => {
+    const f = await fixture();
+    f.stage.mockResolvedValueOnce({ kind: "refused", reason: "cancelled" });
+    const outcome = await run(f, f.formatRequest);
+    expect(outcome).toMatchObject({ kind: "refusal", status: "cancelled" });
+    expect(outcome).not.toHaveProperty("proposal");
+    expect(f.stage).toHaveBeenCalledTimes(1);
+    await expect(outcome.cleanup).resolves.toEqual({ state: "released" });
   });
 
   it("reports release failure as cleanup failure and never succeeds", async () => {
