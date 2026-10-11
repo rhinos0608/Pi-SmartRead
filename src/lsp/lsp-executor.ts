@@ -22,7 +22,9 @@ import { LspAffinity } from "./lsp-affinity.js";
 import { LspCursorStore } from "./lsp-cursor-store.js";
 import { AmbiguousServerError, detectLanguageFromExtension } from "./lsp-types.js";
 import { evaluateRawMethodPolicy } from "./lsp-raw-method-policy.js";
-import { sha256OfText } from "./lsp-document-store.js";
+import { executeBoundAction, type BoundActionOutcome } from "./lsp-action-adapter.js";
+import { createBoundActionBudget, type BoundActionRequest } from "./lsp-action-origin.js";
+import { sha256OfText, type PreparedDocumentReceipt, type DocumentState } from "./lsp-document-store.js";
 import {
   normalizeLocations,
   normalizeDocumentSymbols,
@@ -41,12 +43,14 @@ import {
 /** Minimal session/connection surface the executor consumes. Real LSPConnection satisfies this. */
 export interface ExecutorConnection {
   request(method: string, params: unknown, opts?: { signal?: AbortSignal }): Promise<unknown>;
-  prepareDocument?(filePath: string): Promise<void>;
+  prepareDocument?(filePath: string, text?: string, opts?: { signal?: AbortSignal; deadlineMs?: number }): Promise<PreparedDocumentReceipt>;
+  getDocumentReceipt?(filePath: string): PreparedDocumentReceipt | null;
   getCapabilityRegistry?(): { can(feature: string): boolean } | null;
   isSupported?(feature: string, staticKey: string): boolean;
   getNegotiatedEncoding?(): string;
   getDocumentStore?(): {
-    get(filePath: string): { version: number; lastHash: string | null } | null;
+    get(filePath: string): DocumentState | { submittedVersion: number; submittedHash: string | null } | { version?: number; lastHash?: string | null } | null;
+    getSubmittedReceipt?(filePath: string): PreparedDocumentReceipt | null;
   };
   getDiagnosticsBroker?(): unknown;
   readiness?(token?: string): { state: string; basis: string };
@@ -75,6 +79,19 @@ export interface ExecutorDeps {
   now?: () => number;
   cwd?: string;
   signal?: AbortSignal;
+  /**
+   * INTERNAL opt-in (anchor resolution only): mark normalized
+   * document/workspace symbols with `selectionProvenance` so the anchor
+   * resolver can distinguish a genuine `DocumentSymbol.selectionRange`
+   * from a collapsed `SymbolInformation` range. Absent/false (the default
+   * for every existing caller) yields byte-identical legacy envelopes.
+   * Never a model-facing request field.
+   */
+  includeSymbolProvenance?: boolean;
+  /** Internal production adapter seam for focused executor tests. */
+  executeBoundAction?: typeof executeBoundAction;
+  /** Trusted internal absolute deadline for an already-admitted action schedule. */
+  actionDeadlineMs?: number;
 }
 
 const sharedCursors = new LspCursorStore();
@@ -167,21 +184,21 @@ function resultMetaForPath(
   if (!req.path) return base;
 
   try {
-    const state = conn.getDocumentStore?.()?.get(req.path);
-    if (!state) return base;
+    const receipt = conn.getDocumentReceipt?.(req.path);
+    if (!receipt) return base;
     let freshness: "fresh" | "stale" | "unknown" = "unknown";
-    if (state.lastHash) {
+    if (receipt.textHash) {
       try {
         const current = readFileSync(req.path, "utf-8");
-        freshness = sha256OfText(current) === state.lastHash ? "fresh" : "stale";
+        freshness = sha256OfText(current) === receipt.textHash ? "fresh" : "stale";
       } catch {
         freshness = "unknown";
       }
     }
     return {
       ...base,
-      documentVersion: state.version,
-      freshness: { state: freshness, documentVersion: state.version },
+      documentVersion: receipt.version,
+      freshness: { state: freshness, documentVersion: receipt.version },
     };
   } catch {
     return base;
@@ -235,22 +252,14 @@ function buildParams(req: StrictRequest): Record<string, unknown> {
     case "incomingCalls": case "outgoingCalls": case "supertypes": case "subtypes":
     case "resolveCompletion": case "resolveInlayHint":
       return { item: req.item };
-    case "resolveCodeAction":
-      return { codeAction: req.codeAction };
     case "rename":
       return { textDocument: { uri }, position: req.position, newName: req.newName };
-    case "codeActions":
-      return {
-        textDocument: { uri },
-        range: req.range,
-        context: { diagnostics: [], ...(req.context ?? {}) },
-      };
     case "formatDocument":
       return { textDocument: { uri }, options: req.formatting ?? { tabSize: 2, insertSpaces: true } };
     case "formatRange":
       return { textDocument: { uri }, range: req.range, options: req.formatting ?? { tabSize: 2, insertSpaces: true } };
     case "formatOnType":
-      return { textDocument: { uri }, position: req.position, options: req.formatting ?? { tabSize: 2, insertSpaces: true } };
+      return { textDocument: { uri }, position: req.position, ch: req.ch, options: req.formatting ?? { tabSize: 2, insertSpaces: true } };
     case "completion": case "signatureHelp":
       return { textDocument: { uri }, position: req.position, context: req.context };
     case "inlayHints":
@@ -270,7 +279,7 @@ function buildParams(req: StrictRequest): Record<string, unknown> {
   }
 }
 
-function normalizeByOp(op: StrictOperation, raw: unknown): { value: unknown; malformed: boolean } {
+function normalizeByOp(op: StrictOperation, raw: unknown, markProvenance: boolean): { value: unknown; malformed: boolean } {
   switch (op) {
     case "goToDefinition": case "goToDeclaration": case "goToTypeDefinition":
     case "goToImplementation": case "findReferences": case "documentHighlights": {
@@ -283,7 +292,7 @@ function normalizeByOp(op: StrictOperation, raw: unknown): { value: unknown; mal
       return v === null ? { value: null, malformed: true } : { value: v, malformed: false };
     }
     case "documentSymbols": case "workspaceSymbols": {
-      const v = normalizeDocumentSymbols(raw);
+      const v = normalizeDocumentSymbols(raw, markProvenance ? { markProvenance: true } : undefined);
       return v === null ? { value: null, malformed: true } : { value: v, malformed: false };
     }
     case "prepareCallHierarchy": case "prepareTypeHierarchy": {
@@ -481,7 +490,125 @@ async function releaseScanLease(deps: ExecutorDeps, key: string | null): Promise
   } catch { /* best-effort */ }
 }
 
+export interface DetailedActionDispatch {
+  readonly outcome: BoundActionOutcome;
+  readonly deadlineMs: number;
+  readonly now: () => number;
+  readonly signal?: AbortSignal;
+}
+
+function actionRefusal(status: "cancelled" | "timeout" | "unavailable" | "not_ready" | "unsupported", cleanup: BoundActionOutcome["cleanup"], server?: StrictServerInfo): BoundActionOutcome {
+  return { kind: "refusal", status, cleanup, ...(server ? { server } : {}) };
+}
+
+/** Internal action result retains adapter-private proposal and cleanup only. */
+export async function executeLspActionDetailed(req: unknown, deps: ExecutorDeps = {}): Promise<DetailedActionDispatch> {
+  const validated = validateStrictRequest(req);
+  if (!validated.ok) throw new Error(validated.error);
+  const parsed = validated.value as StrictRequest;
+  if (parsed.operation !== "codeActions" && parsed.operation !== "resolveCodeAction") throw new Error("action operation required");
+  const cwd = deps.cwd ?? process.cwd();
+  const timeoutMs = parsed.timeoutMs ?? deps.defaultTimeoutMs ?? 15000;
+  const now = deps.now ?? Date.now;
+  const signal = deps.signal;
+  const dispatch = deps.executeBoundAction ?? executeBoundAction;
+  const server = parsed.server;
+  const root = resolve(parsed.workspace ?? cwd);
+  const path = resolve(root, parsed.path!);
+  const languageId = detectLanguageFromExtension(path);
+  const operation = parsed.operation;
+  const request: BoundActionRequest = operation === "codeActions"
+    ? { operation, path, range: parsed.range!, ...(parsed.context === undefined ? {} : { context: parsed.context }) }
+    : { operation, path, range: parsed.range!, ...(parsed.context === undefined ? {} : { context: parsed.context }), selection: parsed.selection! };
+  let started: number;
+  let deadlineMs: number;
+  if (deps.actionDeadlineMs !== undefined) {
+    deadlineMs = deps.actionDeadlineMs;
+    started = deadlineMs - timeoutMs;
+  } else {
+    try { started = now(); } catch { started = Number.NaN; }
+    deadlineMs = started + timeoutMs;
+  }
+  const budget = createBoundActionBudget(deadlineMs, signal, now);
+  const schedule = Object.freeze({ deadlineMs, now, ...(signal === undefined ? {} : { signal }) });
+  const emptyCleanup: BoundActionOutcome["cleanup"] = Promise.resolve({ state: "not-acquired" as const });
+  const stopped = (status: "cancelled" | "timeout" | "unavailable" | "not_ready" | "unsupported", cleanup: BoundActionOutcome["cleanup"] = emptyCleanup, server?: StrictServerInfo): DetailedActionDispatch => ({ outcome: actionRefusal(status, cleanup, server), ...schedule });
+  let candidate: DetailedActionDispatch;
+  try {
+    candidate = await (async (): Promise<DetailedActionDispatch> => {
+    const entryStop = signal?.aborted ? "cancelled" : !Number.isFinite(deadlineMs) ? "unsupported" : budget.check();
+    if (entryStop) return stopped(entryStop === "stale" ? "unavailable" : entryStop);
+    if (!languageId) return stopped("unavailable");
+    let outcome: BoundActionOutcome;
+    try {
+      outcome = await dispatch(request, {
+        projectRoot: root,
+        languageId,
+        ...(server === undefined ? {} : { server }),
+      }, { ...schedule });
+    } catch {
+      const stop = signal?.aborted ? "cancelled" : budget.check() ?? "unavailable";
+      return stopped(stop === "stale" ? "unavailable" : stop);
+    }
+    const knownTimeout = outcome.kind === "refusal" ? outcome.status === "timeout" : outcome.envelope.status === "timeout";
+    const publicationStop = signal?.aborted ? "cancelled" : knownTimeout ? "timeout" : budget.check();
+    if (publicationStop) {
+      const server = outcome.kind === "result" ? outcome.envelope.server : outcome.server;
+      return stopped(publicationStop === "stale" ? "unavailable" : publicationStop, outcome.cleanup, server);
+    }
+    return { outcome, ...schedule };
+    })();
+  } finally {
+    budget.dispose();
+  }
+  const knownTimeout = candidate.outcome.kind === "refusal" ? candidate.outcome.status === "timeout" : candidate.outcome.envelope.status === "timeout";
+  const publicationStop = signal?.aborted ? "cancelled" : knownTimeout ? "timeout" : budget.check();
+  if (publicationStop) {
+    const selectedServer = candidate.outcome.kind === "result" ? candidate.outcome.envelope.server : candidate.outcome.server;
+    return stopped(publicationStop === "stale" ? "unavailable" : publicationStop, candidate.outcome.cleanup, selectedServer);
+  }
+  return candidate;
+}
+
 export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {}): Promise<StrictEnvelope> {
+  const actionCheck = validateStrictRequest(req);
+  if (actionCheck.ok && (actionCheck.value.operation === "codeActions" || actionCheck.value.operation === "resolveCodeAction")) {
+    const operation = actionCheck.value.operation;
+    const method = operation === "codeActions" ? "textDocument/codeAction" : "codeAction/resolve";
+    const capturedDeps = Object.freeze({ ...deps, now: deps.now ?? Date.now, signal: deps.signal });
+    const detailed = await executeLspActionDetailed(req, capturedDeps);
+    const { outcome, deadlineMs, now, signal: capturedSignal } = detailed;
+    const budget = createBoundActionBudget(deadlineMs, capturedSignal, now);
+    let candidate: StrictEnvelope;
+    try {
+      candidate = await (async (): Promise<StrictEnvelope> => {
+      void outcome.cleanup.catch(() => undefined);
+      const outerStop = capturedSignal?.aborted ? "cancelled" : budget.check();
+      const knownStop = outcome.kind === "refusal" ? outcome.status : outcome.envelope.status === "timeout" ? "timeout" : null;
+      const status = capturedSignal?.aborted || outerStop === "cancelled" || knownStop === "cancelled" ? "cancelled"
+        : outerStop === "timeout" || knownStop === "timeout" ? "timeout"
+          : outerStop === "unavailable" || outerStop === "stale" ? "unavailable" : null;
+      if (status) {
+        const server = outcome.kind === "refusal" ? outcome.server : outcome.envelope.server;
+        return { status, operation, method, ...(server ? { server } : {}), result: null, meta: { truncated: false }, ...(status === "cancelled" ? { error: { code: "cancelled", message: "Aborted" } } : {}) };
+      }
+      if (outcome.kind === "result") return outcome.envelope;
+      return { status: outcome.status, operation, method, ...(outcome.server ? { server: outcome.server } : {}), result: null, meta: { truncated: false } };
+      })();
+    } finally {
+      budget.dispose();
+    }
+    const outerStop = capturedSignal?.aborted ? "cancelled" : budget.check();
+    const knownStop = outcome.kind === "refusal" ? outcome.status : outcome.envelope.status === "timeout" ? "timeout" : null;
+    const status = capturedSignal?.aborted || outerStop === "cancelled" || knownStop === "cancelled" ? "cancelled"
+      : outerStop === "timeout" || knownStop === "timeout" ? "timeout"
+        : outerStop === "unavailable" || outerStop === "stale" ? "unavailable" : null;
+    if (status) {
+      const selectedServer = outcome.kind === "refusal" ? outcome.server : outcome.envelope.server;
+      return { status, operation, method, ...(selectedServer ? { server: selectedServer } : {}), result: null, meta: { truncated: false }, ...(status === "cancelled" ? { error: { code: "cancelled", message: "Aborted" } } : {}) };
+    }
+    return candidate;
+  }
   // 1. Caller mistakes throw via normal tool-error path — never a status.
   const validated = validateStrictRequest(req);
   if (!validated.ok) throw new Error(validated.error);
@@ -718,7 +845,7 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
         const fanout = (mgr as ExecutorManager & { workspaceSymbol?: (q: string) => Promise<unknown> }).workspaceSymbol;
         if (typeof fanout === "function") {
           const raw = await fanout.call(mgr, r.query ?? "");
-          const { value, malformed } = normalizeByOp(r.operation, raw);
+          const { value, malformed } = normalizeByOp(r.operation, raw, deps.includeSymbolProvenance === true);
           const info: StrictServerInfo = {
             descriptorId: "unknown",
             name: "unknown",
@@ -861,7 +988,7 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
       // Wire issue with timeout; cancellation wins.
       const params = buildParams(r);
       const raw = await issueWithTimeout(conn!, method, params, timeoutMs, signal);
-      const { value, malformed } = normalizeByOp(r.operation, raw);
+      const { value, malformed } = normalizeByOp(r.operation, raw, deps.includeSymbolProvenance === true);
       if (malformed) {
         return {
           status: classifyStatus({ kind: "transport-error" }),

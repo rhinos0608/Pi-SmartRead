@@ -25,6 +25,10 @@ Resolve what a symbol is before reading around it.
 3. `LSP { operation: "hover", path, position }` for type/docs.
 4. `read` the exact target when source text is needed.
 
+## Opt-in affordances
+
+When `PI_SMARTREAD_AFFORDANCES=1`, supported navigation operations also accept an exact declaration `symbol` with optional `path`; pathless symbols are discovery-only and never auto-dispatched. `investigate` takes one `task` (`definition`, `type`, `references`, `implementations`, or `callers`).
+
 ## Guardrails
 
 - The model-facing tool name is `LSP`.

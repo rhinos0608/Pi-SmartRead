@@ -20,6 +20,10 @@ the calls you would otherwise make one at a time.
 - You need raw file prose in context (script mode returns a synthesized JSON
   result, not file text) — use plain `read`.
 
+## Opt-in task views
+
+With `PI_SMARTREAD_INSPECT_AFFORDANCES=1`, file and directory modes also accept one isolated `view` (`overview`, `dependencies`, `architecture`, `change-review`, or `routes`); `gather: true` adds bounded source corroboration. Views cannot be combined with `analysis` or script mode. Gathered output is discovery-only; use focused `read` for strong evidence.
+
 ## Host API (the only names a script can call)
 
 - `grep(pattern, opts)`, `read(path, opts)`

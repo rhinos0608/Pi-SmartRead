@@ -25,6 +25,7 @@ import { getSemanticIndex } from "./indexing/semantic-index-registry.js";
 import { getIncrementalIndex } from "./indexing/incremental-index.js";
 import { resetLSPBridge, shutdownAllManagers } from "./lsp/lsp-bridge.js";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { captureAffordanceSelectors, type AffordanceSelectors } from "./runtime/affordances.js";
 
 export interface ActivationState {
   hygieneTracker: ReturnType<typeof resetContextHygieneTracker>;
@@ -40,6 +41,7 @@ export interface ActivationState {
   grepRegisteredRef: { current: boolean };
   /** Edit dialect resolved once at activation; threaded to all render code. */
   editMode: EditMode;
+  affordanceSelectors: AffordanceSelectors;
 }
 
 export function createActivationState(): ActivationState {
@@ -57,6 +59,7 @@ export function createActivationState(): ActivationState {
     judgeSidecarDispose: null,
     grepRegisteredRef: { current: false },
     editMode: resolveEditMode(process.env).mode,
+    affordanceSelectors: captureAffordanceSelectors(),
   };
 }
 

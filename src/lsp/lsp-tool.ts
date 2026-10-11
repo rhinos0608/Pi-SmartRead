@@ -9,6 +9,8 @@
  * fallback substitution anywhere.
  */
 import { Type, type Static } from "@sinclair/typebox";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import {
@@ -16,14 +18,26 @@ import {
   validateStrictRequest,
   type StrictOperation,
 } from "./lsp-strict-contract.js";
-import { executeLspOperation, type ExecutorDeps } from "./lsp-executor.js";
+import {
+  AFFORDANCE_ANCHOR_OPS,
+  AFFORDANCE_BOUNDS,
+  type AffordanceExecContext,
+  type AffordanceInvestigateInput,
+} from "./affordance-contract.js";
+import { resolveAffordanceAnchor } from "./affordance-anchor.js";
+import { investigateAffordanceTarget, renderBounded } from "./affordance-investigate.js";
+import { executeLspActionDetailed, executeLspOperation, type ExecutorDeps } from "./lsp-executor.js";
+import { createBoundActionStageRequester } from "./lsp-action-stage-rpc.js";
+import { executeBoundAction, type BoundActionOutcome } from "./lsp-action-adapter.js";
+import { createBoundActionBudget } from "./lsp-action-origin.js";
+import { executeBoundSemanticEdit } from "./lsp-semantic-edit-origin.js";
+import { detectLanguageFromExtension } from "./lsp-types.js";
+import type { StrictEnvelope, StrictRequest } from "./lsp-strict-contract.js";
 import { sessionFileFromCtx } from "../evidence/read-evidence.js";
 import {
   applyStagedProposal,
-  envelopeResultToWorkspaceEdit,
   getWorkspaceEditBus,
   invalidateCachesForPaths,
-  stageWorkspaceEdit,
   type BusLike,
 } from "./lsp-workspace-edit.js";
 
@@ -42,7 +56,7 @@ const RangeSchema = Type.Object(
   },
   {
     description:
-      "0-based range. Used only by range-aware operations such as codeActions, formatRange, inlayHints, and semanticTokens.",
+      "0-based range. Used only by range-aware operations such as codeActions, resolveCodeAction, formatRange, inlayHints, and semanticTokens.",
   },
 );
 
@@ -84,6 +98,10 @@ const LspSchema = Type.Object(
       },
     )),
     range: Type.Optional(RangeSchema),
+    ch: Type.Optional(Type.String({
+      minLength: 1,
+      description: "Required trigger character for formatOnType; pass the character typed by the user.",
+    })),
     query: Type.Optional(Type.String({
       minLength: 1,
       description: "Required by workspaceSymbols. workspaceSymbols accepts query, not path.",
@@ -112,11 +130,12 @@ const LspSchema = Type.Object(
       description: "Optional findReferences flag.",
     })),
     context: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
-      description: "Optional context for codeActions, completion, or signatureHelp only.",
+      description: "Optional context for codeActions and resolveCodeAction (the same full discovery query), completion, or signatureHelp only.",
     })),
-    codeAction: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
-      description: "Exact code action returned by codeActions, for resolveCodeAction only.",
-    })),
+    selection: Type.Optional(Type.Object({
+      actionId: Type.String({ minLength: 1, description: "Opaque action identity returned by codeActions." }),
+      sourceSha256: Type.String({ pattern: "^[0-9a-f]{64}$", description: "Lowercase SHA-256 of the exact source bytes at discovery." }),
+    }, { description: "Selection identity returned by codeActions; required for resolveCodeAction." })),
     formatting: Type.Optional(FormattingSchema),
     limit: Type.Optional(Type.Integer({
       minimum: 1,
@@ -144,12 +163,50 @@ const LspSchema = Type.Object(
   },
 );
 
+const AffordanceOperationSchema = Type.Unsafe<string>({
+  type: "string",
+  enum: [...STRICT_LSP_OPERATIONS, "investigate"],
+  description: "Strict LSP operations plus opt-in investigate.",
+});
+
+const LspAffordanceSchema = Type.Object(
+  {
+    ...LspSchema.properties,
+    operation: AffordanceOperationSchema,
+    symbol: Type.Optional(Type.String({ minLength: 1, description: "Exact declaration name or /-separated hierarchy; only anchor operations and investigate." })),
+    task: Type.Optional(Type.String({ enum: ["definition", "type", "references", "implementations", "callers"] })),
+    scope: Type.Optional(Type.String({ minLength: 1, description: "Canonical file or directory filter within the selected workspace; investigate only." })),
+  },
+  { description: "Opt-in strict LSP affordance bundle. Symbol anchors are exact and path-qualified for dispatch." },
+);
+
 type LspInput = Static<typeof LspSchema>;
 
 export const LSP_DESCRIPTION = `Compiler/language-server semantic intelligence, read-only except applyProposal. Use LSP for exact definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion/signature/inlay information, semantic tokens, and refactor/code-action proposals. Use inspect instead for aggregate structural or architectural analysis such as dependency and call-graph summaries, blast radius, dead code, routes, repository maps, clusters, layers, service boundaries, hotspots, and quality signals. Use grep for broad/textual discovery and read for source content at already-known paths. The operation field is an explicit enum; do not invent discovery operations such as listOperations. Use workspaceSymbols with { operation: "workspaceSymbols", query } and no path. Position-based operations such as findReferences use { path, position: { line, character } } with 0-based coordinates in the server's negotiated encoding. Hierarchy/resolve follow-ups consume the exact returned item. The server field routes to one exact server descriptor only, with no fuzzy or silent fallback. Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path. Foreign fields and missing required fields are tool errors; an "unavailable" envelope is a valid routing outcome.`;
 
-/** Proposal-bearing operations whose results are staged with SmartEdit when it answers. */
-const STAGEABLE_OPERATIONS = new Set(["rename", "resolveCodeAction", "formatDocument", "formatRange", "formatOnType"]);
+export const LSP_AFFORDANCE_DESCRIPTION = `${LSP_DESCRIPTION} Opt-in affordances add exact declaration-name anchors on supported navigation operations and the investigate recipe (definition, type, references, implementations, callers). Pathless symbol targets are discovery-only and never dispatched.`;
+
+export function getLspToolSchema(affordances = false): Record<string, unknown> {
+  return (affordances ? LspAffordanceSchema : LspSchema) as unknown as Record<string, unknown>;
+}
+
+export function getLspToolDescription(affordances = false): string {
+  return affordances ? LSP_AFFORDANCE_DESCRIPTION : LSP_DESCRIPTION;
+}
+
+/** Proposal-bearing semantic operations staged through the bound producer. */
+const SEMANTIC_METHODS = {
+  rename: "textDocument/rename",
+  formatDocument: "textDocument/formatting",
+  formatRange: "textDocument/rangeFormatting",
+  formatOnType: "textDocument/onTypeFormatting",
+} as const;
+
+type SemanticToolOperation = keyof typeof SEMANTIC_METHODS;
+
+function isSemanticToolOperation(operation: string): operation is SemanticToolOperation {
+  return Object.hasOwn(SEMANTIC_METHODS, operation);
+}
 
 function resolveBus(opts: LspToolOptions, _ctx: ExtensionContext): BusLike | null {
   try {
@@ -268,80 +325,133 @@ async function applyProposalResult(args: ApplyProposalArgs) {
   };
 }
 
-type StageableRequest = { operation: string; path?: unknown };
-type StageableEnvelope = {
-  status: string;
-  result: unknown;
-  server?: { descriptorId?: unknown; positionEncoding?: unknown };
-};
-interface StageArgs {
-  request: StageableRequest;
-  envelope: StageableEnvelope;
-  cwd: string;
-  opts: LspToolOptions;
-  ctx: ExtensionContext;
-}
-
-function isStageableEnvelope(request: StageableRequest, envelope: StageableEnvelope): boolean {
-  if (!STAGEABLE_OPERATIONS.has(request.operation)) return false;
-  if (envelope.status !== "ok" || envelope.result == null) return false;
-  return true;
-}
-
-/** Protocol accepts utf-16 only: fail closed on any other negotiated encoding. */
-function hasSupportedEncoding(envelope: StageableEnvelope): boolean {
-  const encoding = envelope.server?.positionEncoding;
-  if (typeof encoding !== "string") return true;
-  return encoding === "utf-16";
-}
-
-/** Pure: convert a stageable envelope result into a workspace edit. Null when nothing actionable. */
-function buildWorkspaceEditFromEnvelope(
-  request: StageableRequest,
-  envelope: StageableEnvelope,
-  cwd: string,
-) {
-  const fallback = typeof request.path === "string" ? resolve(cwd, request.path) : undefined;
-  return envelopeResultToWorkspaceEdit(envelope.result, fallback);
-}
-
-function serverDescriptorOf(envelope: StageableEnvelope): string | undefined {
-  const id = envelope.server?.descriptorId;
-  return typeof id === "string" ? id : undefined;
-}
-
-/** Perform the SmartEdit stage RPC for an already-converted edit. Null on any failure. */
-async function stageConvertedEdit(
-  args: StageArgs & { workspaceEdit: NonNullable<ReturnType<typeof envelopeResultToWorkspaceEdit>> },
-): Promise<{ proposalId: string; files: string[]; diff: string } | null> {
+/** Shared bound-producer discipline for proposal-bearing operations (actions and semantic edits).
+ *
+ * Captures the schedule and dependencies before any context callback runs, dispatches exactly one
+ * bound producer call with staging available only when bus+sessionFilePath resolve, then publishes
+ * the outcome through the same candidate/projection guards: a staged proposal keeps its public
+ * shape, a preview stays read-only, and a refusal publishes a status envelope with result null.
+ */
+async function executeBoundToolOperation(args: {
+  readonly operation: StrictOperation;
+  readonly method: string;
+  readonly validated: StrictRequest;
+  readonly opts: LspToolOptions;
+  readonly ctx: ExtensionContext;
+  readonly signal: AbortSignal | undefined;
+  readonly dispatch: (dispatchArgs: {
+    readonly stage: ReturnType<typeof createBoundActionStageRequester> | undefined;
+    readonly deps: ExecutorDeps;
+    readonly actionCwd: string;
+    readonly scheduledNow: () => number;
+    readonly deadlineMs: number;
+  }) => Promise<BoundActionOutcome>;
+}) {
+  const { operation, method, validated, opts, ctx, signal: originalSignal, dispatch } = args;
+  const actionOpts: LspToolOptions = {
+    ...opts,
+    ...(opts.executorDeps ? { executorDeps: { ...opts.executorDeps } } : {}),
+  };
+  const executorDeps = actionOpts.executorDeps ?? {};
+  const scheduledNow = executorDeps.now ?? Date.now;
+  const timeoutMs = validated.timeoutMs ?? executorDeps.defaultTimeoutMs ?? 15000;
+  let started: number;
   try {
-    const serverDescriptorId = serverDescriptorOf(args.envelope);
-    const staged = await stageWorkspaceEdit({
-      bus: resolveBus(args.opts, args.ctx),
-      workspaceEdit: args.workspaceEdit,
-      operation: args.request.operation,
-      ...(serverDescriptorId ? { serverDescriptorId } : {}),
-      sessionFilePath: resolveSessionFilePath(args.opts, args.ctx),
-      cwd: args.cwd,
-    });
-    if (!staged || !staged.ok) return null;
-    return { proposalId: staged.proposalId, files: staged.files, diff: staged.diff };
+    started = scheduledNow();
   } catch {
-    return null;
+    started = Number.NaN;
   }
-}
-
-/** Stage proposal-bearing results with SmartEdit. Null keeps the read-only result. Never throws. */
-async function maybeStageProposal(args: StageArgs): Promise<{ proposalId: string; files: string[]; diff: string } | null> {
+  const deadlineMs = started + timeoutMs;
+  const budget = createBoundActionBudget(deadlineMs, originalSignal, scheduledNow);
+  const knownUnsupportedEntry = !Number.isFinite(started) || !Number.isFinite(deadlineMs);
+  let outcome: BoundActionOutcome | undefined;
+  let failure: unknown;
+  let candidateEnvelope: StrictEnvelope = {
+    status: "unavailable",
+    operation,
+    method,
+    result: null,
+    meta: { truncated: false },
+  };
+  let failed = false;
+  let candidate: ReturnType<typeof unstagedResult> | undefined;
+  const stopped = (): StrictEnvelope["status"] | null => {
+    if (originalSignal?.aborted) return "cancelled";
+    if (outcome?.kind === "refusal" && outcome.status === "timeout") return "timeout";
+    if (candidateEnvelope.status === "timeout") return "timeout";
+    if (knownUnsupportedEntry) return "unsupported";
+    const stop = budget.check();
+    if (stop === "cancelled") return "cancelled";
+    if (stop === "timeout") return "timeout";
+    if (stop) return "unavailable";
+    return null;
+  };
+  const stoppedEnvelope = (status: StrictEnvelope["status"]): StrictEnvelope => ({
+    ...candidateEnvelope,
+    status,
+    result: null,
+    ...(status === "cancelled" ? { error: { code: "cancelled", message: "Aborted" } } : {}),
+  });
   try {
-    if (!isStageableEnvelope(args.request, args.envelope)) return null;
-    if (!hasSupportedEncoding(args.envelope)) return null;
-    const workspaceEdit = buildWorkspaceEditFromEnvelope(args.request, args.envelope, args.cwd);
-    if (!workspaceEdit) return null;
-    return await stageConvertedEdit({ ...args, workspaceEdit });
-  } catch {
-    return null;
+    const entryStop = originalSignal?.aborted ? "cancelled" : knownUnsupportedEntry ? "unsupported" : stopped();
+    if (entryStop) {
+      candidateEnvelope = stoppedEnvelope(entryStop);
+    } else {
+      const actionCwd = resolveExecuteCwd(actionOpts, ctx);
+      const afterCwd = stopped();
+      if (afterCwd) {
+        candidateEnvelope = stoppedEnvelope(afterCwd);
+      } else {
+        const deps = resolveExecutorDeps(actionOpts, actionCwd, originalSignal);
+        const bus = resolveBus(actionOpts, ctx);
+        const afterBus = stopped();
+        if (afterBus) {
+          candidateEnvelope = stoppedEnvelope(afterBus);
+        } else {
+          const sessionFilePath = resolveSessionFilePath(actionOpts, ctx);
+          const afterSession = stopped();
+          if (afterSession) {
+            candidateEnvelope = stoppedEnvelope(afterSession);
+          } else {
+            const stage = bus && sessionFilePath
+              ? createBoundActionStageRequester({ bus, sessionFilePath, cwd: actionCwd })
+              : undefined;
+            outcome = await dispatch({ stage, deps, actionCwd, scheduledNow, deadlineMs });
+            void outcome.cleanup.catch(() => undefined);
+            if (outcome.kind === "result") {
+              candidateEnvelope = outcome.envelope;
+            } else {
+              candidateEnvelope = {
+                status: outcome.status,
+                operation,
+                method,
+                ...(outcome.server ? { server: outcome.server } : {}),
+                result: null,
+                meta: { truncated: false },
+              };
+            }
+            const stop = stopped();
+            if (stop) candidateEnvelope = stoppedEnvelope(stop);
+            candidate = unstagedResult(candidateEnvelope);
+            if (!stop && outcome.kind === "result" && outcome.proposal) {
+              const { proposalId, files, diff } = outcome.proposal;
+              candidate = stagedResult(candidateEnvelope, { proposalId, files: [...files], diff });
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    failed = true;
+    failure = error;
+    candidateEnvelope = stoppedEnvelope(stopped() ?? "unavailable");
+  } finally {
+    budget.dispose();
   }
+  const finalStop = stopped();
+  if (finalStop) return unstagedResult(stoppedEnvelope(finalStop));
+  if (failed) throw failure;
+  return candidate ?? unstagedResult(candidateEnvelope);
 }
 
 export interface LspToolOptions {
@@ -358,14 +468,131 @@ export interface LspToolOptions {
    * producer here instead. Production callers omit it.
    */
   readonly executeOperation?: typeof executeLspOperation;
+  /** Construction-time opt-in; absent/false preserves the legacy tool surface. */
+  readonly affordances?: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function strictEnvelopeResult(envelope: unknown, steps?: Array<{ id: string; args: Record<string, unknown>; envelope: unknown }>) {
+  const { projection, truncated } = renderBounded([envelope]);
+  const original = isRecord(envelope) ? envelope : {};
+  const boundedEnvelope = truncated
+    ? {
+        status: "error",
+        operation: original.operation,
+        result: null,
+        error: { code: "output-limit", message: "affordance response exceeds output limit" },
+        meta: { truncated: true },
+      }
+    : projection[0];
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(boundedEnvelope) }],
+    details: { envelope: boundedEnvelope, ...(steps ? { investigation: { steps } } : {}) },
+  };
+}
+
+function affordanceContext(opts: LspToolOptions, cwd: string, signal?: AbortSignal, params?: Record<string, unknown>): AffordanceExecContext {
+  return {
+    root: cwd,
+    ...(typeof params?.workspace === "string" ? { workspace: params.workspace } : {}),
+    ...(typeof params?.server === "string" ? { server: params.server } : {}),
+    budget: { maxCandidates: AFFORDANCE_BOUNDS.discoveryCandidates, maxRequests: AFFORDANCE_BOUNDS.underlyingRequests, deadlineMs: AFFORDANCE_BOUNDS.aggregateDeadlineMs, signal },
+    exec: (request, deps) => {
+      const validation = validateStrictRequest(request);
+      if (!validation.ok) throw new Error(validation.error);
+      return (opts.executeOperation ?? executeLspOperation)(validation.value, { ...resolveExecutorDeps(opts, cwd, signal), ...deps, cwd, signal: deps?.signal ?? signal });
+    },
+  };
+}
+
+async function executeInvestigation(params: Record<string, unknown>, opts: LspToolOptions, signal: AbortSignal | undefined, ctx: ExtensionContext) {
+  const cwd = resolveExecuteCwd(opts, ctx);
+  const output = await investigateAffordanceTarget(params as unknown as AffordanceInvestigateInput, affordanceContext(opts, cwd, signal, params));
+  const envelope = {
+    status: output.status,
+    operation: "investigate",
+    result: output.result,
+    meta: {
+      truncated: Boolean(isRecord(output.result) && output.result.truncated === true)
+        || output.steps.some((step) => step.envelope.meta.truncated),
+    },
+  };
+  return strictEnvelopeResult(envelope, output.steps);
+}
+
+function hashAnchorFile(path: string): string | null {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+async function executeAnchoredOperation(params: Record<string, unknown>, opts: LspToolOptions, signal: AbortSignal | undefined, ctx: ExtensionContext) {
+  const started = Date.now();
+  const allowed = new Set(["operation", "workspace", "server", "timeoutMs", "limit", "cursor", "path", "position", "symbol"]);
+  for (const key of Object.keys(params)) if (!allowed.has(key)) throw new Error(`foreign field "${key}" not allowed for affordance anchor`);
+  for (const field of ["workspace", "server", "cursor"] as const) {
+    if (params[field] !== undefined && (typeof params[field] !== "string" || params[field].length === 0)) {
+      throw new Error(`operation "${String(params.operation)}": ${field} must be a non-empty string`);
+    }
+  }
+  for (const field of ["timeoutMs", "limit"] as const) {
+    if (params[field] !== undefined && (typeof params[field] !== "number" || !Number.isInteger(params[field]) || (params[field] as number) <= 0)) {
+      throw new Error(`operation "${String(params.operation)}": ${field} must be a positive integer`);
+    }
+  }
+  if (typeof params.symbol !== "string" || params.symbol.length === 0) throw new Error('anchor: "symbol" must be a non-empty string');
+  if (params.path !== undefined && (typeof params.path !== "string" || params.path.length === 0)) {
+    throw new Error('anchor: "path" must be a non-empty string');
+  }
+  if (params.position !== undefined) throw new Error('anchor: "position" and "symbol" are mutually exclusive');
+  const cwd = resolveExecuteCwd(opts, ctx);
+  const initialHash = typeof params.path === "string" ? hashAnchorFile(resolve(params.workspace as string || cwd, params.path)) : null;
+  const resolution = await resolveAffordanceAnchor({ symbol: params.symbol, ...(typeof params.path === "string" ? { path: params.path } : {}) }, affordanceContext(opts, cwd, signal, params));
+  if (resolution.kind === "unresolved") {
+    const envelope = { status: resolution.status, operation: params.operation, result: null, error: { code: resolution.code, message: resolution.message, data: { candidates: resolution.candidates, ...(resolution.retry ? { retry: resolution.retry } : {}) } }, meta: { truncated: false } };
+    return strictEnvelopeResult(envelope, resolution.envelopes.map((stepEnvelope) => ({ id: "anchor.resolve", args: { symbol: params.symbol, ...(params.path ? { path: params.path } : {}) }, envelope: stepEnvelope })));
+  }
+  const elapsedMs = Date.now() - started;
+  if (signal?.aborted) {
+    const envelope = { status: "cancelled", operation: params.operation, result: null, error: { code: "cancelled", message: "anchor dispatch cancelled" }, meta: { truncated: false } };
+    return strictEnvelopeResult(envelope, [{ id: "anchor.resolve", args: { symbol: params.symbol, ...(params.path ? { path: params.path } : {}) }, envelope: resolution.resolutionEnvelope }]);
+  }
+  if (elapsedMs >= AFFORDANCE_BOUNDS.aggregateDeadlineMs) {
+    const envelope = { status: "timeout", operation: params.operation, result: null, error: { code: "timeout", message: "anchor aggregate deadline exceeded" }, meta: { truncated: false } };
+    return strictEnvelopeResult(envelope, [{ id: "anchor.resolve", args: { symbol: params.symbol, ...(params.path ? { path: params.path } : {}) }, envelope: resolution.resolutionEnvelope }]);
+  }
+  if (resolution.resolutionEnvelope.meta?.freshness?.state === "stale" || (initialHash !== null && hashAnchorFile(resolution.path) !== initialHash)) {
+    const envelope = { status: "error", operation: params.operation, result: null, error: { code: "stale_anchor", message: "anchor source changed between resolution and dispatch; re-read and retry" }, meta: { truncated: false } };
+    return strictEnvelopeResult(envelope, [{ id: "anchor.resolve", args: { symbol: params.symbol, ...(params.path ? { path: params.path } : {}) }, envelope: resolution.resolutionEnvelope }]);
+  }
+  const translated: Record<string, unknown> = {
+    ...params,
+    ...(!params.server && resolution.server.descriptorId !== "unknown" ? { server: resolution.server.descriptorId } : {}),
+    path: resolution.path,
+    position: resolution.position,
+    timeoutMs: Math.min(typeof params.timeoutMs === "number" ? params.timeoutMs : AFFORDANCE_BOUNDS.aggregateDeadlineMs, AFFORDANCE_BOUNDS.aggregateDeadlineMs - elapsedMs),
+  };
+  delete translated.symbol;
+  const validation = validateStrictRequest(translated);
+  if (!validation.ok) throw new Error(validation.error);
+  const envelope = await (opts.executeOperation ?? executeLspOperation)(validation.value, resolveExecutorDeps(opts, cwd, signal));
+  return strictEnvelopeResult(envelope, [
+    { id: "anchor.resolve", args: { symbol: params.symbol, ...(params.path ? { path: params.path } : {}) }, envelope: resolution.resolutionEnvelope },
+    { id: `anchor.${params.operation}`, args: validation.value as unknown as Record<string, unknown>, envelope },
+  ]);
 }
 
 export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
   return {
     name: "LSP",
     label: "LSP",
-    description: LSP_DESCRIPTION,
-    parameters: LspSchema as unknown as Record<string, unknown>,
+    description: getLspToolDescription(opts.affordances),
+    parameters: getLspToolSchema(opts.affordances),
     async execute(
       _toolCallId: string,
       params: LspInput & Record<string, unknown>,
@@ -373,17 +600,80 @@ export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
       _onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
+      if (opts.affordances && isRecord(params) && (params as Record<string, unknown>).operation === "investigate") {
+        return executeInvestigation(params, opts, _signal, ctx);
+      }
+      if (opts.affordances && isRecord(params) && typeof params.operation === "string" && AFFORDANCE_ANCHOR_OPS.includes(params.operation as typeof AFFORDANCE_ANCHOR_OPS[number]) && params.symbol !== undefined) {
+        return executeAnchoredOperation(params, opts, _signal, ctx);
+      }
       const validation = validateStrictRequest(params as unknown);
       if (!validation.ok) throw new Error(validation.error);
-      const cwd = resolveExecuteCwd(opts, ctx);
       if (validation.value.operation === "applyProposal") {
+        const cwd = resolveExecuteCwd(opts, ctx);
         return applyProposalResult({ toolCallId: _toolCallId, proposalId: validation.value.proposalId as string, cwd, opts, ctx });
       }
+      if (validation.value.operation === "codeActions" || validation.value.operation === "resolveCodeAction") {
+        const operation = validation.value.operation;
+        const method = operation === "codeActions" ? "textDocument/codeAction" : "codeAction/resolve";
+        return executeBoundToolOperation({
+          operation,
+          method,
+          validated: validation.value,
+          opts,
+          ctx,
+          signal: _signal,
+          dispatch: async ({ stage, deps, scheduledNow, deadlineMs }) => {
+            const baseExecuteBoundAction = deps.executeBoundAction ?? executeBoundAction;
+            const detailed = await executeLspActionDetailed(validation.value, {
+              ...deps,
+              ...(stage ? {
+                executeBoundAction: (request, route, adapterDeps) => baseExecuteBoundAction(request, route, { ...adapterDeps, stage }),
+              } : {}),
+              now: scheduledNow,
+              signal: _signal,
+              actionDeadlineMs: deadlineMs,
+            });
+            return detailed.outcome;
+          },
+        });
+      }
+      if (isSemanticToolOperation(validation.value.operation)) {
+        const operation = validation.value.operation;
+        return executeBoundToolOperation({
+          operation,
+          method: SEMANTIC_METHODS[operation],
+          validated: validation.value,
+          opts,
+          ctx,
+          signal: _signal,
+          dispatch: async ({ stage, actionCwd, scheduledNow, deadlineMs }) => {
+            const root = resolve(validation.value.workspace ?? actionCwd);
+            const path = typeof validation.value.path === "string" ? resolve(root, validation.value.path) : "";
+            const languageId = path ? detectLanguageFromExtension(path) : null;
+            if (!languageId) {
+              return {
+                kind: "refusal",
+                status: "unavailable",
+                cleanup: Promise.resolve({ state: "not-acquired" as const }),
+              };
+            }
+            return executeBoundSemanticEdit(
+              { ...validation.value, path },
+              { projectRoot: root, languageId, ...(validation.value.server ? { server: validation.value.server } : {}) },
+              {
+                deadlineMs,
+                ...(_signal ? { signal: _signal } : {}),
+                now: scheduledNow,
+                ...(stage ? { stage } : {}),
+              },
+            );
+          },
+        });
+      }
+      const cwd = resolveExecuteCwd(opts, ctx);
       const runOperation = opts.executeOperation ?? executeLspOperation;
       const envelope = await runOperation(validation.value, resolveExecutorDeps(opts, cwd, _signal));
-      const staged = await maybeStageProposal({ request: validation.value, envelope, cwd, opts, ctx });
-      if (!staged) return unstagedResult(envelope);
-      return stagedResult(envelope, staged);
+      return unstagedResult(envelope);
     },
   } as unknown as ToolDefinition;
 }

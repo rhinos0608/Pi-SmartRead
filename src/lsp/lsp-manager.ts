@@ -9,6 +9,7 @@ import { realpathSync, existsSync } from "node:fs";
 import { basename, dirname, resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { LSPConnection } from "./lsp-connection.js";
+import type { PreparedDocumentReceipt } from "./lsp-document-store.js";
 import { canonicalProjectRoot, computeConfigFingerprint, buildSessionKey } from "./lsp-session-key.js";
 import { getActiveCatalog, getDescriptorsForLanguage } from "../language-intelligence/language-server-catalog.js";
 import { AmbiguousServerError, type LspSessionOptions } from "./lsp-types.js";
@@ -513,6 +514,66 @@ export async function acquireSession(root: string, languageId: string, opts?: Ls
   return { conn, key };
 }
 
+export interface BoundSessionRegistration {
+  readonly descriptorId: string;
+  readonly name: string;
+  readonly projectRoot: string;
+  readonly languageIds: readonly string[];
+  readonly positionEncoding: "utf-8" | "utf-16" | "utf-32";
+}
+
+export interface BoundSessionLease {
+  readonly conn: LSPConnection;
+  readonly key: string;
+  readonly registration: BoundSessionRegistration;
+  isCurrent(): boolean;
+  release(): void;
+}
+
+/** Acquire a strict lease bound to the exact registered connection identity. */
+export async function acquireBoundSession(root: string, languageId: string, opts?: LspSessionOptions): Promise<BoundSessionLease | null> {
+  const canonicalRoot = canonicalProjectRoot(root);
+  const conn = await cachedManager(root).getServer(languageId, { ...opts, allowInstall: false, purpose: "request" });
+  if (!conn) return null;
+  const key = (conn as LSPConnection & { sessionKey?: unknown }).sessionKey;
+  if (typeof key !== "string" || key.length === 0) return null;
+  const entry = sessionStore.get(key);
+  if (!entry || entry.conn !== conn) return null;
+  const descriptorId = conn.descriptorId;
+  const name = conn.name;
+  const projectRoot = conn.projectRoot;
+  const languageIds = conn.languageIds;
+  const positionEncoding = conn.getNegotiatedEncoding();
+  if (typeof descriptorId !== "string" || descriptorId.length === 0 || typeof name !== "string" || name.length === 0 ||
+      projectRoot !== canonicalRoot || entry.root !== canonicalRoot || entry.descriptorId !== descriptorId ||
+      typeof entry.fingerprint !== "string" || entry.fingerprint.length === 0 || !Array.isArray(languageIds) ||
+      !languageIds.includes(languageId) || !["utf-8", "utf-16", "utf-32"].includes(positionEncoding)) return null;
+  const languages = Object.freeze([...languageIds]);
+  const registration: BoundSessionRegistration = Object.freeze({ descriptorId, name, projectRoot, languageIds: languages, positionEncoding });
+  const fingerprint = entry.fingerprint;
+  entry.leases += 1;
+  entry.lastUsed = Date.now();
+  let released = false;
+  const lease: BoundSessionLease = {
+    conn,
+    key,
+    registration,
+    isCurrent: () => !released && sessionStore.get(key) === entry && entry.conn === conn &&
+      entry.descriptorId === descriptorId && entry.root === projectRoot && entry.fingerprint === fingerprint &&
+      conn.descriptorId === descriptorId && conn.name === name && conn.projectRoot === projectRoot &&
+      conn.languageIds.length === languages.length && conn.languageIds.every((value, index) => value === languages[index]) &&
+      conn.getNegotiatedEncoding() === positionEncoding,
+    release: () => {
+      if (released) return;
+      released = true;
+      entry.leases = Math.max(0, entry.leases - 1);
+      entry.lastUsed = Date.now();
+      if (sessionStore.get(key) === entry) maybeRunPendingManagerEviction(entry.root);
+    },
+  };
+  return Object.freeze(lease);
+}
+
 /** Reaper closes zero-lease sessions only; leased survivors stay alive. */
 export function reapZeroLeaseSessions(maxIdleMs = 60_000, now = Date.now()): string[] {
   const reaped: string[] = [];
@@ -571,9 +632,14 @@ const MAX_MANAGER_CACHE_SIZE = 5;
 /** Tracks insertion order for LRU eviction */
 const managerAccessOrder: string[] = [];
 
-/** Shuts down and removes all managers from the cache */
-export async function prepareDocument(conn: LSPConnection, filePath: string): Promise<void> {
-  return conn.prepareDocument(filePath);
+/** Canonical prepare-document on a specific connection */
+export async function prepareDocument(
+  conn: LSPConnection,
+  filePath: string,
+  text?: string,
+  opts?: { signal?: AbortSignal; deadlineMs?: number },
+): Promise<PreparedDocumentReceipt> {
+  return conn.prepareDocument(filePath, text, opts);
 }
 
 export async function shutdownAllManagers(): Promise<void> {
