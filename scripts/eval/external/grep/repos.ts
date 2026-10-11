@@ -146,7 +146,10 @@ function isMissing(error: unknown): boolean {
 }
 
 /** Verify the required private mode on POSIX. Throws when the mode is not
- *  exact; permission enforcement is fail-closed, never best-effort. */
+ *  exact; permission enforcement is fail-closed, never best-effort. On win32
+ *  this is a no-op: mode bits do not establish owner-only ACLs, so owned
+ *  roots there are NOT verified private (owner decision 2026-10-12: documented
+ *  limitation, no refusal policy). */
 function assertPrivateMode(p: string, expected: number, what: string): void {
     if (process.platform === "win32") return;
     const actual = statSync(p).mode & 0o777;
