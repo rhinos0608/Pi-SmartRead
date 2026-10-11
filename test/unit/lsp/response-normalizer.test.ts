@@ -417,6 +417,15 @@ describe("normalizeWorkspaceEdit — changes | documentChanges, resource ops rej
 });
 
 describe("normalizeCodeActions — CodeAction | Command", () => {
+  it("demonstrates projection loss while payload capture retains the raw action", () => {
+    const raw = { title: "Fix", diagnostics: [{ message: "original" }], extension: { retained: true }, edit: { changes: { "file:///a.ts": [{ range: R(0, 0, 0, 1), newText: "x" }] } }, data: { token: 1 } };
+    const projection = normalizeCodeActions([raw]);
+    expect(projection?.[0]).not.toHaveProperty("diagnostics");
+    expect(projection?.[0]).not.toHaveProperty("extension");
+    expect(projection?.[0]?.edit).not.toEqual(raw.edit);
+    expect(projection?.[0]?.data).toBe(raw.data);
+  });
+
   it("normalizes a full CodeAction with edit", () => {
     const edits = [{ range: R(0, 0, 0, 3), newText: "foo" }];
     expect(

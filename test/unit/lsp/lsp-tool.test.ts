@@ -34,6 +34,13 @@ describe("lsp-tool", () => {
     ).toMatch(/foreign field "query"/);
   });
 
+  it("resolveCodeAction requires selection and rejects raw codeAction, including mixed requests", async () => {
+    const base = { operation: "resolveCodeAction", path: "a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } };
+    expect(await runError(base)).toMatch(/requires field "selection"/);
+    expect(await runError({ ...base, codeAction: { title: "old" } })).toMatch(/foreign field "codeAction"/);
+    expect(await runError({ ...base, selection: { actionId: "opaque", sourceSha256: "A".repeat(64) } })).toMatch(/sourceSha256/);
+  });
+
   it("request-without-method → error", async () => {
     expect(await runError({ operation: "request", params: {} })).toMatch(/requires field "method"/);
   });
@@ -124,6 +131,10 @@ describe("lsp-tool", () => {
     expect(schema.properties.path.description).toMatch(/workspaceSymbols/i);
     expect(schema.properties.query.description).toMatch(/workspaceSymbols/i);
     expect(schema.properties.item.description).toMatch(/incomingCalls.*outgoingCalls/i);
+    expect(schema.properties.selection.properties).toMatchObject({ actionId: expect.any(Object), sourceSha256: expect.any(Object) });
+    expect(schema.properties).not.toHaveProperty("codeAction");
+    expect(schema.properties.range.description).toMatch(/resolveCodeAction/);
+    expect(schema.properties.context.description).toMatch(/same full discovery query/);
     expect(schema.properties.formatting.properties).toMatchObject({
       tabSize: expect.any(Object),
       insertSpaces: expect.any(Object),

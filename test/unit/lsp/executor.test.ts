@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { cachedManager, evictManagerForRoot, sessionStore } from "../../../src/lsp/lsp-manager.js";
 import { canonicalProjectRoot } from "../../../src/lsp/lsp-session-key.js";
-import { executeLspOperation, type ExecutorConnection } from "../../../src/lsp/lsp-executor.js";
+import { executeLspOperation, type ExecutorConnection, type ExecutorDeps } from "../../../src/lsp/lsp-executor.js";
 import { LspAffinity } from "../../../src/lsp/lsp-affinity.js";
 import { LspCursorStore } from "../../../src/lsp/lsp-cursor-store.js";
 import { AmbiguousServerError } from "../../../src/lsp/lsp-types.js";
@@ -25,7 +25,20 @@ function conn(over: Partial<ExecutorConnection> & { requestImpl?: (m: string, p:
     languageIds,
     projectRoot: "/repo",
     getNegotiatedEncoding: () => "utf-16",
-    prepareDocument: async () => {},
+    prepareDocument: async (filePath?: string) => ({
+      canonicalPath: filePath ?? "/repo/a.ts",
+      uri: `file://${filePath ?? "/repo/a.ts"}`,
+      version: 1,
+      textHash: "test-hash",
+      mutationGeneration: 1,
+      submissionStamp: 1,
+      syncConfig: { openClose: true, change: "full" as const },
+      connectionId: "conn-test",
+      transportId: "trans-test",
+      storeId: "store-test",
+      stateId: "state-test",
+      positionEncoding: "utf-16" as const,
+    }),
     request: (m, p) => (requestImpl ? requestImpl(m, p) : Promise.resolve(null)),
     ...rest,
   };
@@ -85,15 +98,31 @@ describe("executor", () => {
     const env = await executeLspOperation({ operation: "goToDefinition", path: "a.ts", position: { line: 0, character: 0 } }, { getManager: () => mgr(c), cwd: ROOT });
     expect(env.status).toBe("ok");
     expect((env.result as unknown[]).length).toBe(1);
-    expect(env.server.descriptorId).toBe("ts");
-    expect(env.server.positionEncoding).toBe("utf-16");
+    expect(env.server?.descriptorId).toBe("ts");
+    expect(env.server?.positionEncoding).toBe("utf-16");
   });
   it("relative paths resolve against the request workspace before prepare/issue", async () => {
     let preparedPath = "";
     let requestUri = "";
     const c = conn({
       getCapabilityRegistry: () => ({ can: () => true }),
-      prepareDocument: async (p) => { preparedPath = p; },
+      prepareDocument: async (p) => {
+        preparedPath = p;
+        return {
+          canonicalPath: p,
+          uri: `file://${p}`,
+          version: 1,
+          textHash: "test-hash",
+          mutationGeneration: 1,
+          submissionStamp: 1,
+          syncConfig: { openClose: true, change: "full" as const },
+          connectionId: "conn-test",
+          transportId: "trans-test",
+          storeId: "store-test",
+          stateId: "state-test",
+          positionEncoding: "utf-16" as const,
+        };
+      },
       requestImpl: async (_m, p) => {
         requestUri = ((p as { textDocument: { uri: string } }).textDocument.uri);
         return { contents: "x" };
@@ -114,11 +143,24 @@ describe("executor", () => {
     const file = join(root, "a.ts");
     const original = "const x = 1;\n";
     writeFileSync(file, original, "utf-8");
-    const state = { version: 7, lastHash: sha256OfText(original) };
+    const receipt = {
+      canonicalPath: file,
+      uri: `file://${file}`,
+      version: 7,
+      textHash: sha256OfText(original),
+      mutationGeneration: 1,
+      submissionStamp: 1,
+      syncConfig: { openClose: true, change: "full" as const },
+      connectionId: "conn-1",
+      transportId: "trans-1",
+      storeId: "store-1",
+      stateId: "state-1",
+      positionEncoding: "utf-16" as const,
+    };
     let makeStale = false;
     const c = conn({
       getCapabilityRegistry: () => ({ can: () => true }),
-      getDocumentStore: () => ({ get: () => state }),
+      getDocumentReceipt: () => receipt,
       requestImpl: async () => {
         if (makeStale) writeFileSync(file, "const x = 2;\n", "utf-8");
         return [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "" }];
@@ -140,6 +182,47 @@ describe("executor", () => {
       );
       expect(stale.status).toBe("ok");
       expect(stale.meta.freshness?.state).toBe("stale");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("RED: live getter null while store receipt and disk match must NOT claim fresh", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lsp-executor-stale-"));
+    const file = join(root, "a.ts");
+    const original = "const x = 1;\n";
+    writeFileSync(file, original, "utf-8");
+    const receipt = {
+      canonicalPath: file,
+      uri: `file://${file}`,
+      version: 7,
+      textHash: sha256OfText(original),
+      mutationGeneration: 1,
+      submissionStamp: 1,
+      syncConfig: { openClose: true, change: "full" as const },
+      connectionId: "conn-1",
+      transportId: "trans-1",
+      storeId: "store-1",
+      stateId: "state-1",
+      positionEncoding: "utf-16" as const,
+    };
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      getDocumentReceipt: () => null,
+      getDocumentStore: () => ({
+        get: () => ({ version: 7, lastHash: sha256OfText(original) }),
+        getSubmittedReceipt: () => receipt,
+      }),
+      requestImpl: async () => [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "" }],
+    });
+    try {
+      const res = await executeLspOperation(
+        { operation: "formatDocument", path: file, workspace: root },
+        { getManager: () => mgr(c), cwd: root },
+      );
+      expect(res.status).toBe("ok");
+      expect(res.meta.freshness).toBeUndefined();
+      expect(res.meta.documentVersion).toBeUndefined();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -240,8 +323,8 @@ describe("executor", () => {
     const getServer = vi.fn(async () => null);
     const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 }, server: "pyright" }, { getManager: () => ({ getServer }), cwd: ROOT, signal: ctl.signal });
     expect(env.status).toBe("cancelled");
-    expect(env.server.descriptorId).toBe("unknown");
-    expect(env.server.name).toBe("unknown");
+    expect(env.server?.descriptorId).toBe("unknown");
+    expect(env.server?.name).toBe("unknown");
     expect(getServer).not.toHaveBeenCalled();
   });
   it("cancelled: abort during request", async () => {
@@ -294,7 +377,7 @@ describe("executor", () => {
     // Reacquisition proven: dead lease released, fresh session acquired.
     expect(acquisitions).toBe(2);
     expect(released).toContain("k1");
-    expect(env.server.descriptorId).toBe("live");
+    expect(env.server?.descriptorId).toBe("live");
   });
   it("retry escape: second-attempt transport error becomes error envelope", async () => {
     const dead = conn({
@@ -335,7 +418,7 @@ describe("executor", () => {
   it("hintless pathless request is unavailable", async () => {
     const env = await executeLspOperation({ operation: "request", method: "textDocument/hover", params: {} }, { getManager: () => mgr(null), cwd: ROOT });
     expect(env.status).toBe("unavailable");
-    expect(env.server.descriptorId).toBe("unknown");
+    expect(env.server?.descriptorId).toBe("unknown");
   });
   it("raw request rejects non-JSON params through the canonical policy", async () => {
     const params: Record<string, unknown> = {};
@@ -361,7 +444,20 @@ describe("executor", () => {
     expect(n).toBe(1);
   });
   it("hierarchy passthrough: exact item + data preserved, no re-prepare", async () => {
-    const prep = vi.fn(async () => {});
+    const prep = vi.fn(async (filePath?: string) => ({
+      canonicalPath: filePath ?? "/a.ts",
+      uri: "file:///a.ts",
+      version: 1,
+      textHash: "test-hash",
+      mutationGeneration: 1,
+      submissionStamp: 1,
+      syncConfig: { openClose: true, change: "full" as const },
+      connectionId: "conn-test",
+      transportId: "trans-test",
+      storeId: "store-test",
+      stateId: "state-test",
+      positionEncoding: "utf-16" as const,
+    }));
     const item = { name: "f", kind: 12, uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, data: { secret: 42 } };
     let seenParams: unknown = null;
     const c = conn({
@@ -395,29 +491,25 @@ describe("executor", () => {
     const c = conn({});
     await expect(executeLspOperation({ operation: "request", method: "custom/mutate", params: {} }, { getManager: () => mgr(c), cwd: ROOT })).rejects.toThrow(/not allowed/);
   });
-  it("codeActions always supplies the protocol-required diagnostics array", async () => {
-    let seen: unknown = null;
-    const c = conn({
-      getCapabilityRegistry: () => ({ can: () => true }),
-      requestImpl: async (_m, p) => {
-        seen = p;
-        return [];
-      },
+  it("bound action dispatch receives the explicit selection and captured routing inputs", async () => {
+    const range = { start: { line: 1, character: 2 }, end: { line: 3, character: 4 } };
+    const context = { only: ["source.organizeImports"] };
+    const selection = { actionId: "a".repeat(64), sourceSha256: "b".repeat(64) };
+    const envelope = { status: "empty" as const, operation: "resolveCodeAction" as const, method: "codeAction/resolve", server: { descriptorId: "ts", name: "ts-server", languageId: "typescript", projectRoot: ROOT, positionEncoding: "utf-16" as const }, result: null, meta: { truncated: false } };
+    const dispatch = vi.fn<NonNullable<ExecutorDeps["executeBoundAction"]>>(async () => ({ kind: "result", envelope, cleanup: Promise.resolve({ state: "released" }) }));
+    const now = vi.fn(() => 1000);
+    const signal = new AbortController().signal;
+    const env = await executeLspOperation({ operation: "resolveCodeAction", path: "a.ts", range, context, selection, server: "ts", timeoutMs: 500 }, {
+      cwd: ROOT, now, signal, executeBoundAction: dispatch,
+      acquire: async () => { throw new Error("generic acquire must not run"); },
+      getManager: () => ({ getServer: async () => { throw new Error("generic getServer must not run"); } }),
     });
-    const env = await executeLspOperation(
-      {
-        operation: "codeActions",
-        path: "a.ts",
-        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
-        context: { only: ["source.organizeImports"] },
-      },
-      { getManager: () => mgr(c), cwd: ROOT },
+    expect(env).toBe(envelope);
+    expect(dispatch).toHaveBeenCalledWith(
+      { operation: "resolveCodeAction", path: resolve(ROOT, "a.ts"), range, context, selection },
+      { projectRoot: resolve(ROOT), languageId: "typescript", server: "ts" },
+      { deadlineMs: 1500, signal, now },
     );
-    expect(env.status).toBe("empty");
-    expect((seen as { context: unknown }).context).toEqual({
-      diagnostics: [],
-      only: ["source.organizeImports"],
-    });
   });
 
   it("capabilityExact=false issues without gate", async () => {
@@ -567,19 +659,19 @@ describe("executor", () => {
     expect(workspaceSymbol).toHaveBeenCalledWith("foo");
     expect(getServer).not.toHaveBeenCalled();
     expect(env.status).toBe("ok");
-    expect(env.server.descriptorId).toBe("unknown");
+    expect(env.server?.descriptorId).toBe("unknown");
   });
   it("pathless workspaceDiagnostics is ambiguous (single-server envelope cannot aggregate)", async () => {
     const getServer = vi.fn(async () => null);
     const env = await executeLspOperation({ operation: "workspaceDiagnostics" }, { getManager: () => ({ getServer }), cwd: ROOT });
     expect(env.status).toBe("ambiguous");
-    expect(env.server.descriptorId).toBe("unknown");
+    expect(env.server?.descriptorId).toBe("unknown");
   });
   it("acquisition failure becomes error envelope with unknown provenance", async () => {
     const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 } }, { getManager: () => mgr(new Error("spawn ENOENT")), cwd: ROOT });
     expect(env.status).toBe("error");
     expect(env.error?.message).toMatch(/spawn ENOENT/);
-    expect(env.server.descriptorId).toBe("unknown");
+    expect(env.server?.descriptorId).toBe("unknown");
   });
   it("hintless pathless capabilities is unavailable", async () => {
     const env = await executeLspOperation({ operation: "capabilities" }, { getManager: () => mgr(null), cwd: ROOT });
@@ -733,7 +825,7 @@ describe("executor", () => {
       getManager: () => ({ getServer: vi.fn(async () => { throw new Error("must not spawn"); }) }), acquire, cwd: ROOT,
     });
     expect(env.status).toBe("ok");
-    expect(env.server.languageId).toBe("javascript");
+    expect(env.server?.languageId).toBe("javascript");
     expect(acquire).not.toHaveBeenCalled();
   });
   it("explicit-server workspaceSymbols scan MISS is unavailable (no fanout)", async () => {

@@ -78,8 +78,9 @@ const LSP_SNIPPET =
 
 const LSP_GUIDELINES = [
   "LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals.",
-  "Positions are 0-based in server.positionEncoding.",
-  "Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals only; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path.",
+  "Positions and ranges are 0-based in server.positionEncoding; inspect the actual returned actionId and sourceSha256 rather than constructing either value.",
+  "For code actions, discover with codeActions using path, range, and optional context; resolve only by sending the returned selection {actionId, sourceSha256} with the same path, range, routing, and context. If context was omitted, retain that omission (the discovery default applies); never pass a raw action or guess an ID, digest, or target.",
+  "A codeActions result is a discovery list, not a selected or applied edit. Resolve is a readonly preview unless trusted SmartEdit staging is available; applyProposal remains explicit. An unavailable refusal may omit server; never infer a server.",
   "Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.",
 ] as const;
 
@@ -89,7 +90,8 @@ const LSP_AFFORDANCE_GUIDANCE: SmartReadToolGuidance = {
     "For supported navigation operations, provide symbol and optional path XOR position; an explicit path scopes an exact declaration lookup, while pathless symbols are discovery-only and never auto-dispatched.",
     "investigate accepts one flat task: definition, type, references, implementations, or callers. Check ambiguous_anchor, anchor_search_incomplete, stale_anchor, and anchor_invalid_path; resolution is bounded to 100 candidates, 6 requests, and 15 seconds.",
     'Examples: {operation:"investigate",task:"callers",symbol:"start",path:"src/server.ts"}; {operation:"investigate",task:"type",path:"src/server.ts",position:{line:12,character:4}}.',
-    "Positions are 0-based in server.positionEncoding. Rename, formatting, and resolved code-action results remain proposals only; applyProposal is the only mutating operation.",
+    "For code actions, use the exact returned actionId and sourceSha256 in selection; resolve with the same path, range, optional context, and routing as discovery. Omitted context stays omitted; never send a raw action or guess an identifier, digest, or target.",
+    "Discovery lists actions but does not select one. Resolution is a readonly preview without trusted SmartEdit staging; use explicit applyProposal for an available staged proposal. On unavailable refusal the server may be absent; do not infer it. Positions are 0-based in server.positionEncoding.",
   ],
 };
 

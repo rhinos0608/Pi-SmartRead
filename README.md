@@ -350,6 +350,10 @@ encoding. The response reports that encoding in `server.positionEncoding`.
 | Editor     | `completion`, `resolveCompletion`, `signatureHelp`, `inlayHints`, `resolveInlayHint`, `semanticTokens`, `foldingRanges`, `selectionRanges` |
 | Raw        | `request`, for an allowlist of read-only LSP methods               |
 
+For code actions, `codeActions` discovers choices for an exact `path` and 0-based `range`. Each returned action includes a query/source-bound `actionId` and `sourceSha256`. Resolve a chosen action using `resolveCodeAction` with the same `path`, `range`, routing, and discovery `context`, plus `selection: { actionId, sourceSha256 }` copied from that result. If discovery omitted `context`, omit it during resolution too; its default is part of the query. Never pass a raw action or guess an ID, digest, or target. The selection is checked against a fresh discovery and current source; stale or mismatched choices are refused.
+
+Discovery does not select or apply an action. Resolution remains a readonly preview unless trusted SmartEdit staging is available; use an explicit `applyProposal` for an available staged proposal. On an `unavailable` refusal, `server` may be absent—do not infer a server. Positions and ranges use the server's negotiated encoding. Script-mode `lsp.*` helpers use different operation names and 1-based coordinates; they are not substitutes for the strict `LSP` calls above.
+
 With `PI_SMARTREAD_AFFORDANCES=1`, LSP also accepts exact declaration-name anchors and the flat `investigate` tasks. A symbol may include `path` to scope a declaration lookup; without a path, it is discovery-only and is never auto-dispatched. This opt-in surface is experimental and disabled by default.
 
 The tool fails closed:

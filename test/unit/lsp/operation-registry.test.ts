@@ -144,9 +144,12 @@ describe("operation registry", () => {
     expect(getOperationDef("request")?.required).toEqual(["method"]);
   });
 
-  it("required: codeActions needs path + range, formatRange needs path + range", () => {
+  it("required: codeActions discovers by path + range; resolve binds explicit selection", () => {
     expect(getOperationDef("codeActions")?.required).toEqual(["path", "range"]);
+    expect(getOperationDef("resolveCodeAction")?.required).toEqual(["path", "range", "selection"]);
     expect(getOperationDef("formatRange")?.required).toEqual(["path", "range"]);
+    expect(getOperationDef("codeActions")?.idempotent).toBe(false);
+    expect(getOperationDef("resolveCodeAction")?.idempotent).toBe(false);
   });
 
   it("methods match LSP 3.17 wire names", () => {

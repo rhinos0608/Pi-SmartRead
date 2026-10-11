@@ -267,6 +267,15 @@ export async function resolveAffordanceAnchor(
         envelopes: [envelope],
       });
     }
+    if (!envelope.server || typeof envelope.server.descriptorId !== "string" || !envelope.server.descriptorId || envelope.server.descriptorId === "unknown" ||
+      !["utf-8", "utf-16", "utf-32"].includes(envelope.server.positionEncoding)) {
+      return unresolved({
+        status: "not_ready",
+        code: "anchor_search_incomplete",
+        message: "anchor lookup returned no initialized server metadata; retry after server initialization",
+        envelopes: [envelope],
+      });
+    }
     if (!Array.isArray(envelope.result)) {
       return unresolved({
         status: "not_ready",
@@ -337,6 +346,16 @@ export async function resolveAffordanceAnchor(
       code: envelope.error?.code ?? envelope.status,
       message: envelope.error?.message ?? `anchor discovery ${envelope.status}`,
       envelopes: [envelope],
+    });
+  }
+  if (!envelope.server || typeof envelope.server.descriptorId !== "string" || !envelope.server.descriptorId || envelope.server.descriptorId === "unknown" ||
+    !["utf-8", "utf-16", "utf-32"].includes(envelope.server.positionEncoding)) {
+    return unresolved({
+      status: "not_ready",
+      code: "anchor_search_incomplete",
+      message: "anchor discovery returned no initialized server metadata; retry with an explicit path after server initialization",
+      envelopes: [envelope],
+      retry: "re-issue with symbol and path from a known candidate",
     });
   }
   const raw = Array.isArray(envelope.result) ? (envelope.result as ProvenanceSymbol[]) : null;

@@ -190,6 +190,32 @@ describe("resolveAffordanceAnchor — explicit path", () => {
     }
   });
 
+  it("refuses ok and empty-shaped outlines without server metadata", async () => {
+    const { ctx, respond, root, done } = fakeCtx([]);
+    writeTarget(root);
+    try {
+      const withResult = docSymbolsEnvelope([docSymbol("start", R(1, 0, 1, 5))]);
+      const { server: _server, ...withoutServer } = withResult;
+      respond.mockResolvedValueOnce(withoutServer as StrictEnvelope);
+      const ok = await resolveAffordanceAnchor({ symbol: "start", path: "src/a.ts" }, ctx);
+      expect(ok.kind).toBe("unresolved");
+      if (ok.kind !== "unresolved") return;
+      expect(ok.status).toBe("not_ready");
+      expect(ok.code).toBe("anchor_search_incomplete");
+      expect(ok.envelopes[0]).toBe(withoutServer);
+
+      const empty = { ...withoutServer, status: "empty" as const, result: [] };
+      respond.mockResolvedValueOnce(empty as StrictEnvelope);
+      const emptyResult = await resolveAffordanceAnchor({ symbol: "start", path: "src/a.ts" }, ctx);
+      expect(emptyResult.kind).toBe("unresolved");
+      if (emptyResult.kind !== "unresolved") return;
+      expect(emptyResult.status).toBe("not_ready");
+      expect(emptyResult.code).toBe("anchor_search_incomplete");
+    } finally {
+      done();
+    }
+  });
+
   it("reports zero matches as file-scoped anchor_not_found", async () => {
     const { ctx, respond, root, done } = fakeCtx([]);
     writeTarget(root);

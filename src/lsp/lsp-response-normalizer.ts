@@ -479,7 +479,7 @@ function asCommand(raw: Record<string, unknown>): NormalizedCommand | null {
   return command;
 }
 
-function normalizeCodeActionEntry(entry: unknown): NormalizedCodeAction | null {
+export function normalizeCodeActionEntry(entry: unknown): NormalizedCodeAction | null {
   if (!isPlainObject(entry)) return null;
   if (typeof entry.title !== "string" || entry.title.length === 0) return null;
   const action: NormalizedCodeAction = { title: entry.title };
