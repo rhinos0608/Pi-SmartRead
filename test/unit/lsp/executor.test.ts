@@ -604,6 +604,31 @@ describe("executor", () => {
     expect(workspaceSymbol).toHaveBeenCalledWith("foo");
     expect(acquire).not.toHaveBeenCalled();
   });
+  it("pathless workspaceSymbols honours timeoutMs when the fan-out never settles", async () => {
+    const workspaceSymbol = vi.fn(() => new Promise<never>(() => {}));
+    const env = await executeLspOperation({ operation: "workspaceSymbols", query: "foo", timeoutMs: 20 }, {
+      getManager: () => ({ getServer: vi.fn(), workspaceSymbol }),
+      cwd: ROOT,
+    });
+    expect(env.status).toBe("timeout");
+    expect(env.result).toBeNull();
+    expect(env.error?.code).toBe("timeout");
+  });
+  it("pathless workspaceSymbols reports cancellation when the caller aborts mid fan-out", async () => {
+    const controller = new AbortController();
+    const workspaceSymbol = vi.fn(() => {
+      queueMicrotask(() => controller.abort());
+      return new Promise<never>(() => {});
+    });
+    const env = await executeLspOperation({ operation: "workspaceSymbols", query: "foo", timeoutMs: 60_000 }, {
+      getManager: () => ({ getServer: vi.fn(), workspaceSymbol }),
+      cwd: ROOT,
+      signal: controller.signal,
+    });
+    expect(env.status).toBe("cancelled");
+    expect(env.result).toBeNull();
+    expect(env.error?.code).toBe("cancelled");
+  });
   it("explicit-server pathless scan precedes generic acquire", async () => {
     const c = conn({ descriptorId: "scan-ts", requestImpl: async () => ({ syms: ["x"] }) });
     liveSession("scan-ts", c);

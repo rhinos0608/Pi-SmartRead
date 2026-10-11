@@ -717,7 +717,9 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
           : (await import("./lsp-manager.js")).cachedManager(root);
         const fanout = (mgr as ExecutorManager & { workspaceSymbol?: (q: string) => Promise<unknown> }).workspaceSymbol;
         if (typeof fanout === "function") {
-          const raw = await fanout.call(mgr, r.query ?? "");
+          // The fan-out (server start-up, then one request per server) has no cancellation of its
+          // own; bound the wait so timeoutMs and caller aborts hold on this branch too.
+          const raw = await withOpTimeout(fanout.call(mgr, r.query ?? ""), timeoutMs, signal);
           const { value, malformed } = normalizeByOp(r.operation, raw);
           const info: StrictServerInfo = {
             descriptorId: "unknown",
@@ -758,6 +760,23 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
           projectRoot: root,
           positionEncoding: "utf-16",
         };
+        const message = String((err as Error)?.message ?? err);
+        if (isCancelledError(err) || signal?.aborted) {
+          return {
+            status: classifyStatus({ kind: "cancelled" }),
+            operation: r.operation, method, server: info, result: null,
+            meta: { truncated: false },
+            error: { code: "cancelled", message },
+          };
+        }
+        if (isTimeoutError(err)) {
+          return {
+            status: classifyStatus({ kind: "timeout" }),
+            operation: r.operation, method, server: info, result: null,
+            meta: { truncated: false },
+            error: { code: "timeout", message },
+          };
+        }
         return {
           status: classifyStatus({ kind: "transport-error" }),
           operation: r.operation,
@@ -765,7 +784,7 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
           server: info,
           result: null,
           meta: { truncated: false },
-          error: { code: (err as { name?: string })?.name ?? "error", message: String((err as Error)?.message ?? err) },
+          error: { code: (err as { name?: string })?.name ?? "error", message },
         };
       }
     }
