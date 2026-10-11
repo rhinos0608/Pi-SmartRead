@@ -48,6 +48,20 @@ describe("classifyStatus", () => {
 });
 
 describe("validateStrictRequest field matrix", () => {
+  it("accepts formatOnType with a non-empty trigger character", () => {
+    expect(validateStrictRequest({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 0 }, ch: "{" }).ok).toBe(true);
+  });
+  it("requires formatOnType trigger character", () => {
+    expect(validateStrictRequest({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 0 } }).ok).toBe(false);
+  });
+  it("rejects empty formatOnType trigger character", () => {
+    expect(validateStrictRequest({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 0 }, ch: "" }).ok).toBe(false);
+  });
+  it("rejects ch as foreign for other operations", () => {
+    const r = validateStrictRequest({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 }, ch: "{" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/foreign field "ch"/);
+  });
   it("accepts valid hover", () => {
     const r = validateStrictRequest({ operation: "hover", path: "src/a.ts", position: { line: 0, character: 5 } });
     expect(r.ok).toBe(true);
@@ -182,6 +196,44 @@ describe("validateStrictRequest field matrix", () => {
     });
     expect(r.ok).toBe(true);
   });
+  it("accepts resolveCodeAction with full binding and opaque action ID", () => {
+    expect(validateStrictRequest({ operation: "resolveCodeAction", path: "a.ts",
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      selection: { actionId: "opaque/id", sourceSha256: "a".repeat(64) } }).ok).toBe(true);
+  });
+  it.each(["path", "range", "selection"] as const)("requires resolveCodeAction %s", (field) => {
+    const request: Record<string, unknown> = { operation: "resolveCodeAction", path: "a.ts",
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      selection: { actionId: "opaque/id", sourceSha256: "a".repeat(64) } };
+    delete request[field];
+    expect(validateStrictRequest(request).ok).toBe(false);
+  });
+  it.each([null, [], {}, { actionId: "", sourceSha256: "a".repeat(64) },
+    { actionId: "x", sourceSha256: "A".repeat(64) }, { actionId: "x", sourceSha256: "a".repeat(63) },
+    { actionId: "x", sourceSha256: "a".repeat(64), extra: true }])("rejects malformed selection %j", (selection) => {
+    expect(validateStrictRequest({ operation: "resolveCodeAction", path: "a.ts",
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, selection }).ok).toBe(false);
+  });
+  it("rejects legacy raw action and raw action alongside selection", () => {
+    const base = { operation: "resolveCodeAction", path: "a.ts",
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      selection: { actionId: "opaque", sourceSha256: "a".repeat(64) } };
+    expect(validateStrictRequest({ operation: "resolveCodeAction", codeAction: {} }).ok).toBe(false);
+    expect(validateStrictRequest({ ...base, codeAction: {} }).ok).toBe(false);
+  });
+  it("rejects selection outside resolveCodeAction", () => {
+    expect(validateStrictRequest({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 },
+      selection: { actionId: "x", sourceSha256: "a".repeat(64) } }).ok).toBe(false);
+  });
+  it("preserves resolveCodeAction range and optional context validation", () => {
+    const selection = { actionId: "opaque", sourceSha256: "a".repeat(64) };
+    expect(validateStrictRequest({ operation: "resolveCodeAction", path: "a.ts",
+      range: { start: { line: 1, character: 0 }, end: { line: 0, character: 0 } }, selection }).ok).toBe(false);
+    expect(validateStrictRequest({ operation: "resolveCodeAction", path: "a.ts",
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, selection, context: [] }).ok).toBe(false);
+    expect(validateStrictRequest({ operation: "resolveCodeAction", path: "a.ts",
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, selection, context: { diagnostics: [] } }).ok).toBe(true);
+  });
 });
 
 describe("envelope shape vocabularies", () => {
@@ -198,6 +250,11 @@ describe("envelope shape vocabularies", () => {
         truncated: false,
       },
     };
+    const refusal: StrictEnvelope = {
+      status: "unavailable", operation: "resolveCodeAction", method: "codeAction/resolve",
+      result: null, meta: { truncated: false },
+    };
+    expect(refusal.server).toBeUndefined();
     expect(env.meta.readiness?.state).toBe("unknown");
     expect(env.meta.freshness?.state).toBe("unknown");
     expect(["confirmed", "settling", "unknown"]).toContain(env.meta.readiness?.state);

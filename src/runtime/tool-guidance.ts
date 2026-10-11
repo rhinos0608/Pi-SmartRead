@@ -50,6 +50,23 @@ const FIND_GUIDELINES = [
 const INSPECT_SNIPPET =
   "inspect analyzes aggregate structure/architecture of a known file or the repository — never raw content reads.";
 
+const INSPECT_AFFORDANCE_GUIDANCE: SmartReadToolGuidance = {
+  snippet: "inspect runs one isolated bounded structural view, optionally with source corroboration.",
+  guidelines: [
+    "Choose view overview, dependencies, architecture, change-review, or routes; change-review requires diff: unstaged, staged, or HEAD. The selected view must match file or directory mode and cannot be combined with analysis or script mode.",
+    "Add gather: true to run bounded source checks for that view. Results report coverage, omissions, unresolved references, and heuristic limits; gathered relations are discovery only, not evidence that authorizes edits or proof of runtime architecture.",
+    "Read cited source with focused read for strong evidence. Graph-dependent work that cannot meet bounds is unsupported; no full-graph fallback is used.",
+  ],
+};
+
+const INSPECT_AFFORDANCE_MCP_GUIDANCE: SmartReadToolGuidance = {
+  snippet: INSPECT_AFFORDANCE_GUIDANCE.snippet,
+  guidelines: [
+    ...INSPECT_AFFORDANCE_GUIDANCE.guidelines.slice(0, 2),
+    "Use your host's file reader on cited source for strong evidence.",
+  ],
+};
+
 const INSPECT_GUIDELINES = [
   "inspect analyzes aggregate structure/architecture: file mode gives dependencies/dependents, call graph, impact, dead code, routes, and quality signals; directory mode gives the ranked map, clusters, layers, service boundaries, and hotspots.",
   "Inspect does not expose LSP navigation or diagnostics: for compiler-known facts about an exact symbol/location use LSP instead.",
@@ -60,11 +77,22 @@ const LSP_SNIPPET =
   "LSP answers exact compiler/language-server semantic questions — the only path to safe rename/refactor proposals.";
 
 const LSP_GUIDELINES = [
-  "LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals.",
-  "Positions are 0-based in server.positionEncoding.",
-  "Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals only; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path.",
-  "Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.",
+  "LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals; use it for exact compiler-known facts, and inspect for repository shape, architecture, impact, graph, or quality.",
+  "Positions and ranges are 0-based in server.positionEncoding; route by exact server id, and an unavailable refusal is valid (the server may be absent).",
+  "Discover code actions with codeActions using path, range, and optional context; resolve only with returned selection {actionId, sourceSha256} and the same path, range, routing, and context (preserve omitted context). Never pass a raw action or guess an ID, digest, or target.",
+  "Discovery lists actions but does not select or apply them; resolve is a readonly preview. Rename, formatting, and resolved actions are proposals; only explicit applyProposal mutates via SmartEdit.",
 ] as const;
+
+const LSP_AFFORDANCE_GUIDANCE: SmartReadToolGuidance = {
+  snippet: "LSP resolves exact declaration-name anchors or compiler-known locations.",
+  guidelines: [
+    "For supported navigation operations, provide symbol and optional path XOR position; an explicit path scopes an exact declaration lookup, while pathless symbols are discovery-only and never auto-dispatched.",
+    "investigate accepts one flat task: definition, type, references, implementations, or callers. Check ambiguous_anchor, anchor_search_incomplete, stale_anchor, and anchor_invalid_path; resolution is bounded to 100 candidates, 6 requests, and 15 seconds.",
+    'Examples: {operation:"investigate",task:"callers",symbol:"start",path:"src/server.ts"}; {operation:"investigate",task:"type",path:"src/server.ts",position:{line:12,character:4}}.',
+    "For code actions, use the exact returned actionId and sourceSha256 in selection; resolve with the same path, range, optional context, and routing as discovery. Omitted context stays omitted; never send a raw action or guess an identifier, digest, or target.",
+    "Discovery lists actions but does not select one. Resolution is a readonly preview without trusted SmartEdit staging; use explicit applyProposal for an available staged proposal. On unavailable refusal the server may be absent; do not infer it. Positions are 0-based in server.positionEncoding.",
+  ],
+};
 
 const SKILL_SNIPPET = "skill discovers and reads reusable agent workflow skills.";
 
@@ -85,7 +113,9 @@ export const SMARTREAD_GUIDED_TOOLS = ["read", "grep", "find", "inspect", "LSP",
 export type SmartReadGuidedTool = (typeof SMARTREAD_GUIDED_TOOLS)[number];
 
 /** Look up per-tool guidance by tool name; undefined when no guidance exists. */
-export function getSmartReadToolGuidance(toolName: string): SmartReadToolGuidance | undefined {
+export function getSmartReadToolGuidance(toolName: string, affordances = false, inspectAffordances = false, hostReader = false): SmartReadToolGuidance | undefined {
+  if (toolName === "LSP" && affordances) return LSP_AFFORDANCE_GUIDANCE;
+  if (toolName === "inspect" && inspectAffordances) return hostReader ? INSPECT_AFFORDANCE_MCP_GUIDANCE : INSPECT_AFFORDANCE_GUIDANCE;
   return SMARTREAD_TOOL_GUIDANCE[toolName];
 }
 
@@ -108,8 +138,12 @@ const TOOL_GUIDE_LINES: string[] = [
   GUIDE_CLOSING,
 ];
 
-export function renderSmartReadToolGuide(task?: string): string {
+export function renderSmartReadToolGuide(task?: string, affordances = false, inspectAffordances = false, hostReader = false): string {
   const trimmedTask = task?.trim();
   const taskLine = trimmedTask ? [`Task: ${trimmedTask}`, ""] : [];
-  return [...taskLine, ...TOOL_GUIDE_LINES].join("\n");
+  const lines = affordances || inspectAffordances
+    ? [...SMARTREAD_GUIDED_TOOLS.flatMap((toolName) => guideSection(toolName, getSmartReadToolGuidance(toolName, affordances, inspectAffordances, hostReader)!))]
+    : TOOL_GUIDE_LINES.slice(1, -1);
+  const lead = affordances ? GUIDE_LEAD.replace("LSP answers exact compiler/language-server semantic questions", "LSP resolves exact declarations and compiler-known locations") : GUIDE_LEAD;
+  return [...taskLine, lead, ...lines, GUIDE_CLOSING].join("\n");
 }

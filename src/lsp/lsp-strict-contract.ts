@@ -72,12 +72,18 @@ export interface StrictRange {
   readonly end: StrictPosition;
 }
 
+export interface StrictActionSelection {
+  readonly actionId: string;
+  readonly sourceSha256: string;
+}
+
 export interface StrictRequest {
   readonly operation: StrictOperation;
   readonly workspace?: string;
   readonly server?: string;
   readonly path?: string;
   readonly position?: StrictPosition;
+  readonly ch?: string;
   readonly range?: StrictRange;
   readonly query?: string;
   readonly identifier?: string;
@@ -85,7 +91,7 @@ export interface StrictRequest {
   readonly item?: Record<string, unknown>;
   readonly newName?: string;
   readonly context?: Record<string, unknown>;
-  readonly codeAction?: Record<string, unknown>;
+  readonly selection?: StrictActionSelection;
   readonly formatting?: { tabSize: number; insertSpaces: boolean };
   readonly method?: string;
   readonly params?: Record<string, unknown>;
@@ -145,7 +151,7 @@ export interface StrictEnvelope<T = unknown> {
   readonly status: StrictStatus;
   readonly operation: StrictOperation;
   readonly method: string;
-  readonly server: StrictServerInfo;
+  readonly server?: StrictServerInfo;
   readonly result: T | null;
   readonly meta: StrictMeta;
   readonly error?: StrictError;
@@ -188,10 +194,10 @@ const FIELD_MATRIX: Readonly<Record<StrictOperation, ReadonlySet<string>>> = {
   prepareRename: new Set(["path", "position"]),
   rename: new Set(["path", "position", "newName"]),
   codeActions: new Set(["path", "range", "context"]),
-  resolveCodeAction: new Set(["codeAction"]),
+  resolveCodeAction: new Set(["path", "range", "selection", "context"]),
   formatDocument: new Set(["path", "formatting"]),
   formatRange: new Set(["path", "range", "formatting"]),
-  formatOnType: new Set(["path", "position", "formatting"]),
+  formatOnType: new Set(["path", "position", "ch", "formatting"]),
   completion: new Set(["path", "position", "context"]),
   resolveCompletion: new Set(["item"]),
   signatureHelp: new Set(["path", "position", "context"]),
@@ -229,10 +235,10 @@ const REQUIRED_FIELDS: Readonly<Record<StrictOperation, readonly string[]>> = {
   prepareRename: ["path", "position"],
   rename: ["path", "position", "newName"],
   codeActions: ["path", "range"],
-  resolveCodeAction: ["codeAction"],
+  resolveCodeAction: ["path", "range", "selection"],
   formatDocument: ["path"],
   formatRange: ["path", "range"],
-  formatOnType: ["path", "position"],
+  formatOnType: ["path", "position", "ch"],
   completion: ["path", "position"],
   resolveCompletion: ["item"],
   signatureHelp: ["path", "position"],
@@ -331,14 +337,26 @@ function validateStringFields(r: Record<string, unknown>, op: StrictOperation): 
 }
 
 function validateRecordFields(r: Record<string, unknown>, op: StrictOperation): string | null {
-  for (const field of ["item", "context", "codeAction", "params"] as const) {
+  for (const field of ["item", "context", "params"] as const) {
     const err = checkOptionalRecord(r, field, op);
     if (err) return err;
   }
   return null;
 }
 
+function isValidActionSelection(v: unknown): v is StrictActionSelection {
+  if (!isRecord(v)) return false;
+  const prototype = Object.getPrototypeOf(v);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const keys = Reflect.ownKeys(v);
+  return keys.length === 2 && keys.includes("actionId") && keys.includes("sourceSha256") &&
+    isNonEmptyString(v.actionId) && typeof v.sourceSha256 === "string" && /^[a-f0-9]{64}$/.test(v.sourceSha256);
+}
+
 function validateShapeFields(r: Record<string, unknown>, op: StrictOperation): string | null {
+  if (op === "resolveCodeAction" && !isValidActionSelection(r.selection)) {
+    return `operation "${op}": selection must contain exactly actionId and lowercase SHA-256 sourceSha256`;
+  }
   if (r.formatting !== undefined && !isValidFormatting(r.formatting)) {
     return `operation "${op}": invalid formatting {tabSize, insertSpaces}`;
   }
@@ -352,7 +370,7 @@ function validateShapeFields(r: Record<string, unknown>, op: StrictOperation): s
 }
 
 function validateNamedFields(r: Record<string, unknown>, op: StrictOperation): string | null {
-  for (const field of ["query", "method", "newName", "proposalId"] as const) {
+  for (const field of ["query", "method", "newName", "proposalId", "ch"] as const) {
     const err = checkOptionalString(r, field, op);
     if (err) return err;
   }

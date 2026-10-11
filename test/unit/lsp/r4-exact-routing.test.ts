@@ -16,7 +16,20 @@ function conn(over: Partial<ExecutorConnection> & { requestImpl?: (m: string, p:
     languageIds,
     projectRoot: "/repo",
     getNegotiatedEncoding: () => "utf-16",
-    prepareDocument: async () => {},
+    prepareDocument: async (filePath?: string) => ({
+      canonicalPath: filePath ?? "/repo/a.ts",
+      uri: `file://${filePath ?? "/repo/a.ts"}`,
+      version: 1,
+      textHash: "test-hash",
+      mutationGeneration: 1,
+      submissionStamp: 1,
+      syncConfig: { openClose: true, change: "full" as const },
+      connectionId: "conn-test",
+      transportId: "trans-test",
+      storeId: "store-test",
+      stateId: "state-test",
+      positionEncoding: "utf-16" as const,
+    }),
     request: (m, p) => (requestImpl ? requestImpl(m, p) : Promise.resolve(null)),
     ...rest,
   };
@@ -49,7 +62,7 @@ describe("R4 exact routing", () => {
     expect(env.status).toBe("ok");
     expect(acquire).toHaveBeenCalledTimes(1);
     expect(attempted).toEqual(["py-linter"]);
-    expect(env.server.descriptorId).toBe("py-linter");
+    expect(env.server?.descriptorId).toBe("py-linter");
   });
 
   it("pathless descriptorId selects matching live session", async () => {
@@ -60,7 +73,7 @@ describe("R4 exact routing", () => {
       { getManager: () => ({ getServer: vi.fn(async () => { throw new Error("must not spawn"); }) }), acquire: vi.fn(async () => { throw new Error("must not acquire"); }), cwd: ROOT },
     );
     expect(env.status).not.toBe("unavailable");
-    expect(env.server.descriptorId).toBe("live-b");
+    expect(env.server?.descriptorId).toBe("live-b");
   });
 
   it("pathless connection-name differing from descriptorId does NOT select", async () => {
@@ -122,6 +135,6 @@ describe("R4 exact routing", () => {
       { operation: "capabilities", server: "exact-desc" },
       { getManager: () => ({ getServer: vi.fn(async () => { throw new Error("must not spawn"); }) }), acquire: vi.fn(async () => { throw new Error("must not acquire"); }), cwd: ROOT },
     );
-    expect(env.server.descriptorId).toBe("exact-desc");
+    expect(env.server?.descriptorId).toBe("exact-desc");
   });
 });

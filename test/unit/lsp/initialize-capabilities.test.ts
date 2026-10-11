@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeProc extends EventEmitter {
-  stdin: { write: ReturnType<typeof vi.fn> };
+  stdin: EventEmitter & { write: ReturnType<typeof vi.fn> };
   stdout: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
 }
@@ -36,8 +36,8 @@ function makeFakeProc(): FakeProc {
   const proc = new EventEmitter() as FakeProc;
   proc.stdout = new EventEmitter();
   proc.kill = vi.fn();
-  proc.stdin = {
-    write: vi.fn((data: string) => {
+  proc.stdin = Object.assign(new EventEmitter(), {
+    write: vi.fn((data: string, _encoding?: unknown, callback?: (error?: Error | null) => void) => {
       const match = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (match) {
         const len = parseInt(match[1]!, 10);
@@ -49,15 +49,16 @@ function makeFakeProc(): FakeProc {
           }
         } catch { /* ignore */ }
       }
+      if (typeof callback === "function") queueMicrotask(() => callback());
       return true;
     }),
-  };
+  });
   return proc;
 }
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: vi.fn(() => makeFakeProc()),
-  execFileSync: vi.fn(() => Buffer.from("")),
 }));
 
 const { spawn } = await import("node:child_process");

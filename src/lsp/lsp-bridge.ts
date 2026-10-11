@@ -115,6 +115,7 @@ export type {
   ServerConfig,
 } from "./lsp-types.js";
 export { LSPConnection } from "./lsp-connection.js";
+export type { PreparedDocumentReceipt } from "./lsp-document-store.js";
 export {
   LSPManager,
   evictManagerForRoot,

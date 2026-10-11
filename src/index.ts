@@ -106,7 +106,7 @@ export default async function (pi: ExtensionAPI) {
 
   // 2.5 Grep: unconditionally replace the eager MCP fallback.
   registerGrepTool(state);
-  registerLspTool(state);
+  registerLspTool(state, state.affordanceSelectors);
 
   // 3. Core tools: the loop iterates all tools from ToolRegistry.getAll().
   registerCoreTools(pi);

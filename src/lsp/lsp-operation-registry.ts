@@ -18,8 +18,9 @@ export type OperationRequiredField =
   | "item"
   | "newName"
   | "context"
-  | "codeAction"
+  | "selection"
   | "formatting"
+  | "ch"
   | "method"
   | "params"
   | "proposalId";
@@ -245,16 +246,16 @@ const REGISTRY: Record<StrictOperation, OperationDef> = {
     capability: "codeAction",
     capabilityExact: true,
     idempotent: false,
-    summary: "Code-action proposals for range. Never auto-retry.",
+    summary: "Discover code-action proposals for range with full action bindings. Never auto-retry.",
   },
   resolveCodeAction: {
     operation: "resolveCodeAction",
     method: "codeAction/resolve",
-    required: ["codeAction"],
+    required: ["path", "range", "selection"],
     capability: "codeAction",
     capabilityExact: true,
     idempotent: false,
-    summary: "Resolve deferred code-action edit. Never auto-retry.",
+    summary: "Resolve an explicitly selected action bound to its source. Never auto-retry.",
   },
   formatDocument: {
     operation: "formatDocument",
@@ -277,7 +278,7 @@ const REGISTRY: Record<StrictOperation, OperationDef> = {
   formatOnType: {
     operation: "formatOnType",
     method: "textDocument/onTypeFormatting",
-    required: ["path", "position"],
+    required: ["path", "position", "ch"],
     capability: "formatting",
     capabilityExact: true,
     idempotent: false,

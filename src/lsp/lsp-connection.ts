@@ -5,6 +5,7 @@
  * semantic actions, plus the fail-closed WorkspaceEdit parser. No behavior change.
  */
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,10 +13,11 @@ import type { LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 import { type LSPDiagnostic, type LSPHoverResult, type LSPRange, type LSPWorkspaceSymbol } from "./lsp-types.js";
 import { SERVER_REQUEST_HANDLERS, type ServerRequestContext } from "./lsp-server-request-handlers.js";
 import { LspCapabilityRegistry } from "./lsp-capability-registry.js";
-import { LspDocumentStore, syncConfigFromCapability } from "./lsp-document-store.js";
+import { LspDocumentStore, syncConfigFromCapability, type PreparedDocumentReceipt } from "./lsp-document-store.js";
 import { LspDiagnosticsBroker } from "./lsp-diagnostics-broker.js";
 import { LspReadinessTracker, type Readiness } from "./lsp-readiness-tracker.js";
 import { convertOffset, positionEncodingsAdvertisement, resolveNegotiatedEncoding, type PositionEncoding } from "./lsp-position-codec.js";
+import { canonicalPathOrFallback } from "../canonical-path.js";
 
 // ── JSON-RPC connection ────────────────────────────────────────────
 
@@ -235,8 +237,10 @@ export class LSPConnection {
   private buffer = Buffer.alloc(0);
   private closed = false;
 
-  /** Track which files are open on this connection */
-  private openDocuments = new Map<string, number>(); // filePath → version
+  readonly connectionId = randomUUID();
+  private transportId = randomUUID();
+  private transportStdin: ReturnType<typeof spawn>["stdin"] = null;
+
   private diagnostics = new Map<string, LSPDiagnostic[]>();
 
   /** Registered handlers for server-initiated notifications, keyed by method */
@@ -352,19 +356,21 @@ export class LSPConnection {
   getServerCapabilities(): Record<string, unknown> | null { return this.serverCapabilities; }
 
   async start(command: string, args: string[], rootUri: string, opts?: { env?: Record<string, string> }): Promise<void> {
+    if (this.lifecycle !== "created" || this.proc !== null) throw new Error("LSP connection can only be started once");
     this.lifecycle = "initializing";
     this.initPromise = new Promise<void>((resolve, reject) => { this.initResolve = resolve; this.initReject = reject; });
     // Prevent unhandled rejection for queued waiters that detach via abort before init settles.
     this.initPromise.catch(() => {});
     this.rootPath = resolve(rootUri);
     this.proc = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], ...(opts?.env ? { env: { ...process.env, ...opts.env } } : {}) });
-    this.proc.stdout?.on("data", (chunk: Buffer) => this._onData(chunk));
-    this.proc.on("exit", () => { this.closed = true; if (this.lifecycle === "initializing") { this.lifecycle = "failed"; this.initReject?.(new LspServerExitError()); } this._rejectAll(new LspServerExitError()); });
-    this.proc.on("error", () => {
-      this.closed = true;
-      if (this.lifecycle === "initializing") { this.lifecycle = "failed"; this.initReject?.(new LspServerExitError()); }
-      this._rejectAll(new LspServerExitError());
-    });
+    const spawnedProc = this.proc;
+    const spawnedStdin = spawnedProc.stdin;
+    this.transportStdin = spawnedStdin;
+    this.transportId = randomUUID();
+    spawnedProc.stdout?.on("data", (chunk: Buffer) => this._onData(chunk));
+    spawnedProc.on("exit", () => this.failTransport(spawnedProc));
+    spawnedProc.on("error", () => this.failTransport(spawnedProc));
+    spawnedStdin?.on("error", () => this.failTransport(spawnedProc, spawnedStdin));
 
     let initResult: unknown;
     try {
@@ -533,102 +539,312 @@ export class LSPConnection {
   }
 
   /**
-   * Open a file with the LSP server. Idempotent — if the file is already open,
-   * refreshes via prepareDocument (store decides wire action).
+   * Canonical prepare-document entry: store decides wire action (didOpen / didChange / none).
+   * Separate preparation plan from submission commit; never diff against uncertain base.
+   * Local writable callback success means local submission, NOT server indexing.
+   * Returns a typed PreparedDocumentReceipt; no fallback.
    */
-  /**
-   * Prepare-document entry: store decides wire action (didOpen / didChange / none).
-   * Real incremental/full sync per advertised capability — never blanket close+reopen.
-   * The chosen action is observable via getDocumentStore() state and wire messages.
-   */
-  async prepareDocument(filePath: string, text?: string): Promise<void> {
-    const resolved = resolve(filePath);
-    const content = text ?? (existsSync(resolved) ? readFileSync(resolved, "utf-8") : "");
-    return this.documentStore.serialize(resolved, async () => {
-      const syncConfig = this.advertisedSyncConfig;
-      const decision = this.documentStore.prepare(resolved, content, {
-        syncMode: syncConfig.change,
-        openClose: syncConfig.openClose,
-      } as Parameters<LspDocumentStore["prepare"]>[2]);
-      if (decision.action === "none") {
-        const changed: boolean = decision.changed;
-        if (changed) {
-          this.diagnostics.delete(resolved);
-          this.diagnosticsBroker.invalidate(resolved);
+  async prepareDocument(
+    filePath: string,
+    text?: string,
+    opts?: { signal?: AbortSignal; deadlineMs?: number },
+  ): Promise<PreparedDocumentReceipt> {
+    const signal = opts?.signal;
+    const deadlineMs = opts?.deadlineMs;
+    if (signal?.aborted) throw new LspRequestCancelledError("prepareDocument");
+    if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+      throw new LspRequestTimeoutError("prepareDocument");
+    }
+    if (this.closed || this.lifecycle === "failed" || this.lifecycle === "shutting-down" || this.lifecycle === "closed") {
+      throw new LspServerExitError();
+    }
+
+    const effectiveDeadline = deadlineMs ?? Date.now() + REQUEST_TIMEOUT_MS;
+    const canonical = canonicalPathOrFallback(resolve(filePath));
+
+    return this.documentStore.serialize(canonical, async () => {
+      // 1. Post-queue cancellation / deadline check (abort queued work before send)
+      if (signal?.aborted) throw new LspRequestCancelledError("prepareDocument");
+      if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+        throw new LspRequestTimeoutError("prepareDocument");
+      }
+      if (this.closed || this.lifecycle === "failed" || this.lifecycle === "shutting-down" || this.lifecycle === "closed") {
+        throw new LspServerExitError();
+      }
+
+      // 2. Initialize barrier (if initializing)
+      if (this.lifecycle === "initializing") {
+        await this.awaitInitBarrier(signal, "prepareDocument", effectiveDeadline);
+        if (signal?.aborted) throw new LspRequestCancelledError("prepareDocument");
+        if (Date.now() >= effectiveDeadline) throw new LspRequestTimeoutError("prepareDocument");
+        if (this.closed || (this.lifecycle as string) !== "ready") {
+          throw new LspServerExitError();
         }
-        return;
       }
-      if (decision.action === "didOpen") {
-        this.openDocuments.set(resolved, decision.version);
-        await this.notify("textDocument/didOpen", {
-          textDocument: { uri: decision.uri, languageId: decision.languageId, version: decision.version, text: decision.text },
-        });
-        this.documentStore.markSynced(resolved);
-        return;
+
+      // 3. Sync capabilities gate
+      const syncConfig = this.advertisedSyncConfig;
+      if (!syncConfig.openClose || syncConfig.change === "none") {
+        throw new Error(
+          `LSP server does not support document synchronization (openClose: ${syncConfig.openClose}, change: ${syncConfig.change})`,
+        );
       }
-      if (decision.action === "didChange-incremental") {
-        this.openDocuments.set(resolved, decision.version);
-        this.diagnostics.delete(resolved);
-        this.diagnosticsBroker.invalidate(resolved);
-        await this.notify("textDocument/didChange", {
-          textDocument: { uri: decision.uri, version: decision.version },
-          contentChanges: [{ range: this.toNegotiatedRange(decision.range, decision.baseText), rangeLength: decision.rangeLength, text: decision.text }],
-        });
-        this.documentStore.markSynced(resolved);
-        return;
-      }
-      this.openDocuments.set(resolved, decision.version);
-      this.diagnostics.delete(resolved);
-      this.diagnosticsBroker.invalidate(resolved);
-      await this.notify("textDocument/didChange", {
-        textDocument: { uri: decision.uri, version: decision.version },
-        contentChanges: [{ text: decision.text }],
+
+      // 4. Content resolution
+      const content = text ?? (existsSync(canonical) ? readFileSync(canonical, "utf-8") : "");
+      if (signal?.aborted) throw new LspRequestCancelledError("prepareDocument");
+      if (Date.now() >= effectiveDeadline) throw new LspRequestTimeoutError("prepareDocument");
+
+      // 5. Plan preparation
+      const plan = this.documentStore.planPrepare(canonical, content, {
+        syncConfig,
+        connectionId: this.connectionId,
+        transportId: this.transportId,
       });
-      this.documentStore.markSynced(resolved);
+
+      if (plan.action === "none") {
+        const liveReceipt = this.getDocumentReceipt(canonical);
+        if (liveReceipt) {
+          if (signal?.aborted) throw new LspRequestCancelledError("prepareDocument");
+          if (Date.now() >= effectiveDeadline) throw new LspRequestTimeoutError("prepareDocument");
+          return liveReceipt;
+        }
+        throw new Error("LSP submitted document receipt is no longer live");
+      }
+
+      const effectivePlan = plan;
+
+      let frame: unknown;
+      if (effectivePlan.action === "didOpen") {
+        frame = {
+          jsonrpc: "2.0",
+          method: "textDocument/didOpen",
+          params: {
+            textDocument: {
+              uri: effectivePlan.uri,
+              languageId: effectivePlan.languageId,
+              version: effectivePlan.version,
+              text: effectivePlan.text,
+            },
+          },
+        };
+      } else if (effectivePlan.action === "didChange-incremental") {
+        frame = {
+          jsonrpc: "2.0",
+          method: "textDocument/didChange",
+          params: {
+            textDocument: { uri: effectivePlan.uri, version: effectivePlan.version },
+            contentChanges: [
+              {
+                range: this.toNegotiatedRange(effectivePlan.range, effectivePlan.baseText),
+                rangeLength: effectivePlan.rangeLength,
+                text: effectivePlan.text,
+              },
+            ],
+          },
+        };
+      } else {
+        frame = {
+          jsonrpc: "2.0",
+          method: "textDocument/didChange",
+          params: {
+            textDocument: { uri: effectivePlan.uri, version: effectivePlan.version },
+            contentChanges: [{ text: effectivePlan.text }],
+          },
+        };
+      }
+
+      // 6. Abort check before send
+      if (signal?.aborted) throw new LspRequestCancelledError("prepareDocument");
+      if (Date.now() >= effectiveDeadline) throw new LspRequestTimeoutError("prepareDocument");
+
+      // 7. Local writable submission
+      const plannedProc = this.proc;
+      const plannedStdin = plannedProc?.stdin ?? null;
+      const plannedTransportId = this.transportId;
+      let writeErr: unknown = null;
+      try {
+        await this.sendFrameWithCallback(frame, { signal, deadlineMs: effectiveDeadline }, plannedProc, plannedStdin, plannedTransportId);
+      } catch (err) {
+        writeErr = err;
+      }
+
+      if (writeErr) {
+        this.documentStore.markUncertain(canonical);
+        throw writeErr;
+      }
+
+      // Check caller abort before timeout before stale/publication after every awaited boundary
+      if (signal?.aborted) {
+        this.documentStore.markUncertain(canonical);
+        throw new LspRequestCancelledError("prepareDocument");
+      }
+      if (Date.now() >= effectiveDeadline) {
+        this.documentStore.markUncertain(canonical);
+        throw new LspRequestTimeoutError("prepareDocument");
+      }
+
+      // 8. Post-write validity check (ABA / close / config change)
+      if (!this.isLiveTransport(plannedProc, plannedStdin, plannedTransportId)) {
+        this.documentStore.markUncertain(canonical);
+        throw new LspServerExitError();
+      }
+      if (this.closed || this.lifecycle !== "ready") {
+        this.documentStore.markUncertain(canonical);
+        throw new LspServerExitError();
+      }
+      if (
+        syncConfig.openClose !== this.advertisedSyncConfig.openClose ||
+        syncConfig.change !== this.advertisedSyncConfig.change
+      ) {
+        this.documentStore.markUncertain(canonical);
+        throw new Error("LSP synchronization configuration changed during preparation");
+      }
+
+      // 9. Commit to store
+      const receipt = this.documentStore.commitSubmitted(effectivePlan, {
+        connectionId: this.connectionId,
+        transportId: this.transportId,
+        descriptorId: this.descriptorId,
+        projectRoot: this.projectRoot,
+        positionEncoding: this.negotiatedEncoding,
+      });
+
+      this.diagnostics.delete(canonical);
+      this.diagnosticsBroker.invalidate(canonical);
+      return receipt;
+    }, {
+      signal,
+      deadlineMs: effectiveDeadline,
+      createCancelError: (method) => new LspRequestCancelledError(method),
+      createTimeoutError: (method) => new LspRequestTimeoutError(method),
     });
+  }
+
+  /**
+   * Submit one JSON-RPC frame using local writable callback success.
+   * `write() === false` is backpressure, not error.
+   * Callback error rejects and invalidates.
+   */
+  private async sendFrameWithCallback(
+    frame: unknown,
+    opts: { signal?: AbortSignal; deadlineMs: number },
+    expectedProc: ReturnType<typeof spawn> | null,
+    expectedStdin: ReturnType<typeof spawn>["stdin"],
+    expectedTransportId: string,
+  ): Promise<void> {
+    if (!this.isLiveTransport(expectedProc, expectedStdin, expectedTransportId)) throw new LspServerExitError();
+    const { signal, deadlineMs } = opts;
+    if (signal?.aborted) throw new LspRequestCancelledError("prepareDocument");
+    if (Date.now() >= deadlineMs) throw new LspRequestTimeoutError("prepareDocument");
+
+    const body = JSON.stringify(frame);
+    const header = `Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n`;
+    const payload = header + body;
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener("abort", onAbort);
+      };
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (err) reject(err);
+        else resolve();
+      };
+      const onAbort = () => finish(new LspRequestCancelledError("prepareDocument"));
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      const timer = setTimeout(() => finish(new LspRequestTimeoutError("prepareDocument")), Math.max(0, deadlineMs - Date.now()));
+
+      if (signal?.aborted) return onAbort();
+      if (Date.now() >= deadlineMs) return finish(new LspRequestTimeoutError("prepareDocument"));
+      if (!this.isLiveTransport(expectedProc, expectedStdin, expectedTransportId)) return finish(new LspServerExitError());
+      try {
+        expectedStdin!.write(payload, "utf-8", (err?: Error | null) => {
+          if (signal?.aborted) return finish(new LspRequestCancelledError("prepareDocument"));
+          if (Date.now() >= deadlineMs) return finish(new LspRequestTimeoutError("prepareDocument"));
+          if (err) return finish(err instanceof Error ? err : new Error(String(err)));
+          if (!this.isLiveTransport(expectedProc, expectedStdin, expectedTransportId)) return finish(new LspServerExitError());
+          finish();
+        });
+      } catch (err) {
+        finish(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  private isLiveTransport(
+    proc: ReturnType<typeof spawn> | null,
+    stdin: ReturnType<typeof spawn>["stdin"],
+    transportId: string,
+  ): boolean {
+    return !this.closed && proc !== null && this.proc === proc && this.transportId === transportId &&
+      stdin !== null && stdin === this.transportStdin && proc.stdin === stdin && !stdin.destroyed && stdin.writable !== false &&
+      !stdin.writableEnded && !stdin.writableFinished;
+  }
+
+  /**
+   * Get verified submitted receipt for a document.
+   * Checks current liveness, connection incarnation, transport, store, and config identity.
+   */
+  getDocumentReceipt(filePath: string): PreparedDocumentReceipt | null {
+    if (this.closed || (this.lifecycle as string) !== "ready" || !this.isLiveTransport(this.proc, this.proc?.stdin ?? null, this.transportId)) return null;
+    const canonical = canonicalPathOrFallback(resolve(filePath));
+    const state = this.documentStore.get(canonical);
+    if (!state || !state.open || state.uncertain || !state.submittedReceipt) return null;
+    const r = state.submittedReceipt;
+    if (
+      r.connectionId !== this.connectionId ||
+      r.transportId !== this.transportId ||
+      r.storeId !== this.documentStore.storeId ||
+      r.stateId !== state.stateId ||
+      r.version !== state.submittedVersion ||
+      r.textHash !== state.submittedHash ||
+      r.mutationGeneration !== state.mutationGeneration ||
+      r.positionEncoding !== this.negotiatedEncoding ||
+      r.submissionStamp !== state.submittedStamp ||
+      r.submissionStamp <= 0 ||
+      (this.descriptorId !== undefined && r.descriptorId !== this.descriptorId) ||
+      (this.projectRoot !== undefined && r.projectRoot !== this.projectRoot) ||
+      r.syncConfig.openClose !== this.advertisedSyncConfig.openClose ||
+      r.syncConfig.change !== this.advertisedSyncConfig.change
+    ) {
+      return null;
+    }
+    return r;
   }
 
   async openFile(filePath: string): Promise<void> {
     const resolved = resolve(filePath);
-    if (this.openDocuments.has(resolved)) return;
+    if (this.isOpen(resolved)) return;
     const text = existsSync(resolved) ? readFileSync(resolved, "utf-8") : "";
     await this.prepareDocument(resolved, text);
   }
 
-  /**
-   * Send full-text didChange for an open file. If the file is not open yet,
-   * sends didOpen with the given content instead (a didChange is only valid
-   * once the server has seen a matching didOpen).
-   */
   async didChange(filePath: string, text: string): Promise<void> {
-    // Real incremental/full sync per advertised capability via DocumentStore.
-    // Never blanket close+reopen: didChange is only valid after didOpen.
     await this.prepareDocument(resolve(filePath), text);
   }
 
-  /**
-   * Close a file on the LSP server.
-   */
   async didClose(filePath: string): Promise<void> {
     const resolved = resolve(filePath);
-    await this.documentStore.serialize(resolved, async () => {
-      if (!this.openDocuments.has(resolved)) return;
-      const closed = this.documentStore.markClosed(resolved);
-      const uri = closed?.uri ?? pathToFileURL(resolved).href;
-      this.openDocuments.delete(resolved);
-      this.diagnosticsBroker.invalidate(resolved);
+    const canonical = canonicalPathOrFallback(resolved);
+    await this.documentStore.serialize(canonical, async () => {
+      if (!this.documentStore.isOpen(canonical)) return;
+      const closed = this.documentStore.markClosed(canonical);
+      const uri = closed?.uri ?? pathToFileURL(canonical).href;
+      this.diagnosticsBroker.invalidate(canonical);
       await this.notify("textDocument/didClose", { textDocument: { uri } });
     });
   }
 
-  /**
-   * Notify the LSP server that an open file was saved. No-op if the file is
-   * not currently tracked as open on this connection.
-   */
   async didSave(filePath: string): Promise<void> {
     const resolved = resolve(filePath);
-    if (!this.openDocuments.has(resolved)) return;
-    const uri = pathToFileURL(resolved).href;
+    const canonical = canonicalPathOrFallback(resolved);
+    if (!this.documentStore.isOpen(canonical)) return;
+    const uri = pathToFileURL(canonical).href;
     await this.notify("textDocument/didSave", { textDocument: { uri } });
   }
 
@@ -659,12 +875,12 @@ export class LSPConnection {
 
   /** Check if a file is currently open on this connection */
   isOpen(filePath: string): boolean {
-    return this.openDocuments.has(resolve(filePath));
+    return this.documentStore.isOpen(filePath);
   }
 
   /** Get all open file paths on this connection */
   getOpenFilePaths(): string[] {
-    return [...this.openDocuments.keys()];
+    return this.documentStore.getOpenFilePaths();
   }
 
   /** Get latest cached publishDiagnostics results for a document */
@@ -678,7 +894,7 @@ export class LSPConnection {
 
   /** Get open document count */
   get openDocumentCount(): number {
-    return this.openDocuments.size;
+    return this.documentStore.openDocumentCount;
   }
 
   async rename(filePath: string, line0: number, character0: number, newName: string): Promise<LspWorkspaceEdit | null> {
@@ -827,16 +1043,23 @@ export class LSPConnection {
   getLifecycleState(): "created" | "initializing" | "ready" | "failed" | "shutting-down" | "closed" { return this.lifecycle; }
 
   /** Wait on the initialize barrier. Rejects if init failed; throws cancelled if signal aborts while queued. */
-  private async awaitInitBarrier(signal?: AbortSignal, method?: string): Promise<void> {
+  private async awaitInitBarrier(signal?: AbortSignal, method?: string, deadlineMs?: number): Promise<void> {
     const gate = this.initPromise;
     if (!gate) return;
     if (signal?.aborted) throw new LspRequestCancelledError(method ?? "request");
+    if (deadlineMs !== undefined && Date.now() >= deadlineMs) throw new LspRequestTimeoutError(method ?? "request");
     await new Promise<void>((resolve, reject) => {
-      const onAbort = () => reject(new LspRequestCancelledError(method ?? "request"));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        if (timer) clearTimeout(timer);
+      };
+      const onAbort = () => { cleanup(); reject(new LspRequestCancelledError(method ?? "request")); };
       if (signal) signal.addEventListener("abort", onAbort, { once: true });
+      if (deadlineMs !== undefined) timer = setTimeout(() => { cleanup(); reject(new LspRequestTimeoutError(method ?? "request")); }, Math.max(0, deadlineMs - Date.now()));
       gate.then(
-        () => { if (signal) signal.removeEventListener("abort", onAbort); resolve(); },
-        (err) => { if (signal) signal.removeEventListener("abort", onAbort); reject(err instanceof Error ? err : new Error(String(err))); },
+        () => { cleanup(); resolve(); },
+        (err) => { cleanup(); reject(err instanceof Error ? err : new Error(String(err))); },
       );
     });
   }
@@ -867,7 +1090,7 @@ export class LSPConnection {
         pending.reject(new Error("LSP shutdown"));
       }
       this.pending.clear();
-      this.openDocuments.clear();
+      this.documentStore.invalidateAll();
       setTimeout(() => this.proc?.kill(), 1000);
     });
   }
@@ -1037,6 +1260,19 @@ export class LSPConnection {
         try { handler(msg.params); } catch { /* isolate handler errors from the read loop */ }
       }
     }
+  }
+
+  private failTransport(
+    proc: ReturnType<typeof spawn>,
+    stdin?: ReturnType<typeof spawn>["stdin"],
+  ): void {
+    if (proc !== this.proc || (stdin !== undefined && (proc.stdin !== stdin || stdin !== this.transportStdin)) || this.closed) return;
+    this.closed = true;
+    if (this.lifecycle !== "closed") this.lifecycle = "failed";
+    this.documentStore.invalidateAll();
+    const failure = new LspServerExitError();
+    this.initReject?.(failure);
+    this._rejectAll(failure);
   }
 
   private _rejectAll(err: Error): void {
