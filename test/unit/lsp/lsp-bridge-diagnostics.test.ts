@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -288,7 +288,7 @@ describe("LSPConnection diagnostics plumbing", () => {
 
 describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
   let root: string;
-  beforeEach(() => { installFakeServerBin(); root = mkdtempSync(join(tmpdir(), "lsp-bridge-outcome-")); });
+  beforeEach(() => { installFakeServerBin(); root = realpathSync(mkdtempSync(join(tmpdir(), "lsp-bridge-outcome-"))); });
   afterEach(async () => { process.env.PATH = ORIGINAL_PATH; invalidateResolvedServerCacheForRoot(root); rmSync(root, { recursive: true, force: true }); vi.clearAllMocks(); (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => makeFakeProc()); await shutdownAllManagers(); resetLSPBridge(); _clearSessionStore(); });
 
   it("goToDefinitionOutcome: 1-based public pos translated to 0-based internally", async () => {
@@ -647,6 +647,12 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     const session = await acquireSession(root, detectLanguageFromExtension(filePath) ?? "typescript");
     (session?.conn as any).serverCapabilities = { diagnosticProvider: true };
     const broker = (session?.conn as any).getDiagnosticsBroker();
+    // Protocol order: didOpen first. A document's first submission invalidates the
+    // broker's pull cache (commitSubmitted), so seeding before open would be wiped
+    // whenever the connection's canonical path equals the seeded key (Linux tmpdir;
+    // macOS /var -> /private/var hid it). The bridge call below then re-uses the
+    // already-synced document and leaves the seeded pull cache intact.
+    await (session?.conn as any).prepareDocument(filePath);
     // Seed prior pull directly through the broker (populates lastPull + resultId).
     const { pathToFileURL: toFileUrl } = await import("node:url");
     const { resolve: resolvePath } = await import("node:path");

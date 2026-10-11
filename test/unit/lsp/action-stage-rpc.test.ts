@@ -11,6 +11,7 @@ import {
 } from "@rhinos0608/pi-workspace-protocol";
 import type { BusLike } from "../../../src/lsp/lsp-workspace-edit.js";
 import { createBoundActionStageRequester } from "../../../src/lsp/lsp-action-stage-rpc.js";
+import { STAGEABLE_SEMANTIC_OPERATIONS } from "../../../src/lsp/lsp-action-continuation.js";
 import { createBoundActionBudget } from "../../../src/lsp/lsp-action-origin.js";
 import type { BoundActionContinuationPacket } from "../../../src/lsp/lsp-action-continuation.js";
 
@@ -358,6 +359,32 @@ describe("createBoundActionStageRequester", () => {
     const requester = createBoundActionStageRequester({ bus, sessionFilePath: "/session", cwd: "/project" });
     await requester(packet(now, original.signal));
     expect(emit).not.toHaveBeenCalled();
+  });
+
+  it.each(STAGEABLE_SEMANTIC_OPERATIONS)("stages %s verbatim as source.operation end-to-end", async (operation) => {
+    const bus = new EventBus();
+    const captured: unknown[] = [];
+    const server = createRpcServer({ bus, channel: RPC_CHANNELS.workspaceEdit, handler: async (request) => {
+      captured.push(request);
+      return { ok: true, proposalId: "p1", files: ["/outside/project/source.ts"], diff: "diff" };
+    } });
+    try {
+      const requester = createBoundActionStageRequester({ bus, sessionFilePath: "/session", cwd: "/project" });
+      const result = await requester({ ...packet(() => 1), operation });
+      expect(result).toEqual({ kind: "staged", proposal: { proposalId: "p1", files: ["/outside/project/source.ts"], diff: "diff" } });
+      const request = captured[0] as { rpc: string; payload: Record<string, unknown> };
+      expect(request.rpc).toBe(WORKSPACE_EDIT_RPC_METHODS.stage);
+      expect(request.payload).toEqual({ workspaceEdit: edit, source: { operation, serverDescriptorId: "descriptor", document: { canonicalPath: "/outside/project/source.ts", sha256: "a".repeat(64) } }, sessionFilePath: "/session", cwd: "/project" });
+    } finally { server.dispose(); }
+    expect(bus.count(RPC_CHANNELS.workspaceEdit)).toBe(0);
+  });
+
+  it.each(["codeActions", "definition", "", "Rename", "formatting"])("refuses unknown operation %j with zero RPC emission", async (operation) => {
+    const bus = new EventBus(); const emit = vi.spyOn(bus, "emit");
+    const requester = createBoundActionStageRequester({ bus, sessionFilePath: "/session", cwd: "/project" });
+    expect(await requester({ ...packet(() => 1), operation } as unknown as BoundActionContinuationPacket)).toEqual({ kind: "refused", reason: "unavailable" });
+    expect(emit).not.toHaveBeenCalled();
+    expect(bus.count(RPC_CHANNELS.workspaceEdit)).toBe(0);
   });
 
   it("does not emit or retain an RPC subscription when caller aborts during client construction", async () => {

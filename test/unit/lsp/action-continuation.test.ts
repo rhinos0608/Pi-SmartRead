@@ -8,7 +8,7 @@ import { LSPConnection } from "../../../src/lsp/lsp-connection.js";
 import { acquireBoundSession, cachedManager, sessionStore, _clearSessionStore, type SessionEntry } from "../../../src/lsp/lsp-manager.js";
 import { canonicalProjectRoot } from "../../../src/lsp/lsp-session-key.js";
 import { runBoundActionOperation, type BoundActionSession } from "../../../src/lsp/lsp-action-origin.js";
-import { startBoundActionContinuation, type BoundActionStageResult } from "../../../src/lsp/lsp-action-continuation.js";
+import { STAGEABLE_SEMANTIC_OPERATIONS, startBoundActionContinuation, type BoundActionStageResult, type StageableSemanticOperation } from "../../../src/lsp/lsp-action-continuation.js";
 import type { PreparedDocumentReceipt } from "../../../src/lsp/lsp-document-store.js";
 
 const roots: string[] = [];
@@ -352,5 +352,37 @@ describe("private bound-action continuation lifetime", () => {
       f?.lease.release();
       vi.useRealTimers();
     }
+  });
+});
+
+describe("private bound-action continuation stageable operations", () => {
+  it.each(STAGEABLE_SEMANTIC_OPERATIONS)("carries %s on the packet handed to the stage callback", async (operation) => {
+    const f = await fixture();
+    const seen: string[] = [];
+    const handle = startBoundActionContinuation(f.origin, f.session, async (packet) => { seen.push(packet.operation); return staged(); }, operation);
+    try {
+      expect(await handle.result).toEqual({ kind: "staged", proposal: { proposalId: "proposal", files: ["source.ts"], diff: "diff" } });
+      expect(seen).toEqual([operation]);
+    } finally { await handle.workSettled; f.lease.release(); }
+  });
+
+  it("defaults to resolveCodeAction when no operation is supplied", async () => {
+    const f = await fixture();
+    const seen: string[] = [];
+    const handle = startBoundActionContinuation(f.origin, f.session, async (packet) => { seen.push(packet.operation); return staged(); });
+    try {
+      await handle.result;
+      expect(seen).toEqual(["resolveCodeAction"]);
+    } finally { await handle.workSettled; f.lease.release(); }
+  });
+
+  it.each(["codeActions", "definition", ""])("refuses unknown operation %j as unsupported without calling stage", async (operation) => {
+    const f = await fixture();
+    const stage = vi.fn(async () => staged());
+    const handle = startBoundActionContinuation(f.origin, f.session, stage, operation as unknown as StageableSemanticOperation);
+    try {
+      expect(await handle.result).toEqual({ kind: "refused", reason: "unsupported" });
+      expect(stage).not.toHaveBeenCalled();
+    } finally { await handle.workSettled; f.lease.release(); }
   });
 });

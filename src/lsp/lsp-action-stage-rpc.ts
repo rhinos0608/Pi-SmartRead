@@ -3,7 +3,7 @@ import {
   WORKSPACE_EDIT_RPC_METHODS,
   createRpcClient,
 } from "@rhinos0608/pi-workspace-protocol";
-import type { BoundActionContinuationPacket, BoundActionStageResult } from "./lsp-action-continuation.js";
+import { isStageableSemanticOperation, type BoundActionContinuationPacket, type BoundActionStageResult } from "./lsp-action-continuation.js";
 import type { BusLike } from "./lsp-workspace-edit.js";
 
 const MAX_TIMER_DELAY = 2_147_483_647;
@@ -75,7 +75,7 @@ export function createBoundActionStageRequester(context: {
       serverDescriptorId = packet.serverDescriptor.descriptorId;
       operation = packet.operation;
     } catch { return refused("unavailable"); }
-    if (operation !== "resolveCodeAction" || typeof now !== "function" || !Number.isFinite(deadlineMs) ||
+    if (!isStageableSemanticOperation(operation) || typeof now !== "function" || !Number.isFinite(deadlineMs) ||
         !ownedSignal || !document || typeof document.canonicalPath !== "string" || typeof document.sha256 !== "string" ||
         typeof serverDescriptorId !== "string" || !prepared) return refused("unavailable");
 

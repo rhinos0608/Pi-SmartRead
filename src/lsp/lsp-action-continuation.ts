@@ -10,11 +10,19 @@ import {
 } from "./lsp-action-origin.js";
 import type { StrictServerInfo } from "./lsp-strict-contract.js";
 
+/** Closed set of semantic operations whose edits may be staged over the SmartEdit RPC. */
+export const STAGEABLE_SEMANTIC_OPERATIONS = Object.freeze(["resolveCodeAction", "rename", "formatDocument", "formatRange", "formatOnType"] as const);
+export type StageableSemanticOperation = (typeof STAGEABLE_SEMANTIC_OPERATIONS)[number];
+
+export function isStageableSemanticOperation(value: unknown): value is StageableSemanticOperation {
+  return typeof value === "string" && (STAGEABLE_SEMANTIC_OPERATIONS as readonly string[]).includes(value);
+}
+
 export interface BoundActionContinuationPacket {
   readonly prepared: LspWorkspaceEdit;
   readonly document: Readonly<{ canonicalPath: string; sha256: string }>;
   readonly serverDescriptor: StrictServerInfo;
-  readonly operation: "resolveCodeAction";
+  readonly operation: StageableSemanticOperation;
   readonly deadlineMs: number;
   readonly now: () => number;
   readonly originalSignal?: AbortSignal;
@@ -104,6 +112,7 @@ function preparePacket(
   origin: BoundActionOriginHandoff,
   originalSignal: AbortSignal | undefined,
   budget: BoundActionBudget,
+  operation: StageableSemanticOperation,
 ): BoundActionContinuationPacket | BoundActionContinuationResult {
   const prepared = prepareBoundActionEdit(origin);
   if (prepared.kind === "refusal") return refusal(prepared.reason);
@@ -112,7 +121,7 @@ function preparePacket(
     prepared: prepared.workspaceEdit,
     document: prepared.document,
     serverDescriptor,
-    operation: "resolveCodeAction",
+    operation,
     deadlineMs: budget.deadlineMs,
     now: budget.now,
     ...(originalSignal ? { originalSignal } : {}),
@@ -125,7 +134,9 @@ export function startBoundActionContinuation(
   origin: BoundActionOriginHandoff,
   session: BoundActionSession,
   stage: (packet: BoundActionContinuationPacket) => Promise<BoundActionStageResult>,
+  operation: StageableSemanticOperation = "resolveCodeAction",
 ): BoundActionContinuationHandle {
+  if (!isStageableSemanticOperation(operation)) return completed(refusal("unsupported"));
   const deadlineMs = session.deadlineMs;
   const originalSignal = session.signal;
   const now = session.now ?? Date.now;
@@ -148,7 +159,7 @@ export function startBoundActionContinuation(
     return completed(refusal(asReason(initialStop)));
   }
   let packet: BoundActionContinuationPacket | BoundActionContinuationResult;
-  try { packet = preparePacket(origin, originalSignal, budget); }
+  try { packet = preparePacket(origin, originalSignal, budget, operation); }
   catch {
     budget.dispose();
     return completed(refusal("unavailable"));
