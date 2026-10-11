@@ -9,8 +9,14 @@
  * hierarchy, diagnostics, refactor proposals) belong to the LSP tool.
  */
 import { Type } from "@sinclair/typebox";
+import { lstat, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+import { canonicalizeWorkspaceRoot, hashSessionFilePath, inspectionIdFor, PROTOCOL_SCHEMA_VERSION } from "@rhinos0608/pi-workspace-protocol";
 import type { ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { executeInspectV4 } from "./inspect.js";
+import { executeInspectV4, runGitDiff } from "./inspect.js";
+import { executeTaskView } from "./inspect-task-views.js";
+import { runGatherRecipe } from "./inspect-structural-gather.js";
+import { DEFAULT_INSPECT_BUDGET, validateInspectTaskCompatibility, type InspectTaskView } from "./inspect-task-contract.js";
 import type {
     InspectParams,
     InspectV4Input,
@@ -135,9 +141,36 @@ export interface InspectToolOptions {
     readonly contextGraph?: ContextGraph | ((cwd: string) => ContextGraph | Promise<ContextGraph>);
     /** Shared LSP provider retained for script-mode host calls; public inspect modes do not expose LSP navigation. */
     readonly lspInspectionProvider?: import("../lsp/lsp-inspection.js").LspInspectionProvider;
+    /** Construction-time opt-in for the selective inspect view/gather surface. */
+    readonly affordances?: boolean;
 }
 
 const INSPECT_V4_DESCRIPTION = `Inspect aggregate code structure and repository architecture for already-known targets. Use { mode: "file", path, analysis? } for structural facts such as dependencies/dependents, call graph, impact, dead code, routes, diff mapping, and quality signals. Use { mode: "directory", path, analysis? } for repository maps, graph summaries, clusters, layers, service boundaries, hotspots, routes, and other architectural views. Use { mode: "script", script, path? } only for bounded dependent multi-hop investigations. Do not use inspect for exact compiler-backed semantic lookup or navigation. Use LSP for definitions, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion/signature/inlay information, and refactor proposals. Use read when you simply need the contents of a known file.`;
+
+const INSPECT_AFFORDANCE_DESCRIPTION = `${INSPECT_V4_DESCRIPTION} Opt-in task views provide isolated structural overviews, dependencies, architecture, change-review, and routes; gather adds bounded source corroboration. Results are discovery-only; read cited source for strong evidence.`;
+const InspectAffordanceSchema = Type.Object(
+    {
+        ...InspectSchema.properties,
+        diff: Type.Optional(DiffSchema),
+        view: Type.Optional(Type.Union([
+            Type.Literal("overview"), Type.Literal("dependencies"), Type.Literal("architecture"),
+            Type.Literal("change-review"), Type.Literal("routes"),
+        ], { description: "Select one isolated structural inspect task view." })),
+        gather: Type.Optional(Type.Boolean({ description: "Run the view's bounded source-corroboration recipe." })),
+    },
+    { additionalProperties: false, description: "Opt-in bounded inspect task views. Results are discovery-only." },
+);
+
+const TASK_GATHER_BUDGET = Object.freeze({
+    ...DEFAULT_INSPECT_BUDGET,
+    stages: 4,
+    candidates: 100,
+    scannedFiles: 100,
+    scannedBytes: 8_000_000,
+    corroborationFiles: 100,
+    wallMs: 15_000,
+    outputBytes: 48 * 1024,
+});
 
 function legacyParamError(params: Record<string, unknown>): string | undefined {
     if (params.query !== undefined) return "inspect no longer supports query mode. Use grep('pattern').";
@@ -316,6 +349,111 @@ function validateFileOrDirectoryRequest(raw: Record<string, unknown>, kind: "fil
     return raw.path;
 }
 
+function validateTaskRequest(raw: Record<string, unknown>): { view: InspectTaskView; mode: "file" | "directory"; path: string; gather: boolean } {
+    if (typeof raw.view !== "string" || !["overview", "dependencies", "architecture", "change-review", "routes"].includes(raw.view)) {
+        throw new Error('Error: inspect affordance requires a valid "view"');
+    }
+    const mode = raw.mode;
+    validateInspectTaskCompatibility({
+        view: raw.view as InspectTaskView,
+        mode: typeof mode === "string" ? mode as "file" | "directory" | "script" : "script",
+        hasAnalysis: Object.hasOwn(raw, "analysis"),
+        diff: raw.diff as InspectV4Input["diff"],
+        targetIsDirectory: mode === "directory",
+    });
+    if (mode !== "file" && mode !== "directory") throw new Error('Error: inspect view requires file or directory mode');
+    if (typeof raw.path !== "string" || raw.path.length === 0) throw new Error(`Error: inspect mode "${mode}" requires "path"`);
+    if (raw.gather !== undefined && typeof raw.gather !== "boolean") throw new Error('Error: inspect param "gather" must be a boolean');
+    const allowed = new Set(["mode", "path", "view", "gather", "diff"]);
+    const foreign = rejectForeignKeys(raw, mode, allowed);
+    if (foreign) throw new Error(foreign);
+    if (raw.diff !== undefined && !["unstaged", "staged", "HEAD"].includes(String(raw.diff))) throw new Error('Error: inspect param "diff" must be unstaged, staged, or HEAD');
+    return { view: raw.view as InspectTaskView, mode, path: raw.path, gather: raw.gather === true };
+}
+
+function discoveryEvidence(cwd: string, sessionFilePath: string) {
+    const sessionId = hashSessionFilePath(sessionFilePath);
+    const canonicalWorkspaceRoot = canonicalizeWorkspaceRoot(cwd);
+    return {
+        schemaVersion: PROTOCOL_SCHEMA_VERSION,
+        inspectionId: inspectionIdFor({ sessionId, workspaceRoot: canonicalWorkspaceRoot, resources: [] }),
+        sessionId,
+        workspaceRoot: cwd,
+        canonicalWorkspaceRoot,
+        createdAt: new Date().toISOString(),
+        resources: [],
+        mode: "query" as const,
+    };
+}
+
+function respondDiscoveryOnly(
+    text: string,
+    mode: "file" | "directory",
+    upstreamDetails: Record<string, unknown>,
+    cwd: string,
+    sessionFilePath: string,
+    toolCallId: string,
+    publish: PublishInspection,
+) {
+    const details = {
+        mode,
+        contentText: text,
+        workspaceEvidence: discoveryEvidence(cwd, sessionFilePath),
+        lineCount: text === "" ? 0 : text.split("\n").length,
+        byteLength: Buffer.byteLength(text, "utf8"),
+        truncated: false,
+        upstreamDetails,
+    } as InspectV4Result;
+    return respondWithInspectDetails(details, toolCallId, publish);
+}
+
+async function executeTaskAffordance(
+    raw: Record<string, unknown>,
+    args: ScriptBranchArgs,
+    viewRequest: ReturnType<typeof validateTaskRequest>,
+) {
+    const { ctx, signal, sessionFilePath, toolCallId, publish } = args;
+    const absolutePath = resolve(ctx.cwd, viewRequest.path);
+    const stat = await lstat(absolutePath);
+    const targetIsDirectory = stat.isDirectory();
+    validateInspectTaskCompatibility({
+        view: viewRequest.view,
+        mode: viewRequest.mode,
+        hasAnalysis: false,
+        diff: raw.diff as InspectV4Input["diff"],
+        targetIsDirectory,
+    });
+    const canonicalPath = await realpath(absolutePath);
+    if (viewRequest.gather) {
+        const gather = await runGatherRecipe(viewRequest.view, {
+            mode: viewRequest.mode,
+            root: canonicalPath,
+            budget: TASK_GATHER_BUDGET,
+            limits: { maxDirs: 500, maxEntries: 5000, maxDepth: 25, maxFiles: 100, maxBytesPerFile: 1_000_000, maxTotalBytes: 8_000_000 },
+            signal,
+            ...(raw.diff ? { diffProvider: async () => {
+                const changes = await runGitDiff(raw.diff as NonNullable<InspectV4Input["diff"]>, canonicalPath);
+                if (changes === null) throw new Error("git diff unavailable");
+                return changes.flatMap((change) => change.changedLineRanges.map((range) =>
+                    `+++ b/${change.file}\n@@ -1,1 +${range.startLine},${Math.max(1, range.endLine - range.startLine + 1)} @@`,
+                )).join("\n");
+            } } : {}),
+        });
+        const text = JSON.stringify(gather, null, 2);
+        return respondDiscoveryOnly(text, viewRequest.mode, { gather }, ctx.cwd, sessionFilePath, toolCallId, publish);
+    }
+    const task = await executeTaskView({
+        view: viewRequest.view,
+        mode: viewRequest.mode,
+        path: canonicalPath,
+        cwd: ctx.cwd,
+        ...(raw.diff ? { diff: raw.diff as NonNullable<InspectV4Input["diff"]> } : {}),
+        signal,
+    });
+    const text = `${task.text}\n\nStatus: ${task.status}; coverage: ${task.coverage}`;
+    return respondDiscoveryOnly(text, viewRequest.mode, { inspectTask: task }, ctx.cwd, sessionFilePath, toolCallId, publish);
+}
+
 function parseAnalysisBag(raw: Record<string, unknown>, kind: "file" | "directory"): Partial<InspectV4Input> {
     const bag = asObject(raw.analysis ?? {});
     if (!bag) {
@@ -381,11 +519,12 @@ async function executeFileOrDirectoryBranch(args: FileOrDirectoryBranchArgs) {
 }
 
 export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
+    const affordances = opts.affordances === true;
     return {
         name: "inspect",
         label: "inspect",
-        description: INSPECT_V4_DESCRIPTION,
-        parameters: InspectSchema as unknown as Record<string, unknown>,
+        description: affordances ? INSPECT_AFFORDANCE_DESCRIPTION : INSPECT_V4_DESCRIPTION,
+        parameters: (affordances ? InspectAffordanceSchema : InspectSchema) as unknown as Record<string, unknown>,
         async execute(
             toolCallId: string,
             params: InspectParams & Record<string, unknown>,
@@ -405,6 +544,11 @@ export function createInspectV4Tool(opts: InspectToolOptions): ToolDefinition {
             const respond: InspectResponder = (details) =>
                 respondWithInspectDetails(details, toolCallId, publish);
             const raw = params as Record<string, unknown>;
+            if (affordances && (raw.view !== undefined || raw.gather !== undefined)) {
+                if (raw.view === undefined) throw new Error('Error: inspect "gather" requires a "view"');
+                const request = validateTaskRequest(raw);
+                return executeTaskAffordance(raw, { raw, ctx, signal, sessionFilePath, opts, toolCallId, publish }, request);
+            }
             switch (raw.mode) {
                 case "script":
                     return executeScriptBranch({ raw, ctx, signal, sessionFilePath, opts, toolCallId, publish });

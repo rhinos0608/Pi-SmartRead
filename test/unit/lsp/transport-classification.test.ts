@@ -17,7 +17,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeProc extends EventEmitter {
-  stdin: { write: ReturnType<typeof vi.fn> };
+  stdin: EventEmitter & { write: ReturnType<typeof vi.fn> };
   stdout: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
 }
@@ -49,8 +49,8 @@ function makeFakeProc(): FakeProc {
   const proc = new EventEmitter() as FakeProc;
   proc.stdout = new EventEmitter();
   proc.kill = vi.fn();
-  proc.stdin = {
-    write: vi.fn((data: string) => {
+  proc.stdin = Object.assign(new EventEmitter(), {
+    write: vi.fn((data: string, ...args: unknown[]) => {
       // Auto-respond to "initialize" so LSPConnection.start() resolves.
       const match = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (match) {
@@ -63,9 +63,11 @@ function makeFakeProc(): FakeProc {
           }
         } catch { /* ignore */ }
       }
+      const callback = args.find((arg) => typeof arg === "function") as ((error?: Error | null) => void) | undefined;
+      if (callback) queueMicrotask(() => callback());
       return true;
     }),
-  };
+  });
   return proc;
 }
 

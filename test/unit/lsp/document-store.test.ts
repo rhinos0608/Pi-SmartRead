@@ -6,147 +6,168 @@ import { diffRange, LspDocumentStore, sha256OfText, syncConfigFromCapability } f
 
 const file = (...segs: string[]) => resolve(join(...segs));
 
+const mockCtx = {
+  connectionId: "conn-1",
+  transportId: "trans-1",
+  descriptorId: "desc-1",
+  projectRoot: "/workspace",
+  positionEncoding: "utf-16" as const,
+};
+
 describe("LspDocumentStore", () => {
-  it("closed document prepares as didOpen with monotonic version 1", () => {
+  it("closed document prepares as didOpen with monotonic version 1, open only after commit", () => {
     const store = new LspDocumentStore();
-    const d = store.prepare(file("/tmp", "a.ts"), "const a = 1;");
+    const p = file("/tmp", "a.ts");
+    const d = store.planPrepare(p, "const a = 1;");
     expect(d.action).toBe("didOpen");
     if (d.action === "didOpen") {
       expect(d.version).toBe(1);
       expect(d.languageId).toBe("typescript");
       expect(d.uri).toContain("a.ts");
     }
-    expect(store.isOpen(file("/tmp", "a.ts"))).toBe(false); // open only after markSynced
-    store.markSynced(file("/tmp", "a.ts"));
-    expect(store.isOpen(file("/tmp", "a.ts"))).toBe(true);
+    expect(store.isOpen(p)).toBe(false); // open only after commit
+    const receipt = store.commitSubmitted(d, mockCtx);
+    expect(store.isOpen(p)).toBe(true);
+    expect(receipt.version).toBe(1);
+    expect(receipt.canonicalPath).toBe(p);
+    expect(receipt.connectionId).toBe("conn-1");
   });
 
-  it("unchanged content prepares as none (no wire)", () => {
+  it("unchanged content prepares as none reusing submitted receipt", () => {
     const store = new LspDocumentStore();
     const p = file("/tmp", "b.ts");
-    store.prepare(p, "x");
-    store.markSynced(p);
-    const d = store.prepare(p, "x");
-    expect(d.action).toBe("none");
+    const d1 = store.planPrepare(p, "x");
+    const receipt1 = store.commitSubmitted(d1, mockCtx);
+    const d2 = store.planPrepare(p, "x");
+    expect(d2.action).toBe("none");
+    if (d2.action === "none") {
+      expect(d2.receipt).toBe(receipt1);
+    }
     expect(store.getVersion(p)).toBe(1);
   });
 
   it("changed content uses incremental range edit when advertised, full otherwise", () => {
     const store = new LspDocumentStore();
-    const p = file("/tmp", "c.ts");
-    store.prepare(p, "const a = 1;\n", { syncMode: "incremental" });
-    store.markSynced(p);
-    const inc = store.prepare(p, "const a = 2;\n", { syncMode: "incremental" });
+    const p1 = file("/tmp", "c_inc.ts");
+    const d1 = store.planPrepare(p1, "const a = 1;\n", { syncConfig: { openClose: true, change: "incremental" } });
+    store.commitSubmitted(d1, mockCtx);
+    const inc = store.planPrepare(p1, "const a = 2;\n", { syncConfig: { openClose: true, change: "incremental" } });
     expect(inc.action).toBe("didChange-incremental");
     if (inc.action === "didChange-incremental") {
       expect(inc.range).toBeTruthy();
       expect(typeof inc.rangeLength).toBe("number");
     }
-    const full = store.prepare(p, "const a = 3;\n", { syncMode: "full" });
+    store.commitSubmitted(inc, mockCtx);
+
+    const p2 = file("/tmp", "c_full.ts");
+    const d2 = store.planPrepare(p2, "const a = 1;\n", { syncConfig: { openClose: true, change: "full" } });
+    store.commitSubmitted(d2, mockCtx);
+    const full = store.planPrepare(p2, "const a = 2;\n", { syncConfig: { openClose: true, change: "full" } });
     expect(full.action).toBe("didChange-full");
   });
 
   it("versions are monotonic and mutation generation bumps on change/close", () => {
     const store = new LspDocumentStore();
     const p = file("/tmp", "d.ts");
-    store.prepare(p, "a");
-    store.markSynced(p);
-    store.prepare(p, "b");
+    const d1 = store.planPrepare(p, "a");
+    store.commitSubmitted(d1, mockCtx);
+    const d2 = store.planPrepare(p, "b");
+    store.commitSubmitted(d2, mockCtx);
     const s = store.get(p)!;
-    expect(s.version).toBe(2);
-    expect(s.mutationGeneration).toBe(1);
+    expect(s.submittedVersion).toBe(2);
+    expect(s.mutationGeneration).toBe(2);
     store.markClosed(p);
-    expect(store.get(p)!.mutationGeneration).toBe(2);
+    expect(store.get(p)!.mutationGeneration).toBe(3);
     expect(store.isOpen(p)).toBe(false);
+    expect(store.getSubmittedReceipt(p)).toBeNull();
   });
 
   it("diagnostic receipts clear on mutation (post-edit invalidation)", () => {
     const store = new LspDocumentStore();
     const p = file("/tmp", "e.ts");
-    store.prepare(p, "a");
-    store.markSynced(p);
+    const d1 = store.planPrepare(p, "a");
+    store.commitSubmitted(d1, mockCtx);
     const r = store.recordDiagnosticReceipt(p, "rid-1");
     expect(store.get(p)!.diagnosticReceipt).toBe(r);
     expect(store.get(p)!.resultId).toBe("rid-1");
-    store.prepare(p, "b");
+    const d2 = store.planPrepare(p, "b");
+    store.commitSubmitted(d2, mockCtx);
     expect(store.get(p)!.diagnosticReceipt).toBeNull();
     expect(store.get(p)!.resultId).toBeNull();
   });
 
-  it("serializes per-document work in order", async () => {
+  it("serializes per-document work in order, releasing queue even on failure", async () => {
     const store = new LspDocumentStore();
     const p = file("/tmp", "f.ts");
     const order: string[] = [];
-    await Promise.all([
-      store.serialize(p, async () => { await new Promise((r) => setTimeout(r, 20)); order.push("first"); }),
-      store.serialize(p, async () => { order.push("second"); }),
+    await Promise.allSettled([
+      store.serialize(p, async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        order.push("first-fail");
+        throw new Error("fail in queue");
+      }),
+      store.serialize(p, async () => {
+        order.push("second-pass");
+      }),
     ]);
-    expect(order).toEqual(["first", "second"]);
+    expect(order).toEqual(["first-fail", "second-pass"]);
   });
 
-  it("legacy syncMode none without openClose sends no wire (back-compat closed)", () => {
+  it("no-sync or openClose:false throws (cannot produce valid receipt)", () => {
     const store = new LspDocumentStore();
-    const p = file("/tmp", "g.ts");
-    const first = store.prepare(p, "const a = 1;", { syncMode: "none" });
-    expect(first.action).toBe("none");
-    if (first.action === "none") expect(first.changed).toBe(true);
-    expect(store.isOpen(p)).toBe(false);
-    const second = store.prepare(p, "const a = 2;", { syncMode: "none" });
-    expect(second.action).toBe("none");
-    expect(store.isOpen(p)).toBe(false);
+    const p1 = file("/tmp", "g1.ts");
+    expect(() => store.planPrepare(p1, "a", { syncConfig: { openClose: false, change: "full" } }))
+      .toThrow(/synchronization not supported/);
+    const p2 = file("/tmp", "g2.ts");
+    expect(() => store.planPrepare(p2, "a", { syncConfig: { openClose: true, change: "none" } }))
+      .toThrow(/synchronization not supported/);
   });
 
-  it("openClose true + change none: first touch didOpen, later changes track with no wire", () => {
+  it("uncertain write refuses preparation until established new document lifecycle", () => {
     const store = new LspDocumentStore();
-    const p = file("/tmp", "g2.ts");
-    const first = store.prepare(p, "const a = 1;", { syncConfig: { openClose: true, change: "none" } });
-    expect(first.action).toBe("didOpen");
-    store.markSynced(p);
+    const p = file("/tmp", "uncert.ts");
+    const d1 = store.planPrepare(p, "const a = 1;\n", { syncConfig: { openClose: true, change: "incremental" } });
+    store.commitSubmitted(d1, mockCtx);
+    expect(store.getSubmittedReceipt(p)).not.toBeNull();
+
+    // Mark uncertain (simulates write error or abort)
+    store.markUncertain(p);
+    expect(store.getSubmittedReceipt(p)).toBeNull();
+    expect(store.get(p)!.uncertain).toBe(true);
+
+    // Uncertain state must remain refused without silent wire recovery
+    expect(() => store.planPrepare(p, "const a = 2;\n", { syncConfig: { openClose: true, change: "incremental" } }))
+      .toThrow(/uncertain/);
+
+    // Establishing a new lifecycle (close) resets uncertain state and permits fresh didOpen
+    store.markClosed(p);
+    const d2 = store.planPrepare(p, "const a = 2;\n", { syncConfig: { openClose: true, change: "incremental" } });
+    expect(d2.action).toBe("didOpen");
+  });
+
+  it("markClosed during write must refuse commit and never reopen old plan", () => {
+    const store = new LspDocumentStore();
+    const p = file("/tmp", "closed-during-write.ts");
+    const d1 = store.planPrepare(p, "v1");
+    store.commitSubmitted(d1, mockCtx);
     expect(store.isOpen(p)).toBe(true);
-    const receipt = store.recordDiagnosticReceipt(p, "rid-1");
-    expect(store.get(p)!.diagnosticReceipt).toBe(receipt);
-    const genBefore = store.get(p)!.mutationGeneration;
-    const second = store.prepare(p, "const a = 2;", { syncConfig: { openClose: true, change: "none" } });
-    expect(second.action).toBe("none");
-    if (second.action === "none") expect(second.changed).toBe(true);
-    // No version bump for no-wire change, but content tracked + receipts cleared + generation bumped.
-    expect(store.getVersion(p)).toBe(1);
-    expect(store.get(p)!.lastContent).toBe("const a = 2;");
-    expect(store.get(p)!.diagnosticReceipt).toBeNull();
-    expect(store.get(p)!.resultId).toBeNull();
-    expect(store.get(p)!.mutationGeneration).toBe(genBefore + 1);
-    expect(store.isOpen(p)).toBe(true);
-    const same = store.prepare(p, "const a = 2;", { syncConfig: { openClose: true, change: "none" } });
-    expect(same.action).toBe("none");
-    if (same.action === "none") expect(same.changed).toBe(false);
-  });
 
-  it("openClose false never opens; content still tracked with receipt invalidation", () => {
-    const store = new LspDocumentStore();
-    const p = file("/tmp", "g3.ts");
-    const first = store.prepare(p, "a", { syncConfig: { openClose: false, change: "none" } });
-    expect(first.action).toBe("none");
+    const d2 = store.planPrepare(p, "v2");
+    // Simulate didClose occurring during the deferred write of v2
+    store.markClosed(p);
     expect(store.isOpen(p)).toBe(false);
-    store.recordDiagnosticReceipt(p, "rid-x");
-    const genBefore = store.get(p)!.mutationGeneration;
-    const second = store.prepare(p, "b", { syncConfig: { openClose: false, change: "none" } });
-    expect(second.action).toBe("none");
-    if (second.action === "none") expect(second.changed).toBe(true);
-    expect(store.isOpen(p)).toBe(false);
-    expect(store.get(p)!.lastContent).toBe("b");
-    expect(store.get(p)!.diagnosticReceipt).toBeNull();
-    expect(store.get(p)!.resultId).toBeNull();
-    expect(store.get(p)!.mutationGeneration).toBe(genBefore + 1);
-    store.markSynced(p);
+
+    // Attempting to commit the old plan after markClosed must refuse and never reopen
+    expect(() => store.commitSubmitted(d2, mockCtx)).toThrow(/refused|mismatch/);
     expect(store.isOpen(p)).toBe(false);
   });
 
   it("incremental decision carries baseText (old synchronized source)", () => {
     const store = new LspDocumentStore();
     const p = file("/tmp", "g4.ts");
-    store.prepare(p, "const a = 1;\n", { syncMode: "incremental" });
-    store.markSynced(p);
-    const d = store.prepare(p, "const a = 2;\n", { syncMode: "incremental" });
+    const d1 = store.planPrepare(p, "const a = 1;\n", { syncConfig: { openClose: true, change: "incremental" } });
+    store.commitSubmitted(d1, mockCtx);
+    const d = store.planPrepare(p, "const a = 2;\n", { syncConfig: { openClose: true, change: "incremental" } });
     expect(d.action).toBe("didChange-incremental");
     if (d.action === "didChange-incremental") expect(d.baseText).toBe("const a = 1;\n");
   });
@@ -163,22 +184,6 @@ describe("LspDocumentStore", () => {
     expect(syncConfigFromCapability({ textDocumentSync: { openClose: false, change: 2 } })).toEqual({ openClose: false, change: "incremental" });
   });
 
-  it("openClose:false with change mode sends no wire (didChange requires didOpen)", () => {
-    const store = new LspDocumentStore();
-    const p = file("/tmp", "g5.ts");
-    const first = store.prepare(p, "a", { syncConfig: { openClose: false, change: "full" } });
-    expect(first.action).toBe("none");
-    if (first.action === "none") expect(first.changed).toBe(true);
-    expect(store.isOpen(p)).toBe(false);
-    const genBefore = store.get(p)!.mutationGeneration;
-    const second = store.prepare(p, "b", { syncConfig: { openClose: false, change: "full" } });
-    expect(second.action).toBe("none");
-    if (second.action === "none") expect(second.changed).toBe(true);
-    expect(store.isOpen(p)).toBe(false);
-    expect(store.get(p)!.lastContent).toBe("b");
-    expect(store.get(p)!.mutationGeneration).toBe(genBefore + 1);
-  });
-
   it("symlinked and real paths share one entry (canonical key)", () => {
     const dir = mkdtempSync(join(tmpdir(), "docstore-sym-"));
     try {
@@ -187,12 +192,12 @@ describe("LspDocumentStore", () => {
       const link = join(dir, "link.ts");
       symlinkSync(real, link);
       const store = new LspDocumentStore();
-      store.prepare(link, "const a = 1;");
-      store.markSynced(link);
+      const d1 = store.planPrepare(link, "const a = 1;");
+      store.commitSubmitted(d1, mockCtx);
       // Same canonical entry visible via real path.
       expect(store.isOpen(real)).toBe(true);
       expect(store.getVersion(real)).toBe(1);
-      const viaLink = store.prepare(real, "const a = 1;");
+      const viaLink = store.planPrepare(real, "const a = 1;");
       expect(viaLink.action).toBe("none");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -202,9 +207,9 @@ describe("LspDocumentStore", () => {
   it("nonexistent path falls back to lexical key (no throw)", () => {
     const store = new LspDocumentStore();
     const p = file("/tmp", "no-such-dir-xyz", "missing.ts");
-    const d = store.prepare(p, "x");
+    const d = store.planPrepare(p, "x");
     expect(d.action).toBe("didOpen");
-    store.markSynced(p);
+    store.commitSubmitted(d, mockCtx);
     expect(store.isOpen(p)).toBe(true);
   });
 
