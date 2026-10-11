@@ -55,9 +55,9 @@ import {
 export const SMARTEDIT_INTEGRATION_ENABLED =
   process.env.PI_SMARTREAD_SMARTEDIT_INTEGRATION === "1";
 
-/** Pinned protocol both repos must resolve to (fail, never skip, on mismatch). */
+/** Pinned protocol both repos must resolve to (fail, never skip, on mismatch): tag v0.8.0. */
 const EXPECTED_PROTOCOL_VERSION = "0.8.0";
-const EXPECTED_PROTOCOL_COMMIT = "7861d95d95964f62ca817c96050a5beec86e4ea9";
+const EXPECTED_PROTOCOL_COMMIT = "4e5e0106c1aba0f01ce839a448587e33b25425f9";
 
 const sha = (value: Buffer | string): string =>
   createHash("sha256").update(value).digest("hex");

@@ -170,8 +170,8 @@ PI_SMARTREAD_SMARTEDIT_INTEGRATION=1 PI_SMARTEDIT_DIR=/path/to/Pi-SmartEdit \
 
 Without the gate the suite skips cleanly. With the gate on, a missing
 `PI_SMARTEDIT_DIR` or a protocol-build mismatch between the two checkouts
-(both must pin `@rhinos0608/pi-workspace-protocol` 0.8.0 from
-`7861d95d95964f62ca817c96050a5beec86e4ea9`) fails instead of skipping.
+(both must pin `@rhinos0608/pi-workspace-protocol` tag `v0.8.0`, resolving to
+`4e5e0106c1aba0f01ce839a448587e33b25425f9`) fails instead of skipping.
 
 ## 5. Explicit UNMET needs — SmartEdit-side approval required (PENDING sister-repo owner decision)
 
