@@ -499,8 +499,23 @@ export interface TebInfraFailure {
     detail: string;
 }
 
-const TEB_AUTH_PATTERN = /(401|403|unauthorized|unauthorised|auth[^a-z]*fail|invalid[^a-z]*api[^a-z]*key|api key|provider[^a-z]*error|rate[- ]?limit|429|ECONNREFUSED|ENOTFOUND|fetch failed)/i;
+const TEB_AUTH_PATTERN = /(\b401\b|\b403\b|unauthorized|unauthorised|auth[^a-z]*fail|invalid[^a-z]*api[^a-z]*key|api key|provider[^a-z]*error|rate[- ]?limit|\b429\b|ECONNREFUSED|ENOTFOUND|fetch failed)/i;
 const TEB_EXT_PATTERN = /(failed to load extension|extension[^\n]{0,80}fail|error[ \w-]*registering tools|could not load extension|ERR.*extension)/i;
+
+/** Harness telemetry prefix (scripts/eval/surface-identity.ts): never an error signal. */
+const TEB_SURFACE_IDENTITY_PREFIX = "[pi-smartread:surface-identity]";
+
+/**
+ * stderr with the harness's own surface-identity telemetry line(s)
+ * removed. Those lines carry 64-hex hashes, and a 401/403/429
+ * substring inside a hash is not an HTTP status.
+ */
+function stderrForInfraSignal(stderrText: string): string {
+    return stderrText
+        .split("\n")
+        .filter((line) => !line.startsWith(TEB_SURFACE_IDENTITY_PREFIX))
+        .join("\n");
+}
 
 /** True when a parsed session event is an assistant message (identity-bearing). */
 function isAssistantMessageEvent(event: unknown): boolean {
@@ -573,11 +588,12 @@ export function classifyInfraFailure(input: {
     // signal/nonzero exit: the session counts as a failure downstream,
     // never as an infrastructure exclusion.
     if (input.timedOut || input.turnLimitHit === true) return null;
-    const authInStderr = input.stderrText.match(TEB_AUTH_PATTERN);
+    const stderrText = stderrForInfraSignal(input.stderrText);
+    const authInStderr = stderrText.match(TEB_AUTH_PATTERN);
     if (authInStderr !== null) {
         return { kind: "provider-auth", detail: `provider/auth failure before the first assistant message: ${authInStderr[0]}` };
     }
-    const extInStderr = input.stderrText.match(TEB_EXT_PATTERN);
+    const extInStderr = stderrText.match(TEB_EXT_PATTERN);
     if (extInStderr !== null) {
         return { kind: "extension-load", detail: `extension load failure: ${extInStderr[0].slice(0, 160)}` };
     }

@@ -1121,6 +1121,20 @@ describe("classifyInfraFailure (E13.6)", () => {
             classifyInfraFailure({ ...base, stderrText: "ERROR 401 Unauthorized: invalid API key", exitCode: 1 }),
         ).toMatchObject({ kind: "provider-auth" });
     });
+    it("ignores hex substrings in the harness surface-identity line (no spurious provider-auth)", () => {
+        // The harness's own telemetry line carries 64-hex hashes; a
+        // '429' (or 401/403) substring inside one must not read as an
+        // HTTP status on a session that completed normally (exit 0).
+        const stderr =
+            `[pi-smartread:surface-identity] {"selectors":{"general":{"enabled":false},"inspect":{"enabled":false}},"surfaceIdentity":"${"a".repeat(61)}429","schemaHash":"${"b".repeat(64)}","guidanceHash":"${"c".repeat(64)}"}\n` +
+            "pi ready\n";
+        expect(classifyInfraFailure({ ...base, stderrText: stderr, exitCode: 0 })).toBeNull();
+    });
+    it("still flags a genuine HTTP 429 rate-limit failure", () => {
+        expect(
+            classifyInfraFailure({ ...base, stderrText: "ERROR 429 Too Many Requests: rate limit exceeded", exitCode: 1 }),
+        ).toMatchObject({ kind: "provider-auth" });
+    });
     it("does not exclude provider errors that arrive after the first assistant message", () => {
         // After the first assistant token the session is graded, never excluded.
         const failure = classifyInfraFailure({
