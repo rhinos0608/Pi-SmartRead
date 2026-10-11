@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { captureCodeActionPayload } from "../../../src/lsp/lsp-code-action-payload.js";
-import { canonicalActionJson } from "../../../src/lsp/lsp-action-json.js";
+import { ACTION_JSON_MAX_BYTES, ACTION_SERIALIZED_EDIT_MAX_BYTES, canonicalActionJson, snapshotActionJson } from "../../../src/lsp/lsp-action-json.js";
 
 describe("captureCodeActionPayload", () => {
+  it("supports an optional byte bound while retaining the 48 KiB default", () => {
+    expect(ACTION_JSON_MAX_BYTES).toBe(48 * 1024);
+    expect(ACTION_SERIALIZED_EDIT_MAX_BYTES).toBe(16 * 1024 * 1024);
+    expect(() => canonicalActionJson("x".repeat(100), { maxBytes: 102 })).not.toThrow();
+    expect(() => canonicalActionJson("x".repeat(100), { maxBytes: 101 })).toThrow();
+    expect(snapshotActionJson("x".repeat(100), { maxBytes: 102 })).toBe("x".repeat(100));
+    expect(() => canonicalActionJson("x".repeat(48 * 1024 - 2))).not.toThrow();
+  });
   it("retains an immutable, ordered full wire object while normalizing its display projection", () => {
     const raw = { title: "Fix", diagnostics: [{ message: "d" }], extension: { opaque: [1] }, edit: { documentChanges: [{ textDocument: { uri: "file:///a", version: 2 }, edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "x" }] }] }, data: { z: 1, a: { keep: true } } };
     Object.defineProperty(raw, "__proto__", { value: { safe: true }, enumerable: true });

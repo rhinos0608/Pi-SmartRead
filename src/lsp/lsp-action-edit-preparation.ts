@@ -68,38 +68,30 @@ function decodeFileUri(uri: unknown): string | null {
   } catch { return null; }
 }
 
-/**
- * Purely prepares the resolved raw WorkspaceEdit for a later independent
- * held-lease verifier/staging gate. This does not validate freshness, stage,
- * authorize, or apply edits.
- */
-export function prepareBoundActionEdit(origin: BoundActionOriginHandoff): PreparedBoundActionEdit {
-  if (origin.server.positionEncoding !== "utf-16" || origin.receipt.positionEncoding !== "utf-16" ||
-      origin.server.positionEncoding !== origin.receipt.positionEncoding) return refusal("unsupported-encoding");
-
-  const action = origin.resolvedAction;
-  if (hasCommandOrDisabled(origin.originalAction) || hasCommandOrDisabled(action)) return refusal("command-or-disabled");
-  if (!isRecord(action)) return refusal("malformed-edit");
-  if (!Object.hasOwn(action, "edit")) return refusal("no-edit");
-  const raw = action.edit;
-  if (!isRecord(raw)) return refusal("malformed-edit");
+/** Converts a raw WorkspaceEdit after rejecting unsupported protocol semantics. */
+export function convertRawWorkspaceEdit(
+  rawValue: unknown,
+  origin: { readonly canonicalPath: string; readonly rawSha256: string; readonly receiptVersion: number },
+): PreparedBoundActionEdit {
+  const { canonicalPath: originCanonicalPath, rawSha256: originSha256, receiptVersion: originReceiptVersion } = origin;
+  if (!originCanonicalPath || !/^[0-9a-f]{64}$/.test(originSha256) || !isRecord(rawValue)) return refusal("malformed-edit");
+  const raw = rawValue;
   if (!hasOnlyKeys(raw, ["changes", "documentChanges"])) return refusal("unsupported-semantics");
   const hasChanges = Object.hasOwn(raw, "changes");
   const hasDocumentChanges = Object.hasOwn(raw, "documentChanges");
   if (hasChanges === hasDocumentChanges) return refusal("malformed-edit");
-
   const targetPaths: string[] = [];
   if (hasChanges) {
     if (!isRecord(raw.changes)) return refusal("malformed-edit");
     const entries = Object.entries(raw.changes);
-    if (entries.length === 0) return refusal("malformed-edit");
+    if (!entries.length) return refusal("malformed-edit");
     for (const [uri, edits] of entries) {
       const path = decodeFileUri(uri);
       if (!path || !validEdits(edits)) return refusal("malformed-edit");
       targetPaths.push(path);
     }
   } else {
-    if (!Array.isArray(raw.documentChanges) || raw.documentChanges.length === 0 || Object.getPrototypeOf(raw.documentChanges) !== Array.prototype) return refusal("malformed-edit");
+    if (!Array.isArray(raw.documentChanges) || !raw.documentChanges.length || Object.getPrototypeOf(raw.documentChanges) !== Array.prototype) return refusal("malformed-edit");
     for (const change of raw.documentChanges) {
       if (!isRecord(change)) return refusal("malformed-edit");
       if (!hasOnlyKeys(change, ["textDocument", "edits"])) return refusal("unsupported-semantics");
@@ -108,14 +100,11 @@ export function prepareBoundActionEdit(origin: BoundActionOriginHandoff): Prepar
       const path = decodeFileUri(uri);
       if (!path || !validEdits(change.edits)) return refusal("malformed-edit");
       if (version !== null && (typeof version !== "number" || !Number.isSafeInteger(version))) return refusal("unsupported-semantics");
-      if (typeof version === "number" && (path !== origin.source.canonicalPath || version !== origin.receipt.version)) return refusal("unsupported-semantics");
+      if (typeof version === "number" && (path !== originCanonicalPath || version !== originReceiptVersion)) return refusal("unsupported-semantics");
       targetPaths.push(path);
     }
   }
   if (new Set(targetPaths).size !== targetPaths.length) return refusal("unsupported-semantics");
-
-  // All semantics omitted by the protocol DTO have been ruled out above.
-  // Source-document versions are bound here, but must be revalidated at staging.
   const converted = envelopeResultToWorkspaceEdit({ edit: raw });
   if (!converted) return refusal("malformed-edit");
   const workspaceEdit = Object.freeze({
@@ -129,9 +118,31 @@ export function prepareBoundActionEdit(origin: BoundActionOriginHandoff): Prepar
       }))),
     }))),
   });
-  return Object.freeze({
-    kind: "prepared",
-    workspaceEdit,
-    document: Object.freeze({ canonicalPath: origin.source.canonicalPath, sha256: origin.source.rawSha256 }),
-  });
+  return Object.freeze({ kind: "prepared", workspaceEdit, document: Object.freeze({ canonicalPath: originCanonicalPath, sha256: originSha256 }) });
+}
+
+/** Converts formatting edits for the request's explicitly selected canonical target. */
+export function convertFormattingTextEdits(
+  edits: unknown,
+  target: { readonly canonicalPath: string; readonly rawSha256: string },
+): PreparedBoundActionEdit {
+  const { canonicalPath: targetCanonicalPath, rawSha256 } = target;
+  if (!targetCanonicalPath || !/^[0-9a-f]{64}$/.test(rawSha256) || !validEdits(edits)) return refusal("malformed-edit");
+  const fileEdits = Object.freeze([Object.freeze({
+    filePath: targetCanonicalPath,
+    edits: Object.freeze(edits.map((edit) => Object.freeze({ filePath: targetCanonicalPath,
+      range: Object.freeze({ start: Object.freeze({ ...edit.range.start }), end: Object.freeze({ ...edit.range.end }) }), newText: edit.newText }))),
+  })]);
+  return Object.freeze({ kind: "prepared", workspaceEdit: Object.freeze({ positionEncoding: "utf-16" as const, fileEdits }), document: Object.freeze({ canonicalPath: targetCanonicalPath, sha256: rawSha256 }) });
+}
+
+/** Encoding/action metadata checks remain at the caller; preparation itself is pure. */
+export function prepareBoundActionEdit(origin: BoundActionOriginHandoff): PreparedBoundActionEdit {
+  if (origin.server.positionEncoding !== "utf-16" || origin.receipt.positionEncoding !== "utf-16" ||
+      origin.server.positionEncoding !== origin.receipt.positionEncoding) return refusal("unsupported-encoding");
+  const action = origin.resolvedAction;
+  if (hasCommandOrDisabled(origin.originalAction) || hasCommandOrDisabled(action)) return refusal("command-or-disabled");
+  if (!isRecord(action)) return refusal("malformed-edit");
+  if (!Object.hasOwn(action, "edit")) return refusal("no-edit");
+  return convertRawWorkspaceEdit(action.edit, { canonicalPath: origin.source.canonicalPath, rawSha256: origin.source.rawSha256, receiptVersion: origin.receipt.version });
 }

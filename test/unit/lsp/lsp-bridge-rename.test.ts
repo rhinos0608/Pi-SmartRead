@@ -8,7 +8,7 @@ const toUri = (p: string): string => pathToFileURL(resolve(p)).href;
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeProc extends EventEmitter {
-  stdin: { write: ReturnType<typeof vi.fn> };
+  stdin: EventEmitter & { write: ReturnType<typeof vi.fn> };
   stdout: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
 }
@@ -23,8 +23,8 @@ function makeFakeProc(): FakeProc {
   const proc = new EventEmitter() as FakeProc;
   proc.stdout = new EventEmitter();
   proc.kill = vi.fn();
-  proc.stdin = {
-    write: vi.fn((data: string) => {
+  proc.stdin = Object.assign(new EventEmitter(), {
+    write: vi.fn((data: string, _encoding?: unknown, callback?: (error?: Error | null) => void) => {
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (m) {
         const len = parseInt(m[1]!, 10);
@@ -36,14 +36,15 @@ function makeFakeProc(): FakeProc {
           }
         } catch {}
       }
+      if (typeof callback === "function") queueMicrotask(() => callback());
       return true;
     }),
-  };
+  });
   return proc;
 }
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: vi.fn(() => makeFakeProc()),
-  execFileSync: vi.fn(() => Buffer.from("")),
 }));
 // Adapter-delegation seam: mock the canonical executor with a controllable
 // override (default = passthrough to the real implementation, so the
@@ -84,8 +85,8 @@ describe("LSPConnection rename", () => {
     const fileUri = toUri(filePath);
     // Intercept rename request and respond with documentChanges
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -123,8 +124,8 @@ describe("LSPConnection rename", () => {
     const filePath = join(root, "a.ts");
     const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -151,8 +152,8 @@ describe("LSPConnection rename", () => {
   it("rename returns null when server returns null", async () => {
     const { conn, proc } = await makeConnection(root);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -170,8 +171,8 @@ describe("LSPConnection rename", () => {
   it("prepareRename returns null when server returns null", async () => {
     const { conn, proc } = await makeConnection(root);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -189,8 +190,8 @@ describe("LSPConnection rename", () => {
   it("prepareRename returns range when server supports it", async () => {
     const { conn, proc } = await makeConnection(root);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -217,8 +218,8 @@ describe("LSPConnection rename", () => {
   it("prepareRename handles Range directly", async () => {
     const { conn, proc } = await makeConnection(root);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);

@@ -4,6 +4,7 @@ import { open, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export const ACTION_SOURCE_MAX_BYTES = 1024 * 1024;
+export const ACTION_SEMANTIC_EDIT_MAX_BYTES = 4 * 1024 * 1024;
 
 export interface ActionSourceSnapshot {
   readonly canonicalPath: string;
@@ -38,9 +39,9 @@ function aborted(signal?: AbortSignal, deadlineMs?: number, now = Date.now): Act
 
 export async function snapshotActionSource(
   path: string,
-  options: { signal?: AbortSignal; deadlineMs: number; now?: () => number; io?: ActionSourceIO },
+  options: { signal?: AbortSignal; deadlineMs: number; now?: () => number; io?: ActionSourceIO; maxBytes?: number },
 ): Promise<ActionSourceResult> {
-  const { signal, deadlineMs, now = Date.now, io = nodeIO } = options;
+  const { signal, deadlineMs, now = Date.now, io = nodeIO, maxBytes = ACTION_SOURCE_MAX_BYTES } = options;
   const check = (): ActionSourceFailure | null => aborted(signal, deadlineMs, now);
   if (!Number.isFinite(deadlineMs)) return { ok: false, reason: "timeout" };
   const before = check();
@@ -62,20 +63,20 @@ export async function snapshotActionSource(
       const afterFstat = check();
       if (afterFstat) return { ok: false, reason: afterFstat };
       if (!opened.isFile()) return { ok: false, reason: "unavailable" };
-      if (opened.size > ACTION_SOURCE_MAX_BYTES) return { ok: false, reason: "too-large" };
+      if (opened.size > maxBytes) return { ok: false, reason: "too-large" };
 
       const parts: Buffer[] = [];
       let total = 0;
       while (true) {
         const interrupted = check();
         if (interrupted) return { ok: false, reason: interrupted };
-        const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, ACTION_SOURCE_MAX_BYTES + 1 - total));
+        const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total));
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
         const afterRead = check();
         if (afterRead) return { ok: false, reason: afterRead };
         if (!bytesRead) break;
         total += bytesRead;
-        if (total > ACTION_SOURCE_MAX_BYTES) return { ok: false, reason: "too-large" };
+        if (total > maxBytes) return { ok: false, reason: "too-large" };
         parts.push(buffer.subarray(0, bytesRead));
       }
 

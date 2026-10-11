@@ -77,11 +77,10 @@ const LSP_SNIPPET =
   "LSP answers exact compiler/language-server semantic questions — the only path to safe rename/refactor proposals.";
 
 const LSP_GUIDELINES = [
-  "LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals.",
-  "Positions and ranges are 0-based in server.positionEncoding; inspect the actual returned actionId and sourceSha256 rather than constructing either value.",
-  "For code actions, discover with codeActions using path, range, and optional context; resolve only by sending the returned selection {actionId, sourceSha256} with the same path, range, routing, and context. If context was omitted, retain that omission (the discovery default applies); never pass a raw action or guess an ID, digest, or target.",
-  "A codeActions result is a discovery list, not a selected or applied edit. Resolve is a readonly preview unless trusted SmartEdit staging is available; applyProposal remains explicit. An unavailable refusal may omit server; never infer a server.",
-  "Rule of thumb: if the question is 'what does the language server/compiler know about this exact symbol/location?', use LSP. If it is 'what is the shape, architecture, blast radius, graph, or quality of this file/repo?', use inspect.",
+  "LSP { operation, ... } provides strict compiler/language-server semantics: definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, and refactor/code-action proposals; use it for exact compiler-known facts, and inspect for repository shape, architecture, impact, graph, or quality.",
+  "Positions and ranges are 0-based in server.positionEncoding; route by exact server id, and an unavailable refusal is valid (the server may be absent).",
+  "Discover code actions with codeActions using path, range, and optional context; resolve only with returned selection {actionId, sourceSha256} and the same path, range, routing, and context (preserve omitted context). Never pass a raw action or guess an ID, digest, or target.",
+  "Discovery lists actions but does not select or apply them; resolve is a readonly preview. Rename, formatting, and resolved actions are proposals; only explicit applyProposal mutates via SmartEdit.",
 ] as const;
 
 const LSP_AFFORDANCE_GUIDANCE: SmartReadToolGuidance = {

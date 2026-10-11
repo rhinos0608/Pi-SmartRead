@@ -48,6 +48,20 @@ describe("classifyStatus", () => {
 });
 
 describe("validateStrictRequest field matrix", () => {
+  it("accepts formatOnType with a non-empty trigger character", () => {
+    expect(validateStrictRequest({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 0 }, ch: "{" }).ok).toBe(true);
+  });
+  it("requires formatOnType trigger character", () => {
+    expect(validateStrictRequest({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 0 } }).ok).toBe(false);
+  });
+  it("rejects empty formatOnType trigger character", () => {
+    expect(validateStrictRequest({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 0 }, ch: "" }).ok).toBe(false);
+  });
+  it("rejects ch as foreign for other operations", () => {
+    const r = validateStrictRequest({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 }, ch: "{" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/foreign field "ch"/);
+  });
   it("accepts valid hover", () => {
     const r = validateStrictRequest({ operation: "hover", path: "src/a.ts", position: { line: 0, character: 5 } });
     expect(r.ok).toBe(true);

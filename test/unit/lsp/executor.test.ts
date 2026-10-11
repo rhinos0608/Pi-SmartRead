@@ -79,6 +79,18 @@ describe("executor", () => {
   it("validation throw: request without method", async () => {
     await expect(executeLspOperation({ operation: "request" }, { cwd: ROOT })).rejects.toThrow(/requires field/);
   });
+  it("onTypeFormatting sends the caller's trigger character unchanged", async () => {
+    let sent: { method: string; params: unknown } | undefined;
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      requestImpl: async (method, params) => { sent = { method, params }; return []; },
+    });
+    await executeLspOperation({ operation: "formatOnType", path: "a.ts", position: { line: 0, character: 1 }, ch: "}" }, { getManager: () => mgr(c), cwd: ROOT });
+    expect(sent).toEqual({
+      method: "textDocument/onTypeFormatting",
+      params: { textDocument: { uri: "file:///repo/a.ts" }, position: { line: 0, character: 1 }, ch: "}", options: { tabSize: 2, insertSpaces: true } },
+    });
+  });
   it("unsupported vs empty: capability absent -> unsupported", async () => {
     const c = conn({ getCapabilityRegistry: () => ({ can: () => false }) });
     const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 } }, { getManager: () => mgr(c), cwd: ROOT });

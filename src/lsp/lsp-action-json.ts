@@ -1,4 +1,5 @@
-const MAX_ACTION_JSON_BYTES = 48 * 1024;
+export const ACTION_JSON_MAX_BYTES = 48 * 1024;
+export const ACTION_SERIALIZED_EDIT_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_ACTION_JSON_DEPTH = 64;
 
 export type ActionJson = null | boolean | number | string | readonly ActionJson[] | { readonly [key: string]: ActionJson };
@@ -12,12 +13,12 @@ function invalid(): never { throw new InvalidActionJson("invalid-json"); }
 type WalkResult = { canonical: string; snapshot: ActionJson };
 
 /** Reads validated JSON descriptor values once for both hashing and snapshotting. */
-function walkActionJson(value: unknown): WalkResult {
+function walkActionJson(value: unknown, maxBytes = ACTION_JSON_MAX_BYTES): WalkResult {
   const ancestors = new Set<object>();
   let bytes = 0;
   const bounded = (text: string): string => {
     bytes += Buffer.byteLength(text, "utf8");
-    if (bytes > MAX_ACTION_JSON_BYTES) throw new InvalidActionJson("size-limit");
+    if (bytes > maxBytes) throw new InvalidActionJson("size-limit");
     return text;
   };
   const visit = (current: unknown, depth: number): WalkResult => {
@@ -73,13 +74,13 @@ function walkActionJson(value: unknown): WalkResult {
 }
 
 /** Validates JSON data and returns its canonical, key-sorted representation. */
-export function canonicalActionJson(value: unknown): string {
-  return walkActionJson(value).canonical;
+export function canonicalActionJson(value: unknown, options: { maxBytes?: number } = {}): string {
+  return walkActionJson(value, options.maxBytes).canonical;
 }
 
 /** Creates a detached immutable JSON snapshot without changing property order. */
-export function snapshotActionJson(value: unknown): ActionJson {
-  return walkActionJson(value).snapshot;
+export function snapshotActionJson(value: unknown, options: { maxBytes?: number } = {}): ActionJson {
+  return walkActionJson(value, options.maxBytes).snapshot;
 }
 
 export function actionJsonRefusal(error: unknown): "size-limit" | "invalid-json" {

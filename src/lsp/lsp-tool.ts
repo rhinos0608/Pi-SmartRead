@@ -97,6 +97,10 @@ const LspSchema = Type.Object(
       },
     )),
     range: Type.Optional(RangeSchema),
+    ch: Type.Optional(Type.String({
+      minLength: 1,
+      description: "Required trigger character for formatOnType; pass the character typed by the user.",
+    })),
     query: Type.Optional(Type.String({
       minLength: 1,
       description: "Required by workspaceSymbols. workspaceSymbols accepts query, not path.",

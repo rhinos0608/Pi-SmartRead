@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import type { FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ACTION_SOURCE_MAX_BYTES, type ActionSourceIO, snapshotActionSource } from "../../../src/lsp/lsp-action-source.js";
+import { ACTION_SOURCE_MAX_BYTES, ACTION_SEMANTIC_EDIT_MAX_BYTES, type ActionSourceIO, snapshotActionSource } from "../../../src/lsp/lsp-action-source.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -69,6 +69,13 @@ function expectClosedExactlyOnce(opened: OpenedHandle[]): void {
 }
 
 describe("snapshotActionSource", () => {
+  it("allows the larger staging limit while preserving the 1 MiB default", async () => {
+    expect(ACTION_SOURCE_MAX_BYTES).toBe(1024 * 1024);
+    expect(ACTION_SEMANTIC_EDIT_MAX_BYTES).toBe(4 * 1024 * 1024);
+    const file = await fixture(Buffer.alloc(ACTION_SOURCE_MAX_BYTES + 1));
+    expect(await snapshotActionSource(file, { deadlineMs: Date.now() + 5000 })).toMatchObject({ ok: false, reason: "too-large" });
+    expect((await snapshotActionSource(file, { deadlineMs: Date.now() + 5000, maxBytes: ACTION_SEMANTIC_EDIT_MAX_BYTES })).ok).toBe(true);
+  });
   it("keeps BOM in decoded text while hashing raw bytes and text separately", async () => {
     const file = await fixture(Buffer.from("\uFEFFconst x = 1;", "utf8"));
     const result = await snapshotActionSource(file, { deadlineMs: Date.now() + 5000 });

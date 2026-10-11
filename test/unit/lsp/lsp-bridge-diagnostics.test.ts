@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * server → client messages via its stdout emitter.
  */
 interface FakeProc extends EventEmitter {
-  stdin: { write: ReturnType<typeof vi.fn> };
+  stdin: EventEmitter & { write: ReturnType<typeof vi.fn> };
   stdout: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
 }
@@ -43,8 +43,8 @@ function makeFakeProc(): FakeProc {
   const proc = new EventEmitter() as FakeProc;
   proc.stdout = new EventEmitter();
   proc.kill = vi.fn();
-  proc.stdin = {
-    write: vi.fn((data: string) => {
+  proc.stdin = Object.assign(new EventEmitter(), {
+    write: vi.fn((data: string, _encoding?: unknown, callback?: (error?: Error | null) => void) => {
       // Auto-respond to "initialize" so LSPConnection.start() resolves.
       const match = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (match) {
@@ -56,19 +56,20 @@ function makeFakeProc(): FakeProc {
             // Advertise definitionProvider: bridge delegates to the canonical
             // executor, which capability-gates navigation. Conn-level tests
             // below never consult this cap, so they are unaffected.
-            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true } } }));
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, textDocumentSync: { openClose: true, change: 1 } } } }));
           }
         } catch { /* ignore */ }
       }
+      if (typeof callback === "function") queueMicrotask(() => callback());
       return true;
     }),
-  };
+  });
   return proc;
 }
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: vi.fn(() => makeFakeProc()),
-  execFileSync: vi.fn(() => Buffer.from("")),
 }));
 
 const { spawn } = await import("node:child_process");
@@ -296,8 +297,8 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
       const proc = makeFakeProc();
       const origWrite = proc.stdin.write as any;
-      proc.stdin.write = vi.fn((data: string) => {
-        origWrite(data);
+      proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
+        origWrite(data, ...args);
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (!m) return true;
         const len = parseInt(m[1]!, 10);
@@ -337,8 +338,8 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
       const proc = makeFakeProc();
       const orig = proc.stdin.write as any;
-      proc.stdin.write = vi.fn((data: string) => {
-        orig(data);
+      proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
+        orig(data, ...args);
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (!m) return true;
         const len = parseInt(m[1]!, 10);
@@ -386,8 +387,8 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
       activeProc = proc;
       // Make pull explicitly unsupported so unconfirmed stays degraded, not empty via pull
       const orig = proc.stdin.write as any;
-      proc.stdin.write = vi.fn((data: string) => {
-        orig(data);
+      proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
+        orig(data, ...args);
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (!m) return true;
         const len = parseInt(m[1]!, 10);
@@ -421,7 +422,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
       const proc = makeFakeProc();
       void proc;
       const orig = proc.stdin.write as any;
-      proc.stdin.write = vi.fn((data: string) => {
+      proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (!m) return true;
         const len = parseInt(m[1]!, 10);
@@ -432,11 +433,13 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
             // Advertise pull support: bridge delegates to the canonical
             // executor, which capability-gates the diagnostics op. Pull itself
             // goes unanswered here (falls back to push after the op timeout).
-            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true } } }));
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true, textDocumentSync: { openClose: true, change: 1 } } } }));
+            const callback = args.find((arg) => typeof arg === "function") as ((error?: Error | null) => void) | undefined;
+            if (callback) queueMicrotask(() => callback());
             return true;
           }
         } catch {}
-        orig(data);
+        orig(data, ...args);
         try {
           const msg = JSON.parse(body);
           if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
@@ -461,7 +464,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
       const proc = makeFakeProc();
       void proc;
       const orig = proc.stdin.write as any;
-      proc.stdin.write = vi.fn((data: string) => {
+      proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (!m) return true;
         const len = parseInt(m[1]!, 10);
@@ -471,11 +474,13 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
           if (msg.method === "initialize" && msg.id !== undefined) {
             // Advertise pull support: bridge delegates to the canonical
             // executor, which capability-gates the diagnostics op.
-            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true } } }));
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { definitionProvider: true, diagnosticProvider: true, textDocumentSync: { openClose: true, change: 1 } } } }));
+            const callback = args.find((arg) => typeof arg === "function") as ((error?: Error | null) => void) | undefined;
+            if (callback) queueMicrotask(() => callback());
             return true;
           }
         } catch {}
-        orig(data);
+        orig(data, ...args);
         try {
           const msg = JSON.parse(body);
           if (msg.method === "textDocument/diagnostic" && msg.id !== undefined) {
@@ -553,7 +558,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
         // Advertise pull support via initialize: bridge delegates to the canonical
         // executor, which capability-gates the diagnostics op on the handshake
         // registry (direct serverCapabilities mutation below only feeds the broker).
-        proc.stdin.write = vi.fn((data: string) => {
+        proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
           const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
           if (m) {
             const len = parseInt(m[1]!, 10);
@@ -566,7 +571,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
               }
             } catch {}
           }
-          return orig(data);
+          return orig(data, ...args);
         });
         return proc;
       });
@@ -594,7 +599,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
       const proc = makeFakeProc();
       const orig = proc.stdin.write as any;
-      proc.stdin.write = vi.fn((data: string) => {
+      proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (m) {
           const len = parseInt(m[1]!, 10);
@@ -609,7 +614,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
             }
           } catch {}
         }
-        orig(data);
+        orig(data, ...args);
         if (!m) return true;
         const retryLen = parseInt(m[1]!, 10);
         const retryBody = String(data).slice(m[0].length, m[0].length + retryLen);
@@ -664,7 +669,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
     (spawn as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
       const proc = makeFakeProc();
       const orig = proc.stdin.write as any;
-      proc.stdin.write = vi.fn((data: string) => {
+      proc.stdin.write = vi.fn((data: string, ...args: unknown[]) => {
         const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
         if (m) {
           const len = parseInt(m[1]!, 10);
@@ -679,7 +684,7 @@ describe("LSPBridge outcome honesty + timeout + AbortSignal", () => {
             }
           } catch {}
         }
-        orig(data);
+        orig(data, ...args);
         if (!m) return true;
         const retryLen = parseInt(m[1]!, 10);
         const retryBody = String(data).slice(m[0].length, m[0].length + retryLen);

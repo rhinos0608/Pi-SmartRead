@@ -83,6 +83,7 @@ export interface StrictRequest {
   readonly server?: string;
   readonly path?: string;
   readonly position?: StrictPosition;
+  readonly ch?: string;
   readonly range?: StrictRange;
   readonly query?: string;
   readonly identifier?: string;
@@ -196,7 +197,7 @@ const FIELD_MATRIX: Readonly<Record<StrictOperation, ReadonlySet<string>>> = {
   resolveCodeAction: new Set(["path", "range", "selection", "context"]),
   formatDocument: new Set(["path", "formatting"]),
   formatRange: new Set(["path", "range", "formatting"]),
-  formatOnType: new Set(["path", "position", "formatting"]),
+  formatOnType: new Set(["path", "position", "ch", "formatting"]),
   completion: new Set(["path", "position", "context"]),
   resolveCompletion: new Set(["item"]),
   signatureHelp: new Set(["path", "position", "context"]),
@@ -237,7 +238,7 @@ const REQUIRED_FIELDS: Readonly<Record<StrictOperation, readonly string[]>> = {
   resolveCodeAction: ["path", "range", "selection"],
   formatDocument: ["path"],
   formatRange: ["path", "range"],
-  formatOnType: ["path", "position"],
+  formatOnType: ["path", "position", "ch"],
   completion: ["path", "position"],
   resolveCompletion: ["item"],
   signatureHelp: ["path", "position"],
@@ -369,7 +370,7 @@ function validateShapeFields(r: Record<string, unknown>, op: StrictOperation): s
 }
 
 function validateNamedFields(r: Record<string, unknown>, op: StrictOperation): string | null {
-  for (const field of ["query", "method", "newName", "proposalId"] as const) {
+  for (const field of ["query", "method", "newName", "proposalId", "ch"] as const) {
     const err = checkOptionalString(r, field, op);
     if (err) return err;
   }

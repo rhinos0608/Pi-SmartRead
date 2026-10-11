@@ -8,7 +8,7 @@ const toUri = (p: string): string => pathToFileURL(resolve(p)).href;
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeProc extends EventEmitter {
-  stdin: { write: ReturnType<typeof vi.fn> };
+  stdin: EventEmitter & { write: ReturnType<typeof vi.fn> };
   stdout: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
 }
@@ -23,8 +23,8 @@ function makeFakeProc(): FakeProc {
   const proc = new EventEmitter() as FakeProc;
   proc.stdout = new EventEmitter();
   proc.kill = vi.fn();
-  proc.stdin = {
-    write: vi.fn((data: string) => {
+  proc.stdin = Object.assign(new EventEmitter(), {
+    write: vi.fn((data: string, _encoding?: unknown, callback?: (error?: Error | null) => void) => {
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (m) {
         const len = parseInt(m[1]!, 10);
@@ -32,18 +32,19 @@ function makeFakeProc(): FakeProc {
         try {
           const msg = JSON.parse(content);
           if (msg.method === "initialize" && msg.id !== undefined) {
-            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { renameProvider: true, codeActionProvider: true, documentFormattingProvider: true } } }));
+            queueMicrotask(() => sendToStdout(proc, { jsonrpc: "2.0", id: msg.id, result: { capabilities: { renameProvider: true, codeActionProvider: true, documentFormattingProvider: true, textDocumentSync: { openClose: true, change: 1 } } } }));
           }
         } catch {}
       }
+      if (typeof callback === "function") queueMicrotask(() => callback());
       return true;
     }),
-  };
+  });
   return proc;
 }
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: vi.fn(() => makeFakeProc()),
-  execFileSync: vi.fn(() => Buffer.from("")),
 }));
 vi.mock("../../../src/lsp/lsp-executor.js", () => ({
   executeLspOperation: vi.fn(),
@@ -71,8 +72,8 @@ describe("LSPConnection semantic actions", () => {
     const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     let captured: unknown = null;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -100,8 +101,8 @@ describe("LSPConnection semantic actions", () => {
     const fileUri = toUri(filePath);
     const otherUri = toUri(join(root, "c.ts"));
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -130,8 +131,8 @@ describe("LSPConnection semantic actions", () => {
   it("organizeImports returns null when no action has edit", async () => {
     const { conn, proc } = await makeConnection(root);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -152,8 +153,8 @@ describe("LSPConnection semantic actions", () => {
     const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     let captured: unknown = null;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -178,8 +179,8 @@ describe("LSPConnection semantic actions", () => {
     const { conn, proc } = await makeConnection(root);
     const filePath = join(root, "g.ts");
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -207,8 +208,8 @@ describe("LSPConnection semantic actions", () => {
   it("formatting returns null for empty response", async () => {
     const { conn, proc } = await makeConnection(root);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -223,8 +224,8 @@ describe("LSPConnection semantic actions", () => {
     // null response also
     const { conn: conn2, proc: proc2 } = await makeConnection(join(root, "root2"));
     const origWrite2 = proc2.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc2.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite2 as unknown as (d: string) => boolean)(data);
+    (proc2.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite2 as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -246,8 +247,8 @@ describe("LSPConnection semantic actions", () => {
     const context = { diagnostics: [{ message: "err" }], only: ["quickfix"] };
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
     let captured: unknown = null;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -274,8 +275,8 @@ describe("LSPConnection semantic actions", () => {
     const filePath = join(root, "i.ts");
     const fileUri = toUri(filePath);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);
@@ -307,8 +308,8 @@ describe("LSPConnection semantic actions", () => {
   it("codeActions returns empty array for null response", async () => {
     const { conn, proc } = await makeConnection(root);
     const origWrite = proc.stdin.write as unknown as ReturnType<typeof vi.fn>;
-    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string) => {
-      (origWrite as unknown as (d: string) => boolean)(data);
+    (proc.stdin.write as unknown as ReturnType<typeof vi.fn>) = vi.fn((data: string, ...args: unknown[]) => {
+      (origWrite as unknown as (...writeArgs: unknown[]) => boolean)(data, ...args);
       const m = String(data).match(/^Content-Length: (\d+)\r\n\r\n/);
       if (!m) return true;
       const len = parseInt(m[1]!, 10);

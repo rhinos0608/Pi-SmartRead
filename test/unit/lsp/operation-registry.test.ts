@@ -144,6 +144,10 @@ describe("operation registry", () => {
     expect(getOperationDef("request")?.required).toEqual(["method"]);
   });
 
+  it("required: formatOnType needs path, position, and trigger character", () => {
+    expect(getOperationDef("formatOnType")?.required).toEqual(["path", "position", "ch"]);
+  });
+
   it("required: codeActions discovers by path + range; resolve binds explicit selection", () => {
     expect(getOperationDef("codeActions")?.required).toEqual(["path", "range"]);
     expect(getOperationDef("resolveCodeAction")?.required).toEqual(["path", "range", "selection"]);

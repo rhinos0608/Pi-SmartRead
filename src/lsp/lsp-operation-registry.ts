@@ -20,6 +20,7 @@ export type OperationRequiredField =
   | "context"
   | "selection"
   | "formatting"
+  | "ch"
   | "method"
   | "params"
   | "proposalId";
@@ -277,7 +278,7 @@ const REGISTRY: Record<StrictOperation, OperationDef> = {
   formatOnType: {
     operation: "formatOnType",
     method: "textDocument/onTypeFormatting",
-    required: ["path", "position"],
+    required: ["path", "position", "ch"],
     capability: "formatting",
     capabilityExact: true,
     idempotent: false,

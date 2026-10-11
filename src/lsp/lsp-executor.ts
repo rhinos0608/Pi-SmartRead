@@ -259,7 +259,7 @@ function buildParams(req: StrictRequest): Record<string, unknown> {
     case "formatRange":
       return { textDocument: { uri }, range: req.range, options: req.formatting ?? { tabSize: 2, insertSpaces: true } };
     case "formatOnType":
-      return { textDocument: { uri }, position: req.position, options: req.formatting ?? { tabSize: 2, insertSpaces: true } };
+      return { textDocument: { uri }, position: req.position, ch: req.ch, options: req.formatting ?? { tabSize: 2, insertSpaces: true } };
     case "completion": case "signatureHelp":
       return { textDocument: { uri }, position: req.position, context: req.context };
     case "inlayHints":

@@ -134,6 +134,8 @@ describe("lsp-tool", () => {
     expect(schema.properties.selection.properties).toMatchObject({ actionId: expect.any(Object), sourceSha256: expect.any(Object) });
     expect(schema.properties).not.toHaveProperty("codeAction");
     expect(schema.properties.range.description).toMatch(/resolveCodeAction/);
+    expect(schema.properties.ch).toMatchObject({ minLength: 1 });
+    expect(schema.properties.ch.description).toMatch(/formatOnType/);
     expect(schema.properties.context.description).toMatch(/same full discovery query/);
     expect(schema.properties.formatting.properties).toMatchObject({
       tabSize: expect.any(Object),

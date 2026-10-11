@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { prepareBoundActionEdit } from "../../../src/lsp/lsp-action-edit-preparation.js";
+import { convertFormattingTextEdits, convertRawWorkspaceEdit, prepareBoundActionEdit } from "../../../src/lsp/lsp-action-edit-preparation.js";
 import type { BoundActionOriginHandoff } from "../../../src/lsp/lsp-action-origin.js";
 import { snapshotActionJson } from "../../../src/lsp/lsp-action-json.js";
 
@@ -37,6 +37,20 @@ const edit2 = { range: { start: { line: 2, character: 0 }, end: { line: 2, chara
 const prepared = (edit: unknown) => prepareBoundActionEdit(makeOrigin(edit));
 
 describe("prepareBoundActionEdit", () => {
+  it("exposes pure raw and explicitly-targeted formatting edit converters", () => {
+    const raw = { changes: { [pathToFileURL(targetPath).href]: [edit1] } };
+    const origin = { canonicalPath: sourcePath, rawSha256: sha, receiptVersion: 7 };
+    const target = { canonicalPath: targetPath, rawSha256: sha };
+    expect(convertRawWorkspaceEdit(raw, origin)).toMatchObject({ kind: "prepared", document: { canonicalPath: sourcePath, sha256: sha } });
+    expect(convertFormattingTextEdits([edit1], target)).toMatchObject({ kind: "prepared", document: { canonicalPath: targetPath, sha256: sha }, workspaceEdit: { fileEdits: [{ filePath: targetPath }] } });
+  });
+  it.each(["", "A".repeat(64), "a".repeat(63)])("refuses invalid source hashes from both converters (%s)", (rawSha256) => {
+    const raw = { changes: { [pathToFileURL(targetPath).href]: [edit1] } };
+    const origin = { canonicalPath: sourcePath, rawSha256, receiptVersion: 7 };
+    const target = { canonicalPath: targetPath, rawSha256 };
+    expect(convertRawWorkspaceEdit(raw, origin)).toEqual({ kind: "refusal", reason: "malformed-edit" });
+    expect(convertFormattingTextEdits([edit1], target)).toEqual({ kind: "refusal", reason: "malformed-edit" });
+  });
   it("refuses a same-start insertion following a replacement", () => {
     const replacement = { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } }, newText: "replace" };
     const insertion = { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "insert" };
