@@ -250,7 +250,11 @@ describe("writeConvertedManifest", () => {
         const written = writeConvertedManifest(v2, outPath);
         expect(written.outPath).toBe(outPath);
         expect(written.fileSha256).toBe(hex(readFileSync(outPath)));
-        expect(statSync(outPath).mode & 0o777).toBe(0o600);
+        // Windows has no owner/group mode distinction; this does not test its ACLs.
+        // https://nodejs.org/docs/latest-v20.x/api/fs.html#file-modes
+        if (process.platform !== "win32") {
+            expect(statSync(outPath).mode & 0o777).toBe(0o600);
+        }
         expect(() => writeConvertedManifest(v2, outPath)).toThrow(/refusing to overwrite/);
     });
 });
@@ -301,7 +305,10 @@ describe("CLI", () => {
         expect(stdout).not.toContain("ACME-");
         expect(stdout).not.toContain("src/");
         expect(existsSync(outPath)).toBe(true);
-        expect(statSync(outPath).mode & 0o777).toBe(0o600);
+        // POSIX mode assertion only; content and overwrite refusal stay cross-platform.
+        if (process.platform !== "win32") {
+            expect(statSync(outPath).mode & 0o777).toBe(0o600);
+        }
         expect(loadFrozenManifest(outPath).holdout).toHaveLength(ENTRY_IDS.length);
 
         expect(() => runCli(inPath, outPath)).toThrow();
