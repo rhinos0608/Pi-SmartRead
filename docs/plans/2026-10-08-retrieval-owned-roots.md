@@ -475,8 +475,11 @@ by design.
 
 Owned roots, snapshots, and holdout writer outputs request POSIX modes
 0700/0600, and `assertPrivateMode` enforces them exactly on POSIX. On
-Windows, Node maps these modes to the read-only attribute only; they do not
-set or verify owner-only ACLs, and `assertPrivateMode` skips the check. A
+Windows, per the Node 20 `fs.chmod` caveat ("only the write permission can
+be changed, and the distinction among the permissions of group, owner, or
+others is not implemented",
+https://nodejs.org/docs/latest-v20.x/api/fs.html), these modes do not set or
+verify owner-only ACLs, and `assertPrivateMode` skips the check. A
 Windows run therefore does NOT certify that holdout material is private to
 the owner, and tests that condition mode assertions on POSIX do not certify
 it either. The preregistered studies run on macOS. Decision: document the
