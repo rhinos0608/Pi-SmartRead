@@ -112,7 +112,11 @@ describe("mergeAttemptReports", () => {
         const dir = tempDir();
         const output = join(dir, "merged.json");
         merge([report()], output);
-        expect(statSync(output).mode & 0o777).toBe(0o600);
+        // Windows has no owner/group mode distinction; this does not test its ACLs.
+        // https://nodejs.org/docs/latest-v20.x/api/fs.html#file-modes
+        if (process.platform !== "win32") {
+            expect(statSync(output).mode & 0o777).toBe(0o600);
+        }
         expect(JSON.parse(readFileSync(output, "utf8")).outcomes).toHaveLength(4);
         expect(() => merge([report()], output)).toThrow(/refusing to overwrite/);
     });
