@@ -126,3 +126,47 @@ describe("handleSymbol", () => {
     expect(result.matches[0]?.relative_path).toBe("a.ts");
   });
 });
+
+// The LSP workspace/symbol fan-out under the bridge has no cancellation of its own, so a server
+// that never answers must not hold the symbol search open.
+describe("handleSymbol with an LSP search that never settles", () => {
+  const neverSettles = () => new Promise<any[]>(() => {});
+  const PENDING = Symbol("pending");
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("rejects with the caller's abort instead of waiting for the LSP search", async () => {
+    write("a.ts", `export function stuckOne() {\n  return 1;\n}\n`);
+    const handleSymbol = await loadHandleSymbol(neverSettles);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 200);
+
+    const outcome = await Promise.race([
+      handleSymbol("stuckOne", 30, false, workdir, workdir, controller.signal).then(
+        () => "resolved",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      ),
+      new Promise<typeof PENDING>((resolve) => setTimeout(() => resolve(PENDING), 5_000)),
+    ]);
+
+    expect(outcome).toBe("Operation aborted");
+  });
+
+  it("returns tree-sitter results after a bounded wait when no caller signal is supplied", async () => {
+    write("a.ts", `export function stuckTwo() {\n  return 2;\n}\n`);
+    const handleSymbol = await loadHandleSymbol(neverSettles);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    let result: Awaited<ReturnType<HandleSymbol>> | undefined;
+    void handleSymbol("stuckTwo", 30, false, workdir, workdir).then((value) => { result = value; });
+    // Interleave real I/O (setImmediate is not faked) with fake time until the call settles.
+    for (let i = 0; i < 300 && result === undefined; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+
+    expect(result?.matches.some((m) => m.name === "stuckTwo")).toBe(true);
+  });
+});
