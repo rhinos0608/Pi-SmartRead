@@ -26,7 +26,7 @@
  * and listing re-verifies directory identity after readdir (TOCTOU swaps
  * fail closed and enumerated names are never returned).
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,12 +185,101 @@ function expectSentinelUnchanged(s: { file: string; bytes: Buffer; mode: number 
 }
 
 // Failed and excluded receipts retain partial roots; root presence is not success.
-function successReceiptDetail(out: ReturnType<typeof materializeInstance>): string {
+// `diagnose` is a thunk so probes run only when a failed/excluded message is built.
+function successReceiptDetail(out: ReturnType<typeof materializeInstance>, diagnose: () => string = () => ""): string {
     if ("failed" in out) {
-        return `expected snapshot success (completedStage=${out.completedStage.slice(0, 40)} error=${out.error.slice(0, 200)})`;
+        return `expected snapshot success (completedStage=${out.completedStage.slice(0, 40)} error=${out.error.slice(0, 200)})${diagnose()}`;
     }
-    if ("excluded" in out) return `expected snapshot success (excluded=${out.reason.slice(0, 200)})`;
+    if ("excluded" in out) return `expected snapshot success (excluded=${out.reason.slice(0, 200)})${diagnose()}`;
     return "expected snapshot success";
+}
+
+// win32-only receipt enrichment: spawnSync is unmocked here (the mock wraps
+// execFileSync only), so probes never touch the tar mock counter; only enum
+// tokens and numeric versions are emitted, never raw paths or process text.
+function textOf(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (value instanceof Uint8Array) return Buffer.from(value).toString("utf8");
+    return "";
+}
+
+function errnoCodeOf(error: unknown): string {
+    if (error instanceof Error) {
+        const errno = error as NodeJS.ErrnoException;
+        return typeof errno.code === "string" ? errno.code : "unknown";
+    }
+    return "unknown";
+}
+
+/** Classify a resolved `where tar` line without ever logging the raw path. */
+function classifyTarLocation(line: string): "system32" | "git" | "other" {
+    const segments = line.split("\\").join("/").toLowerCase().split("/");
+    if (segments.includes("system32")) return "system32";
+    if (segments.includes("git")) return "git";
+    return "other";
+}
+
+/** Tar implementation/version from numeric tokens only; unknown text stays "unknown". */
+function parseTarImplementationVersion(output: string): string {
+    const first = textOf(output).split(/\r?\n/)[0] ?? "";
+    const bsdtar = /bsdtar\s+(\d+(?:\.\d+){0,3})/i.exec(first)?.[1];
+    if (bsdtar !== undefined) {
+        const libarchive = /libarchive\s+(\d+(?:\.\d+){0,3})/i.exec(first)?.[1];
+        return libarchive === undefined ? `bsdtar:${bsdtar}` : `bsdtar:${bsdtar}:libarchive:${libarchive}`;
+    }
+    const gnu = /gnu tar\)?\s+(\d+(?:\.\d+){0,3})/i.exec(first)?.[1];
+    return gnu === undefined ? "unknown" : `gnu:${gnu}`;
+}
+
+/** Parse `chcp` query output. Console observation only, never decoder proof. */
+function parseConsoleCodePage(output: string): string {
+    const code = /(\d{3,5})/.exec(textOf(output))?.[1] ?? "unknown";
+    return `${code} (console observation only; not decoder proof)`;
+}
+
+type ProbeSpawnResult = { status: number | null; stdout: unknown; error?: unknown };
+type ProbeSpawn = (
+    cmd: string,
+    args: string[],
+    opts: { encoding: "utf8"; timeout: number; maxBuffer: number; windowsHide: boolean },
+) => ProbeSpawnResult;
+
+/** Bounded subprocess probe: query-only with explicit time AND memory bounds. */
+function runBoundedProbe(cmd: string, args: string[], spawn: ProbeSpawn = (c, a, o) => spawnSync(c, a, o)): {
+    status: string;
+    stdout: string;
+} {
+    try {
+        const res = spawn(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 4096, windowsHide: true });
+        // Probe failures stay a bounded status string, never a product error.
+        const status = res.error instanceof Error ? `error:${errnoCodeOf(res.error)}` : `status:${String(res.status)}`;
+        return { status, stdout: textOf(res.stdout).slice(0, 200) };
+    } catch (error) {
+        return { status: `probe-threw:${errnoCodeOf(error)}`, stdout: "" };
+    }
+}
+
+/**
+ * Windows-only enrichment for failed/excluded positive-receipt messages.
+ * Returns "" off win32 so other platforms see byte-identical messages.
+ * `pre` carries pre-archive FS observations (booleans/error codes, never raw
+ * paths). tar entries are ordered PATH candidates, not the certified binary.
+ */
+function windowsReceiptDiagnostic(pre: string): string {
+    if (process.platform !== "win32") return "";
+    const where = runBoundedProbe("where", ["tar"]);
+    const classes = where.stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+        .map(classifyTarLocation)
+        .filter((value, index, all) => all.indexOf(value) === index)
+        .join(",")
+        .slice(0, 40);
+    const version = runBoundedProbe("tar", ["--version"]);
+    const codepage = runBoundedProbe("chcp", []);
+    const tarCandidates = (classes === "" ? `unavailable:${where.status}` : classes).slice(0, 40);
+    return ` | win-diag(pre=[${pre.slice(0, 200)}]; tar-candidates=[${tarCandidates}]; tar=[${parseTarImplementationVersion(version.stdout)}:${version.status.slice(0, 40)}]; codepage=[${parseConsoleCodePage(codepage.stdout).slice(0, 100)}:${codepage.status.slice(0, 40)}])`;
 }
 
 describe("preflight rejects unsafe trees before any archive write", () => {
@@ -378,12 +467,17 @@ describe("positive materialization preserves executables and odd names", () => {
         gitCommit(work, "add odd names");
         const sha = headSha(work);
         const id = "weirdnames__i-1";
+        // Pre-archive precondition: the synthetic Unicode names exist before
+        // archive/extract; presence booleans are captured for the diagnostic.
+        for (const name of oddNames) expect(existsSync(join(work, "src", name))).toBe(true);
+        const preUnicode = oddNames.map((name) => `${name.length}:${existsSync(join(work, "src", name)) ? "present" : "absent"}`).join(",");
         const out = materializeInstance(
             makeInstance({ instanceId: id, baseCommit: sha, goldFiles: ["src/a.ts"] }),
             { bareDir: bare, stateRoot: root },
         );
-        expect("failed" in out, successReceiptDetail(out)).toBe(false);
-        expect("excluded" in out, successReceiptDetail(out)).toBe(false);
+        // Lazy thunks: probes run only on win32 AND a failed/excluded receipt.
+        expect("failed" in out, successReceiptDetail(out, () => windowsReceiptDiagnostic(`unicode-fixture=[${preUnicode}]`))).toBe(false);
+        expect("excluded" in out, successReceiptDetail(out, () => windowsReceiptDiagnostic(`unicode-fixture=[${preUnicode}]`))).toBe(false);
         expect("root" in out).toBe(true);
         if ("root" in out) {
             for (const name of oddNames) expect(existsSync(join(out.root, "src", name))).toBe(true);
@@ -1011,6 +1105,17 @@ describe("owner decision 2026-10-08: safe in-tree symlinks and gitlinks", () => 
         symlinkSync("sub", join(work, "src", "dirlink"));
         execFileSync("git", ["add", "."], { cwd: work, stdio: "ignore" });
         gitCommit(work, "add links for parity");
+        // Observed worktree dirlink status for the diagnostic: lstat/readlink
+        // asserted; the stat outcome is recorded as-is, never claimed as passing.
+        const dirlinkPath = join(work, "src", "dirlink");
+        expect(lstatSync(dirlinkPath).isSymbolicLink()).toBe(true);
+        expect(readlinkSync(dirlinkPath)).toBe("sub");
+        let preDirlink: string;
+        try {
+            preDirlink = `readlink=sub isDir=${statSync(dirlinkPath).isDirectory()}`;
+        } catch (error) {
+            preDirlink = `readlink=sub stat-code=${errnoCodeOf(error)}`;
+        }
         const sha = headSha(work);
 
         // LEGACY baseline (temp HOME; never the real cache): legacy lists a
@@ -1046,8 +1151,9 @@ describe("owner decision 2026-10-08: safe in-tree symlinks and gitlinks", () => 
             makeInstance({ instanceId: "parity__owned-1", baseCommit: sha, goldFiles: ["src/link.ts", "src/sub/f.ts"] }),
             { bareDir: bare, stateRoot: root },
         );
-        expect("failed" in owned, successReceiptDetail(owned)).toBe(false);
-        expect("excluded" in owned, successReceiptDetail(owned)).toBe(false);
+        // Lazy thunks: probes run only on win32 AND a failed/excluded receipt.
+        expect("failed" in owned, successReceiptDetail(owned, () => windowsReceiptDiagnostic(`work-dirlink: lstat-symlink=true ${preDirlink}`))).toBe(false);
+        expect("excluded" in owned, successReceiptDetail(owned, () => windowsReceiptDiagnostic(`work-dirlink: lstat-symlink=true ${preDirlink}`))).toBe(false);
         expect("root" in owned).toBe(true);
         if ("root" in owned) {
             expect(lstatSync(join(owned.root, "src", "link.ts")).isSymbolicLink()).toBe(true);
@@ -2134,5 +2240,69 @@ describe("listing TOCTOU: a swap between lstat and readdir fails closed (P1-2)",
         // Fail-closed: NOTHING is returned — the external enumeration
         // (secret.txt) never surfaces to the caller.
         expect(result).toBeUndefined();
+    });
+});
+
+describe("windows receipt diagnostic parsers (synthetic process results)", () => {
+    it("classifies tar locations without logging raw paths", () => {
+        expect(classifyTarLocation("C:\\Windows\\System32\\tar.exe")).toBe("system32");
+        expect(classifyTarLocation("C:\\Program Files\\Git\\usr\\bin\\tar.exe")).toBe("git");
+        expect(classifyTarLocation("/usr/bin/tar")).toBe("other");
+        expect(classifyTarLocation("")).toBe("other");
+    });
+
+    it("parses tar implementation/version tokens only, never raw process text", () => {
+        expect(parseTarImplementationVersion("bsdtar 3.7.4 - libarchive 3.7.4\nsecond line")).toBe(
+            "bsdtar:3.7.4:libarchive:3.7.4",
+        );
+        expect(parseTarImplementationVersion("bsdtar 3.7.4")).toBe("bsdtar:3.7.4");
+        expect(parseTarImplementationVersion("tar (GNU tar) 1.35\nCopyright")).toBe("gnu:1.35");
+        expect(parseTarImplementationVersion("")).toBe("unknown");
+        // Hostile header: a fake path and secret marker must be rejected, not echoed.
+        // The CLI flag + clearly-fake marker are assembled at runtime so the
+        // source holds no static flag+value literal; the parsed input shape is unchanged.
+        const cliFlag = ["--", "token"].join("");
+        const fixtureMarker = "FIXTURE_PRIVATE_MARKER";
+        const hostile = `bsdtar 3.7.4 - libarchive 3.7.4 C:\\Users\\svc\\secret ${cliFlag} ${fixtureMarker} caf\u00e9`;
+        const parsed = parseTarImplementationVersion(hostile);
+        expect(parsed).toBe("bsdtar:3.7.4:libarchive:3.7.4");
+        expect(parsed).not.toMatch(/Users|secret|token|hunter|FIXTURE_PRIVATE_MARKER|caf/);
+        expect(parseTarImplementationVersion(`totally-unknown C:\\x ${cliFlag} ${fixtureMarker}`)).toBe("unknown");
+    });
+
+    it("reports the console codepage as observation, never decoder proof", () => {
+        expect(parseConsoleCodePage("Active code page: 65001")).toMatch(/65001.*console observation only/);
+        expect(parseConsoleCodePage("")).toMatch(/unknown.*console observation only/);
+    });
+
+    it("bounds probe subprocess time and memory via explicit options (typed spy)", () => {
+        let seen: { timeout: number; maxBuffer: number } | undefined;
+        const spy: ProbeSpawn = (cmd, args, opts) => {
+            seen = { timeout: opts.timeout, maxBuffer: opts.maxBuffer };
+            expect(cmd).toBe("tar");
+            expect(args).toEqual(["--version"]);
+            return { status: 0, stdout: "tar (GNU tar) 1.35" };
+        };
+        expect(runBoundedProbe("tar", ["--version"], spy)).toEqual({ status: "status:0", stdout: "tar (GNU tar) 1.35" });
+        expect(seen).toEqual({ timeout: 5000, maxBuffer: 4096 });
+    });
+
+    it("invokes the diagnostic thunk only for failed/excluded receipts (success byte-identical, zero spawns)", () => {
+        // spawnSync is reachable only through the thunk, so zero thunk calls
+        // prove zero subprocess spawns on every platform, including win32.
+        let calls = 0;
+        const spy = (): string => {
+            calls += 1;
+            return " | win-diag(spy)";
+        };
+        expect(successReceiptDetail({ root: "snap", createdFresh: true }, spy)).toBe("expected snapshot success");
+        expect(calls).toBe(0);
+        expect(
+            successReceiptDetail(
+                { failed: true as const, root: "snap", createdFresh: true, completedStage: "extract" as const, error: "boom" },
+                spy,
+            ),
+        ).toBe("expected snapshot success (completedStage=extract error=boom) | win-diag(spy)");
+        expect(calls).toBe(1);
     });
 });
