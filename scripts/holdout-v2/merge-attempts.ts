@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { summarizeMetrics, type InstanceMetrics } from "../eval/external/grep/metrics.js";
+import { countStatusClasses } from "./status-classes.js";
 
 export interface AttemptInput {
     path: string;
@@ -170,8 +171,20 @@ export function mergeAttemptReports(options: MergeAttemptOptions): { report: Rec
         ...source,
         summary: summarizeMetrics(chosenMetrics),
         outcomes: selected,
+        // §9.16 reporting additions: status-class counts per execution and
+        // merged (internal-limit vs watchdog-query vs watchdog-setup vs other).
+        statusClasses: countStatusClasses(selected.map((o) => ({ status: o.status }))),
         attemptMerge: {
-            attempts: loaded.map((entry) => ({ path: entry.path, suppliedPath: entry.suppliedPath, sha256: entry.sha256, summaryErrors: entry.report.summary.errors, errors: entry.errors })),
+            attempts: loaded.map((entry) => ({
+                path: entry.path,
+                suppliedPath: entry.suppliedPath,
+                sha256: entry.sha256,
+                summaryErrors: entry.report.summary.errors,
+                errors: entry.errors,
+                statusClasses: countStatusClasses(
+                    (entry.report.outcomes as Outcome[]).map((o) => ({ status: o.status })),
+                ),
+            })),
             pairsTakenFromEachAttempt: taken,
             exclusions,
         },
