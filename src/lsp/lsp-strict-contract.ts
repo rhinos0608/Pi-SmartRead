@@ -97,6 +97,8 @@ export interface StrictRequest {
   readonly params?: Record<string, unknown>;
   readonly limit?: number;
   readonly cursor?: string;
+  /** Round-2 workspace-relative path filter for findReferences only. Foreign everywhere else. */
+  readonly scope?: string;
   readonly timeoutMs?: number;
   readonly proposalId?: string;
 }
@@ -296,8 +298,11 @@ export type StrictRequestValidation =
   | { ok: true; value: StrictRequest }
   | { ok: false; error: string };
 
-function checkAllowedFields(req: Record<string, unknown>, op: StrictOperation): string | null {
+function checkAllowedFields(req: Record<string, unknown>, op: StrictOperation, r2: boolean): string | null {
   const allowed = new Set<string>([...GLOBAL_FIELDS, ...FIELD_MATRIX[op]]);
+  // Stage A: scope exists on findReferences only in the r2 variant. Every
+  // other operation — and baseline/round-1 validation — rejects it.
+  if (r2 && op === "findReferences") allowed.add("scope");
   for (const key of Object.keys(req)) {
     if (!allowed.has(key)) return `foreign field "${key}" not allowed for operation "${op}"`;
   }
@@ -370,7 +375,7 @@ function validateShapeFields(r: Record<string, unknown>, op: StrictOperation): s
 }
 
 function validateNamedFields(r: Record<string, unknown>, op: StrictOperation): string | null {
-  for (const field of ["query", "method", "newName", "proposalId", "ch"] as const) {
+  for (const field of ["query", "method", "newName", "proposalId", "ch", "scope"] as const) {
     const err = checkOptionalString(r, field, op);
     if (err) return err;
   }
@@ -394,7 +399,7 @@ function validateNumericFields(r: Record<string, unknown>, op: StrictOperation):
   return null;
 }
 
-export function validateStrictRequest(req: unknown): StrictRequestValidation {
+export function validateStrictRequest(req: unknown, opts?: { r2?: boolean }): StrictRequestValidation {
   if (!isRecord(req)) return { ok: false, error: "request must be an object" };
   const { operation } = req as { operation?: unknown };
   if (typeof operation !== "string" || !OPERATIONS.has(operation)) {
@@ -402,7 +407,7 @@ export function validateStrictRequest(req: unknown): StrictRequestValidation {
   }
   const op = operation as StrictOperation;
   const r = req as Record<string, unknown>;
-  const allowedErr = checkAllowedFields(r, op);
+  const allowedErr = checkAllowedFields(r, op, opts?.r2 === true);
   if (allowedErr) return { ok: false, error: allowedErr };
   const requiredErr = checkRequiredFields(r, op);
   if (requiredErr) return { ok: false, error: requiredErr };

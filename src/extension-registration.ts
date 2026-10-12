@@ -173,7 +173,7 @@ export function registerGrepTool(state: ActivationState): void {
 
 export function registerLspTool(state: ActivationState, selectors: AffordanceSelectors): void {
   void state;
-  const lspDef = createLspTool({ affordances: selectors.general.enabled });
+  const lspDef = createLspTool({ affordances: selectors.general.enabled, r2: selectors.general.variant === "r2" });
   const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled);
   ToolRegistry.getInstance().registerOrReplace({
     name: "LSP",

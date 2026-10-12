@@ -18,9 +18,11 @@ import {
   type StrictMeta,
 } from "./lsp-strict-contract.js";
 import { getOperationDef } from "./lsp-operation-registry.js";
+import { resolveInvestigateScope } from "./lsp-scope.js";
+import { shapeR2IncomingCalls, shapeR2References, r2CallsCursorIdentity, r2ReferencesCursorIdentity } from "./lsp-r2-shaping.js";
 import { LspAffinity } from "./lsp-affinity.js";
 import { LspCursorStore } from "./lsp-cursor-store.js";
-import { AmbiguousServerError, detectLanguageFromExtension } from "./lsp-types.js";
+import { AmbiguousServerError, detectLanguageFromExtension, type LSPCallHierarchyItem, type LSPLocation, type LSPRange } from "./lsp-types.js";
 import { evaluateRawMethodPolicy } from "./lsp-raw-method-policy.js";
 import { executeBoundAction, type BoundActionOutcome } from "./lsp-action-adapter.js";
 import { createBoundActionBudget, type BoundActionRequest } from "./lsp-action-origin.js";
@@ -38,6 +40,7 @@ import {
   normalizeHierarchyItems,
   normalizeIncomingCalls,
   normalizeOutgoingCalls,
+  type NormalizedDocumentSymbol,
 } from "./lsp-response-normalizer.js";
 
 /** Minimal session/connection surface the executor consumes. Real LSPConnection satisfies this. */
@@ -88,6 +91,12 @@ export interface ExecutorDeps {
    * Never a model-facing request field.
    */
   includeSymbolProvenance?: boolean;
+  /**
+   * Round-2 output shaping for findReferences/incomingCalls. Internal
+   * opt-in only (mirrors includeSymbolProvenance): never model-facing, so
+   * baseline and round-1 envelopes stay byte-identical when absent.
+   */
+  r2?: boolean;
   /** Internal production adapter seam for focused executor tests. */
   executeBoundAction?: typeof executeBoundAction;
   /** Trusted internal absolute deadline for an already-admitted action schedule. */
@@ -96,6 +105,11 @@ export interface ExecutorDeps {
 
 const sharedCursors = new LspCursorStore();
 const sharedAffinity = new LspAffinity();
+
+/** Shared pagination cursors, reused by round-2 investigate shaping so its cursors continue through strict calls. */
+export function getSharedCursorStore(): LspCursorStore {
+  return sharedCursors;
+}
 
 const FEATURE_TO_STATIC_KEY: Record<string, string> = {
   definition: "definitionProvider",
@@ -610,7 +624,8 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
     return candidate;
   }
   // 1. Caller mistakes throw via normal tool-error path — never a status.
-  const validated = validateStrictRequest(req);
+  const r2 = deps.r2 === true;
+  const validated = validateStrictRequest(req, { r2 });
   if (!validated.ok) throw new Error(validated.error);
   const parsed = validated.value as StrictRequest;
   const root = resolve(parsed.workspace ?? deps.cwd ?? process.cwd());
@@ -669,6 +684,14 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
     if (!rawPolicy.allowed) {
       throw new Error(`raw method not allowed: ${r.method} (${rawPolicy.reason})`);
     }
+  }
+
+  // r2 scope is validated fail-closed before any wire work: a caller error,
+  // never a status. Canonicalization is shared with investigate.
+  let r2Scope: R2RunScope | null = null;
+  if (r2 && r.operation === "findReferences" && r.scope !== undefined) {
+    const resolved = resolveInvestigateScope(r.scope, root, "findReferences");
+    r2Scope = { scopeAbs: resolved.scopeAbs!, scopeIsFile: resolved.scopeIsFile };
   }
 
   // 3. Routing with lease.
@@ -1018,6 +1041,22 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
           };
         }
       }
+      // Round-2 output shaping (r2 only): reference/caller projections with
+      // roles, enclosing declarations, scope filtering, and bounded pages.
+      // Baseline and round-1 fall through to the legacy paths untouched.
+      if (r2 && r.operation === "findReferences" && Array.isArray(value)) {
+        return await runR2FindReferences({
+          conn: conn!, r, method, info, root, cursors, timeoutMs, signal, scopeKey, affinity,
+          ...(deps.now ? { now: deps.now } : {}),
+          locations: value as LSPLocation[], scope: r2Scope,
+        });
+      }
+      if (r2 && r.operation === "incomingCalls" && Array.isArray(value)) {
+        return await runR2IncomingCalls({
+          conn: conn!, r, method, info, root, cursors, timeoutMs, signal, scopeKey, affinity,
+          calls: value as Array<{ from: LSPCallHierarchyItem; fromRanges: LSPRange[] }>,
+        });
+      }
       // Pagination for list results.
       if (LIST_OPS.has(r.operation) && Array.isArray(value) && (r.limit !== undefined || r.cursor !== undefined)) {
         const page = paginate(value, r.limit, r.cursor, cursors);
@@ -1253,6 +1292,173 @@ function paginate(
     return { items: slice, truncated: true, nextCursor: cursors.create(remaining) };
   }
   return { items: slice, truncated: false };
+}
+
+interface R2RunScope {
+  scopeAbs: string;
+  scopeIsFile: boolean;
+}
+
+interface R2RunArgs {
+  conn: ExecutorConnection;
+  r: StrictRequest;
+  method: string;
+  info: StrictServerInfo;
+  root: string;
+  cursors: LspCursorStore;
+  timeoutMs: number;
+  signal: AbortSignal | undefined;
+  scopeKey: string;
+  affinity: LspAffinity;
+  /** Clock for enrichment-deadline accounting; defaults to Date.now. */
+  now?: () => number;
+}
+
+function r2ReadLinesCache(): { readLines: (absPath: string) => string[] | null } {
+  const cache = new Map<string, string[] | null>();
+  return {
+    readLines: (absPath: string) => {
+      let cached = cache.get(absPath);
+      if (cached === undefined) {
+        try {
+          cached = readFileSync(absPath, "utf-8").split("\n");
+        } catch {
+          cached = null;
+        }
+        cache.set(absPath, cached);
+      }
+      return cached;
+    },
+  };
+}
+
+/** Max concurrent documentSymbols enrichment requests per r2 page. */
+export const R2_SYMBOL_CONCURRENCY = 4;
+
+function r2AbortedError(): Error {
+  return Object.assign(new Error("Aborted"), { name: "AbortError" });
+}
+
+/**
+ * Bounded documentSymbols fan-out for r2 enrichment: at most
+ * R2_SYMBOL_CONCURRENCY requests in flight, each with the remaining
+ * deadline (timeoutMs minus elapsed). Cancellation (aborted signal or
+ * AbortError) rethrows so the caller reports cancelled exactly like the
+ * non-r2 path; any other per-file failure resolves to null so no hit is
+ * ever dropped.
+ */
+export async function fetchR2SymbolsBatch(args: {
+  paths: string[];
+  timeoutMs: number;
+  started: number;
+  now: () => number;
+  signal?: AbortSignal;
+  fetchOne: (absPath: string, remainingMs: number) => Promise<NormalizedDocumentSymbol[] | null>;
+}): Promise<Map<string, NormalizedDocumentSymbol[] | null>> {
+  const { paths, timeoutMs, started, now, signal, fetchOne } = args;
+  const out = new Map<string, NormalizedDocumentSymbol[] | null>();
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < paths.length) {
+      if (signal?.aborted) throw r2AbortedError();
+      const absPath = paths[next]!;
+      next += 1;
+      const remaining = Math.max(1, timeoutMs - (now() - started));
+      try {
+        out.set(absPath, await fetchOne(absPath, remaining));
+      } catch (err) {
+        // Cancellation always surfaces as an AbortError so the shaping
+        // layer can tell it apart from per-file failures (recorded null).
+        if (signal?.aborted) throw r2AbortedError();
+        if ((err as { name?: string } | null)?.name === "AbortError") throw err;
+        out.set(absPath, null);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(R2_SYMBOL_CONCURRENCY, paths.length) }, () => worker()));
+  return out;
+}
+
+async function runR2FindReferences(args: R2RunArgs & { locations: LSPLocation[]; scope: R2RunScope | null }): Promise<StrictEnvelope> {
+  const { conn, r, method, info, root, cursors, timeoutMs, signal, scopeKey, affinity, locations, scope } = args;
+  const { readLines } = r2ReadLinesCache();
+  const docSymbolMethod = getOperationDef("documentSymbols")?.method ?? "textDocument/documentSymbol";
+  const nowFn = args.now ?? Date.now;
+  const started = nowFn();
+  const fetchSymbols = async (absPaths: string[]): Promise<Map<string, NormalizedDocumentSymbol[] | null>> =>
+    fetchR2SymbolsBatch({
+      paths: absPaths,
+      timeoutMs,
+      started,
+      now: nowFn,
+      ...(signal ? { signal } : {}),
+      fetchOne: async (absPath, remaining) => {
+        if (conn.prepareDocument) {
+          await conn.prepareDocument(absPath, undefined, {
+            ...(signal ? { signal } : {}),
+            deadlineMs: remaining,
+          });
+        }
+        const raw = await issueWithTimeout(conn, docSymbolMethod, { textDocument: { uri: toUri(absPath) } }, remaining, signal);
+        return normalizeDocumentSymbols(raw);
+      },
+    });
+  const result = await shapeR2References({
+    locations,
+    ...(scope ? { scopeAbs: scope.scopeAbs, scopeIsFile: scope.scopeIsFile, scopeEcho: r.scope } : {}),
+    ...(r.limit !== undefined ? { limit: r.limit } : {}),
+    ...(r.cursor !== undefined ? { cursor: r.cursor } : {}),
+    cursorIdentity: r2ReferencesCursorIdentity(
+      r.path!,
+      { line: r.position!.line, character: r.position!.character },
+      scope ? scope.scopeAbs : null,
+    ),
+    encoding: info.positionEncoding,
+    deps: { root, readLines, fetchSymbols, cursors },
+  });
+  affinity.noteSuccess(scopeKey, info.descriptorId);
+  const empty = result.returned === 0;
+  return {
+    status: classifyStatus({ kind: empty ? "success-empty" : "success-value" }),
+    operation: r.operation,
+    method,
+    server: info,
+    result,
+    meta: resultMetaForPath(conn, r, result.truncated, result.nextCursor),
+  };
+}
+
+function runR2IncomingCalls(args: R2RunArgs & { calls: Array<{ from: LSPCallHierarchyItem; fromRanges: LSPRange[] }> }): StrictEnvelope {
+  const { r, method, info, root, cursors, scopeKey, affinity, calls } = args;
+  const { readLines } = r2ReadLinesCache();
+  const item = r.item as { uri?: unknown; selectionRange?: { start?: { line?: unknown; character?: unknown } } } | undefined;
+  const itemUri = typeof item?.uri === "string" ? item.uri : null;
+  const selStart = item?.selectionRange?.start;
+  const sel = typeof selStart?.line === "number" && typeof selStart?.character === "number"
+    ? { line: selStart.line, character: selStart.character }
+    : null;
+  const shaped = shapeR2IncomingCalls({
+    calls,
+    ...(r.limit !== undefined ? { limit: r.limit } : {}),
+    ...(r.cursor !== undefined ? { cursor: r.cursor } : {}),
+    cursorIdentity: r2CallsCursorIdentity(itemUri, sel),
+    root,
+    readLines,
+    cursors,
+  });
+  affinity.noteSuccess(scopeKey, info.descriptorId);
+  const empty = shaped.result.callers.length === 0;
+  return {
+    status: classifyStatus({ kind: empty ? "success-empty" : "success-value" }),
+    operation: r.operation,
+    method,
+    server: info,
+    result: shaped.result,
+    meta: {
+      truncated: shaped.truncated,
+      ...(shaped.nextCursor ? { nextCursor: shaped.nextCursor } : {}),
+    },
+  };
 }
 
 interface BrokerLike {

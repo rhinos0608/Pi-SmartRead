@@ -170,7 +170,7 @@ reg("grep", () => createGrepTool({
 reg("find", () => createFindTool({ resolveJudge: (root, _ctx, signal) => resolveMcpJudge(root, signal) }), ToolCategory.READ);
 reg("LSP", () => {
     const affordances = affordanceSelectors.general.enabled;
-    const def = createLspTool({ affordances });
+    const def = createLspTool({ affordances, r2: affordanceSelectors.general.variant === "r2" });
     return def;
 }, ToolCategory.READ);
 

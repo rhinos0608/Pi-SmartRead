@@ -86,6 +86,10 @@ export function isAffordancesEnabled(env: NodeJS.ProcessEnv = process.env): bool
   return env.PI_SMARTREAD_AFFORDANCES === "1";
 }
 
+export function isR2AffordancesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PI_SMARTREAD_AFFORDANCES === "2";
+}
+
 // Resolver + execution seams (exact exported signatures):
 export interface AffordanceBudget {
   maxCandidates: number;
@@ -106,6 +110,8 @@ export interface AffordanceExecContext {
    */
   exec?: (req: unknown, deps?: ExecutorDeps) => Promise<StrictEnvelope>;
   now?: () => number;
+  /** Round-2 output shaping for reference-shaped recipes. Absent/false keeps the round-1 projection byte-identical. */
+  r2?: boolean;
 }
 
 export interface AnchorCandidate {

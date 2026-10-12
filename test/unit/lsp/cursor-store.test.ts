@@ -98,4 +98,20 @@ describe("LspCursorStore", () => {
     expect(s.size()).toBe(1);
     expect(s.resolve(b, { now: 1000 })).toBe(2);
   });
+
+  it("binds cursors to a query identity when supplied", () => {
+    const s = new LspCursorStore();
+    const token = s.create(40, { now: 1000, identity: "refs:a.ts:0:0:sub" });
+    expect(s.resolve(token, { now: 1000, identity: "refs:a.ts:0:0:sub" })).toBe(40);
+    // Same token, different scope or query: no silent offset reuse.
+    expect(s.resolve(token, { now: 1000, identity: "refs:a.ts:0:0:" })).toBeNull();
+    expect(s.resolve(token, { now: 1000, identity: "refs:b.ts:0:0:sub" })).toBeNull();
+    expect(s.resolve(token, { now: 1000 })).toBeNull();
+  });
+
+  it("keeps identity-less cursors working exactly as before", () => {
+    const s = new LspCursorStore();
+    const token = s.create(7, { now: 1000 });
+    expect(s.resolve(token, { now: 1000 })).toBe(7);
+  });
 });

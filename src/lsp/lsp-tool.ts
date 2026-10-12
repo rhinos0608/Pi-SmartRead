@@ -250,7 +250,7 @@ function resolveExecuteCwd(opts: LspToolOptions, ctx: ExtensionContext): string 
 }
 
 function resolveExecutorDeps(opts: LspToolOptions, cwd: string, signal: AbortSignal | undefined): ExecutorDeps {
-  return { ...opts.executorDeps, cwd, signal: opts.executorDeps?.signal ?? signal };
+  return { ...opts.executorDeps, ...(opts.r2 === true ? { r2: true as const } : {}), cwd, signal: opts.executorDeps?.signal ?? signal };
 }
 
 function unstagedResult(envelope: unknown) {
@@ -470,6 +470,12 @@ export interface LspToolOptions {
   readonly executeOperation?: typeof executeLspOperation;
   /** Construction-time opt-in; absent/false preserves the legacy tool surface. */
   readonly affordances?: boolean;
+  /**
+   * Round-2 bundle: everything the round-1 affordances have, plus stage-A
+   * reference/caller output shaping. Implies the affordance surface, so the
+   * description, schema, and guidance stay byte-identical to round-1.
+   */
+  readonly r2?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -499,11 +505,15 @@ function affordanceContext(opts: LspToolOptions, cwd: string, signal?: AbortSign
     root: cwd,
     ...(typeof params?.workspace === "string" ? { workspace: params.workspace } : {}),
     ...(typeof params?.server === "string" ? { server: params.server } : {}),
+    ...(opts.r2 === true ? { r2: true as const } : {}),
     budget: { maxCandidates: AFFORDANCE_BOUNDS.discoveryCandidates, maxRequests: AFFORDANCE_BOUNDS.underlyingRequests, deadlineMs: AFFORDANCE_BOUNDS.aggregateDeadlineMs, signal },
     exec: (request, deps) => {
       const validation = validateStrictRequest(request);
       if (!validation.ok) throw new Error(validation.error);
-      return (opts.executeOperation ?? executeLspOperation)(validation.value, { ...resolveExecutorDeps(opts, cwd, signal), ...deps, cwd, signal: deps?.signal ?? signal });
+      // Investigate dispatches stay raw: the recipe shapes what it needs
+      // itself, so every internal strict call counts under the shared
+      // request budget instead of hiding enrichment inside the executor.
+      return (opts.executeOperation ?? executeLspOperation)(validation.value, { ...resolveExecutorDeps(opts, cwd, signal), ...deps, cwd, signal: deps?.signal ?? signal, r2: false });
     },
   };
 }
@@ -588,11 +598,13 @@ async function executeAnchoredOperation(params: Record<string, unknown>, opts: L
 }
 
 export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
+  // r2 implies the affordance surface; only output shaping differs downstream.
+  const affordances = opts.affordances === true || opts.r2 === true;
   return {
     name: "LSP",
     label: "LSP",
-    description: getLspToolDescription(opts.affordances),
-    parameters: getLspToolSchema(opts.affordances),
+    description: getLspToolDescription(affordances),
+    parameters: getLspToolSchema(affordances),
     async execute(
       _toolCallId: string,
       params: LspInput & Record<string, unknown>,
@@ -600,13 +612,13 @@ export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
       _onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
-      if (opts.affordances && isRecord(params) && (params as Record<string, unknown>).operation === "investigate") {
+      if (affordances && isRecord(params) && (params as Record<string, unknown>).operation === "investigate") {
         return executeInvestigation(params, opts, _signal, ctx);
       }
-      if (opts.affordances && isRecord(params) && typeof params.operation === "string" && AFFORDANCE_ANCHOR_OPS.includes(params.operation as typeof AFFORDANCE_ANCHOR_OPS[number]) && params.symbol !== undefined) {
+      if (affordances && isRecord(params) && typeof params.operation === "string" && AFFORDANCE_ANCHOR_OPS.includes(params.operation as typeof AFFORDANCE_ANCHOR_OPS[number]) && params.symbol !== undefined) {
         return executeAnchoredOperation(params, opts, _signal, ctx);
       }
-      const validation = validateStrictRequest(params as unknown);
+      const validation = validateStrictRequest(params as unknown, { r2: opts.r2 === true });
       if (!validation.ok) throw new Error(validation.error);
       if (validation.value.operation === "applyProposal") {
         const cwd = resolveExecuteCwd(opts, ctx);
