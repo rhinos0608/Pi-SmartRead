@@ -31,7 +31,7 @@ import { Value } from "@sinclair/typebox/value";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildToolRegistry } from "./mcp-registry.js";
+import { buildToolRegistry, getMcpAffordanceSelectors } from "./mcp-registry.js";
 import { MCP_PROMPTS } from "./mcp/mcp-prompts.js";
 import { MCP_RESOURCES, resolveResource } from "./mcp/mcp-resources.js";
 import { coerceText } from "./utils.js";
@@ -219,13 +219,16 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   }
 
   if (name === "smartread-tool-guide") {
+    // Only the r2 flag varies here: baseline and round-1 arms render
+    // exactly the default text they always have (see the prompt test).
+    const r2 = getMcpAffordanceSelectors().general.variant === "r2";
     return {
       messages: [
         {
           role: "user" as const,
           content: {
             type: "text" as const,
-            text: renderSmartReadToolGuide(typeof args?.task === "string" ? args.task : undefined),
+            text: renderSmartReadToolGuide(typeof args?.task === "string" ? args.task : undefined, false, false, false, r2),
           },
         },
       ],

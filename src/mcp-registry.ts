@@ -245,7 +245,7 @@ export function buildToolRegistry(): ToolDefinition[] {
     const lsp = tools.find((tool) => tool.name === "LSP");
     const inspect = tools.find((tool) => tool.name === "inspect");
     if (lsp && inspect) {
-        const lspGuidance = getSmartReadToolGuidance("LSP", affordanceSelectors.general.enabled)!;
+        const lspGuidance = getSmartReadToolGuidance("LSP", affordanceSelectors.general.enabled, false, false, affordanceSelectors.general.variant === "r2")!;
         const inspectGuidance = getSmartReadToolGuidance("inspect", affordanceSelectors.general.enabled, affordanceSelectors.inspect.enabled, true)!;
         recordEffectiveAffordanceIdentity(
             affordanceSelectors, surfaceVariants, lsp.parameters, lsp.description,

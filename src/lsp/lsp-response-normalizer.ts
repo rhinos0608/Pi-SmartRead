@@ -282,6 +282,35 @@ export function normalizeHover(result: unknown): NormalizedHover | null {
   return hover;
 }
 
+/**
+ * Plain-text type from normalized hover contents (round-2 `type` field).
+ *
+ * Reads the first fenced code block: strips the fences and language tag,
+ * strips one leading `(kind)` / `(+N overloads)` prefix, keeps multi-line
+ * signatures intact. A bare parenthesized type such as `(a: string) => void`
+ * is not a kind prefix and survives. No fenced block, or an empty one,
+ * yields null: the caller omits `type` rather than guessing.
+ */
+export function extractHoverType(hover: NormalizedHover): string | null {
+  if (!hover || !Array.isArray(hover.contents)) return null;
+  for (const content of hover.contents) {
+    if (typeof content?.value !== "string") continue;
+    const lines = content.value.split("\n");
+    const open = lines.findIndex((line) => line.trimStart().startsWith("```"));
+    if (open === -1) continue;
+    const rest = lines.slice(open + 1);
+    const close = rest.findIndex((line) => line.trimStart().startsWith("```"));
+    const body = (close === -1 ? rest : rest.slice(0, close)).join("\n");
+    const bodyLines = body.split("\n");
+    if (bodyLines.length > 0) {
+      bodyLines[0] = bodyLines[0]!.replace(/^\([A-Za-z]+\)(?=\s+\S)|^\(\+\d+ overloads?\)\s*/, "");
+    }
+    const text = bodyLines.join("\n").trim();
+    if (text.length > 0) return text;
+  }
+  return null;
+}
+
 // ── CompletionItem[] | CompletionList ──────────────────────────────
 
 /** label is the validated spec minimum; all other item fields pass through. */

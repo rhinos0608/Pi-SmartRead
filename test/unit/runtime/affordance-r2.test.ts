@@ -21,6 +21,12 @@ const BASELINE_GUIDANCE_HASH = "0d3e79e23ece2949f06101d7d5c0250962fbbcac59f244c2
 const R1_SCHEMA_HASH = "90eb9ae645f171b91e08ff4dbc8822cba9571ab0b046fa5b99c9a5ba4ab42b2d";
 const R1_GUIDANCE_HASH = "16f517a78e1a6385ead16f9925e79c5fa309d2977023a08115a575b278618593";
 
+// Stage-B r2 surface pins. Stage B rewrote the r2 description, schema
+// (scope text), and guidance, so r2 carries its own hashes distinct from
+// round-1. Baseline and round-1 pins above are unchanged.
+const R2_SCHEMA_HASH = "13242f9025f1f01b77f0cce61e549a5a12e7d7f56fc823c80745a1346527804c";
+const R2_GUIDANCE_HASH = "170083ab8ca6a69cf6445dab833cc7e952770fc612b6ca162708736a5af2e156";
+
 async function piIdentityFor(general: string, inspect: string) {
   vi.stubEnv("PI_SMARTREAD_SURFACE_IDENTITY_LOG", "0");
   vi.resetModules();
@@ -97,14 +103,16 @@ describe("baseline and round-1 surface pins (c388cc5)", () => {
     expect(id.guidanceHash).toBe(R1_GUIDANCE_HASH);
   });
 
-  it("gives r2 a distinct identity with stage-A-identical schema and guidance", async () => {
+  it("gives r2 a distinct identity with its own stage-B schema and guidance", async () => {
     const r1 = await piIdentityFor("1", "0");
     const r2 = await piIdentityFor("2", "0");
     expect(r2.variants.lsp).toBe("r2");
     expect(r2.surfaceIdentity).not.toBe(r1.surfaceIdentity);
-    // Stage A changes output shaping only: no description, schema, or
-    // guidance text rewrite (stage B owns that).
-    expect(r2.schemaHash).toBe(r1.schemaHash);
-    expect(r2.guidanceHash).toBe(r1.guidanceHash);
+    // Stage B rewrote the r2 description, schema, and guidance, so the
+    // hashes differ from round-1 and pin the new text.
+    expect(r2.schemaHash).not.toBe(r1.schemaHash);
+    expect(r2.guidanceHash).not.toBe(r1.guidanceHash);
+    expect(r2.schemaHash).toBe(R2_SCHEMA_HASH);
+    expect(r2.guidanceHash).toBe(R2_GUIDANCE_HASH);
   });
 });

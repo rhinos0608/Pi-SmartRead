@@ -43,11 +43,15 @@ describe("findReferences scope gating (stage A, r2 only)", () => {
 });
 
 describe("r2 tool surface", () => {
-  it("keeps the round-1 description and schema byte-identical", () => {
+  it("carries the stage-B description while round-1 stays byte-identical", () => {
     const r1 = createLspTool({ affordances: true });
     const r2 = createLspTool({ affordances: true, r2: true });
-    expect(r2.description).toBe(r1.description);
-    expect(r2.parameters).toEqual(r1.parameters);
+    expect(r2.description).not.toBe(r1.description);
+    expect(r2.description).toContain("grouped by file");
+    const r2scope = (r2.parameters as { properties: { scope: { description: string } } }).properties.scope;
+    const r1scope = (r1.parameters as { properties: { scope: { description: string } } }).properties.scope;
+    expect(r2scope.description).toMatch(/findReferences/);
+    expect(r1scope.description).toContain("investigate only");
   });
 
   it("rejects scope at the tool boundary without r2 and dispatches with r2", async () => {

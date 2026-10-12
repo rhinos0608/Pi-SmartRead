@@ -31,6 +31,8 @@ import {
   normalizeLocations,
   normalizeDocumentSymbols,
   normalizeHover,
+  extractHoverType,
+  type NormalizedHover,
   normalizeCompletions,
   normalizeCodeActions,
   normalizeWorkspaceEdit,
@@ -1056,6 +1058,20 @@ export async function executeLspOperation(req: unknown, deps: ExecutorDeps = {})
           conn: conn!, r, method, info, root, cursors, timeoutMs, signal, scopeKey, affinity,
           calls: value as Array<{ from: LSPCallHierarchyItem; fromRanges: LSPRange[] }>,
         });
+      }
+      // Round-2 hover answers (r2 only): the plain-text `type` next to the
+      // untouched raw contents. Omitted whenever extraction is not
+      // confident; baseline and round-1 fall through untouched.
+      if (r2 && r.operation === "hover" && value !== null && typeof value === "object" && !Array.isArray(value)) {
+        const type = extractHoverType(value as NormalizedHover);
+        const result = type === null ? value : { ...(value as Record<string, unknown>), type };
+        affinity.noteSuccess(scopeKey, info.descriptorId);
+        const empty = isEmptyValue(result);
+        return {
+          status: classifyStatus({ kind: empty ? "success-empty" : "success-value" }),
+          operation: r.operation, method, server: info, result,
+          meta: resultMetaForPath(conn!, r, false),
+        };
       }
       // Pagination for list results.
       if (LIST_OPS.has(r.operation) && Array.isArray(value) && (r.limit !== undefined || r.cursor !== undefined)) {

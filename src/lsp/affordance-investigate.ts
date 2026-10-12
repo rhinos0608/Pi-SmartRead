@@ -41,7 +41,8 @@ import {
 import { resolveAffordanceAnchor } from "./affordance-anchor.js";
 import { getSharedCursorStore } from "./lsp-executor.js";
 import { shapeR2References, asR2Encoding, r2ReferencesCursorIdentity, type R2ReferencesResult } from "./lsp-r2-shaping.js";
-import type { NormalizedDocumentSymbol } from "./lsp-response-normalizer.js";
+import type { NormalizedDocumentSymbol, NormalizedHover } from "./lsp-response-normalizer.js";
+import { extractHoverType } from "./lsp-response-normalizer.js";
 import type { LSPLocation } from "./lsp-types.js";
 import { isUnderDir, resolveInvestigateScope, type AffordanceScope } from "./lsp-scope.js";
 import { executeLspOperation, type ExecutorDeps } from "./lsp-executor.js";
@@ -549,6 +550,17 @@ async function runSingleRecipe(
   if (recipe === "references" && state.r2 === true) {
     const shaped = await shapeR2InvestigationReferences(state, { path, at }, out.result, out.server?.positionEncoding);
     return { status: out.status, result: { task: recipe, ...shaped }, steps: state.steps };
+  }
+  // Round-2 type answers (r2 only): the same plain-text `type` the strict
+  // hover op returns, merged into the standard projection. Round-1 output
+  // is untouched.
+  if (recipe === "type" && state.r2 === true) {
+    const raw = out.result;
+    const hoverish = raw !== null && typeof raw === "object" && !Array.isArray(raw);
+    const type = hoverish ? extractHoverType(raw as NormalizedHover) : null;
+    const enriched = hoverish && type !== null ? { ...(raw as Record<string, unknown>), type } : raw;
+    const typed = projectItems(recipe, enriched, out, state.scope);
+    return { status: typed.status, result: typed.summary, steps: state.steps };
   }
   const { summary, status } = projectItems(recipe, out.result, out, state.scope);
   return { status, result: summary, steps: state.steps };
