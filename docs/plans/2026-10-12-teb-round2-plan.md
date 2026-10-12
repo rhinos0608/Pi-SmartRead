@@ -64,9 +64,10 @@ evaluated as one bundle against baseline.
     output) returns hits grouped by file, each with the trimmed source line, the enclosing
     declaration (name and kind), and a role tag: `import`/`export` binding, `declaration`, or `use`.
     Classification is syntactic and fail-open to `use`; it never drops a hit.
-2.2 **Scope, budget and truncation.** Reference-shaped results accept a path-prefix scope and a
-    result limit, report total vs returned counts, state truncation explicitly, and return a cursor
-    for the remainder.
+2.2 **Scope, budget and truncation.** Reference-shaped results accept a scope (an existing
+    workspace-relative file or directory, as for `investigate`) and a result limit, report total
+    vs returned counts, state truncation explicitly, and return a cursor for the remainder that is
+    bound to the original query and scope.
 2.3 **Callers as a first-class answer.** A request for callers (call hierarchy, or references with
     the enclosing declaration) returns caller declarations directly, de-duplicated, with call-site
     lines, so no file reads are needed to name the caller.
