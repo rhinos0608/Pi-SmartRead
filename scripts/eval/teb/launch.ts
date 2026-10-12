@@ -58,6 +58,11 @@ export interface LaunchPiSessionOptions {
     timeoutMs: number;
     /** Kill the process group after this many `turn_start` events (E13.6). Defaults to 25 (protocol §9.3). */
     maxTurns?: number;
+    /**
+     * Override TEB_POST_SETTLE_GRACE_MS (unit tests only;
+     * production always uses the constant).
+     */
+    postSettleGraceMs?: number;
     outJsonl: string;
     outStderr: string;
     spawnFn?: PiSpawnFn;
@@ -69,6 +74,17 @@ export interface LaunchPiSessionResult {
     timedOut: boolean;
     /** True when the turn limit fired (counts as a failure like a timeout). */
     turnLimitHit: boolean;
+    /**
+     * True when the session emitted `agent_settled` but the pi process
+     * never exited, so the runner reaped the group after the
+     * post-settle grace. `timedOut` stays false: the session is graded
+     * on its answer, never as a timeout.
+     */
+    postSettleReap: boolean;
+    /** Runner receipt rt (ms) of the first `agent_settled` event; null when the session never settled. */
+    settleRtMs: number | null;
+    /** ms from settle to the post-settle reap; null unless `postSettleReap`. */
+    settleToReapMs: number | null;
     /** Observed `turn_start` event count. */
     turns: number;
     /** stdout lines captured (raw text per line). */
@@ -96,6 +112,14 @@ export function killActivePiGroups(): void {
         }
     }
 }
+
+/**
+ * Post-settle grace (ms) before the runner reaps a settled-but-live
+ * pi process group. Pilot distribution: 110 sessions exited 3.0–3.8 s
+ * after `agent_settled`; 5 s covers the observed max with margin while
+ * staying two orders of magnitude below the 240 s session watchdog.
+ */
+export const TEB_POST_SETTLE_GRACE_MS = 5000;
 
 /**
  * Spawn `piBin args`, wrap every stdout line as `{rt, event}` JSONL
@@ -126,10 +150,11 @@ export async function launchPiSession(opts: LaunchPiSessionOptions): Promise<Lau
     let turns = 0;
     let turnLimitHit = false;
     const maxTurns = opts.maxTurns ?? 25;
-    const isTurnStart = (event: unknown): boolean =>
-        typeof event === "object" &&
-        event !== null &&
-        (event as { type?: unknown }).type === "turn_start";
+    const eventTypeOf = (event: unknown): unknown =>
+        typeof event === "object" && event !== null ? (event as { type?: unknown }).type : undefined;
+    const isTurnStart = (event: unknown): boolean => eventTypeOf(event) === "turn_start";
+    /** Settle is detected from the pi stdout event stream the extractor reads (`event.type`). */
+    const isAgentSettled = (event: unknown): boolean => eventTypeOf(event) === "agent_settled";
     const recordLine = (line: string): void => {
         if (line.length === 0) return;
         let event: unknown;
@@ -148,6 +173,22 @@ export async function launchPiSession(opts: LaunchPiSessionOptions): Promise<Lau
                 turnLimitHit = true;
                 killTree(child);
             }
+        }
+        // False-timeout fix: the terminal `agent_settled` event
+        // determines the session outcome, not process exit. Line
+        // buffering above already reassembles events split across
+        // stdout chunks, so detection here sees whole events only.
+        if (!settled && isAgentSettled(event)) {
+            settled = true;
+            settleRtMs = rt();
+            // The agent finished: the wall-clock watchdog must not
+            // convert this session into a timeout during the drain grace.
+            if (timer !== undefined) {
+                clearTimeout(timer);
+                timer = undefined;
+            }
+            settleTimer = setTimeout(onPostSettleGrace, postSettleGraceMs);
+            settleTimer.unref?.();
         }
     };
 
@@ -173,19 +214,53 @@ export async function launchPiSession(opts: LaunchPiSessionOptions): Promise<Lau
     let exitCode: number | null = null;
     let signal: string | null = null;
     let spawnError: string | null = null;
+    let postSettleReap = false;
+    let settleRtMs: number | null = null;
+    let settleToReapMs: number | null = null;
+    let exited = false;
+    let settled = false;
+    const postSettleGraceMs = opts.postSettleGraceMs ?? TEB_POST_SETTLE_GRACE_MS;
+    let timer: NodeJS.Timeout | undefined;
+    let settleTimer: NodeJS.Timeout | undefined;
+    let notifySettledReaped: () => void = () => {};
+    const settledReaped = new Promise<void>((resolve) => {
+        notifySettledReaped = resolve;
+    });
+    /**
+     * Post-settle grace expiry: the agent finished but the process
+     * never exited — reap the whole group and resolve as NOT timed
+     * out. The event log already holds everything up to settle.
+     */
+    const onPostSettleGrace = (): void => {
+        settleTimer = undefined;
+        if (exited || postSettleReap) return;
+        postSettleReap = true;
+        settleToReapMs = settleRtMs !== null ? rt() - settleRtMs : null;
+        killTree(child);
+        notifySettledReaped();
+    };
     const exit = new Promise<void>((resolve) => {
         child.on("exit", (code: unknown, sig: unknown) => {
+            exited = true;
+            if (settleTimer !== undefined) {
+                clearTimeout(settleTimer);
+                settleTimer = undefined;
+            }
             exitCode = typeof code === "number" ? code : null;
             signal = typeof sig === "string" ? sig : null;
             resolve();
         });
         child.on("error", (cause: unknown) => {
+            exited = true;
+            if (settleTimer !== undefined) {
+                clearTimeout(settleTimer);
+                settleTimer = undefined;
+            }
             spawnError = cause instanceof Error ? cause.message : String(cause);
             resolve();
         });
     });
 
-    let timer: NodeJS.Timeout | undefined;
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         timer = setTimeout(() => {
             timedOut = true;
@@ -194,8 +269,19 @@ export async function launchPiSession(opts: LaunchPiSessionOptions): Promise<Lau
         timer.unref?.();
     }
 
-    await exit;
+    await Promise.race([exit, settledReaped]);
     if (timer) clearTimeout(timer);
+    if (settleTimer !== undefined) {
+        clearTimeout(settleTimer);
+        settleTimer = undefined;
+    }
+    if (!exited) {
+        // Post-settle reap path: the kill is in flight — give exit a
+        // bounded moment to land, then proceed regardless. The outcome
+        // was already determined at settle, so this never becomes a
+        // timeout. Sessions that never settle still hit the watchdog above.
+        await Promise.race([exit, new Promise((resolve) => setTimeout(resolve, 2000))]);
+    }
     // A killed process normally closes stdio, ending stdoutDone. If it
     // does not (wedged pipe), do not wait forever: proceed after a
     // short grace so the timeout outcome is still recorded.
@@ -214,7 +300,19 @@ export async function launchPiSession(opts: LaunchPiSessionOptions): Promise<Lau
         err.end(done);
     });
 
-    return { exitCode, signal, timedOut, turnLimitHit, turns, lines, elapsedMs: rt(), spawnError };
+    return {
+        exitCode,
+        signal,
+        timedOut,
+        turnLimitHit,
+        postSettleReap,
+        settleRtMs,
+        settleToReapMs,
+        turns,
+        lines,
+        elapsedMs: rt(),
+        spawnError,
+    };
 }
 
 /** SIGKILL the group when grandchildren survive the pi exit. */

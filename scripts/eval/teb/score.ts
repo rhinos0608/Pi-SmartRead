@@ -110,6 +110,8 @@ export interface TebScoreOutput {
  * runner only records `timedOut`/`turnLimitHit` for kills it fired
  * itself, and `classifyInfraFailure` already returns null for those,
  * so this ordering is belt and suspenders against misordered inputs.
+ * Post-settle reaps (`postSettleReap`) never reach the timeout branch:
+ * the runner leaves `timedOut` false, so they grade on their answer.
  */
 export function classifySessionValidity(session: TebSessionRecord): {
     validity: TebSessionValidity;

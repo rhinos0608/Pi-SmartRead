@@ -191,6 +191,16 @@ describe("scoreSession", () => {
         expect(score.pass).toBe(false);
         expect(score.validity).toBe("forced-failure");
     });
+    it("grades a post-settle reap on its answer, never as a timeout", () => {
+        const { score } = scoreSession(
+            sessionRecord({ taskId: task.id, postSettleReap: true, settleRtMs: 8000, settleToReapMs: 5000 }),
+            task,
+            messageEnd(CORRECT),
+        );
+        expect(score.validity).toBe("valid");
+        expect(score.gradePass).toBe(true);
+        expect(score.pass).toBe(true);
+    });
 });
 
 describe("pairArmVsBaseline", () => {

@@ -664,6 +664,174 @@ describe("launchPiSession", () => {
     });
 });
 
+/**
+ * Fake pi whose stdout yields raw chunks (so a settle event split
+ * across chunk boundaries is exercised) and whose process never
+ * exits on its own — unless `exitAfterChunks` — but always reports
+ * exit (code null, signal SIGKILL, like a group SIGKILL in
+ * production) once killed, and closes its stdout pipe then.
+ */
+function fakeSettlingSpawn(chunks: string[], opts?: { exitAfterChunks?: boolean; onKill?: () => void }): PiSpawnFn {
+    return () => {
+        let exitListener: ((code: number | null, sig: string | null) => void) | null = null;
+        let releaseStdout: () => void = () => {};
+        const stdoutStalled = new Promise<void>((resolve) => { releaseStdout = resolve; });
+        return {
+            stdout: (async function* () {
+                for (const chunk of chunks) yield chunk;
+                if (opts?.exitAfterChunks) return;
+                await stdoutStalled;
+            })(),
+            stderr: null,
+            pid: undefined,
+            on: (event: string, listener: (...args: never[]) => void) => {
+                if (event === "exit") {
+                    if (opts?.exitAfterChunks) {
+                        queueMicrotask(() => (listener as unknown as () => void)());
+                    } else {
+                        exitListener = listener as unknown as (code: number | null, sig: string | null) => void;
+                    }
+                }
+            },
+            kill: () => {
+                opts?.onKill?.();
+                releaseStdout();
+                const exit = exitListener;
+                exitListener = null;
+                if (exit) queueMicrotask(() => exit(null, "SIGKILL"));
+                return true;
+            },
+        };
+    };
+}
+
+const settleTestLine = `${JSON.stringify({ type: "agent_settled" })}\n`;
+
+function settleLaunchOpts(dir: string, spawnFn: PiSpawnFn, overrides: { timeoutMs: number; postSettleGraceMs: number }) {
+    return {
+        args: ["x"],
+        cwd: dir,
+        env: {},
+        timeoutMs: overrides.timeoutMs,
+        postSettleGraceMs: overrides.postSettleGraceMs,
+        outJsonl: join(dir, "out.jsonl"),
+        outStderr: join(dir, "err.txt"),
+        spawnFn,
+    };
+}
+
+describe("post-settle reap (false-timeout fix)", () => {
+    it("reaps a settled-but-live session without timing out", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-settle-"));
+        let kills = 0;
+        const result = await launchPiSession(
+            settleLaunchOpts(dir, fakeSettlingSpawn([settleTestLine], { onKill: () => { kills += 1; } }), {
+                timeoutMs: 1000,
+                postSettleGraceMs: 30,
+            }),
+        );
+        expect(result.timedOut).toBe(false);
+        expect(result.postSettleReap).toBe(true);
+        expect(kills).toBeGreaterThan(0);
+        expect(result.signal).toBe("SIGKILL");
+        expect(result.settleRtMs).not.toBeNull();
+        expect(result.settleToReapMs).not.toBeNull();
+        // Bounded grace: reaped shortly after settle, never at the watchdog.
+        expect(result.settleToReapMs!).toBeGreaterThanOrEqual(20);
+        expect(result.settleToReapMs!).toBeLessThan(1000);
+        expect(result.elapsedMs).toBeLessThan(1000);
+        // The event log holds everything up to and including settle.
+        const log = readFileSync(join(dir, "out.jsonl"), "utf8");
+        expect(log).toContain("agent_settled");
+    });
+
+    it("leaves a normally-exiting settled session alone", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-settle-"));
+        let kills = 0;
+        const result = await launchPiSession(
+            settleLaunchOpts(dir, fakeSettlingSpawn([settleTestLine], { exitAfterChunks: true, onKill: () => { kills += 1; } }), {
+                timeoutMs: 5000,
+                postSettleGraceMs: 30,
+            }),
+        );
+        expect(result.timedOut).toBe(false);
+        expect(result.postSettleReap).toBe(false);
+        expect(result.settleRtMs).not.toBeNull();
+        expect(result.settleToReapMs).toBeNull();
+        expect(kills).toBe(0);
+    });
+
+    it("still times out sessions that never settle", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-settle-"));
+        const result = await launchPiSession(
+            settleLaunchOpts(dir, fakeSettlingSpawn(['{"type":"message_start"}\n']), {
+                timeoutMs: 60,
+                postSettleGraceMs: 20,
+            }),
+        );
+        expect(result.timedOut).toBe(true);
+        expect(result.postSettleReap).toBe(false);
+        expect(result.settleRtMs).toBeNull();
+        expect(result.settleToReapMs).toBeNull();
+    });
+
+    it("detects settle split across stdout chunks", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-settle-"));
+        const split = [`{"type":"agent_se`, `ttled"}\n`];
+        const result = await launchPiSession(
+            settleLaunchOpts(dir, fakeSettlingSpawn(split), { timeoutMs: 1000, postSettleGraceMs: 30 }),
+        );
+        expect(result.timedOut).toBe(false);
+        expect(result.postSettleReap).toBe(true);
+        expect(result.settleRtMs).not.toBeNull();
+        const log = readFileSync(join(dir, "out.jsonl"), "utf8");
+        expect(log).toContain("agent_settled");
+    });
+});
+
+describe("post-settle reap manifest wiring", () => {
+    it("records post-settle fields on the run manifest and keeps the session gradable", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "teb-settle-run-"));
+        const repos = join(dir, "repos");
+        const { sha } = makeGitRepo(repos, "fake__repo");
+        process.env["TEB_REPOS_DIR"] = repos;
+        const tasksFile = join(dir, "tasks.json");
+        writeFileSync(tasksFile, `${JSON.stringify(definitionTask({ commit: sha }))}\n`);
+        const identity = JSON.stringify({
+            type: "message_end",
+            message: { role: "assistant", provider: "p", model: "p/m", thinkingLevel: "high" },
+        });
+        const spawnFn: PiSpawnFn = (opts) =>
+            fakeSettlingSpawn([`${identity}\n`, settleTestLine])({
+                command: "pi",
+                args: [],
+                cwd: opts.cwd,
+                env: {},
+            });
+        try {
+            const { manifestPath } = await runTebCli(
+                parseTebRunArgs([
+                    "--tasks", tasksFile, "--split", "pilot", "--out", join(dir, "out"),
+                    "--replicates", "1", "--model", "p/m", "--thinking", "high", "--timeout-ms", "1000",
+                ]),
+                { spawnFn, extensionPath: join(dir, "index.ts"), piVersion: "test", postSettleGraceMs: 30 },
+            );
+            const manifest = JSON.parse(readFileSync(manifestPath, "utf8") as string) as TebManifest;
+            expect(manifest.sessions).toHaveLength(1);
+            const session = manifest.sessions[0]!;
+            expect(session.timedOut).toBe(false);
+            expect(session.postSettleReap).toBe(true);
+            expect(session.settleRtMs).not.toBeNull();
+            expect(session.settleToReapMs).not.toBeNull();
+            // Our own post-settle kill explains the SIGKILL exit: graded,
+            // never an infrastructure exclusion.
+            expect(session.infraFailure).toBeNull();
+        } finally {
+            delete process.env["TEB_REPOS_DIR"];
+        }
+    });
+});
+
 describe("teb shutdown (P1-4)", () => {
     it("runTebShutdown removes tracked scratch dirs", () => {
         const dir = mkdtempSync(join(tmpdir(), "teb-shutdown-"));

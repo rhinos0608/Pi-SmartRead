@@ -580,14 +580,21 @@ export function classifyInfraFailure(input: {
     timedOut: boolean;
     /** True when our turn-limit kill fired: the signal/exit it caused is expected, never a crash. */
     turnLimitHit?: boolean;
+    /**
+     * True when our post-settle reap fired: the SIGKILL exit it caused
+     * is expected (the agent had already settled), never a crash. The
+     * session is graded on its answer downstream.
+     */
+    postSettleReap?: boolean;
 }): TebInfraFailure | null {
     if (input.spawnError !== null) {
         return { kind: "spawn", detail: `spawn failure: ${input.spawnError}` };
     }
-    // Our own kills (wall-clock timeout, turn-limit kill) explain any
-    // signal/nonzero exit: the session counts as a failure downstream,
-    // never as an infrastructure exclusion.
-    if (input.timedOut || input.turnLimitHit === true) return null;
+    // Our own kills (wall-clock timeout, turn-limit kill, post-settle
+    // reap) explain any signal/nonzero exit: the session counts as a
+    // failure downstream (or grades on its answer after a post-settle
+    // reap), never as an infrastructure exclusion.
+    if (input.timedOut || input.turnLimitHit === true || input.postSettleReap === true) return null;
     const stderrText = stderrForInfraSignal(input.stderrText);
     const authInStderr = stderrText.match(TEB_AUTH_PATTERN);
     if (authInStderr !== null) {
@@ -912,7 +919,11 @@ export function installTebShutdownHandlers(): void {
  * scoring excludes predeclared infra failures), `contaminated` /
  * `contaminationHit` (contaminated sessions grade as failures per
  * E10.5/E11a), `timedOut` / `turnLimitHit` (both count as failures in
- * the primary denominator like ordinary timeouts), `turns` (observed
+ * the primary denominator like ordinary timeouts), `postSettleReap` /
+ * `settleRtMs` / `settleToReapMs` (the session settled but pi never
+ * exited, so the runner reaped the group after the post-settle grace;
+ * `timedOut` stays false and the session grades on its answer — never
+ * a timeout, never an infra exclusion), `turns` (observed
  * `turn_start` count), `commitVerified`, `checkoutSha`, `error`,
  * `spawnError`, `exitCode`, `signal`, `elapsedMs`. Field names are
  * stable; `infraFailure` changed from `boolean` to
@@ -936,6 +947,24 @@ export interface TebSessionRecord {
     timedOut: boolean;
     /** True when the turn limit fired (kill on exceeding --max-turns). Counts as a failure like a timeout (E13.6). */
     turnLimitHit: boolean;
+    /**
+     * True when the session emitted `agent_settled` but pi never
+     * exited, so the runner reaped the group after the post-settle
+     * grace. Graded on its answer (never a timeout, never an infra
+     * exclusion). Absent (undefined) on manifests written before the
+     * post-settle fix — readers treat absence as false.
+     */
+    postSettleReap?: boolean;
+    /**
+     * Runner receipt rt (ms) of the first `agent_settled` event; null
+     * when the session never settled. Absent on pre-fix manifests.
+     */
+    settleRtMs?: number | null;
+    /**
+     * ms from settle to the post-settle reap; null unless
+     * `postSettleReap`. Absent on pre-fix manifests.
+     */
+    settleToReapMs?: number | null;
     /** Observed `turn_start` event count for the session. */
     turns: number;
     exitCode: number | null;
@@ -1023,6 +1052,8 @@ export interface RunTebOptions {
     piVersion?: string;
     /** Override the pi binary sha256 (keeps unit tests hermetic). */
     piBinarySha256?: string;
+    /** Override the post-settle reap grace (keeps unit tests fast; production uses the constant). */
+    postSettleGraceMs?: number;
     extensionPath?: string;
     keepTempDirs?: boolean;
 }
@@ -1217,6 +1248,9 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
                     stderrLog,
                     timedOut: false,
                     turnLimitHit: false,
+                    postSettleReap: false,
+                    settleRtMs: null,
+                    settleToReapMs: null,
                     turns: 0,
                     exitCode: null,
                     signal: null,
@@ -1324,12 +1358,16 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
                             env,
                             timeoutMs: args.timeoutMs,
                             maxTurns: args.maxTurns,
+                            postSettleGraceMs: opts.postSettleGraceMs,
                             outJsonl: eventLog,
                             outStderr: stderrLog,
                             spawnFn: opts.spawnFn,
                         });
                         record.timedOut = result.timedOut;
                         record.turnLimitHit = result.turnLimitHit;
+                        record.postSettleReap = result.postSettleReap;
+                        record.settleRtMs = result.settleRtMs;
+                        record.settleToReapMs = result.settleToReapMs;
                         record.turns = result.turns;
                         record.exitCode = result.exitCode;
                         record.signal = result.signal;
@@ -1368,6 +1406,10 @@ export async function runTebCli(args: TebRunArgs, opts: RunTebOptions = {}): Pro
                             // nonzero exit: it grades as a failure
                             // downstream, never as an exclusion.
                             turnLimitHit: result.turnLimitHit,
+                            // Our post-settle reap likewise explains the
+                            // SIGKILL exit: the settled session grades on
+                            // its answer, never as an exclusion.
+                            postSettleReap: result.postSettleReap,
                         });
                         if (record.infraFailure !== null) {
                             writeFileSync(

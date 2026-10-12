@@ -583,6 +583,21 @@ analysis, listed in the report, and RERUN (E13.3). Predeclared
 infrastructure failures ((a)–(c) above) are likewise excluded, listed,
 and rerun. Exclusion rate is
 reported; >5% excluded sessions invalidates the run batch.
+
+Amendment (2026-10-12, post-settle reap — frozen values above
+unchanged): the pilot showed a harness false-timeout defect where `pi`
+emitted the terminal `agent_settled` event but the process never
+exited, so the 240 s watchdog graded finished sessions as
+forced-failures. The runner now treats the first observed
+`agent_settled` as determining the session outcome: it cancels the
+wall-clock watchdog, allows a 5 s post-settle grace for natural exit
+(covers the pilot 3.0–3.8 s exit-after-settle distribution with
+margin), then reaps the process group and resolves with
+`timedOut: false`. The session record carries `postSettleReap: true`
+plus `settleRtMs` and `settleToReapMs` for per-arm audit; such
+sessions grade on their answer, never as timeouts or infra
+exclusions. Sessions that never settle still hit the watchdog
+unchanged.
 agent outcomes, not infra. Alternation: paired order alternates by task
 (AB/BA) within each replicate. Replicates: `[FROZEN: pilot 3 runs]`
 per task×arm as INDEPENDENTLY LAUNCHED fresh `--no-session`
