@@ -59,6 +59,41 @@ better answers on these tasks.
 - Power: detecting +5 pp at 80% would need roughly 314 tasks (normal approximation from the observed
   10% discordance, itself resting on 2 discordant pairs); the planned holdout is 120.
 
+## Corrections after evidence audit (2026-10-12)
+
+A mechanism analysis of the transcripts and a second-wave audit of it (raw event logs, harness code)
+change how this result should be read. The primary numbers above stand.
+
+- **The pilot barely exercised the bundle.** Only 2 of 60 `lsp-affordance` sessions used a new
+  feature (`investigate`: 3 calls, all `task: "definition"`; `symbol` anchors: 4 calls). Both arms
+  otherwise made ordinary LSP calls in a similar share of sessions (26 vs 24 of 60). Pilot tasks give
+  exact coordinates, so name anchors were never needed. The comparison therefore mostly tested
+  different LSP description and guidance text, not anchors or composite recipes.
+- **Neither lost task is attributable to the bundle.** `package-exports-001`: no LSP or `inspect`
+  call in any of the 6 sessions; the difference is whether the `./standalone` export was included
+  (baseline 2/3, arm 1/3), consistent with sampling noise. `all-references-003`: both arms called
+  `findReferences` and received identical results; the arm dropped the in-scope `import` binding in
+  3 of 3 replicates, baseline in 1 of 3. The task text does not say whether imports count as
+  references, and 3 replicates cannot separate an arm effect from chance.
+- **Harness false-timeout defect.** 5 of the 10 timeouts were sessions that had already finished
+  (agent settled at 8.3, 28.3, 36.1, 46.8 and 46.8 s): `launch.ts` waits for the `pi` process to
+  exit before reaping its process group, and `pi` stayed alive until the 240 s watchdog killed it.
+  Why `pi` did not exit is not yet established. A post-hoc sensitivity regrade of those 5 sessions
+  with the harness's own grader leaves the task-level result unchanged (15/20 vs 13/20, −10 pp, CI
+  −25 to 0); run-level becomes 43 vs 41. The other 110 completed sessions show a 3.0–3.8 s gap
+  between settle and exit, so no other session was affected.
+- **Benchmark validity limits.** `type-of-symbol` (0 of 12 runs) is scored by exact string equality
+  against the hover banner; every answer gave a declared or structural type instead, so this family
+  measured the grader, not the tools. All 18 `drizzle-orm` sessions began with a path error because
+  task paths are relative to a package subdirectory while the session starts at the repository
+  root. Small gold sets with `minRecall` 1.0 turn one omitted item into a task failure.
+- **Retracted interpretation.** The lower invalid-call rate in the arm is not evidence that the
+  bundle reduced path guessing: path errors were 9 vs 9, LSP errors 4 (baseline) vs 6 (arm); the
+  difference came from `grep` parameter errors.
+- **Signal worth keeping.** The only `callers-002` pass came from `prepareCallHierarchy` +
+  `incomingCalls` (38 ms), where read-based approaches ran out of time. One unscoped
+  `findReferences` returned 203 references (~73 KB of result text).
+
 ## Decision (owner, 2026-10-12)
 
 Record this round as a finding, do not enlarge the holdout or start dev runs for this bundle, and
