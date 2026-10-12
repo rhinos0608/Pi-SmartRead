@@ -29,6 +29,26 @@ import {
 
 // ── LSP Manager ────────────────────────────────────────────────────
 
+/**
+ * Overall bounds for manager shutdown. Each connection escalation is itself
+ * bounded at ~4s (see lsp-connection.ts), and connections/managers close
+ * concurrently, so a 5s cap always covers one full escalation with headroom
+ * while keeping the total worst case on the order of 5s for `pi -p` exit.
+ */
+export const LSP_MANAGER_SHUTDOWN_CAP_MS = 5_000;
+export const LSP_SHUTDOWN_ALL_CAP_MS = 5_000;
+
+/** Unref'd overall-cap timer: bounds shutdown without ever pinning the loop. */
+function shutdownCap(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+    const t = timer as unknown as { unref?: unknown };
+    if (typeof t.unref === "function") (t as { unref: () => void }).unref();
+  });
+  return { promise, cancel: () => clearTimeout(timer) };
+}
+
 export class LSPManager {
   private connections = new Map<string, LSPConnection>();
   private rootUri: string;
@@ -446,8 +466,24 @@ export class LSPManager {
   }
 
   async shutdown(): Promise<void> {
-    for (const conn of new Set(this.connections.values())) conn.shutdown();
+    const conns = [...new Set(this.connections.values())];
     this.connections.clear();
+    if (conns.length === 0) return;
+    // Connections shut down concurrently: one stuck server must not delay the
+    // others. The overall cap bounds the total wait even when every
+    // connection hangs (each connection is itself bounded at ~4s; see
+    // lsp-connection.ts, so 5s here always covers a full escalation).
+    const cap = shutdownCap(LSP_MANAGER_SHUTDOWN_CAP_MS);
+    try {
+      await Promise.race([
+        Promise.allSettled(conns.map((conn) => {
+          try { return conn.shutdown(); } catch { return Promise.resolve(); }
+        })),
+        cap.promise,
+      ]);
+    } finally {
+      cap.cancel();
+    }
   }
 }
 // ── Session store: leases, nested roots, precise invalidation ────────────
@@ -578,11 +614,23 @@ export async function prepareDocument(conn: LSPConnection, filePath: string): Pr
 
 export async function shutdownAllManagers(): Promise<void> {
   pendingManagerEvictions.clear();
-  for (const mgr of managerCache.values()) {
-    await mgr.shutdown();
-  }
+  const managers = [...managerCache.values()];
   managerCache.clear();
   managerAccessOrder.length = 0;
+  if (managers.length === 0) return;
+  // Managers shut down concurrently under one overall cap. Cache state is
+  // cleared up front so a capped (still-closing) manager is never reused.
+  const cap = shutdownCap(LSP_SHUTDOWN_ALL_CAP_MS);
+  try {
+    await Promise.race([
+      Promise.allSettled(managers.map((mgr) => {
+        try { return mgr.shutdown(); } catch { return Promise.resolve(); }
+      })),
+      cap.promise,
+    ]);
+  } finally {
+    cap.cancel();
+  }
 }
 
 export const managerCache = new Map<string, LSPManager>();

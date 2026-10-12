@@ -39,6 +39,35 @@ interface LspIncomingMessage {
 }
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Bounded shutdown escalation for LSPConnection.shutdown().
+ *
+ * pi print mode (`pi -p` / `--mode json`) returns from main() without
+ * process.exit and relies on the event loop draining. A language server that
+ * ignores SIGTERM therefore pins pi forever: the previous fire-and-forget
+ * shutdown sent `shutdown`/`exit` plus one un-awaited SIGTERM with no SIGKILL,
+ * no stream teardown, and no unref.
+ *
+ * Worst case per connection: SETTLE (2s, preserves the pre-existing
+ * shutdown-response bound) + EXIT_GRACE (1s; cooperative servers such as
+ * tsserver normally exit in milliseconds) + TERM_GRACE (1s; lets SIGTERM
+ * handlers flush) ~= 4s, under the 5s manager cap in lsp-manager.ts. Every
+ * timer below is unref'd and every path destroys stdio and unrefs the child,
+ * so even a hung server can never pin the event loop once shutdown resolves.
+ *
+ * Escalation is platform-safe by construction: on win32 POSIX signals do not
+ * exist and ChildProcess.kill() terminates the process regardless of the
+ * signal argument, so SIGTERM-then-SIGKILL degrades to
+ * terminate-then-terminate with no branching needed.
+ *
+ * Grandchild processes (e.g. a tsserver forked by typescript-language-server)
+ * are deliberately NOT addressed here: the server is spawned attached (not
+ * detached, no process-group kill). Whether grandchildren survive is an open
+ * question for a later live repro.
+ */
+export const LSP_SHUTDOWN_SETTLE_MS = 2_000;
+export const LSP_SHUTDOWN_EXIT_GRACE_MS = 1_000;
+export const LSP_SHUTDOWN_TERM_GRACE_MS = 1_000;
 
 /** Cap on cancelled-request ids retained to absorb late server responses. */
 export const CANCELLED_TOMBSTONE_LIMIT = 256;
@@ -841,35 +870,130 @@ export class LSPConnection {
     });
   }
 
-  /** Guard so a second shutdown() while the first is settling does not send a duplicate. */
+  /** Set synchronously on the first shutdown() so request() gates immediately. */
   private shutdownStarted = false;
 
-  /** Best-effort wait for the server's shutdown response before exit; never blocks callers. */
-  private static readonly SHUTDOWN_SETTLE_MS = 2000;
+  /** Shared shutdown promise: concurrent shutdown() calls await the same work. */
+  private shutdownPromise: Promise<void> | null = null;
 
-  shutdown(): void {
-    if (this.closed || this.shutdownStarted) return;
-    this.shutdownStarted = true;
+  /**
+   * Bounded, idempotent shutdown. Resolves only when the child has exited
+   * or has been forcibly released (SIGTERM, then SIGKILL, then stdio
+   * teardown + unref in every path). Concurrent calls share one promise.
+   * The promise never rejects: shutdown is best-effort by design so
+   * fire-and-forget call sites (session reaping, invalidation) stay safe.
+   * Pending requests are rejected with Error("LSP shutdown") as before.
+   */
+  shutdown(): Promise<void> {
+    if (!this.shutdownPromise) {
+      this.shutdownStarted = true;
+      this.shutdownPromise = this.runShutdown();
+    }
+    return this.shutdownPromise;
+  }
+
+  private async runShutdown(): Promise<void> {
     if (this.lifecycle === "ready" || this.lifecycle === "initializing" || this.lifecycle === "created" || this.lifecycle === "failed") this.lifecycle = "shutting-down";
-    const req = this.requestNow("shutdown", {});
-    const settle = new Promise<void>((resolve) => {
-      const t = setTimeout(resolve, LSPConnection.SHUTDOWN_SETTLE_MS);
+    try {
+      await this.performShutdown();
+    } catch { /* best-effort: shutdown never rejects */ }
+    try { this.releaseChild(); } catch { /* best effort */ }
+  }
+
+  private async performShutdown(): Promise<void> {
+    const proc = this.proc;
+    if (this.closed || !proc || LSPConnection.hasProcessExited(proc)) {
+      this.closed = true;
+      if (this.lifecycle === "shutting-down") this.lifecycle = "closed";
+      this.rejectPendingWithShutdownError();
+      return;
+    }
+    try {
+      await Promise.race([
+        this.requestNow("shutdown", {}).then(() => undefined, () => undefined),
+        this.unrefDelay(LSP_SHUTDOWN_SETTLE_MS),
+      ]);
+    } catch { /* a failed shutdown request still proceeds to exit */ }
+    try { await this.notifyNow("exit", {}); } catch { /* best effort */ }
+    this.closed = true;
+    this.lifecycle = "closed";
+    this.rejectPendingWithShutdownError();
+    this.openDocuments.clear();
+    if (await this.waitForExit(proc, LSP_SHUTDOWN_EXIT_GRACE_MS)) return;
+    try { proc.kill("SIGTERM"); } catch { /* best effort */ }
+    if (await this.waitForExit(proc, LSP_SHUTDOWN_TERM_GRACE_MS)) return;
+    // SIGTERM ignored (or unsupported): SIGKILL is the last resort. On win32
+    // kill() terminates regardless of signal, so this is platform-safe.
+    try { proc.kill("SIGKILL"); } catch { /* best effort */ }
+  }
+
+  private rejectPendingWithShutdownError(): void {
+    for (const [id, pending] of [...this.pending]) {
+      this.clearPending(id, pending);
+      pending.reject(new Error("LSP shutdown"));
+    }
+    this.pending.clear();
+  }
+
+  /** Unref'd delay: bounds a shutdown phase without ever pinning the loop. */
+  private unrefDelay(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, ms);
       if (typeof (t as unknown as { unref?: unknown }).unref === "function") {
         (t as unknown as { unref: () => void }).unref();
       }
     });
-    void Promise.race([req.then(() => undefined, () => undefined), settle]).finally(() => {
-      void this.notifyNow("exit", {}).catch(() => {});
-      this.closed = true;
-      this.lifecycle = "closed";
-      for (const [id, pending] of [...this.pending]) {
-        this.clearPending(id, pending);
-        pending.reject(new Error("LSP shutdown"));
+  }
+
+  /** True once the process has actually exited (listener or observed code).
+   * Uses only exitCode/signalCode: this.closed marks connection state and is
+   * already true by the time we wait, so it must not count as process exit. */
+  private static hasProcessExited(proc: { exitCode?: number | null; signalCode?: unknown }): boolean {
+    if (typeof proc.exitCode === "number") return true;
+    const sig = proc.signalCode as unknown;
+    return sig !== null && sig !== undefined;
+  }
+
+  /** True once the process has exited (listener or already-observed exit). */
+  private waitForExit(proc: NonNullable<LSPConnection["proc"]>, ms: number): Promise<boolean> {
+    if (LSPConnection.hasProcessExited(proc)) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const onExit = (): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        resolve(true);
+      };
+      const t = setTimeout(() => {
+        if (done) return;
+        done = true;
+        try { proc.removeListener("exit", onExit); } catch { /* best effort */ }
+        resolve(LSPConnection.hasProcessExited(proc));
+      }, ms);
+      if (typeof (t as unknown as { unref?: unknown }).unref === "function") {
+        (t as unknown as { unref: () => void }).unref();
       }
-      this.pending.clear();
-      this.openDocuments.clear();
-      setTimeout(() => this.proc?.kill(), 1000);
+      proc.once("exit", onExit);
     });
+  }
+
+  /** Destroy stdio streams and unref the child so it can never pin the loop. */
+  private releaseChild(): void {
+    const proc = this.proc;
+    if (!proc) return;
+    for (const stream of [proc.stdin, proc.stdout, proc.stderr] as const) {
+      try {
+        const s = stream as unknown as { destroy?: unknown; end?: unknown } | null;
+        if (!s) continue;
+        if (typeof s.destroy === "function") (s as { destroy: () => void }).destroy();
+        else if (typeof s.end === "function") (s as { end: () => void }).end();
+      } catch { /* best effort */ }
+    }
+    try {
+      const p = proc as unknown as { unref?: unknown };
+      if (typeof p.unref === "function") (p as { unref: () => void }).unref();
+    } catch { /* best effort */ }
   }
 
   private _onData(chunk: Buffer): void {
@@ -878,7 +1002,15 @@ export class LSPConnection {
     this.drainLspFrames();
   }
 
-  /** True when the frame buffer exceeded the cap; closes the connection and rejects all pending. */
+  /**
+   * True when the frame buffer exceeded the cap; closes the connection and rejects all pending.
+   *
+   * NOTE: the synchronous kill() here intentionally differs from shutdown():
+   * this is a safety breaker on the data path (a hostile/broken server
+   * flooding stdout), not a protocol close. It must act inline without
+   * awaiting a handshake; orderly release still happens via the exit handler
+   * and shutdown()/releaseChild().
+   */
   private checkFrameBufferOverflow(): boolean {
     if (this.buffer.length <= LSPConnection.BUFFER_LIMIT_BYTES) return false;
     console.error(
