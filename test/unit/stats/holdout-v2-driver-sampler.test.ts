@@ -20,6 +20,7 @@ import { runDriverCli } from "../../../scripts/holdout-v2/driver-run.js";
 import {
     FAKE_WORKER,
     FAST,
+    fakeEngineRoot,
     manifestFor,
     onlyCheckpoint,
     stubEngine,
@@ -28,13 +29,15 @@ import {
 
 describe.skipIf(process.platform === "win32")("driver load sampler lifecycle", () => {
     it("emits a sidecar even when the worker exits before the first tick", async () => {
-        const root = join(tempDir(), "state");
+        const dir = tempDir();
+        const root = join(dir, "state");
+        const engineRoot = fakeEngineRoot(dir);
         const manifestPath = manifestFor(["syn-t1", "syn-t2"]);
         process.env.FAKE_PLAN_JSON = JSON.stringify({});
         const code = await runDriverCli(
             [
                 "--engine-root",
-                "/tmp/fake-engine",
+                engineRoot,
                 "--manifest",
                 manifestPath,
                 "--split",

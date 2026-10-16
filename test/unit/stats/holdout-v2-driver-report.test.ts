@@ -14,6 +14,7 @@ import { mergeAttemptReports } from "../../../scripts/holdout-v2/merge-attempts.
 import {
     FAST,
     FAKE_WORKER,
+    fakeEngineRoot,
     manifestFor,
     onlyCheckpoint,
     onlyReport,
@@ -61,13 +62,14 @@ describe.skipIf(process.platform === "win32")("driver resume/report/merge/modes"
     it("resume after a supervisor restart completes the remaining pairs in order", async () => {
         const dir = tempDir();
         const stateRoot = join(dir, "state");
+        const engineRoot = fakeEngineRoot(dir);
         const manifest = manifestFor(["syn-t1", "syn-t2"]);
         // Run 1: worker crashes after the first pair; no relaunches allowed.
         process.env.FAKE_PLAN_JSON = JSON.stringify({ queries: { [pairKey("syn-t1", "body")]: "exit-crash" } });
         const reportsDir = join(stateRoot, "reports");
         const baseArgs = [
             "--engine-root",
-            "/tmp/fake-engine",
+            engineRoot,
             "--manifest",
             manifest,
             "--split",
@@ -173,6 +175,7 @@ describe.skipIf(process.platform === "win32")("driver resume/report/merge/modes"
     });
     it("refuses holdout without --open-holdout and mismatched engine hash", async () => {
         const dir = tempDir();
+        const engineRoot = fakeEngineRoot(dir);
         const holdoutManifest = join(dir, "holdout.json");
         writeFileSync(holdoutManifest, JSON.stringify({ version: 2, dev: [], holdout: [{ id: "h1" }], sha256: "cd".repeat(32) }));
         process.env.FAKE_PLAN_JSON = JSON.stringify({});
@@ -188,18 +191,18 @@ describe.skipIf(process.platform === "win32")("driver resume/report/merge/modes"
             runId: "gate-probe",
         };
         const refused = await runDriverCli(
-            ["--engine-root", "/tmp/fake-engine", "--manifest", holdoutManifest, "--split", "holdout", "--state-root", join(dir, "s"), "--accept-license-review"],
+            ["--engine-root", engineRoot, "--manifest", holdoutManifest, "--split", "holdout", "--state-root", join(dir, "s"), "--accept-license-review"],
             base,
         );
         expect(refused).toBe(2);
         const opened = await runDriverCli(
-            ["--engine-root", "/tmp/fake-engine", "--manifest", holdoutManifest, "--split", "holdout", "--open-holdout", "--state-root", join(dir, "s2"), "--accept-license-review"],
+            ["--engine-root", engineRoot, "--manifest", holdoutManifest, "--split", "holdout", "--open-holdout", "--state-root", join(dir, "s2"), "--accept-license-review"],
             base,
         );
         // h1 is not in the stub instance set: dataset-stage exclusion, zero pairs, still a complete report.
         expect(opened).toBe(0);
         const mismatch = await runDriverCli(
-            ["--engine-root", "/tmp/fake-engine", "--manifest", manifestFor(["syn-t1"]), "--split", "dev", "--state-root", join(dir, "s3"), "--accept-license-review"],
+            ["--engine-root", engineRoot, "--manifest", manifestFor(["syn-t1"]), "--split", "dev", "--state-root", join(dir, "s3"), "--accept-license-review"],
             { ...base, expectedEngineHash: "sha256:wrong", runId: "gate-probe-2" },
         );
         expect(mismatch).toBe(2);

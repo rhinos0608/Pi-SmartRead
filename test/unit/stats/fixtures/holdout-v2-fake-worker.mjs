@@ -17,11 +17,20 @@
 
 import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
 
 const configPath = process.argv[process.argv.indexOf("--config") + 1];
 const config = JSON.parse(readFileSync(configPath, "utf8"));
 const plan = JSON.parse(process.env.FAKE_PLAN_JSON ?? "{}");
 const checkpointPath = config.checkpointPath;
+// Synthetic snapshot metadata stays beneath the harness-owned state root
+// (no child-created tmpdir, which a watchdog kill could leave behind).
+const snapshotRootFor = (instanceId) => {
+    if (typeof config.stateRoot === "string" && config.stateRoot !== "") {
+        return join(config.stateRoot, "snapshots", instanceId);
+    }
+    return join(dirname(checkpointPath), "..", "snapshots", instanceId);
+};
 const pairKey = (instanceId, formulation) => JSON.stringify([instanceId, formulation]);
 
 function load() {
@@ -143,7 +152,7 @@ async function main() {
                     reason: "missing-at-base",
                     missing: ["src/gone.ts"],
                     stage: "materialize",
-                    root: "/tmp/fake-snap",
+                    root: snapshotRootFor(instance.instanceId),
                     createdFresh: false,
                 },
             });
@@ -153,7 +162,7 @@ async function main() {
         append({
             v: 1,
             kind: "attempt",
-            attempt: { instanceId: instance.instanceId, root: "/tmp/fake-snap", stage: "materialize", outcome: "success", createdFresh: true },
+            attempt: { instanceId: instance.instanceId, root: snapshotRootFor(instance.instanceId), stage: "materialize", outcome: "success", createdFresh: true },
         });
         marker({ phase: "setup-end", instanceId: instance.instanceId });
         for (const formulation of mine) {

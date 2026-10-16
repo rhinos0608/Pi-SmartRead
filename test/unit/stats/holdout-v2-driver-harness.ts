@@ -5,8 +5,8 @@
  * holdout-v2-driver-*.test.ts suites; not itself a test file.
  */
 
-import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach } from "vitest";
@@ -127,6 +127,16 @@ export const FAST = {
     killGraceMs: 200,
 };
 
+export function fakeEngineRoot(parentDir?: string): string {
+    const engineRoot = parentDir !== undefined ? join(parentDir, "fake-engine") : join(tempDir(), "fake-engine");
+    mkdirSync(engineRoot, { recursive: true });
+    return engineRoot;
+}
+
+export function newRunId(): string {
+    return `t-${randomUUID()}`;
+}
+
 export interface RunOpts {
     plan: Record<string, unknown>;
     hooks?: DriverTestHooks;
@@ -134,21 +144,24 @@ export interface RunOpts {
     formulation?: string;
     stateRoot?: string;
     manifest?: string;
+    engineRoot?: string;
 }
 
-export async function runSynthetic({ plan, hooks = {}, extraArgs = [], formulation = "both", stateRoot, manifest }: RunOpts): Promise<{
+export async function runSynthetic({ plan, hooks = {}, extraArgs = [], formulation = "both", stateRoot, manifest, engineRoot }: RunOpts): Promise<{
     code: number;
     reportsDir: string;
     stateRoot: string;
     manifest: string;
+    engineRoot: string;
 }> {
     const root = stateRoot ?? join(tempDir(), "state");
+    const engine = engineRoot ?? fakeEngineRoot();
     const manifestPath = manifest ?? manifestFor(["syn-t1", "syn-t2"]);
     process.env.FAKE_PLAN_JSON = JSON.stringify(plan);
     const code = await runDriverCli(
         [
             "--engine-root",
-            "/tmp/fake-engine",
+            engine,
             "--manifest",
             manifestPath,
             "--split",
@@ -169,11 +182,11 @@ export async function runSynthetic({ plan, hooks = {}, extraArgs = [], formulati
             loadEngine: async () => stubEngine(),
             listGroup: async () => [],
             expectedEngineHash: "test-engine-hash",
-            runId: `t-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+            runId: newRunId(),
             ...hooks,
         },
     );
-    return { code, reportsDir: join(root, "reports"), stateRoot: root, manifest: manifestPath };
+    return { code, reportsDir: join(root, "reports"), stateRoot: root, manifest: manifestPath, engineRoot: engine };
 }
 
 export function onlyCheckpoint(reportsDir: string): string {

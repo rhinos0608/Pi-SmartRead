@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { launchDetachedWorker, runDriverCli } from "../../../scripts/holdout-v2/driver-run.js";
 import { loadCheckpoint, pairKey } from "../../../scripts/holdout-v2/driver-checkpoint.js";
-import { FAKE_WORKER, FAST, manifestFor, onlyCheckpoint, runSynthetic, stubEngine, tempDir } from "./holdout-v2-driver-harness.js";
+import { FAKE_WORKER, FAST, fakeEngineRoot, manifestFor, onlyCheckpoint, runSynthetic, stubEngine, tempDir } from "./holdout-v2-driver-harness.js";
 
 // Process-group supervision (SIGTERM to -pgid, pgrep/ps) is POSIX-only by
 // §9.16 design; the driver refuses on win32 (see launchDetachedWorker).
@@ -94,11 +94,12 @@ describe.skipIf(process.platform === "win32")("driver supervisor (synthetic)", (
         const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
         const dir = tempDir();
         const stateRoot = join(dir, "state");
+        const engineRoot = fakeEngineRoot(dir);
         const manifest = manifestFor(["syn-t1", "syn-t2"]);
         process.env.FAKE_PLAN_JSON = JSON.stringify({ setups: { "syn-t2": "hang" } });
         const reportsDir = join(stateRoot, "reports");
         const runPromise = runDriverCli(
-            ["--engine-root", "/tmp/fake-engine", "--manifest", manifest, "--split", "dev", "--state-root", stateRoot, "--accept-license-review"],
+            ["--engine-root", engineRoot, "--manifest", manifest, "--split", "dev", "--state-root", stateRoot, "--accept-license-review"],
             {
                 thresholds: { ...FAST, setupCheckMs: 1000, setupStallChecks: 10, setupHardCapMs: 3600000 },
                 tickMs: 50,
