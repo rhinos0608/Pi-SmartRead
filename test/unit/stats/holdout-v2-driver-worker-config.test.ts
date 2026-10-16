@@ -138,9 +138,10 @@ describe("worker config boundary", () => {
         const checkpointPath = join(dir, "ckpt.jsonl");
         const configPath = siblingConfigPath(checkpointPath);
         writeRaw(configPath, "sentinel", 0o600);
+        const modeBefore = statSync(configPath).mode;
         expect(() => writeWorkerConfigFile(configPath, validConfig(checkpointPath))).toThrow(/refus/i);
         expect(readFileSync(configPath, "utf8")).toBe("sentinel");
-        expect(statSync(configPath).mode & 0o777).toBe(0o600);
+        expect(statSync(configPath).mode).toBe(modeBefore);
     });
 
     it("producer refuses to follow a pre-existing symlink", () => {
