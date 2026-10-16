@@ -296,6 +296,11 @@ function isLexicalDeclaration(lineText: string, id: string | null): boolean {
   );
 }
 
+function declaresPos(symbol: NormalizedDocumentSymbol, pos: R2Position): boolean {
+  if (containsPos(symbol.selectionRange, pos)) return true;
+  return symbol.children?.some((child) => declaresPos(child, pos)) ?? false;
+}
+
 function isDeclaration(
   lines: string[],
   line: number,
@@ -303,7 +308,7 @@ function isDeclaration(
   symbols: NormalizedDocumentSymbol[] | null,
 ): boolean {
   const pos = { line, character };
-  if (symbols?.some((s) => containsPos(s.selectionRange, pos))) return true;
+  if (symbols?.some((s) => declaresPos(s, pos))) return true;
   return isLexicalDeclaration(lines[line] ?? "", identifierAt(lines[line] ?? "", character));
 }
 
