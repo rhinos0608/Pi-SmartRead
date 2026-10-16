@@ -162,6 +162,48 @@ function collectHandoffBlacklist(otherSplitTasks: InspectTask[], currentSplit: I
     return [...markers].filter((marker) => marker.length >= 3);
 }
 
+/**
+ * Non-gold markers that a declared anchor must never suppress.
+ *
+ * Parse guards reject only the current task's own universe id/sha and
+ * patch sha as anchors. All other tasks' universe ids/shas, holdout ids,
+ * other-split prompts, every patch sha, and the task-file path stay
+ * protected: an anchor that exactly equals a protected string is dropped
+ * from suppression so the holdout gate still hits. Gold-path markers are
+ * intentionally absent here so ALL-task gold-path pooling is preserved.
+ * General blacklist strings and absolute paths are always blocked inside
+ * assertNoHoldoutExposure and never enter suppression.
+ */
+export function collectAnchorProtectedMarkers(
+    allTasks: InspectTask[],
+    currentSplit: InspectTask["split"],
+    tasksFile: string,
+): string[] {
+    const protectedMarkers = new Set<string>();
+    if (tasksFile.length > 0) protectedMarkers.add(tasksFile);
+    for (const task of allTasks) {
+        if (typeof task.candidateUniverse?.id === "string" && task.candidateUniverse.id.length > 0) {
+            protectedMarkers.add(task.candidateUniverse.id);
+        }
+        if (typeof task.candidateUniverse?.sha256 === "string" && task.candidateUniverse.sha256.length > 0) {
+            protectedMarkers.add(task.candidateUniverse.sha256);
+        }
+        const gold = task.gold as unknown as Record<string, unknown> | null;
+        if (gold !== null && typeof gold === "object") {
+            const patch = gold["patch"];
+            if (patch !== null && typeof patch === "object") {
+                const sha = (patch as Record<string, unknown>)["sha"];
+                if (typeof sha === "string" && sha.length > 0) protectedMarkers.add(sha);
+            }
+        }
+        if (task.split === "holdout" && task.id.length > 0) protectedMarkers.add(task.id);
+        if (task.split !== currentSplit && (task.split === "pilot" || task.split === "dev") && task.prompt.length > 0) {
+            protectedMarkers.add(task.prompt);
+        }
+    }
+    return [...protectedMarkers].filter((marker) => marker.length > 0);
+}
+
 export function buildInspectTaskPrompt(view: { prompt: string; answerShape: string }, arm: InspectArm): string {
     return `${view.prompt}\n\nEnd your run with exactly one fenced json block as the last substantive output, with this shape and no extra keys:\n\`\`\`json\n${view.answerShape}\n\`\`\`${arm.promptSuffix ?? ""}`;
 }
@@ -252,12 +294,15 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
         }
     }
     const forbidden = collectHandoffBlacklist(parsed.tasks, args.split);
+    const tasksPath = resolve(args.tasks);
+    const anchorProtected = new Set(collectAnchorProtectedMarkers(parsed.tasks, args.split, tasksPath));
     for (const task of tasks) {
         const view = toInspectRunnerView(task);
         for (const arm of resolveInspectArms(args.arms, !task.negativeControl)) {
             const prompt = buildInspectTaskPrompt(view, arm);
-            const anchorGoldMarkers = (task.anchors ?? []).filter((anchor) => collectGoldPathMarkers(task.gold).includes(anchor));
-            assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [resolve(args.tasks), ...forbidden], anchorGoldMarkers);
+            const rawGoldAnchors = (task.anchors ?? []).filter((anchor) => collectGoldPathMarkers(task.gold).includes(anchor));
+            const anchorGoldMarkers = rawGoldAnchors.filter((anchor) => !anchorProtected.has(anchor));
+            assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [tasksPath, ...forbidden], anchorGoldMarkers);
         }
     }
     const extensionPath = opts.extensionPath ?? resolve(dirname(new URL(import.meta.url).pathname), "..", "..", "..", "src", "index.ts");
