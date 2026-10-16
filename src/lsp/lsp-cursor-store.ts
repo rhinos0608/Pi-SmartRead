@@ -6,6 +6,8 @@ const TTL_MS = 10 * 60 * 1000;
 interface CursorEntry {
   offset: number;
   createdAt: number;
+  /** Opaque query identity the cursor is bound to. Absent for legacy callers. */
+  identity?: string;
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -54,13 +56,15 @@ function randomId(): string {
 export class LspCursorStore {
   private entries = new Map<string, CursorEntry>();
 
-  create(offset: number, opts?: { now?: number }): string {
+  create(offset: number, opts?: { now?: number; identity?: string }): string {
     if (!Number.isInteger(offset) || offset < 0) {
       throw new RangeError(`offset must be a non-negative integer, got ${offset}`);
     }
     const now = opts?.now ?? Date.now();
     const id = randomId();
-    this.entries.set(id, { offset, createdAt: now });
+    const entry: CursorEntry = { offset, createdAt: now };
+    if (opts?.identity !== undefined) entry.identity = opts.identity;
+    this.entries.set(id, entry);
     if (this.entries.size > MAX_ENTRIES) {
       const oldest = this.entries.keys().next();
       if (!oldest.done) this.entries.delete(oldest.value);
@@ -68,7 +72,7 @@ export class LspCursorStore {
     return toBase64Url(new TextEncoder().encode(id));
   }
 
-  resolve(cursor: string, opts?: { now?: number }): number | null {
+  resolve(cursor: string, opts?: { now?: number; identity?: string }): number | null {
     const now = opts?.now ?? Date.now();
     const raw = fromBase64Url(cursor);
     if (raw === null) return null;
@@ -81,6 +85,10 @@ export class LspCursorStore {
     }
     const entry = this.entries.get(id);
     if (!entry) return null;
+    // A cursor bound to a query identity resolves only for the same
+    // identity: continuations that change the scope or query are rejected
+    // instead of silently reusing the offset.
+    if (entry.identity !== opts?.identity) return null;
     if (now - entry.createdAt > TTL_MS) {
       this.entries.delete(id);
       return null;

@@ -170,7 +170,7 @@ reg("grep", () => createGrepTool({
 reg("find", () => createFindTool({ resolveJudge: (root, _ctx, signal) => resolveMcpJudge(root, signal) }), ToolCategory.READ);
 reg("LSP", () => {
     const affordances = affordanceSelectors.general.enabled;
-    const def = createLspTool({ affordances });
+    const def = createLspTool({ affordances, r2: affordanceSelectors.general.variant === "r2" });
     return def;
 }, ToolCategory.READ);
 
@@ -245,7 +245,7 @@ export function buildToolRegistry(): ToolDefinition[] {
     const lsp = tools.find((tool) => tool.name === "LSP");
     const inspect = tools.find((tool) => tool.name === "inspect");
     if (lsp && inspect) {
-        const lspGuidance = getSmartReadToolGuidance("LSP", affordanceSelectors.general.enabled)!;
+        const lspGuidance = getSmartReadToolGuidance("LSP", affordanceSelectors.general.enabled, false, false, affordanceSelectors.general.variant === "r2")!;
         const inspectGuidance = getSmartReadToolGuidance("inspect", affordanceSelectors.general.enabled, affordanceSelectors.inspect.enabled, true)!;
         recordEffectiveAffordanceIdentity(
             affordanceSelectors, surfaceVariants, lsp.parameters, lsp.description,

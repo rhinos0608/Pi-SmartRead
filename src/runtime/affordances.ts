@@ -4,11 +4,17 @@ import { isAffordancesEnabled } from "../lsp/affordance-contract.js";
 export interface CapturedSelector {
   readonly enabled: boolean;
   readonly invalid?: string;
+  readonly variant?: "r2";
 }
 
 export interface AffordanceSelectors {
   readonly general: CapturedSelector;
   readonly inspect: CapturedSelector;
+}
+
+function captureGeneralSelector(raw: string | undefined, enabledByExistingSelector: boolean): CapturedSelector {
+  if (raw === "2") return Object.freeze({ enabled: true, variant: "r2" } as const);
+  return captureSelector(raw, enabledByExistingSelector);
 }
 
 function captureSelector(raw: string | undefined, enabledByExistingSelector: boolean): CapturedSelector {
@@ -21,14 +27,14 @@ function captureSelector(raw: string | undefined, enabledByExistingSelector: boo
 export function captureAffordanceSelectors(env: NodeJS.ProcessEnv = process.env): AffordanceSelectors {
   const generalRaw = env.PI_SMARTREAD_AFFORDANCES;
   const inspectRaw = env.PI_SMARTREAD_INSPECT_AFFORDANCES;
-  const generalEnabled = isAffordancesEnabled({ PI_SMARTREAD_AFFORDANCES: generalRaw });
+  const generalEnabled = isAffordancesEnabled({ PI_SMARTREAD_AFFORDANCES: generalRaw }) || generalRaw === "2";
   return Object.freeze({
-    general: captureSelector(generalRaw, generalEnabled),
+    general: captureGeneralSelector(generalRaw, generalEnabled),
     inspect: captureSelector(inspectRaw, inspectRaw === "1"),
   });
 }
 
-export type SurfaceVariant = "baseline" | "affordance-bundle" | "inspect-bundle";
+export type SurfaceVariant = "baseline" | "affordance-bundle" | "inspect-bundle" | "r2";
 
 export interface EffectiveAffordanceIdentity {
   readonly selectors: AffordanceSelectors;
@@ -93,9 +99,12 @@ export interface SurfaceVariants {
 
 /** Choose one effective variant per surface; unbuilt WP-C is explicitly baseline. */
 export function selectSurfaceVariants(selectors: AffordanceSelectors): SurfaceVariants {
+  const lsp: SurfaceVariant = selectors.general.variant === "r2"
+    ? "r2"
+    : selectors.general.enabled ? "affordance-bundle" : "baseline";
   if (selectors.inspect.enabled) {
     return Object.freeze({
-      lsp: selectors.general.enabled ? "affordance-bundle" : "baseline",
+      lsp: selectors.general.enabled ? lsp : "baseline",
       inspect: "inspect-bundle",
       grep: "baseline",
       guidance: "inspect-bundle",
@@ -104,7 +113,7 @@ export function selectSurfaceVariants(selectors: AffordanceSelectors): SurfaceVa
   }
   if (selectors.general.enabled) {
     return Object.freeze({
-      lsp: "affordance-bundle",
+      lsp,
       inspect: "baseline",
       grep: "baseline",
       guidance: "affordance-bundle",

@@ -180,17 +180,28 @@ const LspAffordanceSchema = Type.Object(
   { description: "Opt-in strict LSP affordance bundle. Symbol anchors are exact and path-qualified for dispatch." },
 );
 
+const LspR2AffordanceSchema = Type.Object(
+  {
+    ...LspAffordanceSchema.properties,
+    scope: Type.Optional(Type.String({ minLength: 1, description: "An existing workspace-relative file or directory filter; findReferences and investigate." })),
+  },
+  { description: "Opt-in strict LSP affordance bundle. Symbol anchors are exact and path-qualified for dispatch." },
+);
+
 type LspInput = Static<typeof LspSchema>;
 
 export const LSP_DESCRIPTION = `Compiler/language-server semantic intelligence, read-only except applyProposal. Use LSP for exact definitions, declarations, references, implementations, hover, document/workspace symbols, type/call hierarchy, diagnostics, completion/signature/inlay information, semantic tokens, and refactor/code-action proposals. Use inspect instead for aggregate structural or architectural analysis such as dependency and call-graph summaries, blast radius, dead code, routes, repository maps, clusters, layers, service boundaries, hotspots, and quality signals. Use grep for broad/textual discovery and read for source content at already-known paths. The operation field is an explicit enum; do not invent discovery operations such as listOperations. Use workspaceSymbols with { operation: "workspaceSymbols", query } and no path. Position-based operations such as findReferences use { path, position: { line, character } } with 0-based coordinates in the server's negotiated encoding. Hierarchy/resolve follow-ups consume the exact returned item. The server field routes to one exact server descriptor only, with no fuzzy or silent fallback. Rename, formatting, and resolved code-action (resolveCodeAction) results are proposals; when SmartEdit is loaded they include a proposalId, and applyProposal is the only mutating operation — it applies that staged proposal through SmartEdit's evidence-checked edit path. Foreign fields and missing required fields are tool errors; an "unavailable" envelope is a valid routing outcome.`;
 
 export const LSP_AFFORDANCE_DESCRIPTION = `${LSP_DESCRIPTION} Opt-in affordances add exact declaration-name anchors on supported navigation operations and the investigate recipe (definition, type, references, implementations, callers). Pathless symbol targets are discovery-only and never dispatched.`;
 
-export function getLspToolSchema(affordances = false): Record<string, unknown> {
-  return (affordances ? LspAffordanceSchema : LspSchema) as unknown as Record<string, unknown>;
+export const LSP_R2_DESCRIPTION = `LSP answers compiler-known questions about exact symbols and locations. findReferences returns matches grouped by file, each with its source line, enclosing declaration, and role (import, export, declaration, or use); scope accepts an existing workspace-relative file or directory, and pages of 100 continue with the nextCursor bound to the same query. prepareCallHierarchy with incomingCalls returns de-duplicated caller declarations with call-site lines (a lone oversized caller reports callSitesOmitted instead of some sites). hover returns the raw contents plus a plain-text type field. goToDefinition and goToImplementation return definition and implementation locations. Anchors (symbol with optional path) and the investigate recipe (definition, type, references, implementations, callers) cover targets whose coordinates are unknown. Use grep for textual occurrences, comments, strings, and config or non-code files, and read for source content at already-known paths. LSP needs a running language server: where none runs, grep and read are the tools. Positions are 0-based in server.positionEncoding and the server field routes to one exact descriptor; an unavailable envelope is valid. The operation field is an explicit enum; do not invent operations, and foreign fields are tool errors. Rename, formatting, and resolved code actions are proposals; applyProposal through SmartEdit is the mutating operation.`;
+
+export function getLspToolSchema(affordances = false, r2 = false): Record<string, unknown> {
+  return (r2 ? LspR2AffordanceSchema : affordances ? LspAffordanceSchema : LspSchema) as unknown as Record<string, unknown>;
 }
 
-export function getLspToolDescription(affordances = false): string {
+export function getLspToolDescription(affordances = false, r2 = false): string {
+  if (r2) return LSP_R2_DESCRIPTION;
   return affordances ? LSP_AFFORDANCE_DESCRIPTION : LSP_DESCRIPTION;
 }
 
@@ -250,7 +261,7 @@ function resolveExecuteCwd(opts: LspToolOptions, ctx: ExtensionContext): string 
 }
 
 function resolveExecutorDeps(opts: LspToolOptions, cwd: string, signal: AbortSignal | undefined): ExecutorDeps {
-  return { ...opts.executorDeps, cwd, signal: opts.executorDeps?.signal ?? signal };
+  return { ...opts.executorDeps, ...(opts.r2 === true ? { r2: true as const } : {}), cwd, signal: opts.executorDeps?.signal ?? signal };
 }
 
 function unstagedResult(envelope: unknown) {
@@ -470,6 +481,12 @@ export interface LspToolOptions {
   readonly executeOperation?: typeof executeLspOperation;
   /** Construction-time opt-in; absent/false preserves the legacy tool surface. */
   readonly affordances?: boolean;
+  /**
+   * Round-2 bundle: everything the round-1 affordances have, plus stage-A
+   * reference/caller output shaping. Implies the affordance surface, so the
+   * description, schema, and guidance stay byte-identical to round-1.
+   */
+  readonly r2?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -499,11 +516,15 @@ function affordanceContext(opts: LspToolOptions, cwd: string, signal?: AbortSign
     root: cwd,
     ...(typeof params?.workspace === "string" ? { workspace: params.workspace } : {}),
     ...(typeof params?.server === "string" ? { server: params.server } : {}),
+    ...(opts.r2 === true ? { r2: true as const } : {}),
     budget: { maxCandidates: AFFORDANCE_BOUNDS.discoveryCandidates, maxRequests: AFFORDANCE_BOUNDS.underlyingRequests, deadlineMs: AFFORDANCE_BOUNDS.aggregateDeadlineMs, signal },
     exec: (request, deps) => {
       const validation = validateStrictRequest(request);
       if (!validation.ok) throw new Error(validation.error);
-      return (opts.executeOperation ?? executeLspOperation)(validation.value, { ...resolveExecutorDeps(opts, cwd, signal), ...deps, cwd, signal: deps?.signal ?? signal });
+      // Investigate dispatches stay raw: the recipe shapes what it needs
+      // itself, so every internal strict call counts under the shared
+      // request budget instead of hiding enrichment inside the executor.
+      return (opts.executeOperation ?? executeLspOperation)(validation.value, { ...resolveExecutorDeps(opts, cwd, signal), ...deps, cwd, signal: deps?.signal ?? signal, r2: false });
     },
   };
 }
@@ -588,11 +609,14 @@ async function executeAnchoredOperation(params: Record<string, unknown>, opts: L
 }
 
 export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
+  // r2 implies the affordance surface; only output shaping differs downstream.
+  const affordances = opts.affordances === true || opts.r2 === true;
+  const r2 = opts.r2 === true;
   return {
     name: "LSP",
     label: "LSP",
-    description: getLspToolDescription(opts.affordances),
-    parameters: getLspToolSchema(opts.affordances),
+    description: getLspToolDescription(affordances, r2),
+    parameters: getLspToolSchema(affordances, r2),
     async execute(
       _toolCallId: string,
       params: LspInput & Record<string, unknown>,
@@ -600,13 +624,13 @@ export function createLspTool(opts: LspToolOptions = {}): ToolDefinition {
       _onUpdate: unknown,
       ctx: ExtensionContext,
     ) {
-      if (opts.affordances && isRecord(params) && (params as Record<string, unknown>).operation === "investigate") {
+      if (affordances && isRecord(params) && (params as Record<string, unknown>).operation === "investigate") {
         return executeInvestigation(params, opts, _signal, ctx);
       }
-      if (opts.affordances && isRecord(params) && typeof params.operation === "string" && AFFORDANCE_ANCHOR_OPS.includes(params.operation as typeof AFFORDANCE_ANCHOR_OPS[number]) && params.symbol !== undefined) {
+      if (affordances && isRecord(params) && typeof params.operation === "string" && AFFORDANCE_ANCHOR_OPS.includes(params.operation as typeof AFFORDANCE_ANCHOR_OPS[number]) && params.symbol !== undefined) {
         return executeAnchoredOperation(params, opts, _signal, ctx);
       }
-      const validation = validateStrictRequest(params as unknown);
+      const validation = validateStrictRequest(params as unknown, { r2: opts.r2 === true });
       if (!validation.ok) throw new Error(validation.error);
       if (validation.value.operation === "applyProposal") {
         const cwd = resolveExecuteCwd(opts, ctx);

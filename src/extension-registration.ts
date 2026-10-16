@@ -173,8 +173,8 @@ export function registerGrepTool(state: ActivationState): void {
 
 export function registerLspTool(state: ActivationState, selectors: AffordanceSelectors): void {
   void state;
-  const lspDef = createLspTool({ affordances: selectors.general.enabled });
-  const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled);
+  const lspDef = createLspTool({ affordances: selectors.general.enabled, r2: selectors.general.variant === "r2" });
+  const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled, false, false, selectors.general.variant === "r2");
   ToolRegistry.getInstance().registerOrReplace({
     name: "LSP",
     description: lspDef.description,
@@ -216,7 +216,7 @@ export function registerCoreTools(pi: ExtensionAPI): void {
     const lsp = reg.get("LSP");
     if (inspect && lsp) {
       const inspectGuidance = getSmartReadToolGuidance("inspect", selectors.general.enabled, selectors.inspect.enabled)!;
-      const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled)!;
+      const lspGuidance = getSmartReadToolGuidance("LSP", selectors.general.enabled, false, false, selectors.general.variant === "r2")!;
       const variants = selectSurfaceVariants(selectors);
       recordEffectiveAffordanceIdentity(
         selectors, variants, lsp.inputSchema, lsp.description,

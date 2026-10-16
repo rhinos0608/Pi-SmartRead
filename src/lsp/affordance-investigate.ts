@@ -29,7 +29,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { resolve as resolvePath, sep as pathSep } from "node:path";
+import { resolve as resolvePath } from "node:path";
 import {
   AFFORDANCE_BOUNDS,
   type AffordanceExecContext,
@@ -39,6 +39,12 @@ import {
   type InvestigateTask,
 } from "./affordance-contract.js";
 import { resolveAffordanceAnchor } from "./affordance-anchor.js";
+import { getSharedCursorStore } from "./lsp-executor.js";
+import { shapeR2References, asR2Encoding, r2ReferencesCursorIdentity, type R2ReferencesResult } from "./lsp-r2-shaping.js";
+import type { NormalizedDocumentSymbol, NormalizedHover } from "./lsp-response-normalizer.js";
+import { extractHoverType } from "./lsp-response-normalizer.js";
+import type { LSPLocation } from "./lsp-types.js";
+import { isUnderDir, resolveInvestigateScope, type AffordanceScope } from "./lsp-scope.js";
 import { executeLspOperation, type ExecutorDeps } from "./lsp-executor.js";
 import type {
   StrictEnvelope,
@@ -123,11 +129,6 @@ function locationPathOf(entry: unknown): string | null {
   return null;
 }
 
-function underDir(file: string, dir: string): boolean {
-  if (file === dir) return true;
-  return file.startsWith(dir.endsWith(pathSep) ? dir : dir + pathSep);
-}
-
 interface ParsedTarget {
   kind: "explicit" | "symbol";
   path?: string;
@@ -165,43 +166,6 @@ function parseTarget(input: AffordanceInvestigateInput): ParsedTarget {
   return { kind: "explicit", path, position: { line: position.line, character: position.character } };
 }
 
-export interface AffordanceScope {
-  /** Canonical scope path (file or directory), or null when unscoped. */
-  scopeAbs: string | null;
-  /** True when the scope names a regular file (exact match only). */
-  scopeIsFile: boolean;
-}
-
-/**
- * Validate the independent `scope` filter: canonical file/dir INSIDE the
- * chosen workspace. Throws (caller error) before any server request on
- * missing, non-file/dir, realpath failure, or workspace escape. Scope
- * filters result projections only — never explicit dispatch paths.
- */
-export function resolveInvestigateScope(scope: unknown, workspaceRoot: string): AffordanceScope {
-  if (scope === undefined) return { scopeAbs: null, scopeIsFile: false };
-  if (typeof scope !== "string" || scope.length === 0) {
-    throw new Error('investigate: "scope" must be a non-empty string');
-  }
-  const canonicalRoot = realpathSync(resolvePath(workspaceRoot));
-  const abs = resolvePath(canonicalRoot, scope);
-  let canonical: string;
-  try {
-    canonical = realpathSync(abs);
-    const rest = statSync(canonical);
-    if (!rest.isFile() && !rest.isDirectory()) {
-      throw new Error(`investigate: scope is not a file or directory: ${scope}`);
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith("investigate: scope")) throw err;
-    throw new Error(`investigate: scope does not exist or is inaccessible: ${scope}`);
-  }
-  if (!underDir(canonical, canonicalRoot)) {
-    throw new Error(`investigate: scope escapes the workspace: ${scope}`);
-  }
-  return { scopeAbs: canonical, scopeIsFile: statSync(canonical).isFile() };
-}
-
 function applyScope(items: unknown[], scope: AffordanceScope): { items: unknown[]; filteredOut: number } {
   if (!scope.scopeAbs) return { items, filteredOut: 0 };
   const kept: unknown[] = [];
@@ -220,7 +184,7 @@ function applyScope(items: unknown[], scope: AffordanceScope): { items: unknown[
       kept.push(entry);
       continue;
     }
-    const inside = scope.scopeIsFile ? canonical === scope.scopeAbs : underDir(canonical, scope.scopeAbs!);
+    const inside = scope.scopeIsFile ? canonical === scope.scopeAbs : isUnderDir(canonical, scope.scopeAbs!);
     if (inside) kept.push(entry);
     else filteredOut += 1;
   }
@@ -258,7 +222,11 @@ interface RecipeState {
   server?: string;
   timeoutCap?: number;
   scope: AffordanceScope;
+  /** Raw scope string as supplied, echoed in round-2 reference results. */
+  scopeEcho?: string;
   dispatchServer: StrictServerInfo | null;
+  /** Round-2 reference shaping. Absent/false keeps the round-1 projection byte-identical. */
+  r2?: boolean;
 }
 
 function baseArgs(state: RecipeState, path: string): Record<string, unknown> {
@@ -516,6 +484,49 @@ function failureOutput(
 }
 
 /** Single-dispatch recipes: definition / type / references / implementations. */
+async function shapeR2InvestigationReferences(state: RecipeState, target: { path: string; at: { line: number; character: number } }, raw: unknown, encoding: unknown): Promise<R2ReferencesResult> {
+  const locations = (Array.isArray(raw) ? raw : []) as LSPLocation[];
+  const lineCache = new Map<string, string[] | null>();
+  const readLines = (absPath: string): string[] | null => {
+    let cached = lineCache.get(absPath);
+    if (cached === undefined) {
+      try {
+        cached = readFileSync(absPath, "utf-8").split("\n");
+      } catch {
+        cached = null;
+      }
+      lineCache.set(absPath, cached);
+    }
+    return cached;
+  };
+  // Symbol enrichment shares the recipe's request budget: every
+  // documentSymbols dispatch counts, so large file sets degrade to
+  // enclosing null + enclosingIncomplete instead of breaching bounds.
+  const fetchSymbols = async (absPaths: string[]): Promise<Map<string, NormalizedDocumentSymbol[] | null>> => {
+    const map = new Map<string, NormalizedDocumentSymbol[] | null>();
+    for (let i = 0; i < absPaths.length; i += 1) {
+      const absPath = absPaths[i]!;
+      const res = await dispatch(state, "references.symbols", {
+        operation: "documentSymbols", ...baseArgs(state, absPath),
+      });
+      if (isGate(res)) {
+        for (const rest of absPaths.slice(i)) map.set(rest, null);
+        break;
+      }
+      if (failedStatus(res.status) || !Array.isArray(res.result)) map.set(absPath, null);
+      else map.set(absPath, res.result as NormalizedDocumentSymbol[]);
+    }
+    return map;
+  };
+  return shapeR2References({
+    locations,
+    ...(state.scope.scopeAbs ? { scopeAbs: state.scope.scopeAbs, scopeIsFile: state.scope.scopeIsFile, ...(state.scopeEcho !== undefined ? { scopeEcho: state.scopeEcho } : {}) } : {}),
+    cursorIdentity: r2ReferencesCursorIdentity(target.path, { ...target.at }, state.scope.scopeAbs),
+    encoding: asR2Encoding(encoding),
+    deps: { root: state.root, readLines, fetchSymbols, cursors: getSharedCursorStore() },
+  });
+}
+
 async function runSingleRecipe(
   recipe: Exclude<InvestigateTask, "callers">,
   state: RecipeState,
@@ -536,6 +547,21 @@ async function runSingleRecipe(
     return { status: out.status, result: { task: recipe, code: out.status, message: out.message, partial: true }, steps: state.steps };
   }
   if (failedStatus(out.status)) return failureOutput(recipe, out, state);
+  if (recipe === "references" && state.r2 === true) {
+    const shaped = await shapeR2InvestigationReferences(state, { path, at }, out.result, out.server?.positionEncoding);
+    return { status: out.status, result: { task: recipe, ...shaped }, steps: state.steps };
+  }
+  // Round-2 type answers (r2 only): the same plain-text `type` the strict
+  // hover op returns, merged into the standard projection. Round-1 output
+  // is untouched.
+  if (recipe === "type" && state.r2 === true) {
+    const raw = out.result;
+    const hoverish = raw !== null && typeof raw === "object" && !Array.isArray(raw);
+    const type = hoverish ? extractHoverType(raw as NormalizedHover) : null;
+    const enriched = hoverish && type !== null ? { ...(raw as Record<string, unknown>), type } : raw;
+    const typed = projectItems(recipe, enriched, out, state.scope);
+    return { status: typed.status, result: typed.summary, steps: state.steps };
+  }
   const { summary, status } = projectItems(recipe, out.result, out, state.scope);
   return { status, result: summary, steps: state.steps };
 }
@@ -641,6 +667,8 @@ export async function investigateAffordanceTarget(
     workspace: (input.workspace ?? ctx.workspace) as string | undefined,
     server: (input.server ?? ctx.server) as string | undefined,
     timeoutCap, scope, dispatchServer: null,
+    ...((input as { scope?: unknown }).scope !== undefined ? { scopeEcho: (input as { scope?: unknown }).scope as string } : {}),
+    ...(ctx.r2 === true ? { r2: true as const } : {}),
   };
   const resolved = await resolveDispatchTarget(state, target, {
     ctx, now, started, maxRequests, deadlineMs, signal,
