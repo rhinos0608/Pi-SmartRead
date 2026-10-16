@@ -139,9 +139,13 @@ export function collectGoldPathMarkers(gold: unknown): string[] {
     return [...markers].filter((marker) => marker.length >= 2);
 }
 
-export function assertNoHoldoutExposure(prompt: string, extraMarkers: string[] = []): void {
-    const hits = ["pi-smartread-bench", "candidateUniverse", "grade.ts", "grader", "adjudication", ...extraMarkers]
+export function assertNoHoldoutExposure(prompt: string, extraMarkers: string[] = [], anchors: string[] = []): void {
+    const declared = new Set(anchors.filter((anchor) => anchor.length > 0));
+    const generalHits = ["pi-smartread-bench", "candidateUniverse", "grade.ts", "grader", "adjudication"]
         .filter((marker) => marker.length > 0 && prompt.includes(marker));
+    const markerHits = extraMarkers
+        .filter((marker) => marker.length > 0 && prompt.includes(marker) && !declared.has(marker));
+    const hits = [...generalHits, ...markerHits];
     if (/(?:^|[\s"'])\/(?:tmp|home|Users)\/[^\s"']+/.test(prompt)) hits.push("absolute path");
     if (hits.length) throw new Error(`holdout exposure blacklist hit in prompt: ${hits.join(", ")}`);
 }
@@ -252,7 +256,8 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
         const view = toInspectRunnerView(task);
         for (const arm of resolveInspectArms(args.arms, !task.negativeControl)) {
             const prompt = buildInspectTaskPrompt(view, arm);
-            assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [resolve(args.tasks), ...forbidden]);
+            const anchorGoldMarkers = (task.anchors ?? []).filter((anchor) => collectGoldPathMarkers(task.gold).includes(anchor));
+            assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [resolve(args.tasks), ...forbidden], anchorGoldMarkers);
         }
     }
     const extensionPath = opts.extensionPath ?? resolve(dirname(new URL(import.meta.url).pathname), "..", "..", "..", "src", "index.ts");
