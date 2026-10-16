@@ -898,6 +898,10 @@ async function runOneWorker(
             closeSync(fd);
         }
     };
+    if (deps.samplerMs !== null) {
+        lastSampleWall = deps.now();
+        await sampleLoad();
+    }
     const evaluate = async (): Promise<"continue" | "killed-query" | "killed-setup" | "exited"> => {
         if (exited !== null) return "exited";
         const now = deps.now();
