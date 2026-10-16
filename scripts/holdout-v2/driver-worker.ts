@@ -15,8 +15,8 @@
  * so a fresh worker resumes exactly where a killed one stopped.
  */
 
-import { readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { appendCheckpointRecord, loadCheckpoint, pairKey } from "./driver-checkpoint.js";
 
@@ -39,6 +39,152 @@ export interface WorkerConfig {
     assignedPairs: string[];
     /** 1-based launch counter (lets tests stage once-only faults). */
     launchIndex: number;
+}
+
+/** Generated worker-file suffix: `.worker-<now>-<counter>.json`. */
+export const WORKER_CONFIG_SUFFIX_RE = /\.worker-\d+-\d+\.json$/;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate consumed worker-config shape. Throws a generic error (no raw
+ * config content) on mismatch. Extra per-instance fields are preserved.
+ */
+export function validateWorkerConfig(value: unknown): WorkerConfig {
+    if (!isRecord(value)) throw new Error("worker config: invalid shape");
+    const engineRoot = value["engineRoot"];
+    const stateRoot = value["stateRoot"];
+    const owned = value["owned"];
+    const offline = value["offline"];
+    const timeoutMs = value["timeoutMs"];
+    const checkpointPath = value["checkpointPath"];
+    const instances = value["instances"];
+    const manifestEntries = value["manifestEntries"];
+    const revision = value["revision"];
+    const formulations = value["formulations"];
+    const assignedPairs = value["assignedPairs"];
+    const launchIndex = value["launchIndex"];
+    if (typeof engineRoot !== "string" || engineRoot === "") throw new Error("worker config: invalid engineRoot");
+    if (typeof stateRoot !== "string" && stateRoot !== null) throw new Error("worker config: invalid stateRoot");
+    if (typeof stateRoot === "string" && stateRoot === "") throw new Error("worker config: invalid stateRoot");
+    if (typeof owned !== "boolean") throw new Error("worker config: invalid owned");
+    if (typeof offline !== "boolean") throw new Error("worker config: invalid offline");
+    if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error("worker config: invalid timeoutMs");
+    if (typeof checkpointPath !== "string" || checkpointPath === "") throw new Error("worker config: invalid checkpointPath");
+    if (!Array.isArray(instances)) throw new Error("worker config: invalid instances");
+    const cleanInstances: WorkerConfig["instances"] = instances.map((entry) => {
+        if (!isRecord(entry)) throw new Error("worker config: invalid instance");
+        if (typeof entry["instanceId"] !== "string" || entry["instanceId"] === "") throw new Error("worker config: invalid instanceId");
+        if (typeof entry["repo"] !== "string" || entry["repo"] === "") throw new Error("worker config: invalid instance repo");
+        if (typeof entry["baseCommit"] !== "string" || entry["baseCommit"] === "") throw new Error("worker config: invalid instance baseCommit");
+        return { ...entry, instanceId: entry["instanceId"], repo: entry["repo"], baseCommit: entry["baseCommit"] };
+    });
+    if (manifestEntries !== null) {
+        if (!isRecord(manifestEntries)) throw new Error("worker config: invalid manifestEntries");
+        for (const entry of Object.values(manifestEntries)) {
+            if (!isRecord(entry)) throw new Error("worker config: invalid manifest entry");
+            if (typeof entry["repo"] !== "string" || entry["repo"] === "") throw new Error("worker config: invalid manifest entry repo");
+            if (typeof entry["baseCommit"] !== "string" || entry["baseCommit"] === "") throw new Error("worker config: invalid manifest entry baseCommit");
+            if (typeof entry["dataset"] !== "string" || entry["dataset"] === "") throw new Error("worker config: invalid manifest entry dataset");
+        }
+    }
+    if (typeof revision !== "string") throw new Error("worker config: invalid revision");
+    if (!Array.isArray(formulations) || formulations.length === 0 || formulations.some((f) => typeof f !== "string" || f === "")) {
+        throw new Error("worker config: invalid formulations");
+    }
+    if (!Array.isArray(assignedPairs) || assignedPairs.some((p) => typeof p !== "string")) throw new Error("worker config: invalid assignedPairs");
+    if (typeof launchIndex !== "number" || !Number.isInteger(launchIndex) || launchIndex < 1) throw new Error("worker config: invalid launchIndex");
+    return {
+        engineRoot,
+        stateRoot,
+        owned,
+        offline,
+        timeoutMs,
+        checkpointPath,
+        instances: cleanInstances,
+        manifestEntries: manifestEntries as WorkerConfig["manifestEntries"],
+        revision,
+        formulations: formulations as string[],
+        assignedPairs: assignedPairs as string[],
+        launchIndex,
+    };
+}
+
+/**
+ * Securely read a generated worker config.
+ *
+ * Boundary: lstat pre-check, `O_NOFOLLOW` open, `fstat` mode/owner/type
+ * checks on the SAME descriptor, full read from that descriptor, `unknown`
+ * parse + shape validation, then canonical sibling naming binding to the
+ * configured checkpoint. Rejects before any engine import or checkpoint
+ * mutation. Errors are generic and never embed raw config content.
+ *
+ * Sibling binding only requires the config to live next to its configured
+ * checkpoint (`<checkpoint>.worker-<n>-<m>.json`); it intentionally does
+ * not restrict containment under cwd, engineRoot, or owned reports, since
+ * legacy reports and relative/custom `--resume` checkpoints are legitimate.
+ */
+export function readWorkerConfig(configPath: string): WorkerConfig {
+    if (typeof configPath !== "string" || configPath === "") throw new Error("worker config: invalid path");
+    try {
+        const pre = lstatSync(configPath);
+        if (pre.isSymbolicLink()) throw new Error("worker config: refused: symlink");
+        if (!pre.isFile()) throw new Error("worker config: not a regular file");
+    } catch (error) {
+        if (error instanceof Error && error.message.startsWith("worker config:")) throw error;
+        throw new Error("worker config: unreadable");
+    }
+    const nofollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
+    const fd = openSync(configPath, fsConstants.O_RDONLY | nofollow);
+    try {
+        const st = fstatSync(fd);
+        if (!st.isFile()) throw new Error("worker config: not a regular file");
+        if (process.platform !== "win32") {
+            if ((st.mode & 0o077) !== 0) throw new Error("worker config: insecure permissions");
+            const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+            if (typeof uid === "number" && typeof st.uid === "number" && st.uid !== uid) {
+                throw new Error("worker config: unowned file");
+            }
+        }
+        const chunks: Array<Buffer> = [];
+        const buf = Buffer.alloc(65536);
+        for (;;) {
+            const n = readSync(fd, buf, 0, buf.length, null);
+            if (n === 0) break;
+            chunks.push(Buffer.from(buf.subarray(0, n)));
+        }
+        const text = Buffer.concat(chunks).toString("utf8");
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            throw new Error("worker config: malformed JSON");
+        }
+        const config = validateWorkerConfig(parsed);
+        const resolvedConfig = resolve(configPath);
+        const resolvedCheckpoint = resolve(config.checkpointPath);
+        const configBase = basename(resolvedConfig);
+        const checkpointBase = basename(resolvedCheckpoint);
+        if (
+            dirname(resolvedConfig) !== dirname(resolvedCheckpoint) ||
+            !configBase.startsWith(`${checkpointBase}.worker-`) ||
+            !WORKER_CONFIG_SUFFIX_RE.test(configBase)
+        ) {
+            throw new Error("worker config: checkpoint binding mismatch");
+        }
+        try {
+            const realConfigDir = realpathSync(dirname(resolvedConfig));
+            const realCheckpointDir = realpathSync(dirname(resolvedCheckpoint));
+            if (realConfigDir !== realCheckpointDir) throw new Error("worker config: checkpoint binding mismatch");
+        } catch (error) {
+            if (error instanceof Error && error.message.startsWith("worker config:")) throw error;
+        }
+        return config;
+    } finally {
+        closeSync(fd);
+    }
 }
 
 const MARKER_PREFIX = "@@DRIVER ";
@@ -125,7 +271,7 @@ async function loadEngine(engineRoot: string): Promise<{ repos: EngineRepos; ada
 }
 
 export async function runWorker(configPath: string): Promise<number> {
-    const config = JSON.parse(readFileSync(configPath, "utf8")) as WorkerConfig;
+    const config = readWorkerConfig(configPath);
     const { repos, adapter, teardown } = await loadEngine(config.engineRoot);
     const assigned = new Set(config.assignedPairs);
     try {

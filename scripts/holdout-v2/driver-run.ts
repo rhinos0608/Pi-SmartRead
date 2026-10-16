@@ -24,7 +24,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, loadavg } from "node:os";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
@@ -829,6 +829,34 @@ type Phase =
 
 let workerLaunchCounter = 0;
 
+/**
+ * Producer for the internal authority-bearing worker config.
+ *
+ * Exclusive creation (`O_EXCL`) at mode `0600` with `O_NOFOLLOW` on POSIX:
+ * never truncates an existing file and never follows a pre-existing config
+ * symlink. Throws a generic error (no config content) when the target
+ * already exists.
+ */
+export function writeWorkerConfigFile(configPath: string, config: WorkerConfig): void {
+    if (typeof configPath !== "string" || configPath === "") throw new Error("worker config: invalid path");
+    const flags =
+        process.platform === "win32"
+            ? "wx"
+            : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
+    let fd: number;
+    try {
+        fd = openSync(configPath, flags, 0o600);
+    } catch {
+        throw new Error("worker config: refusing to overwrite existing file");
+    }
+    try {
+        writeSync(fd, JSON.stringify(config));
+        fsyncSync(fd);
+    } finally {
+        closeSync(fd);
+    }
+}
+
 async function runOneWorker(
     args: DriverArgs,
     deps: SupervisorDeps,
@@ -849,7 +877,7 @@ async function runOneWorker(
         revision: ctx.revision,
     };
     const configPath = `${ctx.checkpointPath}.worker-${deps.now()}-${(workerLaunchCounter += 1)}.json`;
-    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+    writeWorkerConfigFile(configPath, config);
     const worker = await deps.launchWorker({ nodeArgs: deps.nodeArgs, entry: deps.workerEntry, configPath, cwd: deps.cwd });
     const pgid = worker.pgid;
     let phase: Phase = { kind: "idle" };
