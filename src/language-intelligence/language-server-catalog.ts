@@ -88,11 +88,49 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** True when (command, args) match a command candidate of the known TLS launch profile. */
+/** Strip a Windows executable shim suffix (always: shims are referenced by name on every platform in configs and tests). */
+function stripExeShim(base: string): string {
+  return base.replace(/\.(?:cmd|exe|bat|com)$/i, "");
+}
+
+/**
+ * Executable basename for launch-profile matching: POSIX + Windows path
+ * separators removed, shim suffix stripped, case-insensitive on Windows.
+ */
+function normalizedExeBasename(command: string): string {
+  const base = command.split(/[\\/]/).pop() ?? command;
+  const stripped = stripExeShim(base);
+  return process.platform === "win32" ? stripped.toLowerCase() : stripped;
+}
+
+/** True when a script argument is the package's cli.mjs (basename cli.mjs with a typescript-language-server path segment). */
+function isTlsCliScript(arg: string): boolean {
+  const segs = arg.split(/[\\/]/);
+  const script = segs.pop() ?? "";
+  const name = process.platform === "win32" ? script.toLowerCase() : script;
+  if (name !== "cli.mjs") return false;
+  return segs.some((s) => (process.platform === "win32" ? s.toLowerCase() : s) === "typescript-language-server");
+}
+
+/**
+ * True when (command, args) match a command candidate of the known TLS
+ * launch profile. Matches the executable's basename, so path-qualified
+ * binaries (`/opt/homebrew/bin/typescript-language-server`,
+ * `node_modules/.bin/typescript-language-server`) and Windows shims
+ * (`typescript-language-server.cmd`) match; `--stdio` must be present in
+ * args. A `node` launch matches only when a script argument is the
+ * package's `cli.mjs` — arbitrary node invocations never match. Kept
+ * conservative on purpose: an unverified alternative executable must never
+ * receive the TLS-only option.
+ */
 export function isKnownTlsLaunch(command: string, args: string[]): boolean {
   const tls = LANGUAGE_SERVER_CATALOG.find((d) => d.id === TYPESCRIPT_DESCRIPTOR_ID);
   if (!tls) return false;
-  return tls.commandCandidates.some((c) => c.command === command && JSON.stringify(c.args) === JSON.stringify(args));
+  if (!args.includes("--stdio")) return false;
+  const exe = normalizedExeBasename(command);
+  if (tls.commandCandidates.some((c) => normalizedExeBasename(c.command) === exe)) return true;
+  if (exe === "node" && args.some(isTlsCliScript)) return true;
+  return false;
 }
 
 /**

@@ -9,7 +9,7 @@ import { realpathSync, existsSync } from "node:fs";
 import { basename, dirname, resolve, join } from "node:path";
 import { LSPConnection } from "./lsp-connection.js";
 import { canonicalProjectRoot, computeConfigFingerprint, buildSessionKey } from "./lsp-session-key.js";
-import { getActiveCatalog, getDescriptorsForLanguage, TYPESCRIPT_DESCRIPTOR_ID, applyTlsSemanticOnlyPolicy, isKnownTlsLaunch } from "../language-intelligence/language-server-catalog.js";
+import { getActiveCatalog, getDescriptorsForLanguage, TYPESCRIPT_DESCRIPTOR_ID, TlsSemanticOnlyConflictError, applyTlsSemanticOnlyPolicy, isKnownTlsLaunch } from "../language-intelligence/language-server-catalog.js";
 import { AmbiguousServerError, type LspSessionOptions } from "./lsp-types.js";
 import {
   ALL_SERVER_CONFIGS,
@@ -104,9 +104,11 @@ export class LSPManager {
    * launch profile runs semantic-only (`tsserver.useSyntaxServer: "never"`);
    * every other descriptor passes its configured options through untouched.
    * An explicitly conflicting configured value throws
-   * TlsSemanticOnlyConflictError — never silently overridden. Callers without
-   * an explicit descriptor claim (eager/legacy paths) match the known TLS
-   * launch command; an explicit non-TLS descriptor claim never matches.
+   * TlsSemanticOnlyConflictError — never silently overridden. The profile is
+   * identified by the executable launch (basename, shim, node cli.mjs) —
+   * never by a bare descriptor claim alone — so a command override that
+   * merely defaults to the typescript descriptor (e.g. vtsls) cannot receive
+   * the TLS-only option; an explicit non-TLS descriptor claim never matches.
    */
   private effectiveInitOptions(
     claimedDescriptorId: string | undefined,
@@ -114,10 +116,8 @@ export class LSPManager {
     args: string[],
     configured: Record<string, unknown> | undefined,
   ): Record<string, unknown> | undefined {
-    const isTls = claimedDescriptorId !== undefined
-      ? claimedDescriptorId === TYPESCRIPT_DESCRIPTOR_ID
-      : isKnownTlsLaunch(command, args);
-    if (!isTls) return configured;
+    if (claimedDescriptorId !== undefined && claimedDescriptorId !== TYPESCRIPT_DESCRIPTOR_ID) return configured;
+    if (!isKnownTlsLaunch(command, args)) return configured;
     const tlsDefaults = getActiveCatalog().find((d) => d.id === TYPESCRIPT_DESCRIPTOR_ID)?.initializationOptions as Record<string, unknown> | undefined;
     return applyTlsSemanticOnlyPolicy(configured ?? tlsDefaults);
   }
@@ -229,7 +229,7 @@ export class LSPManager {
       try {
         const conn = await this.startSession(languageId, config, session);
         if (conn) return conn;
-      } catch (e) { if (e instanceof AmbiguousServerError) throw e; /* try next server config */ }
+      } catch (e) { if (e instanceof AmbiguousServerError || e instanceof TlsSemanticOnlyConflictError) throw e; /* try next server config */ }
     }
     // Managed auto-install orchestration (purpose-aware, never for warmup).
     // Strict path passes allowInstall:false to forbid install WITHOUT broadening legacy behavior.
@@ -267,17 +267,19 @@ export class LSPManager {
           conn.descriptorId = res.descriptorId;
           conn.name = basename(res.executable);
           conn.projectRoot = canonicalProjectRoot(this.rootUri);
-          // Managed-install path carries the TLS semantic-only policy too.
-          const managedInitOptions = this.effectiveInitOptions(res.descriptorId, res.executable, res.args, undefined);
+          // Managed-install path carries the TLS semantic-only policy too,
+          // merged over the caller's session options so an explicit conflict
+          // throws instead of being silently dropped.
+          const managedInitOptions = this.effectiveInitOptions(res.descriptorId, res.executable, res.args, session?.initializationOptions as Record<string, unknown> | undefined);
           await conn.start(res.executable, res.args, this.rootUri, {
             ...(managedInitOptions !== undefined ? { initializationOptions: managedInitOptions } : {}),
             workspaceFolders: [canonicalProjectRoot(this.rootUri)],
           });
           this.connections.set(languageId, conn);
           return conn;
-        } catch { /* spawn failed after install */ }
+        } catch (e) { if (e instanceof TlsSemanticOnlyConflictError) throw e; /* spawn failed after install */ }
       }
-    } catch { /* ensure is best-effort */ }
+    } catch (e) { if (e instanceof TlsSemanticOnlyConflictError) throw e; /* ensure is best-effort */ }
     return null;
   }
 
