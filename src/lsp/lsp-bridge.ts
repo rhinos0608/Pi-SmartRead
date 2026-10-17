@@ -115,6 +115,7 @@ export type {
   ServerConfig,
 } from "./lsp-types.js";
 export { LSPConnection } from "./lsp-connection.js";
+export type { LSPConnectionStartOptions } from "./lsp-connection.js";
 export {
   LSPManager,
   evictManagerForRoot,
