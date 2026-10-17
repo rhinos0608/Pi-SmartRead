@@ -7,7 +7,7 @@ import { INSPECT_ANSWER_SHAPES, INSPECT_SPLITS, parseInspectJsonl, toInspectRunn
 import { INSPECT_GENERIC_TEXT, INSPECT_INSTRUCTED_TEXT } from "./prompts.js";
 import { parseSurfaceIdentity, type SurfaceIdentity } from "../surface-identity.js";
 import { buildPiArgs, launchPiSession, type PiSpawnFn, type TebArm } from "../teb/launch.js";
-import { claimHoldoutOpening, classifyInfraFailure, extractSessionIdentity, parseFreezeFile, scanLogForContamination, sha256Hex, type TebInfraFailure, type TebSessionIdentity } from "../teb/run.js";
+import { claimHoldoutOpening, classifyInfraFailure, benchCacheDir, extractSessionIdentity, parseFreezeFile, scanLogForContamination, sha256Hex, type TebInfraFailure, type TebSessionIdentity } from "../teb/run.js";
 
 export const INSPECT_RUNNER_VERSION = 1;
 export const INSPECT_TOOL_ALLOWLIST = "read,bash,grep,find,inspect,LSP";
@@ -137,6 +137,17 @@ export function collectGoldPathMarkers(gold: unknown): string[] {
     };
     visit(gold);
     return [...markers].filter((marker) => marker.length >= 2);
+}
+
+/**
+ * Tool-arg contamination markers for the inspect runner (protocol §9):
+ * the bench-cache dir and the task file only — the same markers the TEB
+ * runner passes. Gold source paths are NOT markers here: reading a gold
+ * repo file is ordinary agent behavior, not bench-cache/task-file access.
+ * Gold paths stay in the prompt holdout-exposure gate (A3/A5) instead.
+ */
+export function collectInspectContaminationMarkers(tasksPath: string): string[] {
+    return [benchCacheDir(), resolve(tasksPath)];
 }
 
 export function assertNoHoldoutExposure(prompt: string, extraMarkers: string[] = [], anchors: string[] = []): void {
@@ -420,12 +431,11 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
                 const sessionIdentity = checkInspectSessionIdentity(identity, { model: args.model, thinking: args.thinking });
                 record.identityOk = surfaceMismatch === null && sessionIdentity.ok;
                 record.identityReason = surfaceMismatch ?? sessionIdentity.reason;
-                record.infraFailure = classifyInfraFailure({ logText: log, stderrText: stderr, spawnError: result.spawnError, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, turnLimitHit: result.turnLimitHit });
-                const goldPaths = collectGoldPathMarkers(task.gold);
-                const contamination = scanLogForContamination(log, [resolve(args.tasks), ...goldPaths]);
+                record.infraFailure = classifyInfraFailure({ logText: log, stderrText: stderr, spawnError: result.spawnError, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, turnLimitHit: result.turnLimitHit, postSettleReap: result.postSettleReap });
+                const contamination = scanLogForContamination(log, collectInspectContaminationMarkers(args.tasks));
                 record.contaminated = contamination.contaminated; record.contaminationHit = contamination.hit;
                 const finalValidity = sessionValidity({ identityMismatch: record.identityOk ? null : record.identityReason,
-                    infraFailure: record.infraFailure, contaminated: record.contaminated, timedOut: record.timedOut });
+                    infraFailure: record.infraFailure, contaminated: record.contaminated, timedOut: record.timedOut, failed: result.turnLimitHit });
                 record.excluded = finalValidity.excluded; record.exclusionReason = finalValidity.exclusionReason;
                 record.rerunRequired = finalValidity.rerunRequired; record.gradedFailure = finalValidity.gradedFailure;
             } catch (error) {
