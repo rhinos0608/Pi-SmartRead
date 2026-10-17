@@ -56,6 +56,72 @@ export function clearCustomDescriptors(): void { customDescriptors.length = 0; }
 /** Runtime source of truth: built-in catalog + validated custom descriptors. */
 export function getActiveCatalog(): ServerDescriptor[] { return [...LANGUAGE_SERVER_CATALOG, ...customDescriptors]; }
 
+/**
+ * Known TypeScript language-server (TLS) launch profile.
+ *
+ * TLS answers definition/references/hover/rename from a `--serverMode
+ * partialSemantic` syntax server while the project loads. SmartRead manages
+ * TLS sessions semantic-only instead (`tsserver.useSyntaxServer: "never"`):
+ * cold starts may be slower or time out, but never return partial-semantic
+ * answers. Scoped to this profile only — never to arbitrary descriptors or
+ * unverified alternative executables.
+ */
+export const TYPESCRIPT_DESCRIPTOR_ID = "typescript";
+
+/** Value forced for `tsserver.useSyntaxServer` on the known TLS launch profile. */
+export const TLS_SEMANTIC_ONLY_USE_SYNTAX_SERVER = "never";
+
+/** Explicitly conflicting TLS initialization: fail, never silently override. */
+export class TlsSemanticOnlyConflictError extends Error {
+  constructor(descriptorId: string, actual: unknown) {
+    super(
+      `TLS semantic-only session misconfigured for descriptor "${descriptorId}": ` +
+      `initializationOptions.tsserver.useSyntaxServer is ${JSON.stringify(actual)} ` +
+      `but SmartRead requires "never" (full semantic server; partial-semantic ` +
+      `syntax answers are not served). Remove the override or set it to "never".`,
+    );
+    this.name = "TlsSemanticOnlyConflictError";
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** True when (command, args) match a command candidate of the known TLS launch profile. */
+export function isKnownTlsLaunch(command: string, args: string[]): boolean {
+  const tls = LANGUAGE_SERVER_CATALOG.find((d) => d.id === TYPESCRIPT_DESCRIPTOR_ID);
+  if (!tls) return false;
+  return tls.commandCandidates.some((c) => c.command === command && JSON.stringify(c.args) === JSON.stringify(args));
+}
+
+/**
+ * Effective initializationOptions for the known TLS launch profile: merges
+ * `tsserver.useSyntaxServer: "never"` over any unrelated configured fields
+ * (unrelated nested `tsserver` settings survive). An explicitly conflicting
+ * configured value throws TlsSemanticOnlyConflictError — never silently
+ * overridden. Call only for the known TLS profile; other descriptors pass
+ * their configured options through untouched.
+ */
+export function applyTlsSemanticOnlyPolicy(configured?: Record<string, unknown>): Record<string, unknown> {
+  const base = isRecord(configured) ? configured : {};
+  const tsserver = (base as Record<string, unknown>).tsserver;
+  if (tsserver !== undefined) {
+    if (!isRecord(tsserver)) {
+      throw new TlsSemanticOnlyConflictError(TYPESCRIPT_DESCRIPTOR_ID, tsserver);
+    }
+    const mode = (tsserver as Record<string, unknown>).useSyntaxServer;
+    if (mode !== undefined && mode !== TLS_SEMANTIC_ONLY_USE_SYNTAX_SERVER) {
+      throw new TlsSemanticOnlyConflictError(TYPESCRIPT_DESCRIPTOR_ID, mode);
+    }
+  }
+  const existing = isRecord(tsserver) ? (tsserver as Record<string, unknown>) : {};
+  return {
+    ...(base as Record<string, unknown>),
+    tsserver: { ...existing, useSyntaxServer: TLS_SEMANTIC_ONLY_USE_SYNTAX_SERVER },
+  };
+}
+
 export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
   {
     id: "typescript",

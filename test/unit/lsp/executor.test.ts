@@ -1084,4 +1084,56 @@ describe("executor", () => {
     expect(rows[0]!["selectionProvenance"]).toBe("explicit");
     expect(rows[1]!["selectionProvenance"]).toBe("collapsed");
   });
+  it("timeout with held semantic response: timeout wins, late completion absorbed, lease released", async () => {
+    let releaseGate: ((v: unknown) => void) | null = null;
+    const gate = new Promise<unknown>((res) => { releaseGate = res; });
+    let observedAbort = false;
+    const released: unknown[] = [];
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      request: async (_m, _p, opts) => {
+        opts?.signal?.addEventListener("abort", () => { observedAbort = true; }, { once: true });
+        return gate;
+      },
+    });
+    const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 }, timeoutMs: 20 }, {
+      cwd: ROOT,
+      acquire: async () => ({ conn: c, key: "held-k1" }),
+      release: (k: string | null) => { released.push(k); },
+    });
+    expect(env.status).toBe("timeout");
+    expect(env.result).toBeNull();
+    expect(observedAbort).toBe(true);
+    expect(released).toEqual(["held-k1"]);
+    // Late semantic completion produces no second result and no unhandled rejection.
+    releaseGate!([{ uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }]);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(env.status).toBe("timeout");
+    expect(env.result).toBeNull();
+  });
+  it("caller abort with held semantic response: cancelled wins, late completion absorbed", async () => {
+    const ctl = new AbortController();
+    let releaseGate: ((v: unknown) => void) | null = null;
+    const gate = new Promise<unknown>((res) => { releaseGate = res; });
+    const aborted = Object.assign(new Error("Aborted"), { name: "AbortError" });
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      request: async (_m, _p, o) => new Promise<unknown>((res, rej) => {
+        gate.then(res, rej);
+        if (o?.signal?.aborted) rej(aborted);
+        else o?.signal?.addEventListener("abort", () => rej(aborted), { once: true });
+      }),
+    });
+    setTimeout(() => ctl.abort(), 10);
+    const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 }, timeoutMs: 2000 }, {
+      getManager: () => mgr(c),
+      cwd: ROOT,
+      signal: ctl.signal,
+    });
+    expect(env.status).toBe("cancelled");
+    expect(env.result).toBeNull();
+    releaseGate!({ contents: "late" });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(env.status).toBe("cancelled");
+  });
 });

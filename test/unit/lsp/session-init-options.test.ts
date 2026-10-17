@@ -52,11 +52,15 @@ function makeFakeProc(): FakeProc {
       }
       return true;
     }),
+    on: vi.fn(),
+    once: vi.fn(),
+    removeListener: vi.fn(),
   };
   return proc;
 }
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: vi.fn(() => makeFakeProc()),
   execFileSync: vi.fn(() => Buffer.from("")),
 }));
