@@ -43,7 +43,8 @@ export const MULTI_SWE_BENCH_FILES = [
     "ts/vuejs__core_dataset.jsonl",
 ] as const;
 
-export function multiSweBenchCacheDir(): string {
+export function multiSweBenchCacheDir(baseDir?: string): string {
+    if (baseDir !== undefined) return baseDir;
     return join(homedir(), ".cache/pi-smartread-bench/datasets/multi-swe-bench");
 }
 
@@ -60,12 +61,20 @@ function cacheFileName(datasetFile: string): string {
     return datasetFile.replace(/[^a-zA-Z0-9]+/g, "-").replace(/-jsonl$/, ".jsonl");
 }
 
-/** Download one dataset jsonl into the cache (no-op when already cached). */
-export async function ensureDatasetFileCached(datasetFile: string): Promise<string> {
-    const dir = multiSweBenchCacheDir();
+/** Download one dataset jsonl into the cache (no-op when already cached).
+ * Options: cacheDir scopes the file under an owned state root; offline
+ * fails when the file is missing instead of touching the network. */
+export async function ensureDatasetFileCached(
+    datasetFile: string,
+    opts: { offline?: boolean; cacheDir?: string } = {},
+): Promise<string> {
+    const dir = opts.cacheDir ?? multiSweBenchCacheDir();
     mkdirSync(dir, { recursive: true });
     const path = join(dir, cacheFileName(datasetFile));
     if (existsSync(path)) return path;
+    if (opts.offline) {
+        throw new Error(`--offline: missing cached dataset file ${datasetFile}; cache once online first`);
+    }
     const res = await fetch(`${HF_RESOLVE}/${datasetFile}`);
     if (!res.ok || !res.body) throw new Error(`huggingface ${res.status} for ${datasetFile}`);
     const out = createWriteStream(path, { mode: 0o600 });
@@ -90,8 +99,8 @@ export interface MultiSweBenchRow {
  * lines). Streams line-by-line: some files hold >512MB single lines, so
  * whole-file string reads are avoided.
  */
-export async function readCachedRows(datasetFile: string): Promise<MultiSweBenchRow[]> {
-    const path = join(multiSweBenchCacheDir(), cacheFileName(datasetFile));
+export async function readCachedRows(datasetFile: string, cacheDir?: string): Promise<MultiSweBenchRow[]> {
+    const path = join(cacheDir ?? multiSweBenchCacheDir(), cacheFileName(datasetFile));
     const rows: MultiSweBenchRow[] = [];
     const rl = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
     for await (const line of rl) {
@@ -107,8 +116,8 @@ export async function readCachedRows(datasetFile: string): Promise<MultiSweBench
 }
 
 /** sha256 over cached raw file bytes (dataset-revision binding per file). */
-export async function cachedFileRevision(datasetFile: string): Promise<string> {
-    const path = join(multiSweBenchCacheDir(), cacheFileName(datasetFile));
+export async function cachedFileRevision(datasetFile: string, cacheDir?: string): Promise<string> {
+    const path = join(cacheDir ?? multiSweBenchCacheDir(), cacheFileName(datasetFile));
     const hash = createHash("sha256");
     const stream = createReadStream(path);
     for await (const chunk of stream) hash.update(chunk as Buffer);

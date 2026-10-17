@@ -30,7 +30,8 @@ export const JS_TS_REPOS = new Set([
     "vuejs/core",
 ]);
 
-export function cacheDir(): string {
+export function cacheDir(baseDir?: string): string {
+    if (baseDir !== undefined) return baseDir;
     return join(homedir(), ".cache/pi-smartread-bench/datasets/swe-bench-multilingual");
 }
 
@@ -51,9 +52,9 @@ function cacheKey(offset: number, length: number): string {
 async function fetchRowsPage(
     offset: number,
     length: number,
-    options: { offline?: boolean } = {},
+    options: { offline?: boolean; cacheDir?: string } = {},
 ): Promise<{ rows: DatasetRow[]; total: number }> {
-    const dir = cacheDir();
+    const dir = options.cacheDir ?? cacheDir();
     mkdirSync(dir, { recursive: true });
     const cached = join(dir, cacheKey(offset, length));
     if (existsSync(cached)) {
@@ -80,7 +81,7 @@ async function fetchRowsPage(
 }
 
 /** Fetch all rows (paginated, cached). Returns raw rows in dataset order. */
-export async function fetchAllRows(options: { offline?: boolean } = {}): Promise<DatasetRow[]> {
+export async function fetchAllRows(options: { offline?: boolean; cacheDir?: string } = {}): Promise<DatasetRow[]> {
     const first = await fetchRowsPage(0, 100, options);
     const total = first.total > 0 ? first.total : 300;
     const all = [...first.rows];

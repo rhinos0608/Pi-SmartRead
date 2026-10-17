@@ -5,7 +5,7 @@
  * without --open-holdout/--freeze, freeze arm mismatch, freeze
  * engine-hash mismatch, and holdout redaction (no query text or gold).
  */
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, existsSync, realpathSync, readdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, existsSync, realpathSync, readdirSync, readFileSync, copyFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import {
     d46ReportFileHit,
     isCleanPorcelain,
     parseD46RunArgs,
+    pinnedCohortQueryFileNames,
     redactForHoldout,
     resolveD46ReportsDir,
     resolveD46ScoringTotalHits,
@@ -32,6 +33,7 @@ import {
 import { scoreD46Query } from "../../../scripts/eval/d46/score.js";
 import { loadSplitQueries, writeSplitManifest } from "../../../scripts/eval/d46/validate.js";
 import type { D46SplitManifest } from "../../../scripts/eval/d46/validate.js";
+import { ensureOwnedStateRoot, SNAPSHOT_COMMIT_MARKER } from "../../../scripts/eval/external/grep/repos.js";
 
 function sha(text: string): string {
     return createHash("sha256").update(text).digest("hex");
@@ -104,10 +106,22 @@ describe("parseD46RunArgs", () => {
     it("parses the documented CLI surface", () => {
         expect(
             parseD46RunArgs(["--split", "dev", "--config", "off", "--replicate", "2"]),
-        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false, reportsDir: null, existsEvidence: null });
+        ).toEqual({ split: "dev", repo: null, config: "off", replicate: 2, freeze: null, openHoldout: false, reportsDir: null, existsEvidence: null, cohortDir: null });
         expect(
             parseD46RunArgs(["--split", "holdout", "--repo", "a__b", "--freeze", "f", "--open-holdout"]),
-        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true, reportsDir: null, existsEvidence: null });
+        ).toEqual({ split: "holdout", repo: "a__b", config: "off", replicate: 1, freeze: "f", openHoldout: true, reportsDir: null, existsEvidence: null, cohortDir: null });
+    });
+
+    it("parses --split selection with --cohort-dir", () => {
+        expect(parseD46RunArgs(["--split", "selection", "--cohort-dir", "/tmp/cohort"])).toEqual({
+            split: "selection", repo: null, config: "off", replicate: 1, freeze: null, openHoldout: false, reportsDir: null, existsEvidence: null, cohortDir: "/tmp/cohort",
+        });
+    });
+
+    it("rejects selection without --cohort-dir and --cohort-dir without selection", () => {
+        expect(() => parseD46RunArgs(["--split", "selection"])).toThrow();
+        expect(() => parseD46RunArgs(["--split", "dev", "--cohort-dir", "/tmp/cohort"])).toThrow();
+        expect(() => parseD46RunArgs(["--split", "holdout", "--cohort-dir", "/tmp/cohort"])).toThrow();
     });
 
     it("rejects bad split/config/replicate", () => {
@@ -210,6 +224,7 @@ describe("checkHoldoutGuard refusals", () => {
         rankBm25b: 0.75,
         rankCoverage: false,
         rankStopwords: false,
+        rankStem: false,
     };
     const freeze = { engineSourceHash: "sha256:abc:1-files", arms: [{ config: "off" as const, replicate: 1, ranking }] };
     const base = {
@@ -243,8 +258,24 @@ describe("checkHoldoutGuard refusals", () => {
 });
 
 describe("runD46Cli cold-start preflight ordering", () => {
-    function makeBench(split: "dev" | "holdout") {
-        const bench = mkdtempSync(join(tmpdir(), "d46-order-"));
+    function makeBench(split: "dev" | "holdout", opts: { owned?: boolean } = {}) {
+        // Canonical fixture base: sidesteps the macOS /var -> /private/var
+        // alias so ensureOwnedStateRoot's symlink-ancestor guard passes.
+        const parent = realpathSync(mkdtempSync(join(tmpdir(), "d46-order-")));
+        const owned = opts.owned ?? true;
+        // Owned variant (default): a freshly claimed state root
+        // (ensureOwnedStateRoot ownership marker) holding the bench, and the
+        // checkout carries a canonical `.snapshot-commit` completion marker —
+        // the exact proof cold-start deletion requires. The non-owned variant
+        // proves the warm-with-refusal-receipt path.
+        let bench: string;
+        if (owned) {
+            const stateRoot = join(parent, "owned-state");
+            ensureOwnedStateRoot(stateRoot);
+            bench = join(stateRoot, "d46-bench");
+        } else {
+            bench = join(parent, "bench");
+        }
         const checkout = join(bench, "repos", "o__r");
         mkdirSync(checkout, { recursive: true });
         execFileSync("git", ["init", "-q"], { cwd: checkout });
@@ -254,6 +285,7 @@ describe("runD46Cli cold-start preflight ordering", () => {
         execFileSync("git", ["add", "."], { cwd: checkout });
         execFileSync("git", ["commit", "-qm", "init"], { cwd: checkout });
         const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: checkout, encoding: "utf8" }).trim();
+        if (owned) writeFileSync(join(checkout, SNAPSHOT_COMMIT_MARKER), sha);
         const repos = [{
             owner: "o", name: "r", url: "https://example.com/o/r.git", sha, branch: "main",
             corpusRoot: ".", split, addedAt: "2026-01-01T00:00:00.000Z", license: "mit", source: "test",
@@ -273,7 +305,7 @@ describe("runD46Cli cold-start preflight ordering", () => {
         // Plant an untracked runtime cache that cold start would delete.
         mkdirSync(join(checkout, ".pi-smartread", "cache"), { recursive: true });
         writeFileSync(join(checkout, ".pi-smartread", "cache", "x.bin"), "x");
-        return { bench, cacheFile: join(checkout, ".pi-smartread", "cache", "x.bin") };
+        return { bench, cacheFile: join(checkout, ".pi-smartread", "cache", "x.bin"), checkout };
     }
 
     function runIsolated(argv: string[], bench: string): Promise<number> {
@@ -310,12 +342,40 @@ describe("runD46Cli cold-start preflight ordering", () => {
     });
 
     it("happy path deletes the planted cache and writes the report into the injected dir", async () => {
-        const { bench, cacheFile } = makeBench("dev");
+        const { bench, cacheFile, checkout } = makeBench("dev");
         const reportsDir = mkdtempSync(join(tmpdir(), "d46-reports-"));
         const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "sha256:abc:1-files", reportsDir });
         expect(code).toBe(0);
         expect(existsSync(cacheFile)).toBe(false);
         expect(readdirSync(reportsDir).filter((f) => f.startsWith("d46-dev-off-"))).toHaveLength(1);
+        const reportFile = readdirSync(reportsDir).filter((f) => f.startsWith("d46-dev-off-"))[0] as string;
+        const report = JSON.parse(readFileSync(join(reportsDir, reportFile), "utf8"));
+        // Owned+marked checkout: full cold receipt, nothing refused.
+        expect(report.coldStart.checkedRoots).toEqual([realpathSync(checkout)]);
+        expect(report.coldStart.planned).toEqual([`${realpathSync(checkout)}/.pi-smartread`]);
+        expect(report.coldStart.deleted).toEqual(report.coldStart.planned);
+        expect(report.coldStart.refused).toEqual([]);
+        expect(report.coldStart.count).toBe(1);
+    });
+
+    it("non-owned bench runs warm with an explicit refusal receipt, never silently deleting", async () => {
+        const { bench, cacheFile, checkout } = makeBench("dev", { owned: false });
+        const reportsDir = mkdtempSync(join(tmpdir(), "d46-reports-"));
+        const code = await runD46Cli(["--split", "dev", "--config", "off"], bench, { engineSourceHash: "sha256:abc:1-files", reportsDir });
+        expect(code).toBe(0);
+        // The run proceeds, but nothing is deleted without ownership proof.
+        expect(existsSync(cacheFile)).toBe(true);
+        const reportFile = readdirSync(reportsDir).filter((f) => f.startsWith("d46-dev-off-"))[0] as string;
+        const report = JSON.parse(readFileSync(join(reportsDir, reportFile), "utf8"));
+        expect(report.coldStart.deleted).toEqual([]);
+        expect(report.coldStart.count).toBe(0);
+        expect(report.coldStart.checkedRoots).toEqual([realpathSync(checkout)]);
+        // The planned target is recorded so the refusal explains exactly what
+        // was NOT deleted — warm results are never labeled cold.
+        expect(report.coldStart.planned).toEqual([`${realpathSync(checkout)}/.pi-smartread`]);
+        expect(report.coldStart.refused).toHaveLength(1);
+        expect(report.coldStart.refused[0].root).toBe(realpathSync(checkout));
+        expect(report.coldStart.refused[0].reason).toMatch(/no owned state root contains/);
     });
 });
 
@@ -393,6 +453,10 @@ describe("D62 SmartRead runtime caches", () => {
         expect(isCleanPorcelain(" M src/a.ts\n")).toBe(false);
         expect(isCleanPorcelain("?? notes.txt\n?? .pi/\n")).toBe(false);
         expect(isCleanPorcelain("?? .pi-smartread.tags.cache.bak/x\n")).toBe(false);
+        // The snapshot completion marker is owned-state provenance at the
+        // repo root (top level only); nested lookalikes stay dirty.
+        expect(isCleanPorcelain("?? .snapshot-commit\n")).toBe(true);
+        expect(isCleanPorcelain("?? sub/.snapshot-commit\n")).toBe(false);
     });
 
     function initRepo(): string {
@@ -417,7 +481,12 @@ describe("D62 SmartRead runtime caches", () => {
     }
 
     it("ignores root+nested cache dirs, cold-starts them, still refuses notes.txt/tracked drift", () => {
-        const reposRoot = realpathSync(mkdtempSync(join(tmpdir(), "d46-d62-roots-")));
+        // Owned fixture: a freshly claimed state root (ownership marker) with
+        // a marked checkout inside — cold-start deletion is ownership-gated.
+        const parent = realpathSync(mkdtempSync(join(tmpdir(), "d46-d62-roots-")));
+        const stateRoot = join(parent, "owned-state");
+        ensureOwnedStateRoot(stateRoot);
+        const reposRoot = join(stateRoot, "checkouts");
         const dir = join(reposRoot, "o__r");
         mkdirSync(dir, { recursive: true });
         execFileSync("git", ["init", "-q", dir]);
@@ -426,6 +495,7 @@ describe("D62 SmartRead runtime caches", () => {
         writeFileSync(join(dir, "a.txt"), "a\n");
         execFileSync("git", ["-C", dir, "add", "."]);
         execFileSync("git", ["-C", dir, "commit", "-qm", "init"]);
+        writeFileSync(join(dir, SNAPSHOT_COMMIT_MARKER), headOf(dir));
         mkdirSync(join(dir, ".pi-smartread.tags.cache"), { recursive: true });
         writeFileSync(join(dir, ".pi-smartread.tags.cache", "t.json"), "{}\n");
         mkdirSync(join(dir, "sub", ".pi"), { recursive: true });
@@ -440,6 +510,7 @@ describe("D62 SmartRead runtime caches", () => {
         expect(verifyCheckoutPins(queries, pins, reposRoot)).toEqual([]);
         const cold = coldStartRuntimeCaches(dir);
         expect(cold.error).toBeNull();
+        expect(cold.refused).toEqual([]);
         expect(cold.deleted).toEqual([".pi-smartread.tags.cache", "sub/.pi"]);
         expect(existsSync(join(dir, ".pi-smartread.tags.cache"))).toBe(false);
         expect(existsSync(join(dir, "sub", ".pi"))).toBe(false);
@@ -467,7 +538,19 @@ describe("D62 SmartRead runtime caches", () => {
     });
 
     it("skips a cache-named dir containing tracked files, deletes untracked caches", () => {
-        const dir = initRepo();
+        // Owned fixture (freshly claimed state root + completion marker).
+        const parent = realpathSync(mkdtempSync(join(tmpdir(), "d46-d62-owned-")));
+        const stateRoot = join(parent, "owned-state");
+        ensureOwnedStateRoot(stateRoot);
+        const dir = join(stateRoot, "checkouts", "o__r");
+        mkdirSync(dir, { recursive: true });
+        execFileSync("git", ["init", "-q", dir]);
+        execFileSync("git", ["-C", dir, "config", "user.email", "d62@test.invalid"]);
+        execFileSync("git", ["-C", dir, "config", "user.name", "d62"]);
+        writeFileSync(join(dir, "a.txt"), "a\n");
+        execFileSync("git", ["-C", dir, "add", "."]);
+        execFileSync("git", ["-C", dir, "commit", "-qm", "init"]);
+        writeFileSync(join(dir, SNAPSHOT_COMMIT_MARKER), headOf(dir));
         mkdirSync(join(dir, ".pi"), { recursive: true });
         writeFileSync(join(dir, ".pi", "config.json"), "{}\n");
         execFileSync("git", ["-C", dir, "add", "."]);
@@ -476,6 +559,7 @@ describe("D62 SmartRead runtime caches", () => {
         writeFileSync(join(dir, ".pi-smartread.tags.cache", "t.json"), "{}\n");
         const cold = coldStartRuntimeCaches(dir);
         expect(cold.error).toBeNull();
+        expect(cold.refused).toEqual([]);
         expect(cold.deleted).toEqual([".pi-smartread.tags.cache"]);
         expect(cold.skippedTracked).toEqual([".pi"]);
         expect(existsSync(join(dir, ".pi", "config.json"))).toBe(true);
@@ -634,5 +718,100 @@ describe("wrapJudge", () => {
         await expect(wrapped.judgeNouls(input)).rejects.toThrow("judge boom");
         expect(invoked).toBe(1);
         expect(calls).toEqual([]);
+    });
+});
+
+describe("runD46Cli --cohort-dir selection cohort (temp fixture only)", () => {
+    function buildCohort(opts: { tamperQuery?: boolean; dropManifest?: boolean; manifestInsideAdjudicated?: boolean } = {}): {
+        cohortDir: string;
+        reportsDir: string;
+    } {
+        const cohortDir = realpathSync(mkdtempSync(join(tmpdir(), "d46-cohort-")));
+        const reposRoot = join(cohortDir, "repos");
+        const checkout = join(reposRoot, "acme__widget");
+        mkdirSync(checkout, { recursive: true });
+        writeFileSync(join(checkout, "a.ts"), "export const x = 1;\n");
+        execFileSync("git", ["-C", checkout, "init", "-q"]);
+        execFileSync("git", ["-C", checkout, "config", "user.email", "t@example.invalid"]);
+        execFileSync("git", ["-C", checkout, "config", "user.name", "t"]);
+        execFileSync("git", ["-C", checkout, "add", "."]);
+        execFileSync("git", ["-C", checkout, "commit", "-qm", "init"]);
+        const sha = execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const repos = [
+            {
+                owner: "acme", name: "widget", split: "selection" as const, sha, branch: "main",
+                license: { spdx: "MIT", file: "LICENSE", sha256: "0".repeat(64) },
+                corpusRoot: ".", fileCount: 1, workingTree: "clean",
+            },
+        ];
+        writeFileSync(join(cohortDir, "repos.json"), JSON.stringify({ version: 1, createdAt: "2026-10-07T00:00:00Z", reposDir: reposRoot, repos }));
+        const adj = join(cohortDir, "adjudicated");
+        mkdirSync(adj, { recursive: true });
+        const query = {
+            id: "acme__widget-behaviour-01", repo: "acme/widget", split: "selection", class: "behaviour",
+            query: "synthetic selection query", gold: [{ path: "a.ts", startLine: 1, endLine: 1, grade: 1 }],
+            rationale: "synthetic", author: "adjudicator:test", authoredAt: "2026-10-07T00:00:00Z",
+        };
+        writeFileSync(join(adj, "acme__widget.jsonl"), `${JSON.stringify(query)}\n`);
+        const loaded = loadSplitQueries(adj, pinnedCohortQueryFileNames(repos));
+        expect(loaded.errors).toEqual([]);
+        const manifestPath = writeSplitManifest(adj, "selection", loaded, repos);
+        if (opts.dropManifest) {
+            unlinkSync(manifestPath);
+        } else if (!opts.manifestInsideAdjudicated) {
+            copyFileSync(manifestPath, join(cohortDir, "MANIFEST.sha256.json"));
+        }
+        if (opts.tamperQuery) {
+            writeFileSync(join(adj, "acme__widget.jsonl"), `${JSON.stringify({ ...query, id: "tampered" })}\n`);
+        }
+        const reportsDir = realpathSync(mkdtempSync(join(tmpdir(), "d46-cohort-reports-")));
+        return { cohortDir, reportsDir };
+    }
+
+    it("fails closed when the cohort manifest is missing", async () => {
+        const { cohortDir, reportsDir } = buildCohort({ dropManifest: true });
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(2);
+    });
+
+    it("fails closed when an adjudicated file hash mismatches the seal", async () => {
+        const { cohortDir, reportsDir } = buildCohort({ tamperQuery: true });
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(2);
+    });
+
+    it("runs the selection cohort with dev-shaped metrics and a fresh-cohort report", async () => {
+        const { cohortDir, reportsDir } = buildCohort();
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(0);
+        const files = readdirSync(reportsDir).filter((f) => f.endsWith(".json"));
+        expect(files.length).toBe(1);
+        const report = JSON.parse(readFileSync(join(reportsDir, files[0] as string), "utf8"));
+        // Selection query text MAY appear in reports (no holdout redaction):
+        // rows carry `query`/`gold` exactly like --split dev.
+        expect(report.queries[0].query).toBe("synthetic selection query");
+        expect(report.queries[0].gold).toEqual([{ path: "a.ts", startLine: 1, endLine: 1, grade: 1 }]);
+        expect(report.split).toBe("selection");
+        expect(report.manifest.corpusKind).toBe("fresh-cohort-checkouts");
+        expect(report.summary.overall.queries).toBe(1);
+        expect(report.summary.overall).toHaveProperty("successAt5");
+    });
+
+    it("supports the manifest inside the adjudicated dir", async () => {
+        const { cohortDir, reportsDir } = buildCohort({ manifestInsideAdjudicated: true });
+        const exit = await runD46Cli(
+            ["--split", "selection", "--cohort-dir", cohortDir, "--reports-dir", reportsDir],
+            cohortDir,
+        );
+        expect(exit).toBe(0);
     });
 });

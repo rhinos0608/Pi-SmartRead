@@ -29,6 +29,12 @@ describe("external grep engine source hash", () => {
         expect(isKnownSourceHash(hash)).toBe(false);
     });
 
+    it("current worktree hash is a known identity in canonical sha256:<hex>:N-files format", () => {
+        const hash = hashEngineSources(REPO_ROOT);
+        expect(isKnownSourceHash(hash)).toBe(true);
+        expect(hash).toMatch(/^sha256:[0-9a-f]{64}:\d+-files$/);
+    });
+
     it("binds the engine hash into the run digest", () => {
         const base = {
             engineSourceHash: "sha256:abc:3-files",
@@ -50,5 +56,10 @@ describe("external grep engine source hash", () => {
         expect(source).toContain("grep-e2e-contract.js");
         expect(source).toContain("engineSourceHash");
         expect(source).toContain("unknown:no-git-root");
+    });
+
+    it("D46 report JSON records manifest.engineSourceHash from the runner", () => {
+        const source = readFileSync(resolve(REPO_ROOT, "scripts/eval/d46/run.ts"), "utf8");
+        expect(source).toContain("engineSourceHash: engineSourceHash");
     });
 });
