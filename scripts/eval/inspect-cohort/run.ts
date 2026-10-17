@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { INSPECT_ANSWER_SHAPES, INSPECT_SPLITS, parseInspectJsonl, toInspectRunnerView, type InspectFamily, type InspectTask } from "./schema.js";
 import { INSPECT_GENERIC_TEXT, INSPECT_INSTRUCTED_TEXT } from "./prompts.js";
 import { parseSurfaceIdentity, type SurfaceIdentity } from "../surface-identity.js";
 import { buildPiArgs, launchPiSession, type PiSpawnFn, type TebArm } from "../teb/launch.js";
-import { claimHoldoutOpening, classifyInfraFailure, benchCacheDir, extractSessionIdentity, parseFreezeFile, scanLogForContamination, sha256Hex, type TebInfraFailure, type TebSessionIdentity } from "../teb/run.js";
+import { benchCacheDir, claimHoldoutOpening, classifyInfraFailure, extractSessionIdentity, findStateEntries, parseFreezeFile, scanLogForContamination, sha256Hex, trackScratchDir, untrackScratchDir, type TebInfraFailure, type TebSessionIdentity } from "../teb/run.js";
 
 export const INSPECT_RUNNER_VERSION = 1;
 export const INSPECT_TOOL_ALLOWLIST = "read,bash,grep,find,inspect,LSP";
@@ -92,11 +92,21 @@ export function checkInspectSessionIdentity(
     return { ok: true, reason: null };
 }
 
+/** Variant keys compared by the TEB runner (teb/run.ts surfaceIdentityMismatch). */
+const SURFACE_VARIANT_KEYS = ["lsp", "inspect", "grep", "guidance", "mcpInstructions", "note"] as const;
+
 export function selectorIdentityMismatch(actual: SurfaceIdentity, expected: InspectSelectorIdentity): string | null {
     const actualInvalid = [actual.selectors.general.invalid, actual.selectors.inspect.invalid].filter((value): value is string => value !== undefined);
     if (actualInvalid.length) return `invalid selector value: ${actualInvalid.join(", ")}`;
     if (actual.selectors.general.enabled !== expected.selectors.general || actual.selectors.inspect.enabled !== expected.selectors.inspect) return "effective selector mismatch";
-    if (JSON.stringify(actual.variants) !== JSON.stringify(expected.variants)) return "surface variants mismatch";
+    // Key-order-independent variant comparison over the exact TEB key set:
+    // identical values are required, and unexpected extra keys on either
+    // side are rejected (at least as strict as the old JSON.stringify
+    // comparison apart from key order).
+    const allowed = SURFACE_VARIANT_KEYS as readonly string[];
+    if (Object.keys(actual.variants).some((key) => !allowed.includes(key))) return "surface variants mismatch";
+    if (Object.keys(expected.variants).some((key) => !allowed.includes(key))) return "surface variants mismatch";
+    if (SURFACE_VARIANT_KEYS.some((key) => actual.variants[key] !== expected.variants[key])) return "surface variants mismatch";
     if (actual.surfaceIdentity !== expected.surfaceIdentity) return "surface identity mismatch";
     if (actual.schemaHash !== expected.schemaHash) return "schema hash mismatch";
     if (actual.guidanceHash !== expected.guidanceHash) return "guidance hash mismatch";
@@ -397,16 +407,26 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
             }
             const repoRoot = process.env["INSPECT_REPOS_DIR"] ?? join(process.env["HOME"] ?? tmpdir(), ".cache", "pi-smartread-bench", "teb", "repos");
             const checkout = join(repoRoot, task.repo), scratch = mkdtempSync(join(tmpdir(), `inspect-${process.pid}-`));
+            trackScratchDir(scratch);
             const cwd = join(scratch, task.repo), eventLog = join(sessionDir, "events.jsonl"), stderrLog = join(sessionDir, "stderr.txt");
             let launchAttempted = false;
             let launchCompleted = false;
             try {
                 if (!existsSync(checkout)) throw new Error(`pinned repo checkout not found: ${checkout}`);
-                const head = execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+                // The repos dir may hold symlinks to the pinned TEB clones;
+                // copying the link itself would run the session inside the
+                // pinned clone and re-dirty it. Resolve to the real
+                // checkout first (internal relative symlinks inside the
+                // tree are still preserved: no `dereference: true`).
+                const realCheckout = realpathSync(checkout);
+                const head = execFileSync("git", ["-C", realCheckout, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
                 if (head !== task.commit) throw new Error(`commit mismatch: checkout HEAD ${head} != task.commit ${task.commit}`);
-                const status = execFileSync("git", ["-C", checkout, "status", "--porcelain", "--ignored"], { encoding: "utf8" });
+                const status = execFileSync("git", ["-C", realCheckout, "status", "--porcelain", "--ignored"], { encoding: "utf8" });
                 if (status.trim()) throw new Error(`pinned checkout not clean: ${status.trim()}`);
-                cpSync(checkout, cwd, { recursive: true });
+                cpSync(realCheckout, cwd, { recursive: true });
+                if (lstatSync(cwd).isSymbolicLink()) throw new Error(`scratch cwd must not be a symlink: ${cwd}`);
+                const leaked = findStateEntries(cwd);
+                if (leaked.length > 0) throw new Error(`scratch copy contains .pi-smartread* state entries: ${leaked.join(", ")}`);
                 const env = { ...process.env, PI_SMARTREAD_SKILL_SYNC: "0", PI_SMARTREAD_AFFORDANCES: "0", PI_SMARTREAD_INSPECT_AFFORDANCES: "0", ...(arm.env ?? {}), PI_SMARTREAD_SURFACE_IDENTITY_LOG: "1" } as Record<string, string>;
                 const getLoadAverage = opts.loadAverage ?? (() => osLoadAverage());
                 record.loadAverageStart = getLoadAverage();
@@ -453,6 +473,7 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
                 const getLoadAverage = opts.loadAverage ?? (() => osLoadAverage());
                 if (record.loadAverageEnd === null) record.loadAverageEnd = getLoadAverage();
                 record.highLoad = opts.idleLoadAverage !== undefined && (record.loadAverageStart !== null && record.loadAverageStart > 2 * opts.idleLoadAverage || record.loadAverageEnd > 2 * opts.idleLoadAverage);
+                untrackScratchDir(scratch);
                 rmSync(scratch, { recursive: true, force: true });
             }
             manifest.sessions.push(record); flush();

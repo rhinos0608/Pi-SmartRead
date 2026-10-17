@@ -1,6 +1,8 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { enumerateRepository } from "../../../scripts/eval/inspect-cohort/enumerate.js";
 
@@ -91,5 +93,37 @@ describe("frozen inspect source enumeration", () => {
         const { readFileSync } = await import("node:fs");
         const source = readFileSync(new URL("../../../scripts/eval/inspect-cohort/enumerate.ts", import.meta.url), "utf8");
         expect(source).not.toMatch(/from\s+["'](?:\.\.\/)+(?:src|repository|graph|search|lsp|inspect)\//);
+    });
+
+    it("flags ignored files in --check, matching the runner's --ignored cleanliness gate", () => {
+        const reposRoot = mkdtempSync(join(tmpdir(), "inspect-enum-check-"));
+        roots.push(reposRoot);
+        const gitInit = (repo: string): string => {
+            mkdirSync(repo, { recursive: true });
+            writeFileSync(join(repo, "index.js"), "export {};\n");
+            const git = (args: string[]): string => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+            git(["init", "--quiet"]); git(["add", "."]);
+            git(["-c", "user.email=inspect@test", "-c", "user.name=inspect", "commit", "-m", "fixture", "--quiet"]);
+            return git(["rev-parse", "HEAD"]);
+        };
+        const cleanCommit = gitInit(join(reposRoot, "owner__clean"));
+        const ignoredRepo = join(reposRoot, "owner__ignored");
+        gitInit(ignoredRepo);
+        writeFileSync(join(ignoredRepo, ".gitignore"), "ignored.txt\n");
+        execFileSync("git", ["add", ".gitignore"], { cwd: ignoredRepo });
+        execFileSync("git", ["-c", "user.email=inspect@test", "-c", "user.name=inspect", "commit", "-m", "ignore", "--quiet"], { cwd: ignoredRepo });
+        writeFileSync(join(ignoredRepo, "ignored.txt"), "ignored\n");
+        const ignoredCommit = execFileSync("git", ["-C", ignoredRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const manifest = join(reposRoot, "repos.json");
+        writeFileSync(manifest, JSON.stringify({ reposDir: reposRoot,
+            repos: [{ owner: "owner", name: "clean", commit: cleanCommit }, { owner: "owner", name: "ignored", commit: ignoredCommit }] }));
+        const script = fileURLToPath(new URL("../../../scripts/eval/inspect-cohort/enumerate.ts", import.meta.url));
+        const checked = spawnSync(process.execPath, ["--import", "tsx", script, "--check", "--repos", manifest], { encoding: "utf8" });
+        expect(`${checked.stdout}${checked.stderr}`).toContain("owner__ignored");
+        // The ignored-but-untracked file must fail the gate: without --ignored it would pass clean.
+        expect(checked.status).not.toBe(0);
+        const parsed = JSON.parse(checked.stdout) as { repos: Array<{ repo: string; clean: boolean }> };
+        expect(parsed.repos.find((item) => item.repo === "owner__clean")?.clean).toBe(true);
+        expect(parsed.repos.find((item) => item.repo === "owner__ignored")?.clean).toBe(false);
     });
 });

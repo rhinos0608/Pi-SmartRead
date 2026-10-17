@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { INSPECT_ANSWER_SHAPES, toInspectRunnerView } from "../../../scripts/eval/inspect-cohort/schema.js";
 import { assertNoHoldoutExposure, buildInspectTaskPrompt, checkInspectSessionIdentity, checkPromptParity, collectInspectContaminationMarkers, resolveInspectArms, runInspectCli, selectorIdentityMismatch, sessionValidity, summarizeExclusions, type InspectSelectorIdentity } from "../../../scripts/eval/inspect-cohort/run.js";
 import { INSPECT_GENERIC_TEXT, INSPECT_INSTRUCTED_TEXT } from "../../../scripts/eval/inspect-cohort/prompts.js";
-import { benchCacheDir, classifyInfraFailure, scanLogForContamination } from "../../../scripts/eval/teb/run.js";
+import { benchCacheDir, activeScratchDirsList, classifyInfraFailure, findStateEntries, scanLogForContamination } from "../../../scripts/eval/teb/run.js";
 import type { PiSpawnFn } from "../../../scripts/eval/teb/launch.js";
 import type { InspectTask } from "../../../scripts/eval/inspect-cohort/schema.js";
+import type { SurfaceIdentity } from "../../../scripts/eval/surface-identity.js";
 
 const view = { id: "insp-pilot-P1-001", prompt: "List routes within src.", answerShape: INSPECT_ANSWER_SHAPES["route-set"] };
 
@@ -226,6 +227,109 @@ describe("inspect cohort runner contracts", () => {
             restore();
         }
     });
+
+    it("compares surface variants key-wise, ignoring order but rejecting unknown keys", () => {
+        const expected: InspectSelectorIdentity = { selectors: { general: false, inspect: false },
+            variants: { lsp: "baseline", inspect: "baseline", grep: "baseline", guidance: "baseline", mcpInstructions: "baseline" },
+            surfaceIdentity: "surface-pin", schemaHash: "schema-pin", guidanceHash: "guide-pin" };
+        const base = { selectors: { general: { enabled: false }, inspect: { enabled: false } },
+            surfaceIdentity: "surface-pin", schemaHash: "schema-pin", guidanceHash: "guide-pin" };
+        // Producer declaration order and alphabetical order carry the same values: both pass.
+        const producerOrder = JSON.parse(`{"lsp":"baseline","inspect":"baseline","grep":"baseline","guidance":"baseline","mcpInstructions":"baseline"}`) as SurfaceIdentity["variants"];
+        const alphaOrder = JSON.parse(`{"grep":"baseline","guidance":"baseline","inspect":"baseline","lsp":"baseline","mcpInstructions":"baseline"}`) as SurfaceIdentity["variants"];
+        expect(selectorIdentityMismatch({ ...base, variants: producerOrder }, expected)).toBeNull();
+        expect(selectorIdentityMismatch({ ...base, variants: alphaOrder }, expected)).toBeNull();
+        // Any differing value fails.
+        expect(selectorIdentityMismatch({ ...base, variants: { ...producerOrder, grep: "other" } }, expected)).toMatch(/variant/);
+        // An extra key on either side fails.
+        expect(selectorIdentityMismatch({ ...base, variants: { ...producerOrder, extra: "baseline" } as unknown as SurfaceIdentity["variants"] }, expected)).toMatch(/variant/);
+        expect(selectorIdentityMismatch({ ...base, variants: producerOrder },
+            { ...expected, variants: { ...expected.variants, extra: "x" } as unknown as SurfaceIdentity["variants"] })).toMatch(/variant/);
+        // A missing key fails.
+        const missing = { ...producerOrder } as Record<string, string>;
+        delete missing["grep"];
+        expect(selectorIdentityMismatch({ ...base, variants: missing as unknown as SurfaceIdentity["variants"] }, expected)).toMatch(/variant/);
+        // The optional note still has to match when present on either side.
+        const noted = { ...expected, variants: { ...expected.variants, note: "wp-c-unbuilt" } };
+        expect(selectorIdentityMismatch({ ...base, variants: { ...producerOrder, note: "wp-c-unbuilt" } }, noted)).toBeNull();
+        expect(selectorIdentityMismatch({ ...base, variants: { ...producerOrder, note: "wp-c-unbuilt" } }, expected)).toMatch(/variant/);
+    });
+
+    it("copies the real checkout into scratch through a symlinked repos entry, preserving internal links", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "inspect-symlink-"));
+        const realRepo = join(dir, "source", "fake__repo");
+        mkdirSync(join(realRepo, "src"), { recursive: true });
+        writeFileSync(join(realRepo, "src", "index.js"), "export {};\n");
+        // Internal relative symlink, mirroring astro (2) and TanStack/query (33).
+        symlinkSync(join("src", "index.js"), join(realRepo, "linked.js"));
+        const git = (args: string[]): string => execFileSync("git", args, { cwd: realRepo, encoding: "utf8" }).trim();
+        git(["init", "--quiet"]); git(["add", "."]);
+        git(["-c", "user.email=inspect@test", "-c", "user.name=inspect", "commit", "-m", "fixture", "--quiet"]);
+        const commit = git(["rev-parse", "HEAD"]);
+        const repos = join(dir, "repos");
+        mkdirSync(repos, { recursive: true });
+        // Repos-dir entry is a symlink to the pinned clone (the 6 symlinked TEB clones).
+        symlinkSync(realRepo, join(repos, "fake__repo"), "dir");
+        expect(lstatSync(join(repos, "fake__repo")).isSymbolicLink()).toBe(true);
+        const task: InspectTask = { id: "insp-pilot-N5-001", split: "pilot", repo: "fake__repo", commit, subpath: ".", family: "N5",
+            prompt: "Which file contains the answer?", scope: "", answerType: "file", gold: { kind: "file", path: "src/answer.ts" },
+            candidateUniverse: { id: "fixture-universe", sha256: "a".repeat(64), count: 1 }, decoys: [], negativeControl: true,
+            derivation: "synthetic fixture", agreement: "agree", labelers: ["a", "b"], adjudication: "agree", snapshot: { head: commit, clean: true } };
+        const tasks = join(dir, "tasks.jsonl"); writeFileSync(tasks, `${JSON.stringify(task)}\n`);
+        const restore = setReposDir(repos);
+        let captured: { cwd: string; isLink: boolean; realCwd: string; realScratch: string; childCwd: string; tracked: boolean; linkIsLink: boolean; linkText: string } | null = null;
+        const identityLine = `${JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "provider", model: "provider/model-v2", thinkingLevel: "high" } })}\n`;
+        const settleLine = `${JSON.stringify({ type: "agent_settled" })}\n`;
+        const settled = fakeSettledSpawn([identityLine, settleLine]);
+        try {
+            const result = await runInspectCli({ tasks, split: "pilot" as const, arms: ["off"], replicates: 1, maxTurns: 25,
+                model: "provider/model-v2", thinking: "high", timeoutMs: 60000, out: join(dir, "out"), dryRun: false,
+                taskIds: null, limit: null, openHoldout: false, freezeFile: null, piBin: "pi" }, {
+                expectedIdentityByArm: { off: offIdentity() },
+                spawnFn: (opts) => {
+                    const cwd = opts.cwd;
+                    const childCwd = execFileSync(process.execPath, ["-p", "process.cwd()"], { cwd, encoding: "utf8" }).trim();
+                    captured = {
+                        cwd,
+                        isLink: lstatSync(cwd).isSymbolicLink(),
+                        realCwd: realpathSync(cwd),
+                        realScratch: realpathSync(dirname(cwd)),
+                        childCwd: realpathSync(childCwd),
+                        tracked: activeScratchDirsList().includes(dirname(cwd)),
+                        linkIsLink: lstatSync(join(cwd, "linked.js")).isSymbolicLink(),
+                        linkText: readFileSync(join(cwd, "linked.js"), "utf8"),
+                    };
+                    // Fake session caches, as a real SmartRead session would write.
+                    mkdirSync(join(cwd, ".pi-smartread.tags.cache"), { recursive: true });
+                    writeFileSync(join(cwd, ".pi-smartread.tags.cache", "junk.json"), "{}");
+                    mkdirSync(join(cwd, ".pi-smartread"), { recursive: true });
+                    writeFileSync(join(cwd, ".pi-smartread", "junk.json"), "{}");
+                    return settled(opts);
+                },
+            });
+            const manifest = readManifest(result.manifestPath);
+            expect(manifest.sessions).toHaveLength(1);
+            expect(manifest.sessions[0]).toMatchObject({ excluded: false, gradedFailure: false });
+        } finally {
+            restore();
+        }
+        // The session ran inside scratch, not the pinned source.
+        expect(captured).not.toBeNull();
+        const seen = captured!;
+        expect(seen.isLink).toBe(false);
+        expect(seen.childCwd).toBe(seen.realCwd);
+        expect(seen.realCwd.startsWith(`${seen.realScratch}${sep}`)).toBe(true);
+        expect(seen.realCwd === realpathSync(realRepo) || seen.realCwd.startsWith(`${realpathSync(realRepo)}${sep}`)).toBe(false);
+        expect(seen.tracked).toBe(true);
+        // Internal relative symlinks survive the copy.
+        expect(seen.linkIsLink).toBe(true);
+        expect(seen.linkText).toBe("export {};\n");
+        // The pinned source stays clean after the fake session wrote caches into cwd.
+        expect(findStateEntries(realRepo)).toEqual([]);
+        expect(execFileSync("git", ["-C", realRepo, "status", "--porcelain", "--ignored"], { encoding: "utf8" }).trim()).toBe("");
+        // Scratch is untracked once the session finishes.
+        expect(activeScratchDirsList()).toEqual([]);
+    }, 60000);
 });
 
 const IDENTITY_HEX = "ab".repeat(32);

@@ -242,7 +242,7 @@ function checkRepos(manifest: RepoManifest): Array<{ repo: string; expected: str
         try {
             const path = realpathSync(checkout);
             const head = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-            const status = execFileSync("git", ["-C", path, "status", "--porcelain"], { encoding: "utf8" }).split("\n").filter(Boolean);
+            const status = execFileSync("git", ["-C", path, "status", "--porcelain", "--ignored"], { encoding: "utf8" }).split("\n").filter(Boolean);
             return { repo, expected: pin.commit, head, clean: status.length === 0, status };
         } catch (error) {
             return { repo, expected: pin.commit, head: null, clean: false, status: [], error: error instanceof Error ? error.message : String(error) };
