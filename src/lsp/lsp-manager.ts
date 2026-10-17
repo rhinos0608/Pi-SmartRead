@@ -7,7 +7,6 @@
 import type { LspWorkspaceEdit } from "@rhinos0608/pi-workspace-protocol";
 import { realpathSync, existsSync } from "node:fs";
 import { basename, dirname, resolve, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { LSPConnection } from "./lsp-connection.js";
 import type { PreparedDocumentReceipt } from "./lsp-document-store.js";
 import { canonicalProjectRoot, computeConfigFingerprint, buildSessionKey } from "./lsp-session-key.js";
@@ -289,22 +288,15 @@ export class LSPManager {
     // Session fingerprint settings reach server workspace/configuration responses
     // via the connection (server → client path), not a client-request patch.
     conn.sessionSettings = fp.settings;
-    const origRequest = conn.request.bind(conn);
-    (conn as any).request = (method: string, params: unknown, ropts?: { signal?: AbortSignal }) => {
-      if (method === "initialize" && params && typeof params === "object") {
-        const p = params as Record<string, unknown>;
-        if (initOptions !== undefined) p.initializationOptions = initOptions;
-        if (folders.length) {
-          p.workspaceFolders = folders.map((f) => ({
-            uri: pathToFileURL(resolve(f)).href,
-            name: basename(resolve(f)),
-          }));
-        }
-      }
-      return (origRequest as any)(method, params, ropts);
-    };
     // Validated env overlay reaches the server process; values are never logged.
-    await conn.start(config.command, config.args, this.rootUri, { env: fp.envOverlay });
+    // Initialize overrides travel as explicit start options: initialize is sent
+    // through the connection's private requestNow path, which a public-request
+    // wrapper can never intercept.
+    await conn.start(config.command, config.args, this.rootUri, {
+      env: fp.envOverlay,
+      ...(initOptions !== undefined ? { initializationOptions: initOptions } : {}),
+      workspaceFolders: folders,
+    });
     (conn as any).sessionInitOptions = initOptions;
     (conn as any).sessionSettings = fp.settings;
     (conn as any).sessionKey = key;

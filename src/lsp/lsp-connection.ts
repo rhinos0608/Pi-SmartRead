@@ -220,6 +220,15 @@ function hasRenamePrepareSupport(caps: Record<string, unknown> | null): boolean 
   return !!rp && typeof rp === "object" && !!(rp as Record<string, unknown>).prepareProvider;
 }
 
+/** Explicit initialize overrides for LSPConnection.start. Initialize is sent
+ * through the private requestNow path, which a public-request wrapper can
+ * never intercept, so overrides travel here instead of a monkey-patch. */
+export interface LSPConnectionStartOptions {
+  env?: Record<string, string>;
+  initializationOptions?: Record<string, unknown>;
+  workspaceFolders?: string[];
+}
+
 /**
  * Exported for unit testing only (constructing a connection against a mocked
  * child process). Not part of the public LSPBridge surface — external
@@ -323,6 +332,9 @@ export class LSPConnection {
   /** Workspace root path passed to start(); drives workspace/workspaceFolders replies. */
   private rootPath: string | null = null;
 
+  /** Workspace folders delivered in initialize; also served to server workspace/workspaceFolders requests. */
+  private sessionWorkspaceFolders: string[] | null = null;
+
   /** Unsolicited workspace/applyEdit proposals retained in memory only — never written to disk. */
   private applyEditProposals: unknown[] = [];
   /** Running JSON-size total of retained proposals, bounded by APPLY_EDIT_PROPOSAL_BYTES. */
@@ -355,13 +367,14 @@ export class LSPConnection {
 
   getServerCapabilities(): Record<string, unknown> | null { return this.serverCapabilities; }
 
-  async start(command: string, args: string[], rootUri: string, opts?: { env?: Record<string, string> }): Promise<void> {
+  async start(command: string, args: string[], rootUri: string, opts?: LSPConnectionStartOptions): Promise<void> {
     if (this.lifecycle !== "created" || this.proc !== null) throw new Error("LSP connection can only be started once");
     this.lifecycle = "initializing";
     this.initPromise = new Promise<void>((resolve, reject) => { this.initResolve = resolve; this.initReject = reject; });
     // Prevent unhandled rejection for queued waiters that detach via abort before init settles.
     this.initPromise.catch(() => {});
     this.rootPath = resolve(rootUri);
+    this.sessionWorkspaceFolders = opts?.workspaceFolders ?? [rootUri];
     this.proc = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], ...(opts?.env ? { env: { ...process.env, ...opts.env } } : {}) });
     const spawnedProc = this.proc;
     const spawnedStdin = spawnedProc.stdin;
@@ -377,6 +390,11 @@ export class LSPConnection {
       initResult = await this.requestNow("initialize", {
       processId: process.pid,
       rootUri: pathToFileURL(resolve(rootUri)).href,
+      ...(opts?.initializationOptions !== undefined ? { initializationOptions: opts.initializationOptions } : {}),
+      workspaceFolders: (opts?.workspaceFolders ?? [rootUri]).map((f) => ({
+        uri: pathToFileURL(resolve(f)).href,
+        name: basename(resolve(f)),
+      })),
       capabilities: {
         textDocument: {
           definition: { dynamicRegistration: true },
@@ -1200,8 +1218,9 @@ export class LSPConnection {
   private serverRequestContext(): ServerRequestContext {
     return {
       workspaceFolders: () => {
-        if (!this.rootPath) return null;
-        return [{ uri: pathToFileURL(this.rootPath).href, name: basename(this.rootPath) }];
+        const folders = this.sessionWorkspaceFolders ?? (this.rootPath ? [this.rootPath] : []);
+        if (!folders.length) return null;
+        return folders.map((f) => ({ uri: pathToFileURL(resolve(f)).href, name: basename(resolve(f)) }));
       },
       retainApplyEditProposal: (proposal) => { this.retainApplyEditProposal(proposal); },
       getConfigurationSettings: () => this.sessionSettings ?? null,

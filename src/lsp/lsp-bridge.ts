@@ -116,6 +116,7 @@ export type {
 } from "./lsp-types.js";
 export { LSPConnection } from "./lsp-connection.js";
 export type { PreparedDocumentReceipt } from "./lsp-document-store.js";
+export type { LSPConnectionStartOptions } from "./lsp-connection.js";
 export {
   LSPManager,
   evictManagerForRoot,
