@@ -56,6 +56,110 @@ export function clearCustomDescriptors(): void { customDescriptors.length = 0; }
 /** Runtime source of truth: built-in catalog + validated custom descriptors. */
 export function getActiveCatalog(): ServerDescriptor[] { return [...LANGUAGE_SERVER_CATALOG, ...customDescriptors]; }
 
+/**
+ * Known TypeScript language-server (TLS) launch profile.
+ *
+ * TLS answers definition/references/hover/rename from a `--serverMode
+ * partialSemantic` syntax server while the project loads. SmartRead manages
+ * TLS sessions semantic-only instead (`tsserver.useSyntaxServer: "never"`):
+ * cold starts may be slower or time out, but never return partial-semantic
+ * answers. Scoped to this profile only — never to arbitrary descriptors or
+ * unverified alternative executables.
+ */
+export const TYPESCRIPT_DESCRIPTOR_ID = "typescript";
+
+/** Value forced for `tsserver.useSyntaxServer` on the known TLS launch profile. */
+export const TLS_SEMANTIC_ONLY_USE_SYNTAX_SERVER = "never";
+
+/** Explicitly conflicting TLS initialization: fail, never silently override. */
+export class TlsSemanticOnlyConflictError extends Error {
+  constructor(descriptorId: string, actual: unknown) {
+    super(
+      `TLS semantic-only session misconfigured for descriptor "${descriptorId}": ` +
+      `initializationOptions.tsserver.useSyntaxServer is ${JSON.stringify(actual)} ` +
+      `but SmartRead requires "never" (full semantic server; partial-semantic ` +
+      `syntax answers are not served). Remove the override or set it to "never".`,
+    );
+    this.name = "TlsSemanticOnlyConflictError";
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Strip a Windows executable shim suffix (always: shims are referenced by name on every platform in configs and tests). */
+function stripExeShim(base: string): string {
+  return base.replace(/\.(?:cmd|exe|bat|com)$/i, "");
+}
+
+/**
+ * Executable basename for launch-profile matching: POSIX + Windows path
+ * separators removed, shim suffix stripped, case-insensitive on Windows.
+ */
+function normalizedExeBasename(command: string): string {
+  const base = command.split(/[\\/]/).pop() ?? command;
+  const stripped = stripExeShim(base);
+  return process.platform === "win32" ? stripped.toLowerCase() : stripped;
+}
+
+/** True when a script argument is the package's cli.mjs (basename cli.mjs with a typescript-language-server path segment). */
+function isTlsCliScript(arg: string): boolean {
+  const segs = arg.split(/[\\/]/);
+  const script = segs.pop() ?? "";
+  const name = process.platform === "win32" ? script.toLowerCase() : script;
+  if (name !== "cli.mjs") return false;
+  return segs.some((s) => (process.platform === "win32" ? s.toLowerCase() : s) === "typescript-language-server");
+}
+
+/**
+ * True when (command, args) match a command candidate of the known TLS
+ * launch profile. Matches the executable's basename, so path-qualified
+ * binaries (`/opt/homebrew/bin/typescript-language-server`,
+ * `node_modules/.bin/typescript-language-server`) and Windows shims
+ * (`typescript-language-server.cmd`) match; `--stdio` must be present in
+ * args. A `node` launch matches only when a script argument is the
+ * package's `cli.mjs` — arbitrary node invocations never match. Kept
+ * conservative on purpose: an unverified alternative executable must never
+ * receive the TLS-only option.
+ */
+export function isKnownTlsLaunch(command: string, args: string[]): boolean {
+  const tls = LANGUAGE_SERVER_CATALOG.find((d) => d.id === TYPESCRIPT_DESCRIPTOR_ID);
+  if (!tls) return false;
+  if (!args.includes("--stdio")) return false;
+  const exe = normalizedExeBasename(command);
+  if (tls.commandCandidates.some((c) => normalizedExeBasename(c.command) === exe)) return true;
+  if (exe === "node" && args.some(isTlsCliScript)) return true;
+  return false;
+}
+
+/**
+ * Effective initializationOptions for the known TLS launch profile: merges
+ * `tsserver.useSyntaxServer: "never"` over any unrelated configured fields
+ * (unrelated nested `tsserver` settings survive). An explicitly conflicting
+ * configured value throws TlsSemanticOnlyConflictError — never silently
+ * overridden. Call only for the known TLS profile; other descriptors pass
+ * their configured options through untouched.
+ */
+export function applyTlsSemanticOnlyPolicy(configured?: Record<string, unknown>): Record<string, unknown> {
+  const base = isRecord(configured) ? configured : {};
+  const tsserver = (base as Record<string, unknown>).tsserver;
+  if (tsserver !== undefined) {
+    if (!isRecord(tsserver)) {
+      throw new TlsSemanticOnlyConflictError(TYPESCRIPT_DESCRIPTOR_ID, tsserver);
+    }
+    const mode = (tsserver as Record<string, unknown>).useSyntaxServer;
+    if (mode !== undefined && mode !== TLS_SEMANTIC_ONLY_USE_SYNTAX_SERVER) {
+      throw new TlsSemanticOnlyConflictError(TYPESCRIPT_DESCRIPTOR_ID, mode);
+    }
+  }
+  const existing = isRecord(tsserver) ? (tsserver as Record<string, unknown>) : {};
+  return {
+    ...(base as Record<string, unknown>),
+    tsserver: { ...existing, useSyntaxServer: TLS_SEMANTIC_ONLY_USE_SYNTAX_SERVER },
+  };
+}
+
 export const LANGUAGE_SERVER_CATALOG: ServerDescriptor[] = [
   {
     id: "typescript",

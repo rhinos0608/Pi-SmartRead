@@ -151,4 +151,16 @@ describe("lsp-inspection engine (executor-sourced)", () => {
     const r = await inspectNavigation({ path: "x.ts", operation: "nope" as unknown as Parameters<typeof inspectNavigation>[0]["operation"], root: "/" });
     expect(r.status).toBe("degraded");
   });
+
+  it("script helper output shape is unchanged: strict meta.readiness is not surfaced", async () => {
+    execMock.mockResolvedValueOnce({
+      ...okEnv([{ uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }]),
+      meta: { truncated: false, readiness: { state: "settling", basis: "progress" } },
+    });
+    const { inspectNavigation } = await import("../../../src/lsp/lsp-inspection.js");
+    const r = await inspectNavigation({ path: "x.ts", operation: "definition", line: 1, character: 1, root: "/" });
+    expect(r.status).toBe("confirmed");
+    expect(Object.keys(r).sort()).toEqual(["items", "operation", "status", "truncated"]);
+    expect((r as unknown as Record<string, unknown>).readiness).toBeUndefined();
+  });
 });
