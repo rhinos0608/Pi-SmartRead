@@ -2,8 +2,8 @@
 /**
  * §9.16 driver worker: one process-group member processing pairs in run.ts order.
  *
- * Spawned by driver-run.ts with `detached: true` (own process group) and a
- * `--config <json>` file. It mirrors the frozen runner's per-instance loop
+ * Spawned by driver-run.ts with `detached: true` (own process group) and
+ * its config as JSON on stdin. It mirrors the frozen runner's per-instance loop
  * (run.ts:488-648) using the engine's exported functions loaded from
  * --engine-root, emits phase markers (setup-start/setup-end per instance,
  * query-start/query-end per pair) on stdout as `@@DRIVER <json>` lines, and
@@ -15,8 +15,8 @@
  * so a fresh worker resumes exactly where a killed one stopped.
  */
 
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { appendCheckpointRecord, loadCheckpoint, pairKey } from "./driver-checkpoint.js";
 
@@ -113,78 +113,69 @@ export function validateWorkerConfig(value: unknown): WorkerConfig {
 }
 
 /**
- * Securely read a generated worker config.
+ * Read the worker config from a stdin stream.
  *
- * Boundary: lstat pre-check, `O_NOFOLLOW` open, `fstat` mode/owner/type
- * checks on the SAME descriptor, full read from that descriptor, `unknown`
- * parse + shape validation, then canonical sibling naming binding to the
- * configured checkpoint. Rejects before any engine import or checkpoint
- * mutation. Errors are generic and never embed raw config content.
- *
- * Sibling binding only requires the config to live next to its configured
- * checkpoint (`<checkpoint>.worker-<n>-<m>.json`); it intentionally does
- * not restrict containment under cwd, engineRoot, or owned reports, since
- * legacy reports and relative/custom `--resume` checkpoints are legitimate.
+ * Bounded: refuses a TTY, caps total bytes, and times out a stream that
+ * never ends. Parses strict JSON, then runs the same shape validation the
+ * file path used. Rejects before any engine import or checkpoint mutation.
+ * Errors are generic and never embed config content.
  */
-export function readWorkerConfig(configPath: string): WorkerConfig {
-    if (typeof configPath !== "string" || configPath === "") throw new Error("worker config: invalid path");
+export async function readWorkerConfigFromStdin(
+    stream: NodeJS.ReadableStream = process.stdin,
+    opts: { maxBytes?: number; timeoutMs?: number } = {},
+): Promise<WorkerConfig> {
+    const maxBytes = opts.maxBytes ?? MAX_WORKER_CONFIG_BYTES;
+    const timeoutMs = opts.timeoutMs ?? WORKER_CONFIG_STDIN_TIMEOUT_MS;
+    if ((stream as { isTTY?: unknown }).isTTY === true) throw new Error("worker config: stdin is a TTY");
+    const chunks: Array<Buffer> = [];
+    let total = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-        const pre = lstatSync(configPath);
-        if (pre.isSymbolicLink()) throw new Error("worker config: refused: symlink");
-        if (!pre.isFile()) throw new Error("worker config: not a regular file");
-    } catch (error) {
-        if (error instanceof Error && error.message.startsWith("worker config:")) throw error;
-        throw new Error("worker config: unreadable");
-    }
-    const nofollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
-    const fd = openSync(configPath, fsConstants.O_RDONLY | nofollow);
-    try {
-        const st = fstatSync(fd);
-        if (!st.isFile()) throw new Error("worker config: not a regular file");
-        if (process.platform !== "win32") {
-            if ((st.mode & 0o077) !== 0) throw new Error("worker config: insecure permissions");
-            const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-            if (typeof uid === "number" && typeof st.uid === "number" && st.uid !== uid) {
-                throw new Error("worker config: unowned file");
-            }
-        }
-        const chunks: Array<Buffer> = [];
-        const buf = Buffer.alloc(65536);
-        for (;;) {
-            const n = readSync(fd, buf, 0, buf.length, null);
-            if (n === 0) break;
-            chunks.push(Buffer.from(buf.subarray(0, n)));
-        }
-        const text = Buffer.concat(chunks).toString("utf8");
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(text);
-        } catch {
-            throw new Error("worker config: malformed JSON");
-        }
-        const config = validateWorkerConfig(parsed);
-        const resolvedConfig = resolve(configPath);
-        const resolvedCheckpoint = resolve(config.checkpointPath);
-        const configBase = basename(resolvedConfig);
-        const checkpointBase = basename(resolvedCheckpoint);
-        if (
-            dirname(resolvedConfig) !== dirname(resolvedCheckpoint) ||
-            !configBase.startsWith(`${checkpointBase}.worker-`) ||
-            !WORKER_CONFIG_SUFFIX_RE.test(configBase)
-        ) {
-            throw new Error("worker config: checkpoint binding mismatch");
-        }
-        try {
-            const realConfigDir = realpathSync(dirname(resolvedConfig));
-            const realCheckpointDir = realpathSync(dirname(resolvedCheckpoint));
-            if (realConfigDir !== realCheckpointDir) throw new Error("worker config: checkpoint binding mismatch");
-        } catch (error) {
-            if (error instanceof Error && error.message.startsWith("worker config:")) throw error;
-        }
-        return config;
+        await new Promise<void>((resolvePromise, reject) => {
+            const cleanup = (): void => {
+                stream.off("data", onData);
+                stream.off("end", onEnd);
+                stream.off("error", onError);
+            };
+            const onData = (chunk: Buffer | string): void => {
+                const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+                total += buf.length;
+                if (total > maxBytes) {
+                    cleanup();
+                    reject(new Error("worker config: input too large"));
+                    return;
+                }
+                chunks.push(buf);
+            };
+            const onEnd = (): void => {
+                cleanup();
+                resolvePromise();
+            };
+            const onError = (error: Error): void => {
+                cleanup();
+                reject(error);
+            };
+            timer = setTimeout(() => {
+                cleanup();
+                reject(new Error("worker config: stdin timeout"));
+            }, timeoutMs);
+            timer.unref();
+            stream.on("data", onData);
+            stream.on("end", onEnd);
+            stream.on("error", onError);
+        });
     } finally {
-        closeSync(fd);
+        if (timer !== undefined) clearTimeout(timer);
     }
+    const text = Buffer.concat(chunks).toString("utf8");
+    if (text.length === 0) throw new Error("worker config: empty stdin");
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        throw new Error("worker config: malformed JSON");
+    }
+    return validateWorkerConfig(parsed);
 }
 
 const MARKER_PREFIX = "@@DRIVER ";
@@ -224,10 +215,23 @@ export function pinMismatchRecords(
     };
 }
 
-function takeValue(flag: string, argv: string[], i: number): string {
-    const value = argv[i];
-    if (value === undefined || value.startsWith("--")) throw new Error(`${flag} requires a value`);
-    return value;
+/**
+ * Maximum worker-config stdin payload: real configs are tens of kilobytes
+ * (one JSON object with the assigned instance rows); 4 MiB leaves wide
+ * headroom while bounding worker memory on hostile input.
+ */
+export const MAX_WORKER_CONFIG_BYTES = 4 * 1024 * 1024;
+
+/** How long the worker waits for its stdin config before giving up. */
+export const WORKER_CONFIG_STDIN_TIMEOUT_MS = 30_000;
+
+/**
+ * The worker takes no pathname and no flags: the driver feeds the config on
+ * stdin. Any argv (including the removed `--config FILE`) is rejected so a
+ * stale launcher fails closed instead of running unconfigured.
+ */
+export function parseWorkerArgs(argv: string[]): void {
+    if (argv.length > 0) throw new Error(`error: unknown argument: ${argv[0]}`);
 }
 
 // Engine module surface used here (structural; loaded from --engine-root).
@@ -270,8 +274,8 @@ async function loadEngine(engineRoot: string): Promise<{ repos: EngineRepos; ada
     };
 }
 
-export async function runWorker(configPath: string): Promise<number> {
-    const config = readWorkerConfig(configPath);
+export async function runWorker(rawConfig: WorkerConfig): Promise<number> {
+    const config = validateWorkerConfig(rawConfig);
     const { repos, adapter, teardown } = await loadEngine(config.engineRoot);
     const assigned = new Set(config.assignedPairs);
     try {
@@ -497,25 +501,19 @@ const invokedAsWorker =
     process.argv[1] !== undefined &&
     process.argv[1].endsWith("driver-worker.ts");
 if (invokedAsWorker) {
-    let configPath = "";
-    for (let i = 2; i < process.argv.length; i++) {
-        if (process.argv[i] === "--config") configPath = takeValue("--config", process.argv, ++i);
-        else {
-            console.error(`error: unknown argument: ${process.argv[i]}`);
+    void (async () => {
+        try {
+            parseWorkerArgs(process.argv.slice(2));
+        } catch (error) {
+            console.error(error instanceof Error ? error.message : String(error));
             process.exitCode = 2;
-            configPath = "";
-            break;
+            return;
         }
-    }
-    if (configPath) {
-        runWorker(configPath).then(
-            (code) => {
-                process.exitCode = code;
-            },
-            (error) => {
-                console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
-                process.exitCode = 1;
-            },
-        );
-    }
+        try {
+            process.exitCode = await runWorker(await readWorkerConfigFromStdin());
+        } catch (error) {
+            console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+            process.exitCode = 1;
+        }
+    })();
 }

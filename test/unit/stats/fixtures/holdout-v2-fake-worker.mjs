@@ -19,8 +19,20 @@ import { closeSync, fsyncSync, openSync, readFileSync, writeFileSync, writeSync 
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 
-const configPath = process.argv[process.argv.indexOf("--config") + 1];
-const config = JSON.parse(readFileSync(configPath, "utf8"));
+// The real worker takes its config as JSON on stdin (no --config FILE);
+// the fake worker mirrors that boundary. Any argv is rejected.
+if (process.argv.length > 2) {
+    console.error(`fake worker: unknown argument: ${process.argv[2]}`);
+    process.exit(2);
+}
+let stdinText = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) stdinText += chunk;
+if (stdinText === "") {
+    console.error("fake worker: empty stdin");
+    process.exit(1);
+}
+const config = JSON.parse(stdinText);
 const plan = JSON.parse(process.env.FAKE_PLAN_JSON ?? "{}");
 const checkpointPath = config.checkpointPath;
 // Synthetic snapshot metadata stays beneath the harness-owned state root

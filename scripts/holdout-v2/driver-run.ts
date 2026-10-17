@@ -12,8 +12,9 @@
  * re-implemented minimally with the mirrored run.ts lines cited.
  *
  * Supervision (§9.16): a supervisor spawns a worker with `detached: true`
- * (own process group). The worker processes pairs in run.ts order, emits
- * phase markers and appends one fsync'd checkpoint record per pair.
+ * (own process group), keeps the exclusive 0600 config sidecar receipt, and
+ * feeds identical config bytes to the worker over stdin. The worker
+ * processes pairs in run.ts order, emits phase markers and appends one fsync'd checkpoint record per pair.
  * The watchdog kills hung queries (120 s → `timeout:watchdog-query`) and
  * stalled setups (10 × 60 s checks under 5 CPU-s with no progress, 30 min
  * hard cap → retry once, then `error:watchdog-setup` for both formulations).
@@ -196,7 +197,7 @@ export interface DriverTestHooks {
     samplerMs?: number | null;
     nodeArgs?: string[];
     workerEntry?: string;
-    launchWorker?: (spec: { nodeArgs: string[]; entry: string; configPath: string; cwd: string }) => Promise<WorkerHandle>;
+    launchWorker?: (spec: { nodeArgs: string[]; entry: string; config: WorkerConfig; cwd: string }) => Promise<WorkerHandle>;
     listGroup?: (pgid: number) => Promise<GroupProcess[]>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
@@ -310,7 +311,7 @@ interface SupervisorDeps {
     samplerMs: number | null;
     nodeArgs: string[];
     workerEntry: string;
-    launchWorker: (spec: { nodeArgs: string[]; entry: string; configPath: string; cwd: string }) => Promise<WorkerHandle>;
+    launchWorker: (spec: { nodeArgs: string[]; entry: string; config: WorkerConfig; cwd: string }) => Promise<WorkerHandle>;
     listGroup: (pgid: number) => Promise<GroupProcess[]>;
     sleep: (ms: number) => Promise<void>;
     now: () => number;
@@ -384,13 +385,22 @@ async function defaultLoadEngine(engineRoot: string): Promise<SupervisorEngine> 
     };
 }
 
-export async function launchDetachedWorker(spec: { nodeArgs: string[]; entry: string; configPath: string; cwd: string }): Promise<WorkerHandle> {
+export async function launchDetachedWorker(spec: { nodeArgs: string[]; entry: string; config: WorkerConfig; cwd: string }): Promise<WorkerHandle> {
     if (process.platform === "win32") throw new Error("refuses: process-group supervision (SIGTERM to -pgid) is POSIX-only");
-    const child: ChildProcess = spawn("node", [...spec.nodeArgs, spec.entry, "--config", spec.configPath], {
+    // Portable stdin piping (works on windows-latest Node 20 too): the
+    // config travels as one JSON write followed by end(), no POSIX-only fds.
+    const payload = JSON.stringify(spec.config);
+    const child: ChildProcess = spawn("node", [...spec.nodeArgs, spec.entry], {
         detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         cwd: spec.cwd,
     });
+    const stdin = child.stdin;
+    if (stdin !== null) {
+        stdin.on("error", () => {});
+        stdin.write(payload);
+        stdin.end();
+    }
     if (child.pid === undefined) throw new Error("worker spawn failed: no pid");
     const pid = child.pid;
     child.stdout?.on("data", (chunk: Buffer) => process.stdout.write(chunk));
@@ -878,7 +888,7 @@ async function runOneWorker(
     };
     const configPath = `${ctx.checkpointPath}.worker-${deps.now()}-${(workerLaunchCounter += 1)}.json`;
     writeWorkerConfigFile(configPath, config);
-    const worker = await deps.launchWorker({ nodeArgs: deps.nodeArgs, entry: deps.workerEntry, configPath, cwd: deps.cwd });
+    const worker = await deps.launchWorker({ nodeArgs: deps.nodeArgs, entry: deps.workerEntry, config, cwd: deps.cwd });
     const pgid = worker.pgid;
     let phase: Phase = { kind: "idle" };
     let lastStallCheckWall = 0;

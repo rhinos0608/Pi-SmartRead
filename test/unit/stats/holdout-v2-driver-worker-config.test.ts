@@ -1,18 +1,21 @@
 /**
- * Worker-config boundary tests (Owner A).
+ * Worker-config boundary tests (stdin design).
  *
  * The driver worker config is internal authority-bearing IPC: the producer
- * (driver-run.ts) generates it and the consumer (driver-worker.ts) validates
- * it before importing engine modules or touching the checkpoint. These tests
- * pin the boundary without touching Owner B fixture/harness files.
+ * (driver-run.ts) generates it, writes an exclusive 0600 sidecar receipt,
+ * and feeds identical bytes to the worker over stdin. The worker never takes
+ * a pathname: it reads bounded stdin bytes, parses strict JSON, and runs the
+ * same shape validation. These tests pin the boundary without touching
+ * Owner B fixture/harness files.
  */
 
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { Readable } from "node:stream";
 import { afterAll, describe, expect, it } from "vitest";
-import { readWorkerConfig, runWorker, validateWorkerConfig } from "../../../scripts/holdout-v2/driver-worker.js";
-import { writeWorkerConfigFile } from "../../../scripts/holdout-v2/driver-run.js";
+import { MAX_WORKER_CONFIG_BYTES, parseWorkerArgs, readWorkerConfigFromStdin, runWorker, validateWorkerConfig } from "../../../scripts/holdout-v2/driver-worker.js";
+import { launchDetachedWorker, writeWorkerConfigFile } from "../../../scripts/holdout-v2/driver-run.js";
 import type { WorkerConfig } from "../../../scripts/holdout-v2/driver-worker.js";
 
 const dirs: string[] = [];
@@ -53,22 +56,53 @@ function writeRaw(path: string, content: string, mode = 0o600): void {
 }
 
 describe("worker config boundary", () => {
-    it("rejects malformed JSON before engine import", async () => {
+    it("accepts valid stdin JSON (producer sidecar bytes round-trip)", async () => {
         const dir = tempDir();
         const checkpointPath = join(dir, "ckpt.jsonl");
         writeRaw(checkpointPath, "");
         const configPath = siblingConfigPath(checkpointPath);
-        writeRaw(configPath, "{not-json");
-        await expect(runWorker(configPath)).rejects.toThrow(/worker config/i);
-        expect(readFileSync(checkpointPath, "utf8")).toBe("");
+        const config = validConfig(checkpointPath);
+        writeWorkerConfigFile(configPath, config);
+        if (process.platform !== "win32") {
+            expect(statSync(configPath).mode & 0o777).toBe(0o600);
+        }
+        const back = await readWorkerConfigFromStdin(Readable.from([readFileSync(configPath)]));
+        expect(back).toEqual(config);
     });
 
-    it("rejects invalid shapes before engine import", async () => {
+    it("rejects oversize stdin input without echoing content", async () => {
+        const dir = tempDir();
+        const checkpointPath = join(dir, "ckpt.jsonl");
+        const oversized = validConfig(checkpointPath, { revision: `ok-SENTINEL-${"p".repeat(MAX_WORKER_CONFIG_BYTES)}` });
+        const error = await readWorkerConfigFromStdin(Readable.from([JSON.stringify(oversized)])).then(
+            () => {
+                throw new Error("expected rejection");
+            },
+            (cause: unknown) => cause,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(/worker config: input too large/);
+        expect((error as Error).message).not.toContain("SENTINEL");
+    });
+
+    it("rejects invalid JSON without echoing content", async () => {
+        const error = await readWorkerConfigFromStdin(Readable.from(["{not-json-SENTINEL"])).then(
+            () => {
+                throw new Error("expected rejection");
+            },
+            (cause: unknown) => cause,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(/worker config: malformed JSON/);
+        expect((error as Error).message).not.toContain("SENTINEL");
+    });
+
+    it("rejects invalid shapes without echoing content", async () => {
         const dir = tempDir();
         const checkpointPath = join(dir, "ckpt.jsonl");
         writeRaw(checkpointPath, "");
         const badShapes: unknown[] = [
-            { ...validConfig(checkpointPath), checkpointPath: 42 },
+            { ...validConfig(checkpointPath), checkpointPath: 42, note: "SENTINEL" },
             { ...validConfig(checkpointPath), instances: [{ instanceId: 1 }] },
             { ...validConfig(checkpointPath), assignedPairs: "nope" },
             { ...validConfig(checkpointPath), formulations: [] },
@@ -76,61 +110,38 @@ describe("worker config boundary", () => {
             { ...validConfig(checkpointPath), timeoutMs: Number.NaN },
         ];
         for (const shape of badShapes) {
-            const configPath = siblingConfigPath(checkpointPath, Date.now(), Math.floor(Math.random() * 1000000));
-            writeRaw(configPath, JSON.stringify(shape));
-            await expect(runWorker(configPath)).rejects.toThrow(/worker config/i);
+            const error = await readWorkerConfigFromStdin(Readable.from([JSON.stringify(shape)])).then(
+                () => {
+                    throw new Error("expected rejection");
+                },
+                (cause: unknown) => cause,
+            );
+            expect(error).toBeInstanceOf(Error);
+            expect((error as Error).message).toMatch(/worker config/i);
+            expect((error as Error).message).not.toContain("SENTINEL");
         }
-        expect(readFileSync(checkpointPath, "utf8")).toBe("");
         expect(() => validateWorkerConfig({})).toThrow(/worker config/i);
     });
 
-    it("rejects a directory as config", () => {
-        const dir = tempDir();
-        const checkpointPath = join(dir, "ckpt.jsonl");
-        const configPath = siblingConfigPath(checkpointPath);
-        mkdirSync(configPath, { recursive: true });
-        expect(() => readWorkerConfig(configPath)).toThrow(/worker config/i);
+    it("rejects empty stdin", async () => {
+        await expect(readWorkerConfigFromStdin(Readable.from([]))).rejects.toThrow(/worker config: empty stdin/);
     });
 
-    it("rejects a symlink config without following it", () => {
-        const dir = tempDir();
-        const checkpointPath = join(dir, "ckpt.jsonl");
-        writeRaw(checkpointPath, "");
-        const target = join(dir, "real.json");
-        writeRaw(target, JSON.stringify(validConfig(checkpointPath)));
-        const linkPath = siblingConfigPath(checkpointPath);
-        symlinkSync(target, linkPath);
-        expect(() => readWorkerConfig(linkPath)).toThrow(/worker config/i);
-        // Target was never consumed as the config (read refused the link itself).
-        expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+    it("rejects a TTY stdin", async () => {
+        const tty = Object.assign(Readable.from([]), { isTTY: true });
+        await expect(readWorkerConfigFromStdin(tty as unknown as NodeJS.ReadableStream)).rejects.toThrow(/worker config: stdin is a TTY/);
     });
 
-    it.skipIf(process.platform === "win32")("rejects insecure file modes on POSIX", () => {
-        const dir = tempDir();
-        const checkpointPath = join(dir, "ckpt.jsonl");
-        writeRaw(checkpointPath, "");
-        const configPath = siblingConfigPath(checkpointPath);
-        writeRaw(configPath, JSON.stringify(validConfig(checkpointPath)), 0o600);
-        chmodSync(configPath, 0o644);
-        expect(() => readWorkerConfig(configPath)).toThrow(/worker config/i);
-        expect(statSync(configPath).mode & 0o777).toBe(0o644);
+    it("rejects stdin that never ends (timeout)", async () => {
+        const stalled = new Readable({ read() {} });
+        await expect(readWorkerConfigFromStdin(stalled, { timeoutMs: 50 })).rejects.toThrow(/worker config: stdin timeout/);
+        stalled.destroy();
     });
 
-    it("rejects naming/checkpoint binding mismatch", () => {
-        const dir = tempDir();
-        const checkpointPath = join(dir, "ckpt.jsonl");
-        const otherCheckpoint = join(dir, "other.jsonl");
-        writeRaw(checkpointPath, "");
-        // Basename does not start with the configured checkpoint basename.
-        const mismatched = join(dir, "unrelated.worker-1-1.json");
-        writeRaw(mismatched, JSON.stringify(validConfig(otherCheckpoint)));
-        expect(() => readWorkerConfig(mismatched)).toThrow(/worker config/i);
-        // Sibling in a different directory also mismatches.
-        const otherDir = join(dir, "sub");
-        mkdirSync(otherDir, { recursive: true });
-        const elsewhere = join(otherDir, `${basename(checkpointPath)}.worker-1-1.json`);
-        writeRaw(elsewhere, JSON.stringify(validConfig(checkpointPath)));
-        expect(() => readWorkerConfig(elsewhere)).toThrow(/worker config/i);
+    it("rejects --config (unknown worker flag)", () => {
+        expect(() => parseWorkerArgs(["--config", "some.json"])).toThrow(/unknown argument/);
+        expect(() => parseWorkerArgs(["--anything"])).toThrow(/unknown argument/);
+        expect(() => parseWorkerArgs([])).not.toThrow();
     });
 
     it("producer refuses to overwrite an existing file (sentinel unchanged)", () => {
@@ -156,69 +167,78 @@ describe("worker config boundary", () => {
         expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
     });
 
-    it("roundtrips current producer output in owned layout", () => {
+    it("runWorker rejects bogus config before checkpoint mutation", async () => {
+        const dir = tempDir();
+        const checkpointPath = join(dir, "ckpt.jsonl");
+        const sentinel = `${JSON.stringify({ v: 1, kind: "attempt", attempt: { instanceId: "x" } })}\n`;
+        writeRaw(checkpointPath, sentinel);
+        await expect(runWorker({ bogus: true } as unknown as WorkerConfig)).rejects.toThrow(/worker config/i);
+        expect(readFileSync(checkpointPath, "utf8")).toBe(sentinel);
+    });
+
+    it("runWorker gets a valid config past validation to engine load", async () => {
         const dir = tempDir();
         const checkpointPath = join(dir, "ckpt.jsonl");
         writeRaw(checkpointPath, "");
-        const configPath = siblingConfigPath(checkpointPath);
-        const config = validConfig(checkpointPath);
-        writeWorkerConfigFile(configPath, config);
-        if (process.platform !== "win32") {
-            expect(statSync(configPath).mode & 0o777).toBe(0o600);
-        }
-        const back = readWorkerConfig(configPath);
-        expect(back.checkpointPath).toBe(checkpointPath);
-        expect(back.instances).toHaveLength(1);
-        expect(resolve(configPath)).toBe(resolve(`${resolve(checkpointPath)}.worker-1700000000000-1.json`));
+        const error = await runWorker(validConfig(checkpointPath)).then(
+            () => {
+                throw new Error("expected rejection");
+            },
+            (cause: unknown) => cause,
+        );
+        expect(error).toBeInstanceOf(Error);
+        // Validation passed: the failure is the missing engine, not the config.
+        expect((error as Error).message).not.toMatch(/worker config/i);
+        expect(readFileSync(checkpointPath, "utf8")).toBe("");
     });
 
-    it("accepts legacy layout (null stateRoot, unowned)", () => {
+    it("accepts legacy layout (null stateRoot, unowned) over stdin", async () => {
         const dir = tempDir();
         const checkpointPath = join(dir, "legacy.jsonl");
         writeRaw(checkpointPath, "");
         const configPath = siblingConfigPath(checkpointPath, 7, 2);
         const config = validConfig(checkpointPath, { stateRoot: null, owned: false });
         writeWorkerConfigFile(configPath, config);
-        const back = readWorkerConfig(configPath);
+        const back = await readWorkerConfigFromStdin(Readable.from([readFileSync(configPath, "utf8")]));
         expect(back.owned).toBe(false);
         expect(back.stateRoot).toBeNull();
     });
 
-    it("accepts custom relative checkpoint paths as siblings", () => {
+    it("accepts custom relative checkpoint paths over stdin", async () => {
+        // Relative form (no cwd containment requirement).
         const dir = tempDir();
-        const checkpointPath = join(dir, "custom-resume.jsonl");
-        writeRaw(checkpointPath, "");
-        // Relative form of the same sibling pair (no cwd containment requirement).
         const relCheckpoint = join(dir, "custom-resume.jsonl");
-        const configPath = siblingConfigPath(relCheckpoint, 9, 3);
+        writeRaw(relCheckpoint, "");
         const config = validConfig(relCheckpoint);
-        writeWorkerConfigFile(configPath, config);
-        const back = readWorkerConfig(configPath);
+        const back = await readWorkerConfigFromStdin(Readable.from([JSON.stringify(config)]));
         expect(resolve(back.checkpointPath)).toBe(resolve(relCheckpoint));
-        expect(dirname(resolve(configPath))).toBe(dirname(resolve(relCheckpoint)));
     });
 
-    it("preserves extra instance fields", () => {
+    it("preserves extra instance fields over stdin", async () => {
         const dir = tempDir();
         const checkpointPath = join(dir, "ckpt.jsonl");
         writeRaw(checkpointPath, "");
-        const configPath = siblingConfigPath(checkpointPath);
         const config = validConfig(checkpointPath, {
             instances: [{ instanceId: "syn-t1", repo: "o/r1", baseCommit: "a".repeat(40), customField: "keep-me" } as WorkerConfig["instances"][number]],
         });
-        writeWorkerConfigFile(configPath, config);
-        const back = readWorkerConfig(configPath);
+        const back = await readWorkerConfigFromStdin(Readable.from([JSON.stringify(config)]));
         expect(back.instances[0]).toMatchObject({ instanceId: "syn-t1", customField: "keep-me" });
     });
 
-    it("rejects before checkpoint mutation", async () => {
+    it.skipIf(process.platform === "win32")("launchDetachedWorker pipes the config over stdin (fake worker)", async () => {
         const dir = tempDir();
         const checkpointPath = join(dir, "ckpt.jsonl");
-        const sentinel = `${JSON.stringify({ v: 1, kind: "attempt", attempt: { instanceId: "x" } })}\n`;
-        writeRaw(checkpointPath, sentinel);
-        const configPath = siblingConfigPath(checkpointPath);
-        writeRaw(configPath, JSON.stringify({ bogus: true }));
-        await expect(runWorker(configPath)).rejects.toThrow(/worker config/i);
-        expect(readFileSync(checkpointPath, "utf8")).toBe(sentinel);
+        writeRaw(checkpointPath, "");
+        const config = validConfig(checkpointPath, { engineRoot: dir, stateRoot: dir, owned: true });
+        const fakeWorker = new URL("./fixtures/holdout-v2-fake-worker.mjs", import.meta.url).pathname;
+        process.env.FAKE_PLAN_JSON = JSON.stringify({});
+        try {
+            const handle = await launchDetachedWorker({ nodeArgs: [], entry: fakeWorker, config, cwd: dir });
+            const result = await handle.wait();
+            expect(result.code).toBe(0);
+        } finally {
+            delete process.env.FAKE_PLAN_JSON;
+        }
+        expect(readFileSync(checkpointPath, "utf8")).toContain('"status":"ok"');
     });
 });

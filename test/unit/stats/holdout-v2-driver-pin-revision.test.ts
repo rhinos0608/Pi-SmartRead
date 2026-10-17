@@ -4,10 +4,11 @@
  * "unknown", and driver-run.ts must pass it through WorkerConfig.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { launchDetachedWorker } from "../../../scripts/holdout-v2/driver-run.js";
-import { pinMismatchRecords } from "../../../scripts/holdout-v2/driver-worker.js";
+import { WORKER_CONFIG_SUFFIX_RE, pinMismatchRecords } from "../../../scripts/holdout-v2/driver-worker.js";
 import { runSynthetic } from "./holdout-v2-driver-harness.js";
 
 const entry = { repo: "pinned/org", baseCommit: "a".repeat(40), dataset: "swe-bench-multilingual" };
@@ -27,17 +28,24 @@ describe("pin-mismatch revision", () => {
         expect(datasetFailure).toMatchObject({ dataset: "swe-bench-multilingual", revision: "rev-test", instanceIds: ["syn-x"] });
     });
     it.skipIf(process.platform === "win32")("supervisor passes the resolved revision in WorkerConfig", async () => {
-        let revision: unknown = undefined;
-        const { code } = await runSynthetic({
+        let seen: unknown = undefined;
+        const { code, reportsDir } = await runSynthetic({
             plan: {},
             hooks: {
                 launchWorker: async (spec) => {
-                    revision = (JSON.parse(readFileSync(spec.configPath, "utf8")) as { revision?: unknown }).revision;
+                    seen = spec.config;
                     return launchDetachedWorker(spec);
                 },
             },
         });
         expect(code).toBe(0);
-        expect(revision).toBe("rev-test");
+        expect((seen as { revision?: unknown }).revision).toBe("rev-test");
+        // The producer still writes the exclusive 0600 sidecar receipt, and
+        // the bytes fed to the worker over stdin are identical to it.
+        const sidecars = readdirSync(reportsDir).filter((f) => WORKER_CONFIG_SUFFIX_RE.test(f));
+        expect(sidecars.length).toBeGreaterThan(0);
+        for (const sidecar of sidecars) {
+            expect(JSON.parse(readFileSync(join(reportsDir, sidecar), "utf8"))).toEqual(seen);
+        }
     });
 });
