@@ -150,12 +150,27 @@ export function assertNoHoldoutExposure(prompt: string, extraMarkers: string[] =
     if (hits.length) throw new Error(`holdout exposure blacklist hit in prompt: ${hits.join(", ")}`);
 }
 
-function collectHandoffBlacklist(otherSplitTasks: InspectTask[], currentSplit: InspectTask["split"]): string[] {
+/**
+ * Pooled holdout-exposure blacklist for the runner gate.
+ *
+ * `allTasks` is every task in the loaded file (the parameter was named
+ * `otherSplitTasks` before A5 even though the caller always passed all
+ * tasks); per-class split-gating happens inside: gold-path markers are
+ * pooled from other-split tasks only (Amendment A5), while holdout ids,
+ * every task's universe id/sha256, and other-split prompts stay global.
+ */
+export function collectHandoffBlacklist(allTasks: InspectTask[], currentSplit: InspectTask["split"]): string[] {
     const markers = new Set<string>();
-    for (const task of otherSplitTasks) {
+    for (const task of allTasks) {
         if (task.split === "holdout") markers.add(task.id);
         if (task.split !== currentSplit && (task.split === "pilot" || task.split === "dev")) markers.add(task.prompt);
-        for (const path of collectGoldPathMarkers(task.gold)) markers.add(path);
+        // Amendment A5: gold-path markers are pooled from other-split tasks
+        // only. Same-split, non-current-task gold-path coincidences are
+        // permitted; the current task's own gold is gated separately at the
+        // call site (A3). Universe metadata stays global below.
+        if (task.split !== currentSplit) {
+            for (const path of collectGoldPathMarkers(task.gold)) markers.add(path);
+        }
         markers.add(task.candidateUniverse.id);
         markers.add(task.candidateUniverse.sha256);
     }
@@ -170,7 +185,8 @@ function collectHandoffBlacklist(otherSplitTasks: InspectTask[], currentSplit: I
  * other-split prompts, every patch sha, and the task-file path stay
  * protected: an anchor that exactly equals a protected string is dropped
  * from suppression so the holdout gate still hits. Gold-path markers are
- * intentionally absent here so ALL-task gold-path pooling is preserved.
+ * intentionally absent here so declared exact anchors can still suppress
+ * pooled other-split (and own) gold-path markers under A3/A5.
  * General blacklist strings and absolute paths are always blocked inside
  * assertNoHoldoutExposure and never enter suppression.
  */
@@ -302,7 +318,11 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
             const prompt = buildInspectTaskPrompt(view, arm);
             const rawGoldAnchors = (task.anchors ?? []).filter((anchor) => collectGoldPathMarkers(task.gold).includes(anchor));
             const anchorGoldMarkers = rawGoldAnchors.filter((anchor) => !anchorProtected.has(anchor));
-            assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [tasksPath, ...forbidden], anchorGoldMarkers);
+            // Amendment A5: the current task's own gold markers are always in
+            // the gate (A3 exact-anchor suppression still applies); only
+            // other-split gold is pooled via `forbidden`.
+            const ownGoldMarkers = collectGoldPathMarkers(task.gold);
+            assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [tasksPath, ...forbidden, ...ownGoldMarkers], anchorGoldMarkers);
         }
     }
     const extensionPath = opts.extensionPath ?? resolve(dirname(new URL(import.meta.url).pathname), "..", "..", "..", "src", "index.ts");

@@ -192,3 +192,26 @@ Adopted before any inspect or TEB benchmark session ran on the pilot under these
 - **Pilot set.** The pilot is the 28-task sealed v2 set (§16).
 - **Prettier negatives.** Prettier negatives are required in dev and holdout (A3 §16 already says so). Recommendation only, pending owner confirmation (not a frozen rule): allocate >=4 prettier negatives in dev and >=8 in holdout, spread across N1/N2/N3/N5.
 - **Rate-limit risk.** A subscription 429 after the first assistant token grades as task failure (same rule as TEB: only pre-first-token provider/auth failure, extension load failure, or runner crash is excluded; anything later is graded, never excluded). Dispatch runs at low concurrency to avoid it. No grading-code change is made by this amendment.
+
+## 18. Amendment A5 — split-gated gold-path pooling (owner delegation 2026-10-18, pre-data)
+
+Adopted under the owner delegation of 2026-10-18 ("Go with your recommendations for the rest") before any inspect agent session ran under this protocol, so no agent data existed when it was adopted. It is conditional on the independent custodian adjudication cited below. It does not overwrite §§1–17. Sealed pilot tasks, gold, seal sha `d9bad97f0558e9621db6fefa37b0227c4217ddb02faccef3b192ec2d5a97b`, and arm counts 84/84/54/54 are unchanged.
+
+- **Rule.** The pooled GOLD-PATH (path/basename) markers in the runner holdout-exposure blacklist (`collectHandoffBlacklist` in `scripts/eval/inspect-cohort/run.ts`) come only from tasks in OTHER splits than the task being launched. Same-split, non-current-task gold-path coincidences are permitted.
+- **Unchanged and still enforced.** The current task's own A3 gold checks, including declared exact-anchor rules and the protected-provenance fix from 2a69361; globally protected identifiers and hashes (holdout ids, universe ids/shas, patch shas, and whatever else the runner treats as protected), pooled from ALL tasks; other-split prompts; privacy restrictions.
+- **Marker-class table.**
+
+  | Marker class | Pooling scope | Suppressible by declared exact anchor? |
+  |---|---|---|
+  | Gold-path markers (`collectGoldPathMarkers`: path/file/from/resolved/to) | Other-split tasks only (A5 split-gated) | Yes — exact declared anchor only (A3), unless the string is also a protected marker |
+  | Holdout task ids | Global, all tasks | No |
+  | `candidateUniverse` id + sha256 (every task) | Global, all tasks | No |
+  | Gold patch sha (every task) | Global, all tasks | No |
+  | Other-split pilot/dev prompts | Other splits (unchanged) | No |
+  | Tasks-file absolute path | Global | No |
+  | General blacklist strings (`grade.ts`, `grader`, `adjudication`, `candidateUniverse`, `pi-smartread-bench`) and absolute paths | Always blocked | Never |
+
+  The runner's universe metadata is a protected identifier, so it stays global. Only gold PATH markers are split-gated.
+- **Rationale.** Fresh sessions receive only their own prompt (new process, `--no-session`, no context files/skills/templates, fresh scratch checkouts), so another task's hidden gold association is not communicated to the current session (oracle e121d258).
+- **Evidence.** Reviewer 7fe7570a measured the blocker: 6 distinct markers (3 basename-only), 11 task × marker pairs, 10 tasks, 34 task × arm gate hits, 0/11 own-gold, all same-split other-task category. Custodian adjudication of the 3 partial-overlap pairs returned verdict ALL NO-LEAK (recomputed 6 markers / 10 tasks / 11 pairs / 34 arm hits; 0/11 own gold), summary at `subagent_artifacts/8f76f05b-2102-4a2c-a010-38382bcff_reviewer_output.md`; the private report `inspect-prep-20261016/CUSTODIAN-ADJUDICATION-20261018.md` (sha256 `0fdbccd8abc5c8f0c28a9fcbaa3a5c34b4d3c64c623d667079b519ee4b5a6a7a`) is custodian-only and is cited here by path and sha only, with no task content.
+- **Gate.** A dry-run must show the holdout gate passes with these exact counts (seal sha and arm counts unchanged) before any live session.
