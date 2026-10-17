@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
     assertNoHoldoutExposure,
+    collectAnchorProtectedMarkers,
     collectGoldPathMarkers,
     collectHandoffBlacklist,
     runInspectCli,
@@ -81,17 +82,24 @@ describe("inspect-cohort runner A5 split-gated gold-path pooling (synthetic)", (
         // End to end: the task never launches (seal-time validator fails it closed).
         const tasks = [baseTask({ prompt: `Synthetic question naming ${OWN_GOLD} as the module under test.` })];
         await expect(dryRun(tasks)).rejects.toThrow(/leaks gold|blacklist/);
+        // End to end through the runner gate: OWN_GOLD in scope (a field the
+        // seal-time validator does not scan) passes parseInspectJsonl but hits
+        // ownGoldMarkers at the runner gate.
+        const scoped = [baseTask({ scope: `Synthetic scope naming ${OWN_GOLD} as the module under test.` })];
+        await expect(dryRun(scoped)).rejects.toThrow(/holdout exposure blacklist/);
     });
 
     it("d. BLOCKS protected ids/hashes from a same-split task", async () => {
         const protId = "syn-prot-universe";
         const protSha = "d".repeat(64);
         const tasks = [
-            baseTask({ prompt: `Synthetic question mentioning ${protId} and ${protSha}.` }),
+            baseTask({ prompt: `Synthetic question mentioning ${protId} and ${protSha} and ${PATCH_SHA}.` }),
             baseTask({ id: "syn-pilot-A5-B", prompt: "Unrelated synthetic question.",
                 gold: { kind: "file", path: SAME_SPLIT_GOLD },
                 candidateUniverse: { id: protId, sha256: protSha, count: 1 } }),
+            patchShaTask("syn-pilot-A5-P", PATCH_SHA),
         ];
+        expect(collectHandoffBlacklist(tasks, "pilot")).toContain(PATCH_SHA);
         await expect(dryRun(tasks)).rejects.toThrow(/blacklist/);
     });
 
@@ -154,6 +162,16 @@ describe("inspect-cohort runner A5 split-gated gold-path pooling (synthetic)", (
         await expect(dryRun([current, other], [current.id])).rejects.toThrow(/blacklist/);
     });
 
+    const patchShaTask = (id: string, sha: string): InspectTask => ({
+        ...baseTask({ id, family: "P5", answerType: "evidence-chain", negativeControl: false,
+            prompt: "Unrelated synthetic evidence question.", scope: "src", anchors: undefined,
+            candidateUniverse: { id: `${id}-universe`, sha256: "f".repeat(64), count: 1 } }),
+        gold: { kind: "evidence-chain", patch: { sha, ranges: [{ path: "src/other.ts", start: 1, end: 2 }] },
+            relations: [{ from: "src/other.ts", specifier: "./x", kind: "import", line: 1,
+                witness: { path: "src/other.ts", line: 1 }, resolved: "src/x.ts" }],
+            minRecall: 1, minPrecision: 1 },
+        decoys: ["decoy"] });
+
     it("f. a per-split file yields zero pooled gold-path markers but keeps protected identifiers", () => {
         const tasks = [
             baseTask(),
@@ -163,6 +181,7 @@ describe("inspect-cohort runner A5 split-gated gold-path pooling (synthetic)", (
             baseTask({ id: "syn-pilot-A5-C", prompt: "Another unrelated synthetic question.",
                 gold: { kind: "file", path: OTHER_SPLIT_GOLD },
                 candidateUniverse: { id: "synthetic-universe-a5-c", sha256: "c".repeat(64), count: 1 } }),
+            patchShaTask("syn-pilot-A5-P", PATCH_SHA),
         ];
         const markers = collectHandoffBlacklist(tasks, "pilot");
         for (const task of tasks) {
@@ -176,5 +195,39 @@ describe("inspect-cohort runner A5 split-gated gold-path pooling (synthetic)", (
         expect(markers).toContain("a".repeat(64));
         expect(markers).toContain("b".repeat(64));
         expect(markers).toContain("c".repeat(64));
+        expect(markers).toContain(PATCH_SHA);
+    });
+
+    it("g. anchor cannot suppress a patch sha or universe id embedded inside an anchored path marker", async () => {
+        const embeddedPatch = `src/${PATCH_SHA}/file.ts`;
+        const currentPatch = baseTask({ prompt: `Synthetic question naming ${embeddedPatch} as the module under test.`,
+            gold: { kind: "file", path: embeddedPatch }, anchors: [embeddedPatch] });
+        await expect(dryRun([currentPatch, patchShaTask("syn-pilot-A5-P", PATCH_SHA)], [currentPatch.id]))
+            .rejects.toThrow(/holdout exposure blacklist/);
+        const embeddedId = "src/syn-embedded-universe/file.ts";
+        const currentId = baseTask({ prompt: `Synthetic question naming ${embeddedId} as the module under test.`,
+            gold: { kind: "file", path: embeddedId }, anchors: [embeddedId] });
+        const otherId = baseTask({ id: "syn-pilot-A5-B", prompt: "Unrelated synthetic question.",
+            gold: { kind: "file", path: SAME_SPLIT_GOLD },
+            candidateUniverse: { id: "syn-embedded-universe", sha256: "b".repeat(64), count: 1 } });
+        await expect(dryRun([currentId, otherId], [currentId.id])).rejects.toThrow(/holdout exposure blacklist/);
+    });
+
+    it("h. fail-closed: missing or unknown split values throw", async () => {
+        const tasks = [baseTask()];
+        const bogusSplit = "bogus" as unknown as InspectTask["split"];
+        const missingSplit = undefined as unknown as InspectTask["split"];
+        expect(() => collectHandoffBlacklist(tasks, missingSplit)).toThrow(/unknown split/);
+        expect(() => collectHandoffBlacklist(tasks, bogusSplit)).toThrow(/unknown split/);
+        expect(() => collectHandoffBlacklist([baseTask({ split: bogusSplit })], "pilot")).toThrow(/unknown task split/);
+        expect(() => collectAnchorProtectedMarkers(tasks, missingSplit, "/tmp/tasks.jsonl")).toThrow(/unknown split/);
+        expect(() => collectAnchorProtectedMarkers(tasks, bogusSplit, "/tmp/tasks.jsonl")).toThrow(/unknown split/);
+        expect(() => collectAnchorProtectedMarkers([baseTask({ split: bogusSplit })], "pilot", "/tmp/tasks.jsonl"))
+            .toThrow(/unknown task split/);
+        const dir = mkdtempSync(join(tmpdir(), "inspect-a5-split-"));
+        await expect(runInspectCli({ tasks: writeTasks(dir, tasks), split: bogusSplit as unknown as "pilot",
+            arms: ["off"], replicates: 1, maxTurns: 1, model: "provider/model-v2", thinking: "high",
+            timeoutMs: 1000, out: join(dir, "out"), dryRun: true, taskIds: null, limit: null,
+            openHoldout: false, freezeFile: null, piBin: "pi" })).rejects.toThrow(/unknown split/);
     });
 });

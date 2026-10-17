@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { INSPECT_ANSWER_SHAPES, parseInspectJsonl, toInspectRunnerView, type InspectFamily, type InspectTask } from "./schema.js";
+import { INSPECT_ANSWER_SHAPES, INSPECT_SPLITS, parseInspectJsonl, toInspectRunnerView, type InspectFamily, type InspectTask } from "./schema.js";
 import { INSPECT_GENERIC_TEXT, INSPECT_INSTRUCTED_TEXT } from "./prompts.js";
 import { parseSurfaceIdentity, type SurfaceIdentity } from "../surface-identity.js";
 import { buildPiArgs, launchPiSession, type PiSpawnFn, type TebArm } from "../teb/launch.js";
@@ -157,11 +157,18 @@ export function assertNoHoldoutExposure(prompt: string, extraMarkers: string[] =
  * `otherSplitTasks` before A5 even though the caller always passed all
  * tasks); per-class split-gating happens inside: gold-path markers are
  * pooled from other-split tasks only (Amendment A5), while holdout ids,
- * every task's universe id/sha256, and other-split prompts stay global.
+ * every task's universe id/sha256 and patch sha, and other-split prompts
+ * stay global.
  */
 export function collectHandoffBlacklist(allTasks: InspectTask[], currentSplit: InspectTask["split"]): string[] {
+    if (!(INSPECT_SPLITS as readonly string[]).includes(currentSplit)) {
+        throw new Error(`unknown split ${JSON.stringify(currentSplit)}`);
+    }
     const markers = new Set<string>();
     for (const task of allTasks) {
+        if (!(INSPECT_SPLITS as readonly string[]).includes(task.split)) {
+            throw new Error(`unknown task split ${JSON.stringify(task.split)} for task ${JSON.stringify(task.id)}`);
+        }
         if (task.split === "holdout") markers.add(task.id);
         if (task.split !== currentSplit && (task.split === "pilot" || task.split === "dev")) markers.add(task.prompt);
         // Amendment A5: gold-path markers are pooled from other-split tasks
@@ -173,6 +180,14 @@ export function collectHandoffBlacklist(allTasks: InspectTask[], currentSplit: I
         }
         markers.add(task.candidateUniverse.id);
         markers.add(task.candidateUniverse.sha256);
+        const gold = task.gold as unknown as Record<string, unknown> | null;
+        if (gold !== null && typeof gold === "object") {
+            const patch = gold["patch"];
+            if (patch !== null && typeof patch === "object") {
+                const sha = (patch as Record<string, unknown>)["sha"];
+                if (typeof sha === "string" && sha.length > 0) markers.add(sha);
+            }
+        }
     }
     return [...markers].filter((marker) => marker.length >= 3);
 }
@@ -195,9 +210,15 @@ export function collectAnchorProtectedMarkers(
     currentSplit: InspectTask["split"],
     tasksFile: string,
 ): string[] {
+    if (!(INSPECT_SPLITS as readonly string[]).includes(currentSplit)) {
+        throw new Error(`unknown split ${JSON.stringify(currentSplit)}`);
+    }
     const protectedMarkers = new Set<string>();
     if (tasksFile.length > 0) protectedMarkers.add(tasksFile);
     for (const task of allTasks) {
+        if (!(INSPECT_SPLITS as readonly string[]).includes(task.split)) {
+            throw new Error(`unknown task split ${JSON.stringify(task.split)} for task ${JSON.stringify(task.id)}`);
+        }
         if (typeof task.candidateUniverse?.id === "string" && task.candidateUniverse.id.length > 0) {
             protectedMarkers.add(task.candidateUniverse.id);
         }
@@ -287,6 +308,9 @@ export interface RunInspectOptions {
 }
 
 export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOptions = {}): Promise<{ runDir: string; manifestPath: string }> {
+    if (!(INSPECT_SPLITS as readonly string[]).includes(args.split)) {
+        throw new Error(`unknown split ${JSON.stringify(args.split)}`);
+    }
     const text = readFileSync(args.tasks, "utf8"), parsed = parseInspectJsonl(text);
     if (parsed.errors.length) throw new Error(`invalid task file: ${parsed.errors.slice(0, 5).join("; ")}`);
     if (args.split === "holdout" && (!args.openHoldout || !args.freezeFile || !existsSync(args.freezeFile))) throw new Error("holdout requires --open-holdout and --freeze-file");
