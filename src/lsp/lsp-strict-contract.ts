@@ -103,6 +103,13 @@ export interface StrictRequest {
   readonly proposalId?: string;
 }
 
+/**
+ * Advisory engine-progress evidence, observed from $/progress and work-done
+ * tokens. `readiness` describes observed evidence only — it is not a
+ * semantic-completeness gate and never asserts the language server's index
+ * is complete. Contrast `freshness`, which describes synchronized document
+ * content (hash match), not index completeness.
+ */
 export type ReadinessState = "confirmed" | "settling" | "unknown";
 export type ReadinessBasis =
   | "progress"
@@ -136,7 +143,20 @@ export interface StrictServerInfo {
 
 export interface StrictMeta {
   readonly documentVersion?: number;
+  /**
+   * Synchronized-content evidence: whether the server has seen the current
+   * document bytes (document-hash based). Not a semantic-index verdict — a
+   * `fresh` result was computed against current content, nothing more.
+   */
   readonly freshness?: Freshness;
+  /**
+   * Observed-evidence axis, independent of freshness: progress/token
+   * observations attached by the executor. Advisory only; consumers must not
+   * treat `confirmed` as proof of semantic completeness, nor `settling` as
+   * proof of staleness. Cold-start behavior (e.g. TLS semantic-only
+   * sessions answering slowly or timing out) is visible here, never by
+   * redefining freshness.
+   */
   readonly readiness?: Readiness;
   readonly source?: string;
   readonly truncated: boolean;

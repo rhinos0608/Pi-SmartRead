@@ -377,6 +377,13 @@ Every result arrives in an envelope:
 - `meta` covers freshness, readiness, document version, truncation and the
   pagination cursor.
 
+TypeScript language-server sessions run semantic-only: the server is
+started with `tsserver.useSyntaxServer: "never"`, so cold navigation may
+answer slowly or time out instead of returning fast partial answers from
+the syntax server. `meta.readiness` reports observed engine progress
+(advisory only); `meta.freshness` reports synchronized document content.
+Neither asserts the server's index is complete.
+
 **Changing files.** `rename`, `resolveCodeAction` and the format operations
 never write to disk. When SmartEdit is loaded, they stage the edit as a
 proposal and return a `proposalId` and a diff. `applyProposal` with that ID

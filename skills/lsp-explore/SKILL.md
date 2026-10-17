@@ -34,6 +34,9 @@ When `PI_SMARTREAD_AFFORDANCES=1`, supported navigation operations also accept a
 - The model-facing tool name is `LSP`.
 - `position` is 0-based in the returned server's negotiated encoding.
 - Check the strict envelope `status`; `unavailable` is not a guessed fallback.
+- TypeScript sessions are semantic-only: cold starts may be slow or time
+  out rather than return fast partial answers. `meta.readiness` is advisory
+  progress evidence, never a completeness gate.
 - Read-only. No edit/write/patch calls.
 
 ## EXAMPLE

@@ -1084,4 +1084,119 @@ describe("executor", () => {
     expect(rows[0]!["selectionProvenance"]).toBe("explicit");
     expect(rows[1]!["selectionProvenance"]).toBe("collapsed");
   });
+  it("navigation results carry advisory meta.readiness; document-hash freshness unchanged", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lsp-executor-ready-"));
+    const file = join(root, "a.ts");
+    const original = "const x = 1;\n";
+    writeFileSync(file, original, "utf-8");
+    const state = { version: 7, lastHash: sha256OfText(original) };
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      getDocumentStore: () => ({ get: () => state }),
+      readiness: () => ({ state: "settling", basis: "progress" }),
+      requestImpl: async () => [{ uri: pathToFileURL(file).href, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }],
+    });
+    try {
+      const env = await executeLspOperation(
+        { operation: "goToDefinition", path: file, position: { line: 0, character: 0 }, workspace: root },
+        { getManager: () => mgr(c), cwd: root },
+      );
+      expect(env.status).toBe("ok");
+      expect(env.meta.readiness).toEqual({ state: "settling", basis: "progress" });
+      expect(env.meta.freshness).toEqual({ state: "fresh", documentVersion: 7 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("meta.readiness attaches even without document-store state (before pathless/no-document returns)", async () => {
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      readiness: () => ({ state: "unknown", basis: "none" }),
+      requestImpl: async () => ({ contents: "hover-text" }),
+    });
+    const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 } }, { getManager: () => mgr(c), cwd: ROOT });
+    expect(env.status).toBe("ok");
+    expect(env.meta.readiness).toEqual({ state: "unknown", basis: "none" });
+    expect(env.meta.freshness).toBeUndefined();
+  });
+  it("paginated navigation results carry meta.readiness", async () => {
+    const items = [0, 1].map((i) => ({ uri: `file:///f${i}.ts`, range: { start: { line: i, character: 0 }, end: { line: i, character: 1 } } }));
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      readiness: () => ({ state: "confirmed", basis: "progress" }),
+      requestImpl: async () => items,
+    });
+    const cursors = new LspCursorStore();
+    const env = await executeLspOperation({ operation: "findReferences", path: "a.ts", position: { line: 0, character: 0 }, limit: 1 }, { getManager: () => mgr(c), cwd: ROOT, cursors });
+    expect(env.status).toBe("ok");
+    expect(env.meta.truncated).toBe(true);
+    expect(env.meta.nextCursor).toBeTruthy();
+    expect(env.meta.readiness).toEqual({ state: "confirmed", basis: "progress" });
+  });
+  it("bounded raw results carry meta.readiness", async () => {
+    let deep: unknown = { leaf: "x" };
+    for (let i = 0; i < 25; i++) deep = { nest: deep };
+    const c = conn({
+      descriptorId: "raw-ready",
+      readiness: () => ({ state: "settling", basis: "progress" }),
+      requestImpl: async () => deep,
+    });
+    liveSession("raw-ready", c);
+    const env = await executeLspOperation({ operation: "request", method: "textDocument/hover", params: {}, server: "raw-ready" }, { getManager: () => mgr(null), cwd: ROOT });
+    expect(env.status).toBe("ok");
+    expect(env.meta.truncated).toBe(true);
+    expect(env.meta.readiness).toEqual({ state: "settling", basis: "progress" });
+  });
+  it("timeout with held semantic response: timeout wins, late completion absorbed, lease released", async () => {
+    let releaseGate: ((v: unknown) => void) | null = null;
+    const gate = new Promise<unknown>((res) => { releaseGate = res; });
+    let observedAbort = false;
+    const released: unknown[] = [];
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      request: async (_m, _p, opts) => {
+        opts?.signal?.addEventListener("abort", () => { observedAbort = true; }, { once: true });
+        return gate;
+      },
+    });
+    const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 }, timeoutMs: 20 }, {
+      cwd: ROOT,
+      acquire: async () => ({ conn: c, key: "held-k1" }),
+      release: (k: string | null) => { released.push(k); },
+    });
+    expect(env.status).toBe("timeout");
+    expect(env.result).toBeNull();
+    expect(observedAbort).toBe(true);
+    expect(released).toEqual(["held-k1"]);
+    // Late semantic completion produces no second result and no unhandled rejection.
+    releaseGate!([{ uri: "file:///a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }]);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(env.status).toBe("timeout");
+    expect(env.result).toBeNull();
+  });
+  it("caller abort with held semantic response: cancelled wins, late completion absorbed", async () => {
+    const ctl = new AbortController();
+    let releaseGate: ((v: unknown) => void) | null = null;
+    const gate = new Promise<unknown>((res) => { releaseGate = res; });
+    const aborted = Object.assign(new Error("Aborted"), { name: "AbortError" });
+    const c = conn({
+      getCapabilityRegistry: () => ({ can: () => true }),
+      request: async (_m, _p, o) => new Promise<unknown>((res, rej) => {
+        gate.then(res, rej);
+        if (o?.signal?.aborted) rej(aborted);
+        else o?.signal?.addEventListener("abort", () => rej(aborted), { once: true });
+      }),
+    });
+    setTimeout(() => ctl.abort(), 10);
+    const env = await executeLspOperation({ operation: "hover", path: "a.ts", position: { line: 0, character: 0 }, timeoutMs: 2000 }, {
+      getManager: () => mgr(c),
+      cwd: ROOT,
+      signal: ctl.signal,
+    });
+    expect(env.status).toBe("cancelled");
+    expect(env.result).toBeNull();
+    releaseGate!({ contents: "late" });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(env.status).toBe("cancelled");
+  });
 });

@@ -169,4 +169,31 @@ describe("lsp-tool", () => {
       category: ToolCategory.READ,
     });
   });
+
+  it("passes additive meta.readiness through the envelope verbatim", async () => {
+    const additive = {
+      status: "ok",
+      operation: "hover",
+      method: "textDocument/hover",
+      server: { descriptorId: "ts", name: "ts", languageId: "typescript", projectRoot: "/tmp", positionEncoding: "utf-16" },
+      result: { contents: "hover-text" },
+      meta: { truncated: false, readiness: { state: "settling", basis: "progress" } },
+    };
+    const tool = createLspTool({ executeOperation: (async () => additive) as never });
+    const result = await (tool.execute as Function)(
+      "call-1",
+      { operation: "hover", path: "a.ts", position: { line: 0, character: 0 } },
+      undefined,
+      undefined,
+      ctx,
+    );
+    expect(result.details.envelope).toEqual(additive);
+    expect(result.details.envelope.meta.readiness).toEqual({ state: "settling", basis: "progress" });
+    expect(JSON.parse(result.content[0].text)).toEqual(additive);
+  });
+
+  it("description documents the TLS semantic-only cold-start trade-off", () => {
+    expect(LSP_DESCRIPTION).toMatch(/semantic-only/i);
+    expect(LSP_DESCRIPTION).toMatch(/readiness/i);
+  });
 });
