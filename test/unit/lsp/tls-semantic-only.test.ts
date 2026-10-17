@@ -77,6 +77,7 @@ const { ensureLanguageServerAvailable } = await import("../../../src/language-in
 const { shutdownAllManagers, resetLSPBridge } = await import("../../../src/lsp/lsp-bridge.js");
 const { LSPManager, _clearSessionStore, sessionStore } = await import("../../../src/lsp/lsp-manager.js");
 const { canonicalProjectRoot, computeConfigFingerprint } = await import("../../../src/lsp/lsp-session-key.js");
+const { TlsSemanticOnlyConflictError } = await import("../../../src/language-intelligence/language-server-catalog.js");
 
 function procs(): FakeProc[] {
   return (spawn as unknown as ReturnType<typeof vi.fn>).mock.results
@@ -109,7 +110,7 @@ describe("TLS semantic-only initialization policy", () => {
   function tlsManager(): InstanceType<typeof LSPManager> {
     const mgr = new LSPManager(root);
     (mgr as any).availableConfigs = [
-      { command: "fake-tls", args: ["--stdio"], languageIds: ["typescript"], descriptorId: "typescript" },
+      { command: "typescript-language-server", args: ["--stdio"], languageIds: ["typescript"], descriptorId: "typescript" },
     ];
     return mgr;
   }
@@ -207,7 +208,7 @@ describe("TLS semantic-only initialization policy", () => {
     expect(entries).toHaveLength(1);
     const withoutPolicy = computeConfigFingerprint({
       descriptorId: "typescript",
-      executable: "fake-tls",
+      executable: "typescript-language-server",
       args: ["--stdio"],
       initializationOptions: undefined,
       settings: undefined,
@@ -218,7 +219,7 @@ describe("TLS semantic-only initialization policy", () => {
     expect(entries[0]!.fingerprint).not.toBe(withoutPolicy);
     const withPolicy = computeConfigFingerprint({
       descriptorId: "typescript",
-      executable: "fake-tls",
+      executable: "typescript-language-server",
       args: ["--stdio"],
       initializationOptions: { tsserver: { useSyntaxServer: "never" } },
       settings: undefined,
@@ -241,7 +242,7 @@ describe("TLS semantic-only initialization policy", () => {
     vi.mocked(ensureLanguageServerAvailable).mockResolvedValue({
       status: "available",
       tier: "managed",
-      executable: "fake-tls-managed",
+      executable: "/managed/typescript-language-server",
       args: ["--stdio"],
       descriptorId: "typescript",
     } as any);
@@ -254,5 +255,87 @@ describe("TLS semantic-only initialization policy", () => {
     const inits = allInitFrames();
     expect(inits).toHaveLength(1);
     expect(inits[0].params.initializationOptions).toEqual({ tsserver: { useSyntaxServer: "never" } });
+  });
+
+  it("path-qualified TLS launch sends the policy on the initialize wire", async () => {
+    const mgr = new LSPManager(root);
+    (mgr as any).availableConfigs = [
+      { command: "/opt/homebrew/bin/typescript-language-server", args: ["--stdio"], languageIds: ["typescript"] },
+    ];
+    const conn = await mgr.getServer("typescript");
+    expect(conn).toBeTruthy();
+    const inits = allInitFrames();
+    expect(inits).toHaveLength(1);
+    expect(inits[0].params.initializationOptions).toEqual({ tsserver: { useSyntaxServer: "never" } });
+  });
+
+  it("Windows-shim (.cmd) TLS launch sends the policy on the initialize wire", async () => {
+    const mgr = new LSPManager(root);
+    (mgr as any).availableConfigs = [
+      { command: "typescript-language-server.cmd", args: ["--stdio"], languageIds: ["typescript"] },
+    ];
+    const conn = await mgr.getServer("typescript");
+    expect(conn).toBeTruthy();
+    const inits = allInitFrames();
+    expect(inits).toHaveLength(1);
+    expect(inits[0].params.initializationOptions).toEqual({ tsserver: { useSyntaxServer: "never" } });
+  });
+
+  it("vtsls-style override under the typescript language does NOT receive the policy", async () => {
+    const mgr = new LSPManager(root);
+    // Simulates a command override for the typescript language whose
+    // descriptorId defaulted to "typescript" while the command is not a
+    // known TLS launch.
+    (mgr as any).availableConfigs = [
+      { command: "vtsls", args: ["--stdio"], languageIds: ["typescript"], descriptorId: "typescript" },
+    ];
+    const conn = await mgr.getServer("typescript");
+    expect(conn).toBeTruthy();
+    const inits = allInitFrames();
+    expect(inits).toHaveLength(1);
+    expect(inits[0].params.initializationOptions).toBeUndefined();
+  });
+
+  it("managed-install path carries session initializationOptions under the policy", async () => {
+    vi.mocked(ensureLanguageServerAvailable).mockResolvedValue({
+      status: "available",
+      tier: "managed",
+      executable: "/managed/typescript-language-server",
+      args: ["--stdio"],
+      descriptorId: "typescript",
+    } as any);
+    const mgr = new LSPManager(root);
+    (mgr as any).availableConfigs = [
+      { command: "missing-srv", args: [], languageIds: ["typescript"] },
+    ];
+    const conn = await mgr.getServer("typescript", {
+      initializationOptions: { tsserver: { logVerbosity: "off" }, other: { a: 1 } },
+    });
+    expect(conn).toBeTruthy();
+    const inits = allInitFrames();
+    expect(inits).toHaveLength(1);
+    expect(inits[0].params.initializationOptions).toEqual({
+      tsserver: { logVerbosity: "off", useSyntaxServer: "never" },
+      other: { a: 1 },
+    });
+  });
+
+  it("conflicting session option on managed-install surfaces TlsSemanticOnlyConflictError", async () => {
+    vi.mocked(ensureLanguageServerAvailable).mockResolvedValue({
+      status: "available",
+      tier: "managed",
+      executable: "/managed/typescript-language-server",
+      args: ["--stdio"],
+      descriptorId: "typescript",
+    } as any);
+    const mgr = new LSPManager(root);
+    (mgr as any).availableConfigs = [
+      { command: "missing-srv", args: [], languageIds: ["typescript"] },
+    ];
+    await expect(
+      mgr.getServer("typescript", {
+        initializationOptions: { tsserver: { useSyntaxServer: "auto" } },
+      }),
+    ).rejects.toThrow(TlsSemanticOnlyConflictError);
   });
 });
