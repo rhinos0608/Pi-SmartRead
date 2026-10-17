@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface FakeProc extends EventEmitter {
-  stdin: { write: ReturnType<typeof vi.fn> };
+  stdin: { write: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; once: ReturnType<typeof vi.fn>; removeListener: ReturnType<typeof vi.fn> };
   stdout: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
 }
