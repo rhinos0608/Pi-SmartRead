@@ -576,16 +576,12 @@ function isFirstAssistantTokenEvent(event: unknown): boolean {
     if (event === null || typeof event !== "object") return false;
     const envelope = event as Record<string, unknown>;
     if (envelope["type"] === "tool_execution_start") return true;
-    if (envelope["type"] === "message_update") {
-        if (assistantMessageOf(envelope) !== null) return true;
-    }
     const message = assistantMessageOf(envelope);
     if (message === null) return false;
     if (assistantMessageHasToken(message)) return true;
     if (isEmptyErrorAssistantMessage(message)) return false;
     const type = envelope["type"];
-    if (type === "message_end" || type === "message_start") return true;
-    return false;
+    return type === "message_update" || type === "message_end" || type === "message_start";
 }
 
 /** True for an assistant message that carries an error but no produced token. */
@@ -600,9 +596,9 @@ function isEmptyErrorAssistantMessage(message: Record<string, unknown>): boolean
  * Detail when the event is an empty error-bearing assistant message whose
  * diagnostics name a provider failure (`provider_*`, e.g.
  * provider_transport_failure). Protocol §9 excludes only provider/auth
- * failures, so an empty error message alone is not enough: local or
- * arm-induced errors before the first token stay graded. Error text
- * matching TEB_AUTH_PATTERN is handled by the isErrorEvent path.
+ * failures, so an empty error message alone is not enough, and its free
+ * text is never regex-matched: local or arm-induced errors before the
+ * first token stay graded.
  */
 function preTokenProviderFailureDetail(event: unknown): string | null {
     if (event === null || typeof event !== "object") return null;
@@ -623,8 +619,7 @@ function preTokenProviderFailureDetail(event: unknown): string | null {
 
 /**
  * True when a parsed session event carries an error signal (an
- * `error`-typed event, an explicit error flag, an assistant
- * stopReason/errorMessage, or a failed auto-retry). Transcript prose —
+ * `error`-typed event or an explicit error flag). Transcript prose —
  * including the pi system prompt, which itself names API keys — is
  * never an error signal on its own.
  */
@@ -632,19 +627,27 @@ function isErrorEvent(event: unknown): boolean {
     if (event === null || typeof event !== "object") return false;
     const envelope = event as Record<string, unknown>;
     if (envelope["type"] === "error" || envelope["isError"] === true) return true;
-    if (envelope["type"] === "auto_retry_end" && envelope["success"] === false) return true;
-    const candidates: unknown[] = [envelope["message"], envelope];
-    for (const candidate of candidates) {
-        if (candidate === null || typeof candidate !== "object") continue;
-        const record = candidate as Record<string, unknown>;
+    const message = envelope["message"];
+    if (message !== null && typeof message === "object") {
+        const record = message as Record<string, unknown>;
         if (record["type"] === "error" || record["isError"] === true) return true;
-        if (record["stopReason"] === "error") return true;
-        const errorMessage = record["errorMessage"];
-        if (typeof errorMessage === "string" && errorMessage.length > 0) return true;
-        const finalError = record["finalError"];
-        if (envelope["type"] === "auto_retry_end" && typeof finalError === "string" && finalError.length > 0) return true;
     }
     return false;
+}
+
+/** Parsed session events (the `event` payload of each JSONL record). */
+function parseSessionEvents(logText: string): unknown[] {
+    const events: unknown[] = [];
+    for (const line of logText.split("\n")) {
+        if (line.trim().length === 0) continue;
+        try {
+            const record = JSON.parse(line) as { event?: unknown };
+            events.push(record !== null && typeof record === "object" && "event" in record ? record.event : record);
+        } catch {
+            continue;
+        }
+    }
+    return events;
 }
 
 /** Raw text of one log line's event for signal matching (never used for identity). */
@@ -693,8 +696,12 @@ export function classifyInfraFailure(input: {
     // failure downstream (or grades on its answer after a post-settle
     // reap), never as an infrastructure exclusion.
     if (input.timedOut || input.turnLimitHit === true || input.postSettleReap === true) return null;
+    const events = parseSessionEvents(input.logText);
+    // stderr is unordered relative to the event log, so its provider/auth
+    // text only counts when the log shows no assistant token at all.
+    const tokenProduced = events.some(isFirstAssistantTokenEvent);
     const stderrText = stderrForInfraSignal(input.stderrText);
-    const authInStderr = stderrText.match(TEB_AUTH_PATTERN);
+    const authInStderr = tokenProduced ? null : stderrText.match(TEB_AUTH_PATTERN);
     if (authInStderr !== null) {
         return { kind: "provider-auth", detail: `provider/auth failure before the first assistant message: ${authInStderr[0]}` };
     }
@@ -706,19 +713,10 @@ export function classifyInfraFailure(input: {
     // first token is a streaming message_update for the assistant, a
     // tool execution, or an assistant message with non-empty content /
     // output tokens / tool calls. Empty error-bearing assistant messages
-    // and failed auto-retries before that point are excluded only with
-    // provider evidence (a provider_* diagnostic or TEB_AUTH_PATTERN
-    // text); anything after the first token is graded, never excluded.
+    // before that point are excluded only with a provider_* diagnostic;
+    // anything after the first token is graded, never excluded.
     let sawAssistant = false;
-    for (const line of input.logText.split("\n")) {
-        if (line.trim().length === 0) continue;
-        let event: unknown;
-        try {
-            const record = JSON.parse(line) as { event?: unknown };
-            event = record !== null && typeof record === "object" && "event" in record ? record.event : record;
-        } catch {
-            continue;
-        }
+    for (const event of events) {
         if (!sawAssistant && isFirstAssistantTokenEvent(event)) {
             sawAssistant = true;
             continue;

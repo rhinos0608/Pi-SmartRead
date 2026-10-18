@@ -1388,6 +1388,45 @@ describe("classifyInfraFailure (E13.6)", () => {
         expect(classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "", exitCode: 0 })).toBeNull();
         expect(classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "", exitCode: 1 })).toMatchObject({ kind: "runner" });
     });
+    it("never treats provider-like wording in an arm error message as provider evidence", () => {
+        // Only a provider_* diagnostic proves a provider failure for an
+        // empty error message; regex hits on free text could be arm-induced.
+        const errorMessage = {
+            role: "assistant",
+            content: [],
+            usage: { input: 0, output: 0, totalTokens: 0 },
+            stopReason: "error",
+            errorMessage: "Cannot read provider error label from undefined",
+        };
+        const lines = [
+            JSON.stringify({ rt: 1, event: { type: "message_end", message: errorMessage } }),
+            JSON.stringify({ rt: 2, event: { type: "agent_settled" } }),
+        ];
+        expect(classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "", exitCode: 0 })).toBeNull();
+    });
+    it("never excludes on stderr provider text once the log shows an assistant token", () => {
+        const lines = [
+            JSON.stringify({ rt: 1, event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "answer" }], usage: { output: 12 } } } }),
+            JSON.stringify({ rt: 2, event: { type: "agent_settled" } }),
+        ];
+        expect(classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "ERROR 429 rate limit exceeded\n", exitCode: 0 })).toBeNull();
+    });
+    it("does not count an empty error-bearing message_update as the first token", () => {
+        const errorMessage = {
+            role: "assistant",
+            content: [],
+            usage: { input: 0, output: 0, totalTokens: 0 },
+            stopReason: "error",
+            errorMessage: "fetch failed",
+            diagnostics: [{ type: "provider_transport_failure", eventsEmitted: false }],
+        };
+        const lines = [
+            JSON.stringify({ rt: 1, event: { type: "message_update", message: errorMessage } }),
+            JSON.stringify({ rt: 2, event: { type: "message_end", message: errorMessage } }),
+            JSON.stringify({ rt: 3, event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "fetch failed" } }),
+        ];
+        expect(classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "", exitCode: 1 })).toMatchObject({ kind: "provider-auth" });
+    });
     it("grades (never excludes) a late provider error after real assistant output", () => {
         // Counter-example: 25 message_update events, 5 tool executions,
         // 541 output tokens, then a terminal stopReason "error" with
