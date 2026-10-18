@@ -519,23 +519,114 @@ function stderrForInfraSignal(stderrText: string): string {
         .join("\n");
 }
 
-/** True when a parsed session event is an assistant message (identity-bearing). */
-function isAssistantMessageEvent(event: unknown): boolean {
-    if (event === null || typeof event !== "object") return false;
-    const envelope = event as Record<string, unknown>;
-    const message = envelope["message"];
+/** Assistant message record when the event bears one (identity-bearing). */
+function assistantMessageOf(event: Record<string, unknown>): Record<string, unknown> | null {
+    const message = event["message"];
     if (message !== null && typeof message === "object") {
-        if ((message as Record<string, unknown>)["role"] === "assistant") return true;
+        const record = message as Record<string, unknown>;
+        if (record["role"] === "assistant") return record;
     }
-    if (envelope["role"] === "assistant") return true;
-    const type = envelope["type"];
-    if ((type === "message_end" || type === "message_start") && envelope["role"] === "assistant") return true;
+    if (event["role"] === "assistant") return event;
+    return null;
+}
+
+/** Numeric output tokens on an assistant message (0 when absent). */
+function assistantOutputTokens(message: Record<string, unknown>): number {
+    const usage = message["usage"];
+    if (usage === null || typeof usage !== "object") return 0;
+    const output = (usage as Record<string, unknown>)["output"];
+    return typeof output === "number" && Number.isFinite(output) ? output : 0;
+}
+
+/** True when an assistant message carries produced content (a real token). */
+function assistantMessageHasToken(message: Record<string, unknown>): boolean {
+    if (assistantOutputTokens(message) > 0) return true;
+    const toolCalls = message["toolCalls"];
+    if (Array.isArray(toolCalls) && toolCalls.length > 0) return true;
+    const content = message["content"];
+    if (typeof content === "string") return content.trim().length > 0;
+    if (Array.isArray(content)) {
+        for (const block of content) {
+            if (block === null || typeof block !== "object") continue;
+            const record = block as Record<string, unknown>;
+            const type = record["type"];
+            if (type === "toolCall" || type === "tool_call" || type === "function_call") return true;
+            if (typeof record["name"] === "string" && typeof record["id"] === "string") return true;
+            const text = record["text"];
+            if (typeof text === "string" && text.trim().length > 0) return true;
+            const thinking = record["thinking"];
+            if (typeof thinking === "string" && thinking.trim().length > 0) return true;
+        }
+        return false;
+    }
     return false;
 }
 
 /**
+ * True when the event proves the assistant produced its first token:
+ * a streaming `message_update` for the assistant, a tool execution
+ * (the model must have emitted a tool call), or an assistant message
+ * with non-empty content / output tokens / tool calls. Empty
+ * zero-output error-bearing assistant messages never count: they carry
+ * no token, only the provider failure. Bare assistant message_end /
+ * message_start records without content or error signals still count
+ * (legacy synthetic sessions use them as the "assistant spoke" proxy).
+ */
+function isFirstAssistantTokenEvent(event: unknown): boolean {
+    if (event === null || typeof event !== "object") return false;
+    const envelope = event as Record<string, unknown>;
+    if (envelope["type"] === "tool_execution_start") return true;
+    if (envelope["type"] === "message_update") {
+        if (assistantMessageOf(envelope) !== null) return true;
+    }
+    const message = assistantMessageOf(envelope);
+    if (message === null) return false;
+    if (assistantMessageHasToken(message)) return true;
+    if (preTokenProviderFailureDetail(event) !== null) return false;
+    const type = envelope["type"];
+    if (type === "message_end" || type === "message_start") return true;
+    return false;
+}
+
+/**
+ * Detail when the event is a pre-first-token provider failure: an empty
+ * zero-output assistant message bearing stopReason "error" or an
+ * errorMessage (no token was produced), or auto_retry_end with
+ * success:false. Returns null otherwise. This catches provider
+ * transport failures whose wording matches no TEB_AUTH_PATTERN entry:
+ * zero assistant output before any token is itself the exclusion
+ * signal, per protocol §9 (only pre-first-token provider/auth
+ * failure is excluded; anything later is graded).
+ */
+function preTokenProviderFailureDetail(event: unknown): string | null {
+    if (event === null || typeof event !== "object") return null;
+    const envelope = event as Record<string, unknown>;
+    if (envelope["type"] === "auto_retry_end" && envelope["success"] === false) {
+        const finalError = envelope["finalError"];
+        if (typeof finalError === "string" && finalError.length > 0) return finalError.slice(0, 160);
+        return "auto_retry_end success:false";
+    }
+    const message = assistantMessageOf(envelope);
+    if (message === null) return null;
+    if (assistantMessageHasToken(message) || assistantOutputTokens(message) > 0) return null;
+    const errorMessage = message["errorMessage"];
+    if (typeof errorMessage === "string" && errorMessage.length > 0) return errorMessage.slice(0, 160);
+    if (message["stopReason"] === "error") return "stopReason:error";
+    const diagnostics = message["diagnostics"];
+    if (Array.isArray(diagnostics)) {
+        for (const entry of diagnostics) {
+            if (entry === null || typeof entry !== "object") continue;
+            const type = (entry as Record<string, unknown>)["type"];
+            if (typeof type === "string" && type.length > 0) return String(type).slice(0, 160);
+        }
+    }
+    return null;
+}
+
+/**
  * True when a parsed session event carries an error signal (an
- * `error`-typed event or an explicit error flag). Transcript prose —
+ * `error`-typed event, an explicit error flag, an assistant
+ * stopReason/errorMessage, or a failed auto-retry). Transcript prose —
  * including the pi system prompt, which itself names API keys — is
  * never an error signal on its own.
  */
@@ -543,10 +634,17 @@ function isErrorEvent(event: unknown): boolean {
     if (event === null || typeof event !== "object") return false;
     const envelope = event as Record<string, unknown>;
     if (envelope["type"] === "error" || envelope["isError"] === true) return true;
-    const message = envelope["message"];
-    if (message !== null && typeof message === "object") {
-        const record = message as Record<string, unknown>;
+    if (envelope["type"] === "auto_retry_end" && envelope["success"] === false) return true;
+    const candidates: unknown[] = [envelope["message"], envelope];
+    for (const candidate of candidates) {
+        if (candidate === null || typeof candidate !== "object") continue;
+        const record = candidate as Record<string, unknown>;
         if (record["type"] === "error" || record["isError"] === true) return true;
+        if (record["stopReason"] === "error") return true;
+        const errorMessage = record["errorMessage"];
+        if (typeof errorMessage === "string" && errorMessage.length > 0) return true;
+        const finalError = record["finalError"];
+        if (envelope["type"] === "auto_retry_end" && typeof finalError === "string" && finalError.length > 0) return true;
     }
     return false;
 }
@@ -606,7 +704,13 @@ export function classifyInfraFailure(input: {
     if (extInStderr !== null) {
         return { kind: "extension-load", detail: `extension load failure: ${extInStderr[0].slice(0, 160)}` };
     }
-    // Error-typed stdout events before the first assistant message.
+    // Error-typed stdout events before the first assistant token. The
+    // first token is a streaming message_update for the assistant, a
+    // tool execution, or an assistant message with non-empty content /
+    // output tokens / tool calls. Empty zero-output error-bearing
+    // assistant messages and failed auto-retries before that point are
+    // pre-first-token provider failures (excluded); anything after the
+    // first token is graded, never excluded.
     let sawAssistant = false;
     for (const line of input.logText.split("\n")) {
         if (line.trim().length === 0) continue;
@@ -617,9 +721,15 @@ export function classifyInfraFailure(input: {
         } catch {
             continue;
         }
-        if (!sawAssistant && isAssistantMessageEvent(event)) {
+        if (!sawAssistant && isFirstAssistantTokenEvent(event)) {
             sawAssistant = true;
             continue;
+        }
+        if (!sawAssistant) {
+            const preTokenDetail = preTokenProviderFailureDetail(event);
+            if (preTokenDetail !== null) {
+                return { kind: "provider-auth", detail: `provider/auth failure before the first assistant message: ${preTokenDetail}` };
+            }
         }
         if (!sawAssistant && isErrorEvent(event)) {
             const text = eventTextForSignal(event);

@@ -1312,6 +1312,132 @@ describe("classifyInfraFailure (E13.6)", () => {
         });
         expect(failure === null || failure.kind !== "provider-auth").toBe(true);
     });
+    it("excludes pre-first-token provider transport failures with empty error assistant messages", () => {
+        // Live pilot shape: empty zero-output assistant messages with
+        // stopReason "error" / errorMessage "fetch failed" and a
+        // provider_transport_failure diagnostic before any token, retried
+        // then auto_retry_end success:false. No message_update, no tool call.
+        const errorMessage = {
+            role: "assistant",
+            content: [],
+            usage: { input: 0, output: 0, totalTokens: 0 },
+            stopReason: "error",
+            errorMessage: "fetch failed",
+            diagnostics: [{ type: "provider_transport_failure", eventsEmitted: false, phase: "before_message_stream_start" }],
+        };
+        const lines = [
+            JSON.stringify({ rt: 1, event: { type: "message_start", message: errorMessage } }),
+            JSON.stringify({ rt: 2, event: { type: "message_end", message: errorMessage } }),
+            JSON.stringify({ rt: 3, event: { type: "turn_end" } }),
+            JSON.stringify({ rt: 4, event: { type: "message_start", message: errorMessage } }),
+            JSON.stringify({ rt: 5, event: { type: "message_end", message: errorMessage } }),
+            JSON.stringify({ rt: 6, event: { type: "turn_end" } }),
+            JSON.stringify({ rt: 7, event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "fetch failed" } }),
+            JSON.stringify({ rt: 8, event: { type: "agent_settled" } }),
+        ];
+        const failure = classifyInfraFailure({
+            ...base,
+            logText: lines.join("\n"),
+            stderrText: "pi ready\n",
+            exitCode: 1,
+        });
+        expect(failure).toMatchObject({ kind: "provider-auth" });
+        expect(failure?.detail ?? "").toContain("fetch failed");
+    });
+    it("excludes pre-first-token provider errors even when the message names no known auth pattern", () => {
+        // Protocol: a provider error with zero assistant output before any
+        // token is a pre-first-token provider failure, even when the
+        // errorMessage matches no TEB_AUTH_PATTERN entry.
+        const errorMessage = {
+            role: "assistant",
+            content: [],
+            usage: { input: 0, output: 0, totalTokens: 0 },
+            stopReason: "error",
+            errorMessage: "overloaded_error",
+            diagnostics: [{ type: "provider_transport_failure", eventsEmitted: false, phase: "before_message_stream_start" }],
+        };
+        const lines = [
+            JSON.stringify({ rt: 1, event: { type: "message_end", message: errorMessage } }),
+            JSON.stringify({ rt: 2, event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "overloaded_error" } }),
+            JSON.stringify({ rt: 3, event: { type: "agent_settled" } }),
+        ];
+        const failure = classifyInfraFailure({
+            ...base,
+            logText: lines.join("\n"),
+            stderrText: "",
+            exitCode: 1,
+        });
+        expect(failure).toMatchObject({ kind: "provider-auth" });
+        expect(failure?.detail ?? "").toContain("overloaded_error");
+    });
+    it("grades (never excludes) a late provider error after real assistant output", () => {
+        // Counter-example: 25 message_update events, 5 tool executions,
+        // 541 output tokens, then a terminal stopReason "error" with
+        // "fetch failed" + auto_retry_end success:false. Tokens were
+        // produced, so this is graded, never excluded.
+        const lines: string[] = [];
+        for (let i = 0; i < 25; i += 1) {
+            lines.push(
+                JSON.stringify({ rt: i + 1, event: { type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "partial" }] } } }),
+            );
+        }
+        lines.push(
+            JSON.stringify({
+                rt: 26,
+                event: {
+                    type: "message_end",
+                    message: {
+                        role: "assistant",
+                        content: [{ type: "text", text: "working answer" }],
+                        usage: { input: 100, output: 541, totalTokens: 641 },
+                        stopReason: "stop",
+                    },
+                },
+            }),
+        );
+        for (let i = 0; i < 5; i += 1) {
+            lines.push(JSON.stringify({ rt: 27 + i, event: { type: "tool_execution_start", toolCallId: `call_${i}`, toolName: "read", args: {} } }));
+        }
+        lines.push(
+            JSON.stringify({
+                rt: 32,
+                event: {
+                    type: "message_end",
+                    message: {
+                        role: "assistant",
+                        content: [],
+                        usage: { input: 0, output: 0, totalTokens: 0 },
+                        stopReason: "error",
+                        errorMessage: "fetch failed",
+                    },
+                },
+            }),
+        );
+        lines.push(JSON.stringify({ rt: 33, event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "fetch failed" } }));
+        expect(
+            classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "", exitCode: 0 }),
+        ).toBeNull();
+    });
+    it("treats a non-empty assistant message with stopReason error as a produced token", () => {
+        // Content was produced, so the session is graded even though the
+        // message carries stopReason "error".
+        const logText = JSON.stringify({
+            rt: 1,
+            event: {
+                type: "message_end",
+                message: {
+                    role: "assistant",
+                    content: [{ type: "text", text: "partial answer" }],
+                    usage: { input: 10, output: 10, totalTokens: 20 },
+                    stopReason: "error",
+                    errorMessage: "fetch failed",
+                },
+            },
+        });
+        expect(
+            classifyInfraFailure({ ...base, logText, stderrText: "", exitCode: 0 }),
+        ).toBeNull();
+    });
     it("classifies extension load failures", () => {
         expect(
             classifyInfraFailure({ ...base, stderrText: "Failed to load extension /ext/src/index.ts", exitCode: 1 }),
