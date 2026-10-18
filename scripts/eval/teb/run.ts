@@ -20,11 +20,13 @@ import {
     mkdtempSync,
     readFileSync,
     readdirSync,
+    realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { FAMILY_TABLE, parseTebJsonl, toRunnerView, type RunnerTaskView, type TebSplit, type TebTask } from "./schema.js";
 // Static import is cycle-safe: score.ts imports run.ts type-only
 // (erased at runtime), and both CLI mains are argv-guarded.
@@ -1037,7 +1039,7 @@ export function worktreeGitSha(worktree: string): string {
 
 function defaultExtensionPath(): string {
     // scripts/eval/teb/run.ts -> <worktree>/src/index.ts
-    return resolve(dirname(new URL(import.meta.url).pathname), "..", "..", "..", "src", "index.ts");
+    return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "src", "index.ts");
 }
 
 function reposDir(): string {
@@ -1503,8 +1505,10 @@ function main(): void {
 }
 
 const invokedAsCli = (() => {
+    const invoked = process.argv[1];
+    if (!invoked) return false;
     try {
-        return resolve(process.argv[1] ?? "") === new URL(import.meta.url).pathname;
+        return pathToFileURL(realpathSync(invoked)).href === pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
     } catch {
         return false;
     }

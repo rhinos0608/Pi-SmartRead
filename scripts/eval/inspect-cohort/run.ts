@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { INSPECT_ANSWER_SHAPES, INSPECT_SPLITS, parseInspectJsonl, toInspectRunnerView, type InspectFamily, type InspectTask } from "./schema.js";
 import { INSPECT_GENERIC_TEXT, INSPECT_INSTRUCTED_TEXT } from "./prompts.js";
 import { parseSurfaceIdentity, type SurfaceIdentity } from "../surface-identity.js";
@@ -370,7 +371,7 @@ export async function runInspectCli(args: InspectRunArgs, opts: RunInspectOption
             assertNoHoldoutExposure([task.prompt, task.scope, view.answerShape, arm.promptSuffix ?? "", prompt].join("\n"), [tasksPath, ...forbidden, ...ownGoldMarkers], anchorGoldMarkers);
         }
     }
-    const extensionPath = opts.extensionPath ?? resolve(dirname(new URL(import.meta.url).pathname), "..", "..", "..", "src", "index.ts");
+    const extensionPath = opts.extensionPath ?? resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "src", "index.ts");
     const runId = `inspect-${Date.now()}-pid${process.pid}`, runDir = join(resolve(args.out), runId);
     mkdirSync(runDir, { recursive: true });
     const manifest = { runnerVersion: INSPECT_RUNNER_VERSION, runId, startedAt: new Date().toISOString(), split: args.split,
@@ -496,4 +497,14 @@ function main(): void {
     const args = parseInspectRunArgs(process.argv.slice(2));
     void runInspectCli(args).then(({ runDir }) => console.log(runDir)).catch((error: unknown) => { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });
 }
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) main();
+function isDirectExecution(): boolean {
+    const invoked = process.argv[1];
+    if (!invoked) return false;
+    try {
+        return pathToFileURL(realpathSync(invoked)).href === pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
+    } catch {
+        return false;
+    }
+}
+
+if (isDirectExecution()) main();

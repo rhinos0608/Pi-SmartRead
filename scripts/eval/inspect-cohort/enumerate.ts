@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type * as TypeScript from "typescript";
 
 const require = createRequire(import.meta.url);
@@ -279,4 +280,14 @@ function main(): void {
     if (!root.startsWith(`${repoRoot}${sep}`) && root !== repoRoot) throw new Error("subpath escapes pinned checkout");
     console.log(JSON.stringify(enumerateRepository(root, args.repo), null, 2));
 }
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) main();
+function isDirectExecution(): boolean {
+    const invoked = process.argv[1];
+    if (!invoked) return false;
+    try {
+        return pathToFileURL(realpathSync(invoked)).href === pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
+    } catch {
+        return false;
+    }
+}
+
+if (isDirectExecution()) main();

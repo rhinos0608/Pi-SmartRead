@@ -16,8 +16,9 @@
  * and main() touch the filesystem.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { extractRunFromText, type TebExtractedRun } from "./extract.js";
 import { gradeTebTask, type TebGradeResult } from "./grade.js";
 import {
@@ -627,8 +628,10 @@ function main(): void {
 }
 
 const invokedAsCli = (() => {
+    const invoked = process.argv[1];
+    if (!invoked) return false;
     try {
-        return resolve(process.argv[1] ?? "") === new URL(import.meta.url).pathname;
+        return pathToFileURL(realpathSync(invoked)).href === pathToFileURL(realpathSync(fileURLToPath(import.meta.url))).href;
     } catch {
         return false;
     }
