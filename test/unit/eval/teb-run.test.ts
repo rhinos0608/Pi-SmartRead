@@ -1344,10 +1344,9 @@ describe("classifyInfraFailure (E13.6)", () => {
         expect(failure).toMatchObject({ kind: "provider-auth" });
         expect(failure?.detail ?? "").toContain("fetch failed");
     });
-    it("excludes pre-first-token provider errors even when the message names no known auth pattern", () => {
-        // Protocol: a provider error with zero assistant output before any
-        // token is a pre-first-token provider failure, even when the
-        // errorMessage matches no TEB_AUTH_PATTERN entry.
+    it("excludes pre-first-token errors carrying a provider diagnostic even when the message names no known auth pattern", () => {
+        // The provider_* diagnostic is the provider evidence; the
+        // errorMessage itself matches no TEB_AUTH_PATTERN entry.
         const errorMessage = {
             role: "assistant",
             content: [],
@@ -1369,6 +1368,25 @@ describe("classifyInfraFailure (E13.6)", () => {
         });
         expect(failure).toMatchObject({ kind: "provider-auth" });
         expect(failure?.detail ?? "").toContain("overloaded_error");
+    });
+    it("never excludes a pre-first-token error without provider evidence", () => {
+        // Protocol §9 excludes only provider/auth failures. A local or
+        // arm-induced error before the first token must stay graded (or
+        // fall through to the runner-crash rule), never excluded and rerun.
+        const errorMessage = {
+            role: "assistant",
+            content: [],
+            usage: { input: 0, output: 0, totalTokens: 0 },
+            stopReason: "error",
+            errorMessage: "Cannot read properties of undefined (reading 'name')",
+        };
+        const lines = [
+            JSON.stringify({ rt: 1, event: { type: "message_end", message: errorMessage } }),
+            JSON.stringify({ rt: 2, event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "Cannot read properties of undefined (reading 'name')" } }),
+            JSON.stringify({ rt: 3, event: { type: "agent_settled" } }),
+        ];
+        expect(classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "", exitCode: 0 })).toBeNull();
+        expect(classifyInfraFailure({ ...base, logText: lines.join("\n"), stderrText: "", exitCode: 1 })).toMatchObject({ kind: "runner" });
     });
     it("grades (never excludes) a late provider error after real assistant output", () => {
         // Counter-example: 25 message_update events, 5 tool executions,

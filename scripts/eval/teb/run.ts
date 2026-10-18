@@ -582,43 +582,41 @@ function isFirstAssistantTokenEvent(event: unknown): boolean {
     const message = assistantMessageOf(envelope);
     if (message === null) return false;
     if (assistantMessageHasToken(message)) return true;
-    if (preTokenProviderFailureDetail(event) !== null) return false;
+    if (isEmptyErrorAssistantMessage(message)) return false;
     const type = envelope["type"];
     if (type === "message_end" || type === "message_start") return true;
     return false;
 }
 
+/** True for an assistant message that carries an error but no produced token. */
+function isEmptyErrorAssistantMessage(message: Record<string, unknown>): boolean {
+    if (assistantMessageHasToken(message)) return false;
+    if (message["stopReason"] === "error") return true;
+    const errorMessage = message["errorMessage"];
+    return typeof errorMessage === "string" && errorMessage.length > 0;
+}
+
 /**
- * Detail when the event is a pre-first-token provider failure: an empty
- * zero-output assistant message bearing stopReason "error" or an
- * errorMessage (no token was produced), or auto_retry_end with
- * success:false. Returns null otherwise. This catches provider
- * transport failures whose wording matches no TEB_AUTH_PATTERN entry:
- * zero assistant output before any token is itself the exclusion
- * signal, per protocol §9 (only pre-first-token provider/auth
- * failure is excluded; anything later is graded).
+ * Detail when the event is an empty error-bearing assistant message whose
+ * diagnostics name a provider failure (`provider_*`, e.g.
+ * provider_transport_failure). Protocol §9 excludes only provider/auth
+ * failures, so an empty error message alone is not enough: local or
+ * arm-induced errors before the first token stay graded. Error text
+ * matching TEB_AUTH_PATTERN is handled by the isErrorEvent path.
  */
 function preTokenProviderFailureDetail(event: unknown): string | null {
     if (event === null || typeof event !== "object") return null;
-    const envelope = event as Record<string, unknown>;
-    if (envelope["type"] === "auto_retry_end" && envelope["success"] === false) {
-        const finalError = envelope["finalError"];
-        if (typeof finalError === "string" && finalError.length > 0) return finalError.slice(0, 160);
-        return "auto_retry_end success:false";
-    }
-    const message = assistantMessageOf(envelope);
-    if (message === null) return null;
-    if (assistantMessageHasToken(message) || assistantOutputTokens(message) > 0) return null;
-    const errorMessage = message["errorMessage"];
-    if (typeof errorMessage === "string" && errorMessage.length > 0) return errorMessage.slice(0, 160);
-    if (message["stopReason"] === "error") return "stopReason:error";
+    const message = assistantMessageOf(event as Record<string, unknown>);
+    if (message === null || !isEmptyErrorAssistantMessage(message)) return null;
     const diagnostics = message["diagnostics"];
-    if (Array.isArray(diagnostics)) {
-        for (const entry of diagnostics) {
-            if (entry === null || typeof entry !== "object") continue;
-            const type = (entry as Record<string, unknown>)["type"];
-            if (typeof type === "string" && type.length > 0) return String(type).slice(0, 160);
-        }
+    if (!Array.isArray(diagnostics)) return null;
+    for (const entry of diagnostics) {
+        if (entry === null || typeof entry !== "object") continue;
+        const type = (entry as Record<string, unknown>)["type"];
+        if (typeof type !== "string" || !type.startsWith("provider_")) continue;
+        const errorMessage = message["errorMessage"];
+        const reason = typeof errorMessage === "string" && errorMessage.length > 0 ? `${type}: ${errorMessage}` : type;
+        return reason.slice(0, 160);
     }
     return null;
 }
@@ -707,10 +705,10 @@ export function classifyInfraFailure(input: {
     // Error-typed stdout events before the first assistant token. The
     // first token is a streaming message_update for the assistant, a
     // tool execution, or an assistant message with non-empty content /
-    // output tokens / tool calls. Empty zero-output error-bearing
-    // assistant messages and failed auto-retries before that point are
-    // pre-first-token provider failures (excluded); anything after the
-    // first token is graded, never excluded.
+    // output tokens / tool calls. Empty error-bearing assistant messages
+    // and failed auto-retries before that point are excluded only with
+    // provider evidence (a provider_* diagnostic or TEB_AUTH_PATTERN
+    // text); anything after the first token is graded, never excluded.
     let sawAssistant = false;
     for (const line of input.logText.split("\n")) {
         if (line.trim().length === 0) continue;
