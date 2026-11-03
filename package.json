@@ -77,7 +77,7 @@
     "tree-sitter-rust": "0.21.0",
     "tree-sitter-typescript": "0.23.2",
     "xxhash-wasm": "^1.1.0",
-    "zod": "^4.4.2"
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
     "@ast-grep/napi": "^0.45.1",
