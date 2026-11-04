@@ -160,9 +160,17 @@ function resultMetaForPath(
   truncated: boolean,
   nextCursor?: string,
 ): StrictMeta {
+  // Advisory readiness is observed engine-progress evidence, attached
+  // independently of document lookup (before the pathless/no-document early
+  // returns). Freshness below stays document-hash based: readiness never
+  // redefines what synchronized content means.
+  const readiness = (() => {
+    try { return conn.readiness?.(); } catch { return undefined; }
+  })();
   const base: StrictMeta = {
     truncated,
     ...(nextCursor ? { nextCursor } : {}),
+    ...(readiness ? { readiness: readiness as NonNullable<StrictMeta["readiness"]> } : {}),
   };
   if (!req.path) return base;
 

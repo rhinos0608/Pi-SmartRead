@@ -27,7 +27,9 @@ Re-check semantics after SmartEdit changes the files.
 ## Guardrails
 
 - Verification is read-only even when it fails.
-- Require fresh results when judging the post-edit state.
+- Require fresh results when judging the post-edit state. Freshness means
+  synchronized content; `meta.readiness` is advisory progress evidence,
+  not a substitute for freshness and not a completeness gate.
 - Positions are 0-based in negotiated encoding.
 - One failed verification returns evidence to the mutation owner.
 

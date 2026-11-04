@@ -9,7 +9,7 @@ import { realpathSync, existsSync } from "node:fs";
 import { basename, dirname, resolve, join } from "node:path";
 import { LSPConnection } from "./lsp-connection.js";
 import { canonicalProjectRoot, computeConfigFingerprint, buildSessionKey } from "./lsp-session-key.js";
-import { getActiveCatalog, getDescriptorsForLanguage } from "../language-intelligence/language-server-catalog.js";
+import { getActiveCatalog, getDescriptorsForLanguage, TYPESCRIPT_DESCRIPTOR_ID, TlsSemanticOnlyConflictError, applyTlsSemanticOnlyPolicy, isKnownTlsLaunch } from "../language-intelligence/language-server-catalog.js";
 import { AmbiguousServerError, type LspSessionOptions } from "./lsp-types.js";
 import {
   ALL_SERVER_CONFIGS,
@@ -99,6 +99,29 @@ export class LSPManager {
     return this._startupPromise;
   }
 
+  /**
+   * Effective initializationOptions for one start attempt. The known TLS
+   * launch profile runs semantic-only (`tsserver.useSyntaxServer: "never"`);
+   * every other descriptor passes its configured options through untouched.
+   * An explicitly conflicting configured value throws
+   * TlsSemanticOnlyConflictError — never silently overridden. The profile is
+   * identified by the executable launch (basename, shim, node cli.mjs) —
+   * never by a bare descriptor claim alone — so a command override that
+   * merely defaults to the typescript descriptor (e.g. vtsls) cannot receive
+   * the TLS-only option; an explicit non-TLS descriptor claim never matches.
+   */
+  private effectiveInitOptions(
+    claimedDescriptorId: string | undefined,
+    command: string,
+    args: string[],
+    configured: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined {
+    if (claimedDescriptorId !== undefined && claimedDescriptorId !== TYPESCRIPT_DESCRIPTOR_ID) return configured;
+    if (!isKnownTlsLaunch(command, args)) return configured;
+    const tlsDefaults = getActiveCatalog().find((d) => d.id === TYPESCRIPT_DESCRIPTOR_ID)?.initializationOptions as Record<string, unknown> | undefined;
+    return applyTlsSemanticOnlyPolicy(configured ?? tlsDefaults);
+  }
+
   private async _doStartAll(): Promise<void> {
     // Pick one server config per language, then start each selected command
     // once and share that connection across every language it supports.
@@ -121,7 +144,16 @@ export class LSPManager {
           conn.descriptorId = config.descriptorId ?? config.command;
           conn.name = basename(config.command);
           conn.projectRoot = canonicalProjectRoot(this.rootUri);
-          await conn.start(config.command, config.args, this.rootUri);
+          // TLS semantic-only policy on the eager path: no legacy fallback
+          // connection stays in partial-semantic mode. A conflicting
+          // configured value throws here and is skipped like any other eager
+          // start failure; it surfaces clearly on the on-demand startSession
+          // path when the session is actually requested.
+          const eagerInitOptions = this.effectiveInitOptions(config.descriptorId, config.command, config.args, config.initializationOptions);
+          await conn.start(config.command, config.args, this.rootUri, {
+            ...(eagerInitOptions !== undefined ? { initializationOptions: eagerInitOptions } : {}),
+            workspaceFolders: [canonicalProjectRoot(this.rootUri)],
+          });
           for (const langId of config.languageIds) {
             if (configForLanguage.get(langId) === config) {
               this.connections.set(langId, conn);
@@ -197,7 +229,7 @@ export class LSPManager {
       try {
         const conn = await this.startSession(languageId, config, session);
         if (conn) return conn;
-      } catch (e) { if (e instanceof AmbiguousServerError) throw e; /* try next server config */ }
+      } catch (e) { if (e instanceof AmbiguousServerError || e instanceof TlsSemanticOnlyConflictError) throw e; /* try next server config */ }
     }
     // Managed auto-install orchestration (purpose-aware, never for warmup).
     // Strict path passes allowInstall:false to forbid install WITHOUT broadening legacy behavior.
@@ -235,12 +267,19 @@ export class LSPManager {
           conn.descriptorId = res.descriptorId;
           conn.name = basename(res.executable);
           conn.projectRoot = canonicalProjectRoot(this.rootUri);
-          await conn.start(res.executable, res.args, this.rootUri);
+          // Managed-install path carries the TLS semantic-only policy too,
+          // merged over the caller's session options so an explicit conflict
+          // throws instead of being silently dropped.
+          const managedInitOptions = this.effectiveInitOptions(res.descriptorId, res.executable, res.args, session?.initializationOptions as Record<string, unknown> | undefined);
+          await conn.start(res.executable, res.args, this.rootUri, {
+            ...(managedInitOptions !== undefined ? { initializationOptions: managedInitOptions } : {}),
+            workspaceFolders: [canonicalProjectRoot(this.rootUri)],
+          });
           this.connections.set(languageId, conn);
           return conn;
-        } catch { /* spawn failed after install */ }
+        } catch (e) { if (e instanceof TlsSemanticOnlyConflictError) throw e; /* spawn failed after install */ }
       }
-    } catch { /* ensure is best-effort */ }
+    } catch (e) { if (e instanceof TlsSemanticOnlyConflictError) throw e; /* ensure is best-effort */ }
     return null;
   }
 
@@ -253,7 +292,13 @@ export class LSPManager {
   private fingerprintFor(languageId: string, config: ServerConfig, session?: LspSessionOptions) {
     const desc = getDescriptorsForLanguage(languageId).find((d) => d.id === (config.descriptorId ?? session?.descriptorId))
       ?? getDescriptorsForLanguage(languageId)[0];
-    const initializationOptions = session?.initializationOptions ?? config.initializationOptions ?? desc?.initializationOptions ?? undefined;
+    // Effective initialization options include the TLS semantic-only policy
+    // for the known TLS launch profile (merged over unrelated configured
+    // fields; explicit conflicts throw). The effective value feeds both the
+    // initialize frame and the fingerprint below, so the policy is part of
+    // session identity. Other descriptors pass through untouched.
+    const rawInitializationOptions = session?.initializationOptions ?? config.initializationOptions ?? desc?.initializationOptions ?? undefined;
+    const initializationOptions = this.effectiveInitOptions(config.descriptorId ?? session?.descriptorId, config.command, config.args, rawInitializationOptions as Record<string, unknown> | undefined);
     const settings = session?.settings ?? config.settings ?? desc?.settings ?? undefined;
     const workspaceFolders = session?.workspaceFolders ?? config.workspaceFolders ?? [canonicalProjectRoot(this.rootUri)];
     const envOverlay = validateEnvOverlay(session?.envOverlay ?? config.envOverlay);

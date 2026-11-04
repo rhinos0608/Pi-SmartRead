@@ -101,6 +101,14 @@ On every envelope, before using a proposal:
    use, if `documentVersion` does not match the buffer SmartEdit is about
    to mutate, discard the proposal and re-request. `readiness`, when
    present, is additional indexing evidence, not a substitute for freshness.
+   The two axes stay independent: readiness reports observed engine
+   progress (advisory only, never a semantic-completeness assertion) while
+   freshness reports synchronized document content. TypeScript
+   language-server sessions additionally run semantic-only
+   (`tsserver.useSyntaxServer: "never"`, enforced on every SmartRead start
+   path and part of session identity): cold proposals may arrive slowly or
+   time out instead of returning fast partial answers. The proposal DTOs,
+   staging rules, and the freshness gate are unchanged by this policy.
 5. `meta.truncated` + `meta.nextCursor`: list-bearing results
    (`codeActions`, `completion`) may paginate. Cursors are opaque
    base64url random-id tokens (256-entry store, 10-min TTL,
@@ -218,6 +226,16 @@ column has no contract yet — do not assume it.
   partially applied proposal are SmartEdit-owned behaviors: they are not
   visible on the wire, not negotiated here, and SmartRead makes no promise
   about proposal lifetime beyond cursor TTL (10 min, `src/lsp/lsp-cursor-store.ts`).
+- **TLS semantic-only startup (SmartRead-local).** SmartRead-managed
+  TypeScript language-server sessions start with
+  `tsserver.useSyntaxServer: "never"` on every start path (on-demand,
+  eager, managed-install); the effective policy is part of session identity
+  and explicitly conflicting configured values fail startup clearly instead
+  of being overridden (verified:
+  `test/unit/lsp/tls-semantic-only.test.ts`). Expect slower cold starts and
+  possible cold timeouts instead of partial-semantic answers. Proposal
+  DTOs, staging, and the freshness gate are unchanged; `meta.readiness`
+  stays advisory observed evidence, independent of freshness (§3).
 
 ### 6b. Unresolved guarantees — no contract yet, owner decision required
 
