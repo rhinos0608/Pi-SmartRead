@@ -46,6 +46,13 @@ Mutation-oriented skills must state the ownership boundary: SmartRead may return
 
 ## Shipped skills
 
+On Pi session start, the extension syncs these skills into
+`~/.pi/agent/skills` (or `$PI_CODING_AGENT_DIR/skills`; opt out with
+`PI_SMARTREAD_SKILL_SYNC=0`). Each synced copy carries a
+`.smartread-managed` marker recording the skill name; copies you edited —
+or directories without the marker — are never updated or removed. MCP-only
+users can install them with `npm run install-skills`.
+
 | Skill | Job |
 |---|---|
 | `inspect-script-mode` | Bounded multi-hop grep/read/inspect/LSP/graph composition |

@@ -26,6 +26,7 @@ import {
   registerRepositoryIntelligenceBestEffort,
   registerSessionHooksWithDoomReset,
 } from "./extension-registration.js";
+import { registerSkillSync } from "./runtime/skill-sync-hook.js";
 
 // Internal URL router re-exports (enables external consumers to use skill://, memory://, graph:// URLs)
 export {
@@ -98,6 +99,7 @@ export default async function (pi: ExtensionAPI) {
 
   // 1. Session hooks: eager repo-map generation + startup injection
   registerSessionHooksWithDoomReset(pi, state);
+  registerSkillSync(pi);
 
   // 2. Inspect: unconditionally replace the eager MCP fallback.
   registerInspectTool(state);

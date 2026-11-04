@@ -60,7 +60,9 @@ The server exposes these `smartread://` URIs as MCP resources:
 
 ## Prompts
 
-The server exposes these MCP prompts:
+The server sends the SmartRead Tool Guide as MCP `instructions` at
+handshake, so tool-routing guidance arrives without the Pi prompt sections.
+It also exposes these MCP prompts:
 
 | Prompt | Description |
 |---|---|
@@ -246,6 +248,7 @@ Or in `.mcp.json`:
 | **Transport** | Pi's internal tool API | MCP stdio (via `@modelcontextprotocol/sdk`) |
 | **Host** | Pi coding agent | Any MCP client (Claude Code, Claude Desktop, Cursor, etc.) |
 | **Hooks** | First-read repo map interception, context hygiene, doom-loop detection, bash guard | No hooks (direct tool calls only) |
+| **Skills** | Auto-synced into `~/.pi/agent/skills` on session start | Install manually with `npm run install-skills` |
 | **Install** | `pi install github:rhinos0608/Pi-SmartRead` | `npx tsx src/mcp-server.ts` |
 | **Same tools?** | `read`, `find`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools | `find`, `inspect`, `grep`, `LSP`, `skill`, and optional experimental tools; only the wrapped `read` surface is Pi-only |
 
