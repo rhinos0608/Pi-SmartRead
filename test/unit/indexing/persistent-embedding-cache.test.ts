@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { PersistentEmbeddingCache } from "../../../src/indexing/persistent-embedding-cache.js";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +21,10 @@ describe("PersistentEmbeddingCache", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "embedding-cache-test-"));
+    // F4 behaviour change: the disk cache persists only at a canonical state
+    // root; the fixture declares its temp dir a project root so the
+    // persistence tests still exercise real disk writes.
+    writeFileSync(join(tmpDir, "package.json"), "{}\n");
   });
 
   afterEach(() => {

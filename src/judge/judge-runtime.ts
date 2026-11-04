@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { isStateRoot } from "../workspace/state-root.js";
 import { resolveJudge, type ResolveJudgeResult } from "./judge-resolver.js";
 import { readJudgeSettings } from "./judge-settings.js";
 import { getSharedVonSidecarManager } from "./von-sidecar.js";
@@ -9,7 +10,12 @@ interface PiJudgeContext {
     };
 }
 
-function workspaceCacheDir(root: string): string {
+/**
+ * Verdict-cache dir at the canonical state root, or `undefined` when `root`
+ * is not one (F4): no judge cache directory outside a canonical state root.
+ */
+function workspaceCacheDir(root: string): string | undefined {
+    if (!isStateRoot(root)) return undefined;
     return join(root, ".pi-smartread", "judge-cache");
 }
 

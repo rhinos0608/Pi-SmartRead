@@ -8,6 +8,11 @@ node_modules/
 .pi-smartread.tags.cache/*
 .pi-smartread/*
 .pi-subagents/artifacts/*
+# State-root fix: state dirs must be ignored at every depth, not just the root.
+**/.pi-smartread/
+**/.pi-smartread.tags.cache/
+**/.pi-smartread.embeddings.cache/
+**/.pi-subagents/
 graphify-out/
 .understand-anything/.understandignore
 .understand-anything/fingerprints.json

@@ -120,6 +120,8 @@ Do not hand-edit or commit runtime caches/output:
 
 `.pi/`, `.pi-smartread/`, `.pi-smartread.tags.cache/`, `.pi-smartread.embeddings.cache/`, `.pi-subagents/`, `graphify-out/`, `.smart-edit-undo/`, `.subagent-work/`.
 
+State lives only at the canonical state root: the git top level when inside git, the outermost project-marker directory (excluding `$HOME` itself and its ancestors) when not, and nowhere at all when no marker resolves (`src/workspace/state-root.ts`). Writers persist only where `isStateRoot()` holds and run memory-only otherwise. A `.pi-smartread*` directory anywhere else — including nested project/fixture dirs or a tool's `path` argument — is a bug, not expected output.
+
 If a test needs these formats, build fixtures in temp directories instead of reusing a developer's live cache.
 
 ## Cross-repo coordination

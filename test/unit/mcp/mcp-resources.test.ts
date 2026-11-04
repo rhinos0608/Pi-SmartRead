@@ -12,6 +12,10 @@ let oldCwd: string;
 beforeEach(() => {
   oldCwd = process.cwd();
   root = mkdtempSync(join(tmpdir(), "smartread-resources-"));
+  // F4 behaviour change: recordCoverage persists only at a canonical state
+  // root; the fixture declares its temp dir a project root so the coverage
+  // resource round-trip still exercises a real write.
+  writeFileSync(join(root, "package.json"), "{}\n");
   process.chdir(root);
 });
 

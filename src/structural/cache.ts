@@ -11,8 +11,10 @@
  *  - Disk cache clearing on version mismatch
  */
 import { promises as fs, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as pathResolve } from "node:path";
 import { createHash } from "node:crypto";
+import { resolveStateRoot } from "../workspace/state-root.js";
+import { canonicalPathOrNull } from "../canonical-path.js";
 
 export type TagConfidence = "extracted" | "inferred" | "ambiguous";
 
@@ -41,13 +43,20 @@ interface CacheEntry {
   tags: Tag[];
 }
 
-/** Current cache format version. Bump when Tag structure or serialization changes. */
-export const CACHE_VERSION = 3;
+/**
+ * Current cache format version. Bump when Tag structure, serialization, or
+ * key derivation changes. v4: entries live at the canonical state root and
+ * keys are namespaced by scan root (see getFilePath).
+ */
+export const CACHE_VERSION = 4;
 
 const VERSION_FILENAME = "version.json";
 
 export class TagsCache {
-  private cacheDir: string;
+  /** Canonical scan root — namespaces cache keys, see getFilePath. */
+  private readonly scanRoot: string;
+  /** Canonical state root + dir, or null when there is none (memory-only). */
+  private cacheDir: string | null;
   private memoryCache: Map<string, CacheEntry>;
   private useFilePersistence: boolean;
   private corruptionCount: number;
@@ -73,7 +82,13 @@ export class TagsCache {
   parseCount = 0;
 
   constructor(root: string, options: TagsCacheOptions = {}) {
-    this.cacheDir = join(root, ".pi-smartread.tags.cache");
+    // Scan scope stays at `root` (the caller's scan dir — map results are
+    // unchanged); the on-disk cache moves to the canonical state root so a
+    // nested scan dir never gets its own `.pi-smartread.tags.cache`. No
+    // state root (no git top level / no qualifying marker) → memory-only.
+    this.scanRoot = canonicalPathOrNull(root) ?? pathResolve(root);
+    const stateRoot = resolveStateRoot(root);
+    this.cacheDir = stateRoot === null ? null : join(stateRoot, ".pi-smartread.tags.cache");
     this.memoryCache = new Map();
     this.useFilePersistence = false;
     this.corruptionCount = 0;
@@ -92,6 +107,11 @@ export class TagsCache {
    * Checks CACHE_VERSION and clears if mismatch.
    */
   async init(): Promise<void> {
+    if (this.cacheDir === null) {
+      // No canonical state root: memory-only, never mkdir. Never throws.
+      this.useFilePersistence = false;
+      return;
+    }
     try {
       if (!existsSync(this.cacheDir)) {
         await fs.mkdir(this.cacheDir, { recursive: true });
@@ -127,6 +147,7 @@ export class TagsCache {
   }
 
   private async writeVersionFile(): Promise<void> {
+    if (this.cacheDir === null) return;
     try {
       const versionFile = join(this.cacheDir, VERSION_FILENAME);
       await fs.writeFile(
@@ -139,8 +160,18 @@ export class TagsCache {
     }
   }
 
-  private getFilePath(fname: string): string {
-    const hash = createHash("sha256").update(fname).digest("hex");
+  /**
+   * Entry path for a file's tags, or null when the cache is memory-only.
+   *
+   * One state-root cache dir is shared by every scanDir beneath it, so the
+   * key namespaces the canonical scan root: `relFname` inside an entry is
+   * relative to the scan root that parsed it, and hashing the scan root
+   * keeps two scanDirs from reading each other's entries for the same
+   * absolute file.
+   */
+  private getFilePath(fname: string): string | null {
+    if (this.cacheDir === null) return null;
+    const hash = createHash("sha256").update(`${this.scanRoot}\0${fname}`).digest("hex");
     return join(this.cacheDir, `${hash}.json`);
   }
 
@@ -174,7 +205,7 @@ export class TagsCache {
     if (this.useFilePersistence) {
       try {
         const filePath = this.getFilePath(fname);
-        if (existsSync(filePath)) {
+        if (filePath !== null && existsSync(filePath)) {
           const raw = await fs.readFile(filePath, "utf-8");
           const entry = JSON.parse(raw) as CacheEntry;
           if (
@@ -220,7 +251,7 @@ export class TagsCache {
     if (this.useFilePersistence) {
       try {
         const filePath = this.getFilePath(fname);
-        await fs.writeFile(filePath, JSON.stringify(entry), "utf-8");
+        if (filePath !== null) await fs.writeFile(filePath, JSON.stringify(entry), "utf-8");
       } catch {
         // Write failed — memory cache is sufficient fallback
       }
@@ -254,10 +285,12 @@ export class TagsCache {
    */
   async clearDiskCache(): Promise<void> {
     try {
-      if (existsSync(this.cacheDir)) {
-        await fs.rm(this.cacheDir, { recursive: true, force: true });
+      if (this.cacheDir !== null) {
+        if (existsSync(this.cacheDir)) {
+          await fs.rm(this.cacheDir, { recursive: true, force: true });
+        }
+        await fs.mkdir(this.cacheDir, { recursive: true, mode: 0o700 });
       }
-      await fs.mkdir(this.cacheDir, { recursive: true, mode: 0o700 });
       this.memoryCache.clear();
       this.corruptionCount = 0;
       this.dependentsFull = false;
@@ -310,6 +343,7 @@ export class TagsCache {
         if (mtime === null) continue;
 
         const filePath = this.getFilePath(fname);
+        if (filePath === null) continue;
         try {
           const raw = await fs.readFile(filePath, "utf-8");
           const entry = JSON.parse(raw) as CacheEntry;
@@ -415,7 +449,7 @@ export class TagsCache {
     if (this.useFilePersistence) {
       try {
         const filePath = this.getFilePath(fname);
-        if (existsSync(filePath)) {
+        if (filePath !== null && existsSync(filePath)) {
           await fs.rm(filePath);
         }
       } catch {

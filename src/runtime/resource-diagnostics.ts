@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { isStateRoot } from "../workspace/state-root.js";
 
 export interface ResourceDiagnosticSample {
   timestamp: number;
@@ -48,7 +49,13 @@ export function diagnosticsPath(root: string, pid = process.pid): string {
   return join(resolve(root), ".pi-smartread", `diagnostics-${pid}.ndjson`);
 }
 
-export function writeResourceDiagnosticSample(root: string, sample = collectResourceDiagnosticSample()): string {
+/**
+ * Append one sample, but only at the canonical state root (state-root fix):
+ * anywhere else the write is skipped and `null` is returned. Never throws
+ * because persistence was skipped.
+ */
+export function writeResourceDiagnosticSample(root: string, sample = collectResourceDiagnosticSample()): string | null {
+  if (!isStateRoot(root)) return null;
   const path = diagnosticsPath(root, sample.pid);
   mkdirSync(join(resolve(root), ".pi-smartread"), { recursive: true, mode: 0o700 });
   appendFileSync(path, `${JSON.stringify(sample)}\n`, { mode: 0o600 });
@@ -59,8 +66,12 @@ let activeTimer: NodeJS.Timeout | null = null;
 
 export function startResourceDiagnostics(root: string, env: NodeJS.ProcessEnv = process.env): NodeJS.Timeout | null {
   if (env[DIAGNOSTICS_ENV] !== "1") return null;
-  if (activeTimer) clearInterval(activeTimer);
-  writeResourceDiagnosticSample(root);
+  if (activeTimer) {
+    clearInterval(activeTimer);
+    activeTimer = null;
+  }
+  // Fail closed: no canonical state root → no diagnostics file, no timer.
+  if (writeResourceDiagnosticSample(root) === null) return null;
   activeTimer = setInterval(() => writeResourceDiagnosticSample(root), 5_000);
   activeTimer.unref?.();
   return activeTimer;

@@ -21,6 +21,7 @@ import { join, parse, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import type { EmbedRequest, EmbedResult } from "./embedding.js";
 import { embeddingProfileId } from "./embedding-profile.js";
+import { isStateRoot } from "../workspace/state-root.js";
 
 const DEFAULT_MAX_ENTRIES = 128;
 const CACHE_DIRNAME = ".pi-smartread.embeddings.cache";
@@ -65,6 +66,9 @@ export class PersistentEmbeddingCache {
     } catch {
       return;
     }
+    // F4: disk persistence only at a canonical state root; elsewhere the
+    // memory LRU above is the whole cache.
+    if (!isStateRoot(resolved)) return;
 
     try {
       if (!existsSync(this.cacheDir)) {

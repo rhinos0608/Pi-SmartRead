@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { gzipSync, gunzipSync } from "node:zlib";
+import { isStateRoot } from "../workspace/state-root.js";
 
 export const SNAPSHOT_SCHEMA_VERSION = 1;
 
@@ -50,6 +51,8 @@ export function computeSourceHash(entriesOrPaths: (string | SourceEntry)[]): str
 
 export function writeSnapshot<T>(root: string, kind: string, data: T, manifest: Omit<IndexSnapshotManifest, "schemaVersion" | "createdAt" | "root" | "kind">): string {
   const path = snapshotPath(root, kind);
+  // F4: writers persist only at a canonical state root; empty string = not written.
+  if (!isStateRoot(root)) return "";
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const snapshot: IndexSnapshot<T> = {
     manifest: {

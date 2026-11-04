@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { isStateRoot } from "../workspace/state-root.js";
 
 export type CoverageStatus = "indexed" | "ignored" | "unsupported" | "binary" | "parse_error" | "partial" | "read_error";
 
@@ -34,6 +35,8 @@ export function readCoverage(root: string): IndexCoverageRecord[] {
 }
 
 export function writeCoverage(root: string, records: IndexCoverageRecord[]): void {
+  // F4: writers persist only at a canonical state root; elsewhere memory-only.
+  if (!isStateRoot(root)) return;
   const path = coveragePath(root);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const existing = readCoverage(root);

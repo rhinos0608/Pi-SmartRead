@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { resolveStateRoot } from "./state-root.js";
 
 const PROJECT_MARKERS = [
   "package.json",
@@ -31,7 +32,13 @@ export function isProjectWorkspace(cwd: string): boolean {
   return findProjectWorkspace(cwd) !== null;
 }
 
-/** Scope enrichment to the file's project even when Pi was started above it. */
+/**
+ * Canonical state root for enrichment involving `fullPath` (git top level,
+ * outermost non-git project marker, or `null` when there is none).
+ *
+ * Routes through `resolveStateRoot` so read enrichment never persists state
+ * at a nested marker directory below the true project root (state-root fix).
+ */
 export function projectWorkspaceForFile(fullPath: string): string | null {
-  return findProjectWorkspace(path.dirname(path.resolve(fullPath)));
+  return resolveStateRoot(fullPath);
 }

@@ -8,7 +8,7 @@
  * Documents actual behaviour; where it contradicts D53's expectation the
  * test names the gap explicitly instead of changing src/.
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -185,6 +185,10 @@ describe("workspace verdict cache integration", () => {
 
     it("(5) Pi and MCP resolvers share the same workspace cache dir and read each other's verdicts", async () => {
         const root = mkdtempSync(join(tmpdir(), "judge-int-"));
+        // F4 behaviour change: the runtimes derive their verdict-cache dir only
+        // at a canonical state root; the fixture declares its temp dir a
+        // project root so resolver-level cache sharing is still exercised.
+        writeFileSync(join(root, "package.json"), "{}\n");
         const savedMode = process.env.PI_SMARTREAD_JUDGE_MODE;
         const savedKey = process.env.PI_SMARTREAD_JUDGE_API_KEY;
         const savedModel = process.env.PI_SMARTREAD_JUDGE_MODEL;

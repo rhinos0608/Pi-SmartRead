@@ -8,6 +8,10 @@ let root: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "smartread-lock-"));
+  // F4 behaviour change: lock files persist only at a canonical state root;
+  // the temp fixture declares `.git` so lock create/hold/stale semantics are
+  // still exercised (an empty `.git` dir satisfies the state-root contract).
+  mkdirSync(join(root, ".git"));
 });
 
 afterEach(() => {

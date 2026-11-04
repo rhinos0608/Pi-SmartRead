@@ -12,6 +12,7 @@
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL } from "./cloud-judge.js";
 import { LOCAL_JUDGE_DEFAULT_MODEL } from "./local-judge.js";
 import { JudgeCache } from "./judge-cache.js";
+import { isStateRoot } from "../workspace/state-root.js";
 import { readJudgeSettings, writeJudgeSettings, type JudgeMode } from "./judge-settings.js";
 import {
     checkPythonVersion,
@@ -60,6 +61,8 @@ function notify(ctx: Ctx, message: string, type: "info" | "warning" | "error" = 
 function defaultCacheDir(ctx: Ctx): string | undefined {
     const root = ctx.cwd ?? process.cwd();
     if (!root) return undefined;
+    // F4: no verdict cache outside a canonical state root (memory-only judging).
+    if (!isStateRoot(root)) return undefined;
     return `${root}/.pi-smartread/judge-cache`;
 }
 

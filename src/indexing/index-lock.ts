@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { isStateRoot } from "../workspace/state-root.js";
 
 export interface IndexLockOptions {
   staleMs?: number;
@@ -43,6 +44,9 @@ export function withIndexLockSync<T>(
   fn: () => T,
   options: IndexLockOptions = {},
 ): T {
+  // F4: no lock file outside a canonical state root — run the work unlocked
+  // rather than creating state (or throwing) at a nested/markerless root.
+  if (!isStateRoot(root)) return fn();
   const path = lockPath(root, name);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
