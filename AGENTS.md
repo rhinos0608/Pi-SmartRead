@@ -68,6 +68,12 @@ Do not port examples between the strict tool and script host helpers without con
 | MCP | `src/mcp-server.ts`, `src/mcp-registry.ts`, `src/mcp/` |
 | Skills | `skills/`, `src/runtime/skill-tool.ts`, `scripts/validate-skills.mjs` |
 
+## Skill sync and tool guidance (traps)
+
+- Per-tool `promptSnippet`/`promptGuidelines` live in `src/runtime/tool-guidance.ts` and are the single source for `renderSmartReadToolGuide` and the MCP `instructions` in `src/mcp/mcp-instructions.ts`. Edit the wording in one place only.
+- Skill sync (`src/runtime/skill-sync.ts`) owns only `~/.pi/agent/skills` entries carrying a `.smartread-managed` marker that records the skill name. Removal/update require `marker.skill === dirname` plus the shipped package name; user-edited or unmarked dirs are never touched. The root is resolved with `realpath` once at sync start and every operation runs under that canonical root.
+- Never add `pi.skills` to `package.json`: it triggers duplicate-name warnings. Ship skills via `files: skills/**` plus the sync hook and `npm run install-skills`.
+
 ## Evidence contract and SmartEdit boundary
 
 `@rhinos0608/pi-workspace-protocol` is pinned in `package.json`. Import `PROTOCOL_SCHEMA_VERSION`; do not hardcode a schema number in new code.

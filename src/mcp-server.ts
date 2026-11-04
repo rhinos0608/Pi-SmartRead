@@ -37,6 +37,7 @@ import { MCP_RESOURCES, resolveResource } from "./mcp/mcp-resources.js";
 import { coerceText } from "./utils.js";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { toExtensionContext } from "./types.js";
+import { buildServerOptions } from "./mcp/mcp-instructions.js";
 import { renderSmartReadToolGuide } from "./runtime/tool-guidance.js";
 import { getSharedVonSidecarManager } from "./judge/von-sidecar.js";
 
@@ -66,7 +67,7 @@ const tools: ToolDefinition[] = buildToolRegistry();
 
 const server = new Server(
   { name: "pi-smartread", version: "0.5.0" },
-  { capabilities: { tools: {}, prompts: {}, resources: {} } },
+  buildServerOptions(),
 );
 
 // ── Handlers ───────────────────────────────────────────────────────

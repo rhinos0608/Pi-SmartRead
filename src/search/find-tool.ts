@@ -32,6 +32,7 @@ import {
 } from "./find-candidates.js";
 import { formatFindOutput, type FindEntry } from "./find-format.js";
 import { findFileQuestion } from "../judge/questions.js";
+import { getSmartReadToolGuidance } from "../runtime/tool-guidance.js";
 import type { ResolveJudgeResult } from "../judge/judge-resolver.js";
 import {
     answerProbability,
@@ -505,11 +506,15 @@ function publishDiscoveryEvidence(
 }
 
 export function createFindTool(opts: FindToolOptions = {}): ToolDefinition {
+    const findGuidance = getSmartReadToolGuidance("find");
     return {
         name: "find",
         label: "find",
         description: FIND_DESCRIPTION,
         parameters: FindSchema as unknown as Record<string, unknown>,
+        ...(findGuidance !== undefined
+            ? { promptSnippet: findGuidance.snippet, promptGuidelines: [...findGuidance.guidelines] }
+            : {}),
         async execute(
             toolCallId: string,
             params: FindInput & Record<string, unknown>,
