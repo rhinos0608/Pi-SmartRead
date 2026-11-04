@@ -126,3 +126,44 @@ describe("handleSymbol", () => {
     expect(result.matches[0]?.relative_path).toBe("a.ts");
   });
 });
+
+// The LSP workspace/symbol fan-out under the bridge has no cancellation of its own, so a server
+// that never answers must not hold the symbol search open.
+describe("handleSymbol with an LSP search that never settles", () => {
+  const neverSettles = () => new Promise<any[]>(() => {});
+  const PENDING = Symbol("pending");
+
+  it("rejects with the caller's abort instead of waiting for the LSP search", async () => {
+    write("a.ts", `export function stuckOne() {\n  return 1;\n}\n`);
+    const handleSymbol = await loadHandleSymbol(neverSettles);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 200);
+
+    const outcome = await Promise.race([
+      handleSymbol("stuckOne", 30, false, workdir, workdir, controller.signal).then(
+        () => "resolved",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      ),
+      new Promise<typeof PENDING>((resolve) => setTimeout(() => resolve(PENDING), 5_000)),
+    ]);
+
+    expect(outcome).toBe("Operation aborted");
+  });
+
+  it("returns tree-sitter results after a bounded wait when no caller signal is supplied", async () => {
+    write("a.ts", `export function stuckTwo() {\n  return 2;\n}\n`);
+    const handleSymbol = await loadHandleSymbol(neverSettles);
+    // Shorten only the LSP timer: fake time must not race ahead of real scan I/O.
+    const realSetTimeout = globalThis.setTimeout;
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      (handler, delay, ...args) => realSetTimeout(handler, delay === 30_000 ? 50 : delay, ...args),
+    );
+    try {
+      const result = await handleSymbol("stuckTwo", 30, false, workdir, workdir);
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
+      expect(result.matches.some((m) => m.name === "stuckTwo")).toBe(true);
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  }, 15_000);
+});

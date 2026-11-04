@@ -80,10 +80,38 @@ export async function handleSymbol(
   // Merge LSP results first (typically faster/more accurate for configured
   // language servers), then fill remaining slots with tree-sitter results.
   // Deduplicate by file:line so the same symbol isn't shown twice.
-  const lspResultsRaw = await lspSearchPromise;
+  const lspResultsRaw = await waitForLspSymbols(lspSearchPromise, signal);
   const merged = await mergeSymbolMatches(lspResultsRaw, matches, maxResults, matchesGlob);
 
   return { matches: merged, totalDefs, filesScanned: allFiles.length };
+}
+
+/**
+ * Upper bound on waiting for the optional LSP contribution. Server start-up and
+ * one workspace/symbol request per server may legitimately take tens of seconds
+ * on a cold workspace, so this only guards against a wait that never settles.
+ */
+const LSP_SYMBOL_WAIT_MS = 30_000;
+
+/**
+ * The LSP workspace/symbol fan-out has no cancellation of its own, so abandon the
+ * wait rather than the work: reject on caller abort, fall back to tree-sitter-only
+ * results ([]) after LSP_SYMBOL_WAIT_MS.
+ */
+function waitForLspSymbols(search: Promise<SymbolEntry[]>, signal: AbortSignal | undefined): Promise<SymbolEntry[]> {
+  if (signal?.aborted) return Promise.reject(new Error("Operation aborted"));
+  return new Promise<SymbolEntry[]>((resolve, reject) => {
+    const finish = (settle: () => void) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      settle();
+    };
+    const onAbort = () => finish(() => reject(new Error("Operation aborted")));
+    const timer = setTimeout(() => finish(() => resolve([])), LSP_SYMBOL_WAIT_MS);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void search.then((symbols) => finish(() => resolve(symbols)));
+  });
 }
 
 /** Start an LSP workspace/symbol search. Never rejects — falls back to []. */
