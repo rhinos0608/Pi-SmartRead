@@ -7,7 +7,7 @@
  * this schema, the validator, and the authoring protocol live in the repo.
  */
 
-export type D46Split = "dev" | "holdout";
+export type D46Split = "dev" | "holdout" | "selection";
 
 export type D46QueryClass =
     | "behaviour"

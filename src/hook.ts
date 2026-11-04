@@ -43,7 +43,6 @@ import {
 } from "./evidence/read-evidence.js";
 import { resolveAstOutlineConfig, outlineSupportsPath, buildAstOutline, renderAstOutline } from "./structural/ast-outline.js";
 import { getGraphifyEnricher } from "./graph/graphify-enricher.js";
-import { SMARTREAD_TOOL_GUIDE_TITLE, renderSmartReadToolGuide } from "./runtime/tool-guidance.js";
 import { startResourceDiagnostics, stopResourceDiagnostics } from "./runtime/resource-diagnostics.js";
 import {
   scanMicroagents as doScanMicroagents,
@@ -215,11 +214,40 @@ export function resetSessionState(): void {
 }
 
 /**
+ * Narrow structural guard for the newer Pi host surface where
+ * `before_agent_start` carries mutable `systemPromptOptions.sections`
+ * (Record<string, string>, rendered as XML-wrapped sections keyed by tag
+ * name; Pi diffs sections and records a transcript delta). The pinned
+ * devDependency's BeforeAgentStartEvent type does not declare `sections`,
+ * so this guard avoids depending on it.
+ */
+function getMutablePromptSections(event: unknown): Record<string, string> | null {
+   if (typeof event !== "object" || event === null) return null;
+   const options = (event as { systemPromptOptions?: unknown }).systemPromptOptions;
+   if (typeof options !== "object" || options === null) return null;
+   const sections = (options as { sections?: unknown }).sections;
+   if (typeof sections !== "object" || sections === null || Array.isArray(sections)) return null;
+   return sections as Record<string, string>;
+}
+
+/**
  * Register session lifecycle hooks for startup repo-map injection.
  *
  * - session_start (reason=startup): eagerly starts repo map generation.
- * - before_agent_start (first turn only): injects the repo map into the
- *   system prompt before the agent's first turn.
+ * - before_agent_start (every turn): writes stable sections
+ *   (`smartread_repo_map`, `smartread_git_context`, `smartread_microagents`)
+ *   into the mutable `event.systemPromptOptions.sections` map when the host
+ *   provides it. Section content comes from the session-cached promises primed
+ *   at `session_start`, so it is stable across runs and does not churn prompt
+ *   caching; the settle budget (STARTUP_CONTEXT_WAIT_MS) applies while the
+ *   caches are still pending, and later runs reuse the resolved values. A
+ *   later run that arrives after the map has resolved simply adds it then.
+ *   The SmartRead Tool Guide is not injected here; per-tool promptGuidelines
+ *   carry that guidance instead. No `systemPrompt` replacement is returned on
+ *   this path.
+ * - before_agent_start on older Pi hosts without `systemPromptOptions.sections`:
+ *   falls back to the legacy one-time `systemPrompt` replacement (map/git/
+ *   microagents appended) on the first run only.
  * - session_shutdown: resets the injected-flag for the next session.
  */
 export function registerSessionHooks(pi: ExtensionAPI): void {
@@ -287,10 +315,11 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
    });
 
    pi.on("before_agent_start", async (event, ctx) => {
-      if (repoMapInjectedThisSession) return;
-      repoMapInjectedThisSession = true;
-
       const key = computeRepoKey(ctx.cwd);
+      // Session-scoped single-flight: the same repo key returns the cached
+      // promise, so values are stable across runs and prompt caching is not
+      // churned. The settle budget only bites while generation is pending;
+      // once resolved, later runs reuse the resolved value immediately.
       const [map, gitCtx] = await Promise.all([
          settleWithin(
             startupRepoMapCache.get(key) ?? Promise.resolve(null),
@@ -303,14 +332,34 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
             null,
          ),
       ]);
+      const alwaysLoadMicroagents = cachedMicroagents.filter(m => m.frontmatter.alwaysLoad);
 
-      const rawSystemPrompt = (event as any).systemPrompt;
+      const sections = getMutablePromptSections(event);
+      if (sections) {
+         if (map) {
+            sections["smartread_repo_map"] =
+               "The following is a compact overview of this repository's structure:\n\n" + map;
+         }
+         const gitParts = [gitCtx?.contextString, gitCtx?.notesString]
+            .filter((part): part is string => typeof part === "string" && part.length > 0);
+         if (gitParts.length > 0) {
+            sections["smartread_git_context"] = gitParts.join("\n\n");
+         }
+         if (alwaysLoadMicroagents.length > 0) {
+            sections["smartread_microagents"] = renderMicroagentContext(alwaysLoadMicroagents);
+         }
+         return;
+      }
+
+      // Legacy host without mutable sections: one-time full-prompt replacement.
+      if (repoMapInjectedThisSession) return;
+      repoMapInjectedThisSession = true;
+
+      const rawSystemPrompt = (event as { systemPrompt?: unknown }).systemPrompt;
       const systemPromptParts = (Array.isArray(rawSystemPrompt) ? rawSystemPrompt : [rawSystemPrompt])
          .filter((part): part is string => typeof part === "string" && part.length > 0);
 
       const additions: string[] = [...systemPromptParts];
-
-      additions.push("", `## ${SMARTREAD_TOOL_GUIDE_TITLE}`, renderSmartReadToolGuide());
 
       if (map) {
          additions.push("", "## Repository Map",
@@ -326,8 +375,6 @@ export function registerSessionHooks(pi: ExtensionAPI): void {
          additions.push("", gitCtx.notesString);
       }
 
-      // Add alwaysLoad microagents to system prompt
-      const alwaysLoadMicroagents = cachedMicroagents.filter(m => m.frontmatter.alwaysLoad);
       if (alwaysLoadMicroagents.length > 0) {
          additions.push("", renderMicroagentContext(alwaysLoadMicroagents));
       }

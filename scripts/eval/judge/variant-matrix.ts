@@ -107,7 +107,7 @@ export interface MatrixResult {
     leaveOneOut: LeaveOneOutEntry[];
 }
 
-const RANK_KEYS = ["rankTestDemote", "rankFilename", "rankBm25k1", "rankBm25b", "rankCoverage", "rankStopwords"];
+const RANK_KEYS = ["rankTestDemote", "rankFilename", "rankBm25k1", "rankBm25b", "rankCoverage", "rankStopwords", "rankStem"];
 
 function readJson(path: string): unknown {
     try {

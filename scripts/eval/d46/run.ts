@@ -9,8 +9,22 @@
  *
  * Usage:
  *   npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>]
-  *     [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout]
-  *     [--reports-dir <dir>] ($PI_SMARTREAD_D46_REPORTS_DIR overrides the default)
+ *     [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout]
+ *     [--reports-dir <dir>] ($PI_SMARTREAD_D46_REPORTS_DIR overrides the default)
+ *     [--exists-evidence excerpts|count|off]
+ *   npx tsx scripts/eval/d46/run.ts --split selection --cohort-dir <dir> [same query flags]
+ *
+ * Fresh selection cohort (--cohort-dir <dir>, --split selection):
+ * - bench root = the flag value; pins from <cohort-dir>/repos.json, queries
+ *   from <cohort-dir>/adjudicated/<owner>__<name>.jsonl.
+ * - the adjudicated files are verified (fail-closed, exit 2) against the
+ *   frozen manifest at <cohort-dir>/MANIFEST.sha256.json (fallback:
+ *   <cohort-dir>/adjudicated/MANIFEST.sha256.json); entries are bare
+ *   adjudicated-dir file names verified with verifySplitManifest.
+ * - checkout pin checks, per-query execution/scoring, and the dev report
+ *   shape are reused unchanged; only corpusKind differs
+ *   ("fresh-cohort-checkouts"). Selection query text MAY appear in
+ *   stdout/reports; judge config flags are unchanged.
  *
  * Integrity (fail-closed, exit 2):
  * - the split's sealed MANIFEST.sha256.json is re-verified against current
@@ -44,7 +58,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { CLOUD_JUDGE_DEFAULT_BASE_URL, CLOUD_JUDGE_DEFAULT_MODEL, CloudJudge } from "../../../src/judge/cloud-judge.js";
 import {
     GREP_JUDGE_EXISTS_EVIDENCE_ENV_VAR,
@@ -114,6 +128,7 @@ export interface D46RunArgs {
     openHoldout: boolean;
     reportsDir: string | null;
     existsEvidence: D46ExistsEvidence | null;
+    cohortDir: string | null;
 }
 
 export interface D46JudgeUnitProb {
@@ -193,6 +208,7 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
     let openHoldout = false;
     let reportsDir: string | null = null;
     let existsEvidence: D46ExistsEvidence | null = null;
+    let cohortDir: string | null = null;
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i] as string;
         if (arg === "--split") split = argv[++i];
@@ -202,23 +218,33 @@ export function parseD46RunArgs(argv: string[]): D46RunArgs {
         else if (arg === "--freeze") freeze = argv[++i] ?? "";
         else if (arg === "--open-holdout") openHoldout = true;
         else if (arg === "--reports-dir") reportsDir = argv[++i] ?? "";
+        else if (arg === "--cohort-dir") cohortDir = argv[++i] ?? "";
         else if (arg === "--exists-evidence") existsEvidence = (argv[++i] ?? "") as D46ExistsEvidence;
         else if (arg === "--help" || arg === "-h") {
             console.log(
                 "Usage: npx tsx scripts/eval/d46/run.ts --split dev|holdout [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--freeze <path>] [--open-holdout] [--reports-dir <dir>] [--exists-evidence excerpts|count|off]",
+            );
+            console.log(
+                "   or: npx tsx scripts/eval/d46/run.ts --split selection --cohort-dir <dir> [--repo <owner__name>] [--config off|t040] [--replicate <k>] [--reports-dir <dir>] [--exists-evidence excerpts|count|off]",
             );
             process.exit(0);
         } else {
             throw new Error(`Unknown argument: ${arg}`);
         }
     }
-    if (split !== "dev" && split !== "holdout") throw new Error("--split must be dev|holdout");
+    if (split !== "dev" && split !== "holdout" && split !== "selection") throw new Error("--split must be dev|holdout|selection");
     if (config !== "off" && config !== "t040") throw new Error("--config must be off|t040");
     if (!Number.isInteger(replicate) || replicate < 1) throw new Error("--replicate must be a positive integer");
     if (existsEvidence !== null && existsEvidence !== "excerpts" && existsEvidence !== "count" && existsEvidence !== "off") {
         throw new Error("--exists-evidence must be excerpts|count|off");
     }
-    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout, reportsDir, existsEvidence };
+    if (split === "selection" && (cohortDir === null || cohortDir.length === 0)) {
+        throw new Error("--split selection requires --cohort-dir <dir>");
+    }
+    if (cohortDir !== null && cohortDir.length > 0 && split !== "selection") {
+        throw new Error("--cohort-dir requires --split selection");
+    }
+    return { split, repo, config: config as D46RunConfig, replicate, freeze, openHoldout, reportsDir, existsEvidence, cohortDir };
 }
 
 /** Re-verify the sealed manifest against current split-dir files. Returns error strings. */
@@ -525,7 +551,8 @@ function rankingsEqual(a: RankReportSettings, b: RankReportSettings): boolean {
         a.rankBm25k1 === b.rankBm25k1 &&
         a.rankBm25b === b.rankBm25b &&
         a.rankCoverage === b.rankCoverage &&
-        a.rankStopwords === b.rankStopwords
+        a.rankStopwords === b.rankStopwords &&
+        a.rankStem === b.rankStem
     );
 }
 
@@ -727,29 +754,85 @@ function gitRootFromScript(): string | null {
     }
 }
 
+/**
+ * Fresh selection cohort helpers (`--cohort-dir <dir>`).
+ *
+ * Layout (see the fresh-cohort AUTHORING.md loader note): pins from
+ * `<cohortDir>/repos.json`, queries from
+ * `<cohortDir>/adjudicated/<owner>__<name>.jsonl`, frozen seal at
+ * `<cohortDir>/MANIFEST.sha256.json` (fallback:
+ * `<cohortDir>/adjudicated/MANIFEST.sha256.json`). Manifest entries use
+ * bare adjudicated-dir file names and are verified with
+ * verifySplitManifest (fail-closed).
+ */
+export function resolveCohortSplitDir(cohortDir: string): string {
+    return join(cohortDir, "adjudicated");
+}
+
+export function resolveCohortManifestPath(cohortDir: string): string {
+    const rootLevel = join(cohortDir, "MANIFEST.sha256.json");
+    if (existsSync(rootLevel)) return rootLevel;
+    return join(resolveCohortSplitDir(cohortDir), "MANIFEST.sha256.json");
+}
+
+/** Query-file names for a fresh cohort: one `<owner>__<name>.jsonl` per pinned repo. */
+export function pinnedCohortQueryFileNames(pins: ReadonlyArray<{ owner: string; name: string }>): Set<string> {
+    return new Set(pins.map((p) => `${p.owner}__${p.name}.jsonl`));
+}
+
+export function readCohortManifest(cohortDir: string): { manifest: D46SplitManifest; splitDir: string } {
+    const splitDir = resolveCohortSplitDir(cohortDir);
+    const manifestPath = resolveCohortManifestPath(cohortDir);
+    if (!existsSync(manifestPath)) {
+        throw new Error(`sealed manifest missing: ${manifestPath}`);
+    }
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as D46SplitManifest;
+    if (manifest.split !== undefined && manifest.split !== "selection") {
+        throw new Error(`cohort manifest split is ${JSON.stringify(manifest.split)}, want "selection"`);
+    }
+    const manifestErrors = verifySplitManifest(splitDir, manifest);
+    if (manifestErrors.length > 0) throw new Error(manifestErrors.join("; "));
+    return { manifest, splitDir };
+}
+
 export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_ROOT, overrides: { engineSourceHash?: string; reportsDir?: string } = {}): Promise<number> {
     const args = parseD46RunArgs(argv);
     const holdout = args.split === "holdout";
-    const splitDir = join(benchRoot, args.split);
-    const manifestPath = join(splitDir, "MANIFEST.sha256.json");
-    if (!existsSync(manifestPath)) {
-        console.error(`error: sealed manifest missing: ${manifestPath}`);
-        return 2;
-    }
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as D46SplitManifest;
-    const manifestErrors = verifySplitManifest(splitDir, manifest);
-    if (manifestErrors.length > 0) {
-        for (const e of manifestErrors) console.error(`error: ${e}`);
-        return 2;
+    // Selection cohort: bench root is the --cohort-dir flag value.
+    const effectiveRoot = args.cohortDir ?? benchRoot;
+    const splitDir = args.cohortDir ? resolveCohortSplitDir(args.cohortDir) : join(benchRoot, args.split);
+    let manifest: D46SplitManifest;
+    if (args.cohortDir) {
+        try {
+            manifest = readCohortManifest(args.cohortDir).manifest;
+        } catch (error) {
+            console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+            return 2;
+        }
+    } else {
+        const manifestPath = join(splitDir, "MANIFEST.sha256.json");
+        if (!existsSync(manifestPath)) {
+            console.error(`error: sealed manifest missing: ${manifestPath}`);
+            return 2;
+        }
+        manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as D46SplitManifest;
+        const manifestErrors = verifySplitManifest(splitDir, manifest);
+        if (manifestErrors.length > 0) {
+            for (const e of manifestErrors) console.error(`error: ${e}`);
+            return 2;
+        }
     }
     let repoManifest: ReturnType<typeof loadRepoManifest>;
     try {
-        repoManifest = loadRepoManifest(benchRoot);
+        repoManifest = loadRepoManifest(effectiveRoot);
     } catch {
-        console.error(`error: cannot load ${benchRoot}/repos.json`);
+        console.error(`error: cannot load ${effectiveRoot}/repos.json`);
         return 2;
     }
-    const loaded = loadSplitQueries(splitDir, pinnedQueryFileNames(repoManifest.repos, args.split));
+    const queryFiles = args.cohortDir
+        ? pinnedCohortQueryFileNames(repoManifest.repos)
+        : pinnedQueryFileNames(repoManifest.repos, args.split);
+    const loaded = loadSplitQueries(splitDir, queryFiles);
     if (loaded.errors.length > 0) {
         for (const e of loaded.errors) console.error(`error: ${e}`);
         return 2;
@@ -763,9 +846,12 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
             return 2;
         }
     }
-    const reposRoot = repoManifest.reposDir.startsWith("~")
-        ? join(homedir(), repoManifest.reposDir.slice(1))
-        : repoManifest.reposDir;
+    const rawReposDir = repoManifest.reposDir;
+    const reposRoot = rawReposDir.startsWith("~")
+        ? join(homedir(), rawReposDir.slice(1))
+        : isAbsolute(rawReposDir)
+          ? rawReposDir
+          : join(effectiveRoot, rawReposDir);
     const pinErrors = verifyCheckoutPins(queries, repoManifest.repos, reposRoot);
     if (pinErrors.length > 0) {
         for (const e of pinErrors) console.error(`error: ${e}`);
@@ -969,7 +1055,7 @@ export async function runD46Cli(argv: string[], benchRoot: string = D46_BENCH_RO
         manifest: {
             fixtureSha: manifest.queriesSha256,
             inventoryHashBefore: manifest.queriesSha256,
-            corpusKind: "d46-pinned-checkouts",
+            corpusKind: args.cohortDir ? "fresh-cohort-checkouts" : "d46-pinned-checkouts",
             sourceRef: null,
             gateConstants: { ...GATE_CONSTANTS },
             retrievalConditions: {

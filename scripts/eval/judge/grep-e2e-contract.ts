@@ -281,6 +281,7 @@ export const RANK_SETTING_KEYS = [
     "rankBm25b",
     "rankCoverage",
     "rankStopwords",
+    "rankStem",
 ] as const;
 
 export interface RankReportSettings {
@@ -290,6 +291,7 @@ export interface RankReportSettings {
     rankBm25b: number;
     rankCoverage: boolean;
     rankStopwords: boolean;
+    rankStem: boolean;
 }
 
 /**
@@ -304,6 +306,7 @@ export function toRankReportSettings(options: {
     bm25b: number;
     coverageBoost: boolean;
     stopwords: boolean;
+    stemming: boolean;
 }): RankReportSettings {
     return {
         rankTestDemote: options.testDemoteFactor,
@@ -312,6 +315,7 @@ export function toRankReportSettings(options: {
         rankBm25b: options.bm25b,
         rankCoverage: options.coverageBoost,
         rankStopwords: options.stopwords,
+        rankStem: options.stemming,
     };
 }
 

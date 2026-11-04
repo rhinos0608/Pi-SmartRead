@@ -111,6 +111,7 @@ by default except test demotion. Boolean knobs accept `1`, `true`, `on` or
 | `PI_SMARTREAD_GREP_RANK_BM25`        | `1.2,0.75`  | BM25 `k1,b` parameters                    |
 | `PI_SMARTREAD_GREP_RANK_COVERAGE`    | off         | Boosts files that match more distinct query terms |
 | `PI_SMARTREAD_GREP_RANK_STOPWORDS`   | off         | Drops common English and keyword stopwords from queries |
+| `PI_SMARTREAD_GREP_RANK_STEM`        | off         | Applies Porter English stemming to query and document tokens in the natural-language BM25 channel only (identifier/exact/regex/structural channels untouched) |
 | `PI_SMARTREAD_GREP_UNIT_MODE`        | `anchor`    | `symbol` returns whole enclosing functions instead of line windows |
 | `PI_SMARTREAD_GREP_UNIT_MAX_PER_FILE`| `2`         | Function units per file in `symbol` mode (1–4) |
 | `PI_SMARTREAD_GREP_UNIT_EXCERPT_LINES` | `12`      | Lines shown per unit in `symbol` mode     |
