@@ -46,6 +46,10 @@ export function judgeCacheKey(args: {
     shared: Record<string, JsonValue>;
     state: Record<string, JsonValue>;
     question: NoulQuestion;
+    /** Request method (D-80). Hashed only when not M0, so pre-existing M0
+     *  entries stay valid while verdicts from a model's earlier method never
+     *  satisfy a lookup under its current method. */
+    method?: string;
 }): string {
     const h = createHash("sha256");
     h.update(args.backend);
@@ -59,6 +63,10 @@ export function judgeCacheKey(args: {
     h.update(stableStringify(args.state));
     h.update("\0");
     h.update(stableStringify(args.question));
+    if (args.method !== undefined && args.method !== "M0") {
+        h.update("\0method:");
+        h.update(args.method);
+    }
     return h.digest("hex");
 }
 

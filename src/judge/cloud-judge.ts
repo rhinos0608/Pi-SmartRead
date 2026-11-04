@@ -5,9 +5,16 @@
  * packed into as few requests as fit a ~24k estimated-token budget
  * (chars/4) for state+questions; overflow splits into multiple requests run
  * with concurrency <= 4. `usage.cost` maps to `costUsd`.
+ *
+ * Per-model methods (owner ruling D-80): the request shape is selected by
+ * `judgeMethodForModel` on the exact model id. M0 keeps this packed
+ * behavior; M1 sends one singleton request per candidate; M2 sends the
+ * packed forward request plus the exact-reverse packed request and scores
+ * `(forward + reverse) / 2` per candidate. Unknown models fail safe to M0.
  */
 import { JudgeCache, JUDGE_CACHE_CANONICAL_REF, judgeCacheKey } from "./judge-cache.js";
-import { postSystemOneDecisions, type FetchFn, type SleepFn } from "./systemone-client.js";
+import { judgeMethodForModel } from "./judge-method.js";
+import { postSystemOneDecisions, type FetchFn, type SleepFn, type SystemOneResponse } from "./systemone-client.js";
 import type {
     Judge,
     JudgeBackendInfo,
@@ -32,6 +39,28 @@ export interface CloudJudgeOptions {
     cache?: JudgeCache | null;
     fetchFn?: FetchFn;
     sleepFn?: SleepFn;
+}
+
+export interface CloudJudgePendingEntry {
+    id: string;
+    question: NoulQuestion;
+    cacheKey: string;
+}
+
+interface CloudJudgeUsageAccum {
+    inputTokens: number;
+    costUsd: number | undefined;
+    requests: number;
+}
+
+/** Shared per-call context threaded through the packed/isolated/forward-reverse paths. */
+interface CloudJudgeBatchCtx {
+    shared: Record<string, JsonValue>;
+    statesById: Map<string, Record<string, JsonValue>>;
+    p: Map<string, number>;
+    unjudged: Array<{ id: string; code: string }>;
+    usage: CloudJudgeUsageAccum;
+    signal?: AbortSignal;
 }
 
 export function estimateTokens(value: unknown): number {
@@ -79,6 +108,12 @@ export class CloudJudge implements Judge {
         const usage = { inputTokens: 0, costUsd: undefined as number | undefined, requests: 0 };
         let cacheHits = 0;
 
+        // Per-model methods (D-80): M0 keeps the packed behavior; M1/M2
+        // reuse the same client, token-budget packing, and failure
+        // semantics; only the request shape, score aggregation, and the
+        // cache-key method component differ.
+        const method = judgeMethodForModel(this.info.model);
+
         // Cache pass: build per-item questions with the cloud state ref so
         // instructions reference the right path (`units.<id>`).
         const pending: Array<{ id: string; question: NoulQuestion; cacheKey: string }> = [];
@@ -92,6 +127,7 @@ export class CloudJudge implements Judge {
                     shared: input.shared,
                     state: item.state,
                     question: item.question(JUDGE_CACHE_CANONICAL_REF),
+                    method,
                 })
                 : "";
             const hit = key ? this.cache?.get(key) : undefined;
@@ -103,16 +139,144 @@ export class CloudJudge implements Judge {
             }
         }
 
-        // Pack pending questions: shared state + per-item states under
-        // shared.units.<id>, splitting when the budget is exceeded.
-        const sharedTokens = estimateTokens(input.shared);
-        const batches: Array<typeof pending> = [];
-        let current: typeof pending = [];
-        let currentTokens = sharedTokens;
         const statesById = new Map(input.items.map((i) => [i.id, i.state]));
+        const ctx: CloudJudgeBatchCtx = { shared: input.shared, statesById, p, unjudged, usage, signal };
+        if (method === "M1") {
+            await this.judgeIsolated(ctx, pending);
+        } else if (method === "M2") {
+            await this.judgeForwardReverse(ctx, pending);
+        } else {
+            await this.judgePacked(ctx, pending);
+        }
+        const outUsage: JudgeNoulResult["usage"] =
+            usage.costUsd === undefined
+                ? { inputTokens: usage.inputTokens, requests: usage.requests }
+                : { inputTokens: usage.inputTokens, costUsd: usage.costUsd, requests: usage.requests };
+        return { p, unjudged, usage: outUsage, cacheHits };
+    }
+
+    /**
+     * M0: pack pending questions — shared state + per-item states under
+     * `shared.units.<id>`, splitting when the token budget is exceeded.
+     * Unchanged production behavior; the per-model dispatch calls it for
+     * Jev and unknown models.
+     */
+    private async judgePacked(
+        ctx: CloudJudgeBatchCtx,
+        pending: CloudJudgePendingEntry[],
+    ): Promise<void> {
+        const batches = this.packEntries(ctx, pending);
+        const tasks = batches.map((batch) => () => this.postPackedBatch(ctx, batch));
+        const settled = await runWithLimit(tasks, CLOUD_JUDGE_CONCURRENCY);
+        for (const { batch, res } of settled) {
+            this.accumulateUsage(ctx.usage, res);
+            for (const entry of batch) {
+                const v = res.answers[entry.id];
+                const prob = v === undefined ? undefined : answerProbability(v, false);
+                if (prob === undefined) {
+                    ctx.unjudged.push({ id: entry.id, code: "bad_response" });
+                } else {
+                    ctx.p.set(entry.id, prob);
+                    if (entry.cacheKey) this.cache?.set(entry.cacheKey, prob);
+                }
+            }
+        }
+    }
+
+    /**
+     * M1: one singleton request per candidate — the same question
+     * template and packing as M0 over a singleton (a singleton never
+     * splits), matching the study's `buildM1Request`. Concurrency stays
+     * within the existing limit and the caller signal is honored per
+     * request. A failing sub-request rejects the whole call, matching
+     * today's single-request failure semantics (the caller falls back to
+     * unjudged); a non-numeric answer marks only that candidate unjudged.
+     */
+    private async judgeIsolated(
+        ctx: CloudJudgeBatchCtx,
+        pending: CloudJudgePendingEntry[],
+    ): Promise<void> {
+        const tasks = pending.map((entry) => () => this.postPackedBatch(ctx, [entry]));
+        const settled = await runWithLimit(tasks, CLOUD_JUDGE_CONCURRENCY);
+        for (const { batch, res } of settled) {
+            this.accumulateUsage(ctx.usage, res);
+            const entry = batch[0]!;
+            const v = res.answers[entry.id];
+            const prob = v === undefined ? undefined : answerProbability(v, false);
+            if (prob === undefined) {
+                ctx.unjudged.push({ id: entry.id, code: "bad_response" });
+            } else {
+                ctx.p.set(entry.id, prob);
+                if (entry.cacheKey) this.cache?.set(entry.cacheKey, prob);
+            }
+        }
+    }
+
+    /**
+     * M2: the packed forward request over the canonical pending order
+     * plus the packed reverse request over the exact reversed order (one
+     * order drives units and questions in each leg, as the study's
+     * `buildM0Request`/`buildM2Reverse` pair). Per-candidate score is
+     * `(forward + reverse) / 2`; a candidate missing a usable answer on
+     * either leg is unjudged, never filled from the surviving leg. A
+     * failing leg rejects the whole call — never a silent forward-only
+     * fallback. At most twice the M0 request count, legs sequential
+     * within the existing concurrency limit.
+     */
+    private async judgeForwardReverse(
+        ctx: CloudJudgeBatchCtx,
+        pending: CloudJudgePendingEntry[],
+    ): Promise<void> {
+        const forwardProbs = await this.judgePackedLeg(ctx, this.packEntries(ctx, pending));
+        const reverseProbs = await this.judgePackedLeg(ctx, this.packEntries(ctx, [...pending].reverse()));
         for (const entry of pending) {
+            const forward = forwardProbs.get(entry.id);
+            const reverse = reverseProbs.get(entry.id);
+            if (forward === undefined || reverse === undefined) {
+                ctx.unjudged.push({ id: entry.id, code: "bad_response" });
+            } else {
+                const prob = (forward + reverse) / 2;
+                ctx.p.set(entry.id, prob);
+                if (entry.cacheKey) this.cache?.set(entry.cacheKey, prob);
+            }
+        }
+    }
+
+    /** Run one packed leg (M0 batch list or one M2 direction), returning per-candidate wire probabilities. */
+    private async judgePackedLeg(
+        ctx: CloudJudgeBatchCtx,
+        batches: CloudJudgePendingEntry[][],
+    ): Promise<Map<string, number | undefined>> {
+        const probs = new Map<string, number | undefined>();
+        const tasks = batches.map((batch) => () => this.postPackedBatch(ctx, batch));
+        const settled = await runWithLimit(tasks, CLOUD_JUDGE_CONCURRENCY);
+        for (const { batch, res } of settled) {
+            this.accumulateUsage(ctx.usage, res);
+            for (const entry of batch) {
+                const v = res.answers[entry.id];
+                probs.set(entry.id, v === undefined ? undefined : answerProbability(v, false));
+            }
+        }
+        return probs;
+    }
+
+    /**
+     * Greedy token-budget packing: per-entry question over `units.<id>`,
+     * shared state re-seeded per batch. One entry order drives both
+     * units and questions, so packing the reversed pending list yields
+     * the exact-reverse request.
+     */
+    private packEntries(
+        ctx: CloudJudgeBatchCtx,
+        entries: CloudJudgePendingEntry[],
+    ): CloudJudgePendingEntry[][] {
+        const sharedTokens = estimateTokens(ctx.shared);
+        const batches: CloudJudgePendingEntry[][] = [];
+        let current: CloudJudgePendingEntry[] = [];
+        let currentTokens = sharedTokens;
+        for (const entry of entries) {
             const entryTokens =
-                estimateTokens({ [entry.id]: statesById.get(entry.id) }) + estimateTokens(entry.question);
+                estimateTokens({ [entry.id]: ctx.statesById.get(entry.id) }) + estimateTokens(entry.question);
             if (current.length > 0 && currentTokens + entryTokens > CLOUD_JUDGE_TOKEN_BUDGET) {
                 batches.push(current);
                 current = [];
@@ -122,48 +286,37 @@ export class CloudJudge implements Judge {
             currentTokens += entryTokens;
         }
         if (current.length > 0) batches.push(current);
+        return batches;
+    }
 
-        const tasks = batches.map((batch) => async () => {
-            const units: Record<string, JsonValue> = {};
-            const questions: Record<string, NoulQuestion> = {};
-            for (const entry of batch) {
-                units[entry.id] = statesById.get(entry.id) ?? {};
-                questions[entry.id] = entry.question;
-            }
-            const state: Record<string, JsonValue> = { ...input.shared, units };
-            const res = await postSystemOneDecisions({
-                baseUrl: this.info.baseUrl,
-                route: CLOUD_JUDGE_ROUTE,
-                model: this.info.model,
-                state,
-                questions,
-                apiKey: this.apiKey,
-                signal,
-                fetchFn: this.fetchFn,
-                sleepFn: this.sleepFn,
-            });
-            return { batch, res };
-        });
-        const settled = await runWithLimit(tasks, CLOUD_JUDGE_CONCURRENCY);
-        for (const { batch, res } of settled) {
-            usage.requests += 1;
-            usage.inputTokens += res.usage.inputTokens;
-            if (res.usage.costUsd !== undefined) usage.costUsd = (usage.costUsd ?? 0) + res.usage.costUsd;
-            for (const entry of batch) {
-                const v = res.answers[entry.id];
-                const prob = v === undefined ? undefined : answerProbability(v, false);
-                if (prob === undefined) {
-                    unjudged.push({ id: entry.id, code: "bad_response" });
-                } else {
-                    p.set(entry.id, prob);
-                    if (entry.cacheKey) this.cache?.set(entry.cacheKey, prob);
-                }
-            }
+    /** Post one packed batch: `units`/`questions` keyed by candidate id under the shared state. */
+    private postPackedBatch(
+        ctx: CloudJudgeBatchCtx,
+        batch: CloudJudgePendingEntry[],
+    ): Promise<{ batch: CloudJudgePendingEntry[]; res: SystemOneResponse }> {
+        const units: Record<string, JsonValue> = {};
+        const questions: Record<string, NoulQuestion> = {};
+        for (const entry of batch) {
+            units[entry.id] = ctx.statesById.get(entry.id) ?? {};
+            questions[entry.id] = entry.question;
         }
-        const outUsage: JudgeNoulResult["usage"] =
-            usage.costUsd === undefined
-                ? { inputTokens: usage.inputTokens, requests: usage.requests }
-                : { inputTokens: usage.inputTokens, costUsd: usage.costUsd, requests: usage.requests };
-        return { p, unjudged, usage: outUsage, cacheHits };
+        const state: Record<string, JsonValue> = { ...ctx.shared, units };
+        return postSystemOneDecisions({
+            baseUrl: this.info.baseUrl,
+            route: CLOUD_JUDGE_ROUTE,
+            model: this.info.model,
+            state,
+            questions,
+            apiKey: this.apiKey,
+            signal: ctx.signal,
+            fetchFn: this.fetchFn,
+            sleepFn: this.sleepFn,
+        }).then((res) => ({ batch, res }));
+    }
+
+    private accumulateUsage(usage: CloudJudgeUsageAccum, res: SystemOneResponse): void {
+        usage.requests += 1;
+        usage.inputTokens += res.usage.inputTokens;
+        if (res.usage.costUsd !== undefined) usage.costUsd = (usage.costUsd ?? 0) + res.usage.costUsd;
     }
 }

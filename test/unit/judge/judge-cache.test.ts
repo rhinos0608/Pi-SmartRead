@@ -23,6 +23,14 @@ describe("judge-cache", () => {
         expect(stableStringify({ b: 1, a: 2 })).toBe(stableStringify({ a: 2, b: 1 }));
     });
 
+    it("keys non-M0 methods separately while M0 keys stay unchanged", () => {
+        const legacy = judgeCacheKey(keyArgs());
+        expect(judgeCacheKey({ ...keyArgs(), method: "M0" })).toBe(legacy);
+        const m1 = judgeCacheKey({ ...keyArgs(), method: "M1" });
+        const m2 = judgeCacheKey({ ...keyArgs(), method: "M2" });
+        expect(new Set([legacy, m1, m2]).size).toBe(3);
+    });
+
     it("miss then hit persists across instances via JSONL", () => {
         const dir = mkdtempSync(join(tmpdir(), "judge-cache-"));
         const c1 = new JudgeCache(dir);
